@@ -1,10 +1,7 @@
 // release 构建在 Windows 上走 GUI 子系统:console 子系统的 exe 从快捷方式/Explorer 启动
 // 会被 Windows 新开一个控制台窗口滚启动日志(装机版即此形态)。debug 不挂,保留 console
 // 让 cargo run 的日志照常附着当前终端;代价是 release 版 println!/eprintln! 全部静默丢弃。
-#![cfg_attr(
-    all(not(debug_assertions), target_os = "windows"),
-    windows_subsystem = "windows"
-)]
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 //! mini-term 的 GPUI 应用壳。
 //!
@@ -115,6 +112,7 @@ mod tree;
 mod ui;
 mod update_check;
 mod usage_panel;
+mod workbench_area;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -122,8 +120,8 @@ use std::sync::Arc;
 use futures::StreamExt;
 use gpui::{
     AnimationExt as _, AnyView, App, AppContext, Application, Bounds, Context, Entity,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString, Size,
-    StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Task, TitlebarOptions,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement, StyleRefinement, Styled, Size, Subscription, Task, TitlebarOptions,
     Window, WindowBounds, WindowOptions, actions, div, point, prelude::FluentBuilder, px, size,
 };
 // img 的 `object_fit` 是 StyledImage 的方法(毛玻璃背板那两处在用)
@@ -144,6 +142,7 @@ use crate::title_bar::TitleBar;
 use crate::tray::{Tray, TrayEvent};
 use crate::tree::SplitDirection;
 use crate::usage_panel::UsagePanel;
+use crate::workbench_area::WorkbenchArea;
 
 actions!(
     mini_term,
@@ -350,6 +349,8 @@ struct Workspace {
     project_list: Entity<ProjectList>,
     file_tree: Entity<FileTree>,
     terminal_area: Entity<TerminalArea>,
+    /// 常驻终端页与运行时文件页签的宿主。文件页不进入终端布局持久化。
+    workbench_area: Entity<WorkbenchArea>,
     /// 终端区右缘的「项目级终端面板」切换竖条。显隐住在 store
     /// (`terminals_panel_visible`,落 layout.db),收起时整个不进元素树。
     terminals_panel: Entity<terminals_panel::TerminalsPanel>,
@@ -424,8 +425,13 @@ impl Workspace {
         let title_bar = cx.new(|cx| TitleBar::new(store.clone(), cx));
         let project_list = cx.new(|cx| ProjectList::new(store.clone(), cx));
         let file_tree = cx.new(|cx| FileTree::new(store.clone(), cx));
+        file_tree::install(file_tree.clone(), cx);
         let terminal_area = cx.new(|cx| TerminalArea::new(store.clone(), cx));
-        let terminals_panel = cx.new(|cx| terminals_panel::TerminalsPanel::new(store.clone(), cx));
+        let workbench_area =
+            cx.new(|cx| WorkbenchArea::new(store.clone(), terminal_area.clone(), cx));
+        workbench_area::install(workbench_area.clone(), cx);
+        let terminals_panel =
+            cx.new(|cx| terminals_panel::TerminalsPanel::new(store.clone(), cx));
         let session_panel = cx.new(|cx| SessionPanel::new(store.clone(), cx));
         let git_panel = cx.new(|cx| git_panel::GitPanel::new(store.clone(), window, cx));
         let columns_state = cx.new(|_| ResizableState::default());
@@ -536,6 +542,7 @@ impl Workspace {
             project_list,
             file_tree,
             terminal_area,
+            workbench_area,
             terminals_panel,
             session_panel,
             git_panel,
@@ -663,13 +670,7 @@ impl Workspace {
     fn on_tray_event(&mut self, event: TrayEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             TrayEvent::Clicked => {
-                if !self
-                    .store
-                    .read(cx)
-                    .config()
-                    .tray_click_focus
-                    .unwrap_or(true)
-                {
+                if !self.store.read(cx).config().tray_click_focus.unwrap_or(true) {
                     return;
                 }
                 self.focus_attention_target(None, window, cx);
@@ -705,6 +706,8 @@ impl Workspace {
             store.set_active_project(&project_id, cx);
             store.activate_pane(&project_id, &pane_id, window, cx);
         });
+        self.workbench_area
+            .update(cx, |area, cx| area.activate_terminal(window, cx));
         true
     }
 
@@ -715,7 +718,12 @@ impl Workspace {
     /// `IconName` 渲染成空白、去重是「替换」而原版是「忽略」),外加右上角 448px
     /// 的位置尺寸 —— 都不是宿主能绕过去的,见 `toast.rs` 模块注释。跳转与去重
     /// 语义一并搬进那一层,这里只剩「推一条」。
-    fn deliver_alert(&mut self, alert: PendingAlert, window: &mut Window, cx: &mut Context<Self>) {
+    fn deliver_alert(
+        &mut self,
+        alert: PendingAlert,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if alert.plan.sound {
             notify::play_sound(alert.sound_path.as_deref());
         }
@@ -734,8 +742,12 @@ impl Workspace {
         Some((project_id, pane_id))
     }
 
+    fn terminal_page_active(&self, cx: &App) -> bool {
+        self.workbench_area.read(cx).is_terminal_active(cx)
+    }
+
     fn on_new_terminal(&mut self, _: &NewTerminal, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) {
+        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
             return;
         }
         let Some(project_id) = self.store.read(cx).active_project_id.clone() else {
@@ -753,7 +765,7 @@ impl Workspace {
     /// 走 [`pane_actions::close_leaf_of_pane`] 而不是直接调 store:关闭前要盘点
     /// 组里活着的 AI 会话并确认(三条关闭路径共用同一个入口)。
     fn on_close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) {
+        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
             return;
         }
         let Some((project_id, pane_id)) = self.target_pane(cx) else {
@@ -763,14 +775,14 @@ impl Workspace {
     }
 
     fn on_next_pane(&mut self, _: &NextPane, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) {
+        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
             return;
         }
         self.cycle_pane(1, window, cx);
     }
 
     fn on_prev_pane(&mut self, _: &PrevPane, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) {
+        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
             return;
         }
         self.cycle_pane(-1, window, cx);
@@ -786,7 +798,7 @@ impl Workspace {
     }
 
     fn on_select_pane(&mut self, action: &SelectPane, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) {
+        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
             return;
         }
         let Some((project_id, pane_id)) = self.target_pane(cx) else {
@@ -799,14 +811,14 @@ impl Workspace {
     }
 
     fn on_split_right(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) {
+        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
             return;
         }
         self.split(SplitDirection::Horizontal, window, cx);
     }
 
     fn on_split_down(&mut self, _: &SplitDown, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) {
+        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
             return;
         }
         self.split(SplitDirection::Vertical, window, cx);
@@ -830,8 +842,7 @@ impl Workspace {
         if yields_to_overlay(window, cx) {
             return;
         }
-        self.store
-            .update(cx, |store, cx| store.toggle_middle_column(cx));
+        self.store.update(cx, |store, cx| store.toggle_middle_column(cx));
     }
 
     /// F2。**这是全仓唯一一条 F2 绑定的唯一处理器** —— 项目列表里那三条行级
@@ -850,6 +861,9 @@ impl Workspace {
             .project_list
             .update(cx, |list, cx| list.rename_focused_row(window, cx))
         {
+            return;
+        }
+        if !self.terminal_page_active(cx) {
             return;
         }
         let Some((project_id, pane_id)) = self.target_pane(cx) else {
@@ -980,8 +994,7 @@ impl Workspace {
             return;
         }
         if self.focus_attention_target(None, window, cx) {
-            self.store
-                .update(cx, |store, cx| store.clear_unread_done(cx));
+            self.store.update(cx, |store, cx| store.clear_unread_done(cx));
         }
     }
 
@@ -1001,25 +1014,30 @@ impl Workspace {
     fn focus_adjacent(&mut self, dir: Direction, window: &mut Window, cx: &mut Context<Self>) {
         // 这四条只从快捷键进来,守卫放这一处就够(Alt+方向键在文本输入框里
         // 还是「按词移动」,让路给弹窗是必须的)
-        if yields_to_overlay(window, cx) {
+        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
             return;
         }
         self.terminal_area
             .update(cx, |area, cx| area.focus_adjacent(dir, window, cx));
     }
 
-    /// Ctrl+F:在**当前焦点 pane** 上开查找条。
+    /// Ctrl+F:文件页交给当前文档；终端页在**当前焦点 pane** 上开查找条。
     ///
     /// 与原版有一处差:原版在「当前 pane 还没有 ptyId」时**不拦**这次按键
     /// (让 Ctrl+F 原样落进终端,发 `\x06`),而 gpui 的 action 一旦绑上就必然吞掉
     /// 按键、没有「退回按键」的通路。取舍是:PTY 还没起来的空 pane 上按 Ctrl+F
     /// 什么也不发生 —— 那个 pane 本来也没有终端能收这个字节。
-    fn on_terminal_search(
-        &mut self,
-        _: &TerminalSearch,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_terminal_search(&mut self, _: &TerminalSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal_page_active(cx) {
+            // 文档编辑器本身也是 `Input`,不能套用终端页的 typing guard,否则编辑器
+            // 获得焦点后 Ctrl+F 会被提前吞掉；真正的弹窗仍然必须优先处理快捷键。
+            if !overlay::allows(overlay::Yield::ToOverlay) {
+                return;
+            }
+            self.workbench_area
+                .update(cx, |area, cx| area.search_active_document(window, cx));
+            return;
+        }
         if yields_to_overlay(window, cx) {
             return;
         }
@@ -1057,7 +1075,7 @@ impl Workspace {
     /// 两道闸。方向键在输入框里有明确语义,在设置对话框里按 Ctrl+Shift+↑ 去跳终端
     /// 是意外行为 —— 这里让它与其余全局动作同口径。
     fn on_marker_prev(&mut self, _: &MarkerPrev, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) {
+        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
             return;
         }
         self.store.update(cx, |store, cx| store.step_marker(-1, cx));
@@ -1066,7 +1084,7 @@ impl Workspace {
     /// Ctrl+Shift+↓:跳到下一个 AI 任务标记。首次按跳**最早一条**。
     /// 让路口径见 [`Self::on_marker_prev`]。
     fn on_marker_next(&mut self, _: &MarkerNext, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) {
+        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
             return;
         }
         self.store.update(cx, |store, cx| store.step_marker(1, cx));
@@ -1078,7 +1096,11 @@ impl Workspace {
     /// w-1/2`,`transform: translateX(0% | 100%)`,`--motion-tab-indicator` 0.22s)。
     /// gpui 没有 transform,这里用 `left` 百分比 + `with_animation` 做等效补间:
     /// 换面板时 id 里带目标面板名 → 动画重播,底块从 0% 滑到 50%(或反过来)。
-    fn render_drawer_header(&self, panel: DrawerPanel, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_drawer_header(
+        &self,
+        panel: DrawerPanel,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let to_git = panel == DrawerPanel::Git;
         let mut seg = div()
             .relative()
@@ -1092,10 +1114,7 @@ impl Workspace {
             // 滑动选中块
             .child(
                 div()
-                    .id(SharedString::from(format!(
-                        "drawer-tab-ind-{}",
-                        panel.key()
-                    )))
+                    .id(SharedString::from(format!("drawer-tab-ind-{}", panel.key())))
                     .absolute()
                     .top_0()
                     .bottom_0()
@@ -1136,9 +1155,9 @@ impl Workspace {
                     })
                     .child(label)
                     // 段控件走 open_drawer:**不做「再点一次关闭」**
-                    .on_click(
-                        cx.listener(move |this, _event, _window, cx| this.open_drawer(tab, cx)),
-                    ),
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.open_drawer(tab, cx)
+                    })),
             );
         }
 
@@ -1310,6 +1329,7 @@ impl Render for Workspace {
                 store.background_art().cloned(),
             )
         };
+        let terminal_page_active = self.workbench_area.read(cx).is_terminal_active(cx);
 
         // 条件按钮可能在鼠标仍停在原坐标时从元素树消失,这时 GPUI 不保证再补一发
         // on_hover(false)。主动按当前可见性对账,避免它的旧计时把会话偷偷热身。
@@ -1328,23 +1348,22 @@ impl Render for Workspace {
         let dialog_open = window.has_active_dialog(cx);
         let frost_wanted = dialog_open || self.usage_open;
         if frost_wanted {
-            if self.frost.is_none()
-                && self.frost_task.is_none()
-                && let Some(raw) = frost::capture_raw(window)
-            {
-                self.frost_task = Some(cx.spawn(async move |this, cx| {
-                    let img = cx
-                        .background_executor()
-                        .spawn(async move { frost::finish(raw) })
-                        .await;
-                    let _ = this.update(cx, |this, cx| {
-                        this.frost_task = None;
-                        if let Some(img) = img {
-                            this.frost = Some(img);
-                            cx.notify();
-                        }
-                    });
-                }));
+            if self.frost.is_none() && self.frost_task.is_none() {
+                if let Some(raw) = frost::capture_raw(window) {
+                    self.frost_task = Some(cx.spawn(async move |this, cx| {
+                        let img = cx
+                            .background_executor()
+                            .spawn(async move { frost::finish(raw) })
+                            .await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.frost_task = None;
+                            if let Some(img) = img {
+                                this.frost = Some(img);
+                                cx.notify();
+                            }
+                        });
+                    }));
+                }
             }
         } else if self.frost.is_some() || self.frost_task.is_some() {
             self.frost = None;
@@ -1388,12 +1407,7 @@ impl Render for Workspace {
                     )),
             )
             .on_resize(move |state, _window, cx| {
-                let sizes: Vec<f64> = state
-                    .read(cx)
-                    .sizes()
-                    .iter()
-                    .map(|p| f32::from(*p) as f64)
-                    .collect();
+                let sizes: Vec<f64> = state.read(cx).sizes().iter().map(|p| f32::from(*p) as f64).collect();
                 store_for_middle.update(cx, |store, cx| store.set_middle_column_sizes(sizes, cx));
             });
 
@@ -1422,9 +1436,9 @@ impl Render for Workspace {
                                 // ⚠️ 终端区**不套** [`cached_panel`]:它就是每一拍
                                 // 真在变的那块内容,套上等于每帧必然未命中,白付
                                 // 一次 cache_key 比较
-                                .child(self.terminal_area.clone()),
+                                .child(self.workbench_area.clone()),
                         )
-                        .when(terminals_visible, |el| {
+                        .when(terminals_visible && terminal_page_active, |el| {
                             // 同样套缓存:竖条的数据源只有 store。占位样式照抄它
                             // render 根节点的 `.w(WIDTH).h_full().flex_none()`
                             el.child(cached_panel(
@@ -1438,12 +1452,7 @@ impl Render for Workspace {
                 ),
             )
             .on_resize(move |state, _window, cx| {
-                let sizes: Vec<f64> = state
-                    .read(cx)
-                    .sizes()
-                    .iter()
-                    .map(|p| f32::from(*p) as f64)
-                    .collect();
+                let sizes: Vec<f64> = state.read(cx).sizes().iter().map(|p| f32::from(*p) as f64).collect();
                 store_for_columns.update(cx, |store, cx| {
                     // 折叠/收起的那一栏**不写回**:gpui-component 的
                     // `ResizableState` 按 children 个数占位,不可见的面板既不
@@ -1510,14 +1519,10 @@ impl Render for Workspace {
                 // 某个 shell `exit 1` 不该让整条边栏亮红点、盖住真在跑的 AI。
                 // 徽标本体(含 ai-working 档的闪烁)在 `activity_bar::status_badge`。
                 .when(global_status != crate::tree::PaneStatus::Idle, |el| {
-                    el.child(activity_bar::status_badge(
-                        "activity-bar-ai-badge",
-                        global_status,
-                    ))
+                    el.child(activity_bar::status_badge(global_status))
                 })
                 .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.store
-                        .update(cx, |store, cx| store.toggle_middle_column(cx));
+                    this.store.update(cx, |store, cx| store.toggle_middle_column(cx));
                 })),
             )
             .child(
@@ -1544,11 +1549,9 @@ impl Render for Workspace {
                     self.activity_bar_hover.is_visible("toggle-git"),
                     Self::activity_bar_item_hover_listener("toggle-git", cx),
                 )
-                .on_click(
-                    cx.listener(|this, _event, _window, cx| {
-                        this.toggle_drawer(DrawerPanel::Git, cx)
-                    }),
-                ),
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.toggle_drawer(DrawerPanel::Git, cx)
+                })),
             )
             // 终端列表竖条(GPUI 版新增,原版边条没有这颗)。开关的是终端区
             // 右缘的**停靠竖条**而不是右抽屉,所以激活态跟 store 的持久化显隐走
@@ -1557,13 +1560,19 @@ impl Render for Workspace {
                     "toggle-terminals",
                     activity_bar::TERMINALS,
                     t("app", "activityBar.terminals"),
-                    terminals_visible,
+                    terminals_visible && terminal_page_active,
                     self.activity_bar_hover.is_visible("toggle-terminals"),
                     Self::activity_bar_item_hover_listener("toggle-terminals", cx),
                 )
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.store
-                        .update(cx, |store, cx| store.toggle_terminals_panel(cx));
+                .on_click(cx.listener(|this, _event, window, cx| {
+                    let terminal_was_active = this.terminal_page_active(cx);
+                    this.workbench_area
+                        .update(cx, |area, cx| area.activate_terminal(window, cx));
+                    this.store.update(cx, |store, cx| {
+                        if terminal_was_active || !store.terminals_panel_visible() {
+                            store.toggle_terminals_panel(cx);
+                        }
+                    });
                 })),
             )
             .child(activity_bar::divider())
@@ -1739,19 +1748,14 @@ impl Render for Workspace {
                         .hover(|el| el.bg(ui::with_alpha(ui::accent(), 0.4)))
                         .on_mouse_down(
                             gpui::MouseButton::Left,
-                            cx.listener(
-                                move |this: &mut Self,
-                                      event: &gpui::MouseDownEvent,
-                                      _window,
-                                      cx| {
-                                    cx.stop_propagation();
-                                    this.drawer_drag = Some(DrawerDrag {
-                                        start_x: event.position.x,
-                                        start_width: drawer_width,
-                                        width: drawer_width,
-                                    });
-                                },
-                            ),
+                            cx.listener(move |this: &mut Self, event: &gpui::MouseDownEvent, _window, cx| {
+                                cx.stop_propagation();
+                                this.drawer_drag = Some(DrawerDrag {
+                                    start_x: event.position.x,
+                                    start_width: drawer_width,
+                                    width: drawer_width,
+                                });
+                            }),
                         ),
                 )
                 .with_animation(
@@ -1818,6 +1822,20 @@ impl Render for Workspace {
                             .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
                                 cx.stop_propagation();
                             })
+                            // 面板体自己的底色。**别省这一行** —— 少了它面板就是全透明的,
+                            // 背后只剩那层 black/50,终端文字照样一个个看得清。
+                            //
+                            // Windows 上看不出来:根层那张毛玻璃快照垫在面板之下,透出来的是
+                            // 模糊+压暗的画面,勉强能读。但快照走 `PrintWindow` 是 Windows 专有
+                            // (见 `frost` 模块),**非 Windows 上 `frost` 恒为 `None`**,退化成
+                            // 纯 black/50 —— 隔着一层黑纱看锐利的终端正文,读不了。
+                            //
+                            // 用 `bg_overlay` 而不是 `bg_surface` / `bg_elevated`:后两者在外置
+                            // 主题包下会乘 `surface_opacity`(有背景图时要透出图),而浮层叠在任意
+                            // 内容之上,半透明是拿可读性换观感 —— 判据见 `ui::Palette::from_pack`
+                            // 里那一行注释。设置弹窗与 pane 预览 / 分支家族 / 日期选择器四处浮层
+                            // 用的都是它,这里是唯一漏掉的一个。
+                            .bg(ui::bg_overlay())
                             .rounded(px(6.0))
                             .border_1()
                             .border_color(ui::border_default())
@@ -1909,7 +1927,12 @@ impl Render for Workspace {
             // 同时开等于同一块像素画两遍图、两层纱罩把 dim 平方。逐终端那路
             // 从没接过线(`pane.rs` 不调 `set_background_art`),这里是唯一一处。
             .when_some(background, |el, art| {
-                el.child(div().absolute().inset_0().child(mt_ui::background_art(art)))
+                el.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(mt_ui::background_art(art)),
+                )
             })
             .key_context("Workspace")
             .on_action(cx.listener(Self::on_new_terminal))
@@ -1937,28 +1960,23 @@ impl Render for Workspace {
             // 拖拽期间鼠标可能划出手柄(甚至划过终端),所以移动/松手挂在**根**上
             // —— 等价于原版往 document 上挂 mousemove/mouseup
             .when(self.drawer_drag.is_some(), |el| {
-                el.on_mouse_move(cx.listener(
-                    |this: &mut Self, event: &gpui::MouseMoveEvent, _window, cx| {
-                        if let Some(drag) = this.drawer_drag.as_mut() {
-                            let delta = f32::from(drag.start_x - event.position.x) as f64;
-                            drag.width = (drag.start_width + delta).clamp(240.0, 720.0);
-                            cx.notify();
-                        }
-                    },
-                ))
+                el.on_mouse_move(cx.listener(|this: &mut Self, event: &gpui::MouseMoveEvent, _window, cx| {
+                    if let Some(drag) = this.drawer_drag.as_mut() {
+                        let delta = f32::from(drag.start_x - event.position.x) as f64;
+                        drag.width = (drag.start_width + delta).clamp(240.0, 720.0);
+                        cx.notify();
+                    }
+                }))
                 .on_mouse_up(
                     gpui::MouseButton::Left,
-                    cx.listener(
-                        |this: &mut Self, _event: &gpui::MouseUpEvent, _window, cx| {
-                            let Some(drag) = this.drawer_drag.take() else {
-                                return;
-                            };
-                            this.store.update(cx, |store, cx| {
-                                store.set_right_drawer_width(drag.width, cx)
-                            });
-                            cx.notify();
-                        },
-                    ),
+                    cx.listener(|this: &mut Self, _event: &gpui::MouseUpEvent, _window, cx| {
+                        let Some(drag) = this.drawer_drag.take() else {
+                            return;
+                        };
+                        this.store
+                            .update(cx, |store, cx| store.set_right_drawer_width(drag.width, cx));
+                        cx.notify();
+                    }),
                 )
             })
             // ⚠️ 标题栏**不套** [`cached_panel`]:它靠 `.window_control_area(..)`
@@ -1974,10 +1992,11 @@ impl Render for Workspace {
             // theme.rs::apply 钉的),用量面板走 usage_layer 自己的 black/50 ——
             // 两族弹窗共用同一张玻璃,观感一致(用户实测口径)。
             .children(self.frost.clone().filter(|_| frost_wanted).map(|img| {
-                div()
-                    .absolute()
-                    .inset_0()
-                    .child(gpui::img(img).size_full().object_fit(gpui::ObjectFit::Fill))
+                div().absolute().inset_0().child(
+                    gpui::img(img)
+                        .size_full()
+                        .object_fit(gpui::ObjectFit::Fill),
+                )
             }))
             // 用量统计(自绘 Modal):玻璃之上、Dialog 层之下 —— Dialog 叠开时
             // (如面板里再弹确认框)压在它上面,与原版 Modal 叠 Modal 同序。
@@ -2133,6 +2152,26 @@ fn main() {
             // 池没建过时是 no-op,不会为此现起 tokio 运行时。
             remote_ssh::shutdown_on_exit();
             async {}
+        })
+        .detach();
+
+        // macOS 的 NSApplication **不随最后一个窗口关闭而退出**(Windows / Linux 的
+        // gpui 会结束事件循环),于是关窗后进程还活着、Dock 里还挂着图标,而点它没有
+        // 任何反应:本仓没注册 `on_reopen`,`menu.rs` 又是右键菜单不是菜单栏,没有
+        // 任何入口能把窗口叫回来 —— 应用变成一个点不开也退不掉的僵尸。
+        //
+        // 收敛成「关窗即退出」而不是重开窗口:`Workspace::new` 吃掉的 `ai_events` 是
+        // 一次性的 `UnboundedReceiver`,重建窗口得先把 AI 事件泵与 Workspace 的生命
+        // 周期解耦;而 `title_bar::finish_close` 的注释(「那条管进程退出,这条管窗口
+        // 关闭」)与关窗确认框的措辞(「关掉会丢失这些 AI 会话」)本来就是
+        // 「关窗 = 关应用」的语义。
+        //
+        // 只在 macOS 挂:另外两家 gpui 自己就会退,多这一道只会在主力平台上引入变数。
+        #[cfg(target_os = "macos")]
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
         })
         .detach();
 

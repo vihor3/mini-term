@@ -1,18 +1,10 @@
 //! 文件预览与内置编辑器。对应 `src/components/FileViewerModal.tsx`(498 行)
 //! 与 `src/components/CodeEditor.tsx`(350 行),审计缺口 #29。
 //!
-//! # 一个单例,两个入口
+//! # 工作区页签
 //!
-//! 原版是**两处各挂一份** `FileViewerModal`(`FileTree.tsx:838` / `SearchModal.tsx:356`,
-//! 各自 `lazy()` 懒加载,理由是「CodeMirror + react-markdown 数百 KB」)。GPUI 没有
-//! 代码分割这回事,这里做成**单例**:文件树单击文件行、全局搜索单击结果都调
-//! [`open`],走 [`crate::prompt::open_guarded`] + [`crate::overlay::kind::FILE_VIEWER`]。
-//! 于是防叠开、Esc、快捷键让路一次到位。
-//!
-//! 「已经开着时再点一条搜索结果」**不是叠开而是换文件** —— 原版靠 `filePath` prop
-//! 变化触发 `setCurrentPath(filePath)`(`FileViewerModal.tsx:239-242`),这里由
-//! [`open`] 认出栈里已有自己、转而 [`FileViewer::navigate`]。注意原版那条路
-//! **不问「有未保存修改吗」**(effect 直接重设 currentPath),照抄。
+//! 文件树和全局搜索都通过 [`crate::workbench_area`] 打开项目级文件页签。每个页签
+//! 持有独立的 [`FileViewer`]，切到文件页只隐藏终端视图，不销毁 PTY 或终端实体。
 //!
 //! # 编辑器是 gpui-component 的 code editor,不是自绘
 //!
@@ -38,17 +30,16 @@
 //!
 //! 1. **Markdown 里的链接点击拦不住**:gpui-component 的富文本渲染器把链接写死成
 //!    `cx.open_url(&link.url)`(`text/node.rs:622`、`text/inline.rs:359`),没有回调口。
-//!    于是原版三条链接处置(外链弹确认框 / 文档内锚点滚动 / 本地文件在弹窗内跳转)
-//!    都做不到,**弹窗内跳转历史栈(`←` 返回)随之整条不做**。记档。
-//! 2. **HTML 是简版渲染,不是浏览器**:GPUI 侧没有 iframe 等价物,`TextView::html`
+//!    于是原版三条链接处置(外链弹确认框 / 文档内锚点滚动 / 本地文件在页内跳转)
+//!    都做不到,**页内跳转历史栈(`←` 返回)随之整条不做**。记档。
+//! 2. **本地 HTML 是简版渲染,不是浏览器**:GPUI 侧没有 iframe 等价物,`TextView::html`
 //!    与 markdown 那支是同一个富文本渲染器(无 CSS / 无 JS)。此处曾按规格 B.6.3
 //!    的建议「只留源码编辑器」,**已翻案**(用户要求):现在给预览态,但配一条
 //!    说明 + 工具栏常驻「用浏览器打开」——走样的排版有解释、真效果有出口,
-//!    比对着一屏源码有用。相对资源不再是问题,见 [`rewrite_html_urls`]。
-//! 3. **遮罩点击不关窗**:Dialog 的遮罩关闭无法拦截,而关闭要先过「未保存确认」——
-//!    留着就等于给草稿开了一条静默丢弃的路。改为只能 ✕ / Esc 关。
-
+//!    比对着一屏源码有用。相对资源不再是问题,见 [`rewrite_html_urls`]。远程
+//!    HTML 属于不可信输入，只走源码编辑器，不进入富文本 HTML 渲染器。
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -60,25 +51,72 @@ use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use gpui::{
     App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable, ImageAssetLoader,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Resource,
-    StatefulInteractiveElement, Styled, StyledImage as _, Subscription, Task, WeakEntity, Window,
-    div, img, prelude::FluentBuilder as _, px,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Resource, ScrollHandle,
+    StatefulInteractiveElement, Styled, StyledImage as _, Subscription, Task, Window, div, img,
+    prelude::FluentBuilder as _, px,
 };
 use gpui::http_client::{
     AsyncBody, HttpClient, Request, Response, StatusCode, Url, http::HeaderValue,
 };
 use gpui_component::ActiveTheme as _;
-use gpui_component::input::{Input, InputEvent, InputState, Position};
+use gpui_component::WindowExt as _;
+use gpui_component::input::{Input, InputEvent, InputState, Position, Search};
+use gpui_component::scroll::Scrollbar;
 use gpui_component::text::{TextView, TextViewStyle};
-use mt_ui::tooltip::Tooltip;
+use markdown::{ParseOptions, mdast::Node as MarkdownNode};
 use mt_project::fs::FileContentResult;
 use mt_project::watch::FsWatcher;
 use mt_ui::icons::FileIcon;
+use mt_ui::tooltip::Tooltip;
 
 use crate::i18n::t;
-use crate::overlay::kind;
-use crate::prompt::{Confirm, close_guarded, open_guarded};
 use crate::ui;
+
+/// 文档的读写来源。远程来源持有打开时的连接快照；保存前还会与 `AppStore`
+/// 中的当前连接身份复核，避免连接配置原地变化后旧页签写到错误主机。
+#[derive(Clone)]
+pub enum DocumentSource {
+    Local {
+        project_id: String,
+        project_root: PathBuf,
+        path: PathBuf,
+    },
+    Remote {
+        project_id: String,
+        connection: mt_config::SshConnection,
+        project_root: String,
+        path: PathBuf,
+    },
+}
+
+impl DocumentSource {
+    pub fn project_id(&self) -> &str {
+        match self {
+            Self::Local { project_id, .. } | Self::Remote { project_id, .. } => project_id,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Local { path, .. } | Self::Remote { path, .. } => path,
+        }
+    }
+
+    pub fn file_name(&self) -> String {
+        file_name_of(&self.path().to_string_lossy()).to_string()
+    }
+
+    fn project_root_path(&self) -> PathBuf {
+        match self {
+            Self::Local { project_root, .. } => project_root.clone(),
+            Self::Remote { project_root, .. } => PathBuf::from(project_root),
+        }
+    }
+
+    fn is_remote(&self) -> bool {
+        matches!(self, Self::Remote { .. })
+    }
+}
 
 // ─── 纯逻辑(可测) ────────────────────────────────────────────
 
@@ -246,16 +284,8 @@ pub fn language_for(file_name: &str) -> &'static str {
 
 /// 该把光标放到第几行(1-based),`None` = 不动。
 ///
-/// 两道闸都来自原版:
-/// - `same_file`:跳走之后行号就失效了(`FileViewerModal.tsx:486` 的
-///   `highlightLine={currentPath === filePath ? highlightLine : undefined}`);
-///   本批没有弹窗内跳转(见模块注释偏差 1),但「预览器已开着又点了另一条搜索结果」
-///   会换掉 `origin_path`,这道闸照样要有;
-/// - 越界不动(`CodeEditor.tsx:341` 的 `if (highlightLine > view.state.doc.lines) return`)。
-pub fn highlight_target(highlight_line: Option<u32>, same_file: bool, text: &str) -> Option<u32> {
-    if !same_file {
-        return None;
-    }
+/// 越界不动(`CodeEditor.tsx:341` 的 `if (highlightLine > view.state.doc.lines) return`)。
+pub fn highlight_target(highlight_line: Option<u32>, text: &str) -> Option<u32> {
     let line = highlight_line?;
     // 至少一行:空文件在编辑器里也是「第 1 行」
     let total = text.lines().count().max(1) as u32;
@@ -299,6 +329,34 @@ pub fn can_edit(is_img: bool, result: Option<&FileContentResult>) -> bool {
     !is_img && matches!(result, Some(r) if !r.is_binary && !r.too_large)
 }
 
+fn supports_rich_preview(is_remote: bool, path: &str) -> bool {
+    is_markdown_file(path) || (!is_remote && is_html_file(path))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RemoteRefreshFailurePresentation {
+    Fatal,
+    Warning,
+}
+
+fn remote_refresh_failure_presentation(
+    has_loaded_result: bool,
+    has_editor: bool,
+) -> RemoteRefreshFailurePresentation {
+    if has_loaded_result || has_editor {
+        RemoteRefreshFailurePresentation::Warning
+    } else {
+        RemoteRefreshFailurePresentation::Fatal
+    }
+}
+
+fn refresh_warning_after_remote_save(
+    current: Option<String>,
+    save_succeeded: bool,
+) -> Option<String> {
+    if save_succeeded { None } else { current }
+}
+
 /// 自己落盘的回声窗口:保存后 2s 内的 `fs-change` 不算「外部修改」
 /// (`FileViewerModal.tsx:280`)。
 ///
@@ -321,7 +379,8 @@ pub const ECHO_WINDOW: Duration = Duration::from_millis(2000);
 // → 走 http client),于是 md 里的相对路径图片(README 的截图)在预览里
 // 什么都不出;原版靠 `convertFileSrc(fileDir + '/' + src)` 转 asset 协议
 // (`FileViewerModal.tsx:145-150`)。这里把「整行只有图片」的行拆出来自绘,
-// 相对路径按当前文件所在目录解析成 `Resource::Path`,见 [`parse_image_line`]
+// 相对路径按当前文件所在目录解析成 `Resource::Path`,见
+// [`split_top_level_image_paragraph`]
 // 与 [`FileViewer::render_md_images`]。
 
 /// GFM 表格的列对齐(分隔行的 `:---:` 语法)。
@@ -340,7 +399,7 @@ struct MdTable {
     rows: Vec<Vec<String>>,
 }
 
-/// markdown 里的一张图片。整行只有图片时被拆出来自绘(见 [`parse_image_line`])。
+/// markdown 里的一张图片。纯图片段落由 AST 确认后拆出来自绘。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct MdImage {
     /// 原文里的目标,**未解码也未解析** —— 落地在 [`resolve_image_src`]
@@ -380,13 +439,15 @@ enum MdBlock {
 struct MdCache {
     source: String,
     base_dir: PathBuf,
+    local_resources: bool,
     /// `(块顶间距, 块)`。`Rc` 让 [`FileViewer::render_markdown`] 拿完就撒手,
     /// 不必攥着 `RefCell` 的借用穿过整段渲染
     blocks: Rc<Vec<(f32, MdBlock)>>,
 }
 
-/// 把 markdown 源切成**块级**段:GFM 表格与整行图片各自独立成段,其余文本
-/// 按空行拆块(围栏代码块 ``` / ~~~ 内的空行、竖线、图片语法都不拆)。
+/// 把 markdown 源切成**顶层 AST 块**:确认是顶层 GFM 表格或纯图片段落时才
+/// 自绘，其余节点按源码范围交回 TextView。列表/引用/raw HTML/代码块整块保留，
+/// 不能先按“看起来像图片的一行”拆开，否则会把容器里的代码误变成真实资源请求。
 ///
 /// 逐块喂 TextView 而不是整篇 —— 除了表格要自绘,还有一条硬理由:
 /// gpui-component 0.5.1 的非虚拟化路径把 `is_last: true` 原样传给 Root 的
@@ -395,207 +456,196 @@ struct MdCache {
 /// 实测)。块间距改由 [`block_top_margin`] 自己控,顺带复刻原版「标题前
 /// 间距更大」的非对称节奏(`.md-preview h* { margin-top: 1.4em }`)。
 fn split_md_blocks(source: &str) -> Vec<MdSegment> {
-    let lines: Vec<&str> = source.lines().collect();
-    let mut segs = Vec::new();
-    let mut text_start = 0usize;
-    let mut in_fence = false;
-    let mut i = 0usize;
-    while i < lines.len() {
-        let trimmed = lines[i].trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            i += 1;
-            continue;
-        }
-        if in_fence {
-            i += 1;
-            continue;
-        }
-        // 空行 = 块边界(围栏外)
-        if lines[i].trim().is_empty() {
-            push_text_block(&lines[text_start..i], &mut segs);
-            text_start = i + 1;
-            i += 1;
-            continue;
-        }
-        if lines[i].contains('|')
-            && i + 1 < lines.len()
-            && let Some(aligns) = parse_separator(lines[i + 1])
-        {
-            let header = split_cells(lines[i]);
-            // GFM 规则:分隔行列数与表头一致才成表
-            if !header.is_empty() && header.len() == aligns.len() {
-                push_text_block(&lines[text_start..i], &mut segs);
-                let mut rows = Vec::new();
-                let mut j = i + 2;
-                while j < lines.len() && lines[j].contains('|') && !lines[j].trim().is_empty() {
-                    let mut cells = split_cells(lines[j]);
-                    cells.resize(header.len(), String::new());
-                    rows.push(cells);
-                    j += 1;
-                }
-                segs.push(MdSegment::Table(MdTable { header, aligns, rows }));
-                text_start = j;
-                i = j;
-                continue;
-            }
-        }
-        i += 1;
+    let Ok(ast) = markdown::to_mdast(source, &ParseOptions::gfm()) else {
+        return markdown_text_only(source);
+    };
+    // 引用、脚注与嵌套定义可能跨分段消费；遇到这些就整篇交回 TextView。
+    // 仅有未被引用的顶层普通定义时可以安全分块，它本身不产生可见内容。
+    if markdown_requires_shared_definition_scope(&ast) {
+        return markdown_text_only(source);
     }
-    push_text_block(&lines[text_start..], &mut segs);
+    let Some(children) = ast.children() else {
+        return markdown_text_only(source);
+    };
+
+    let mut nodes = Vec::with_capacity(children.len());
+    let mut previous_end = 0usize;
+    for node in children {
+        let Some(position) = node.position() else {
+            return markdown_text_only(source);
+        };
+        let (start, end) = (position.start.offset, position.end.offset);
+        if start > end || start < previous_end || source.get(start..end).is_none() {
+            return markdown_text_only(source);
+        }
+        nodes.push((node, start, end));
+        previous_end = end;
+    }
+
+    let mut segs = Vec::new();
+    let mut pending_text: Option<(usize, usize)> = None;
+    for (node, start, end) in nodes {
+        // 未被引用的顶层定义不产生可见内容。既然上面的共享作用域检查已经确认
+        // 没有引用消费者，就直接跳过，避免为它建立一个空 TextView 和块间距。
+        if matches!(node, MarkdownNode::Definition(_)) {
+            continue;
+        }
+        let raw = &source[start..end];
+        let custom = match node {
+            MarkdownNode::Table(_) => {
+                parse_table_block(raw).map(|table| vec![MdSegment::Table(table)])
+            }
+            MarkdownNode::Paragraph(_) => split_top_level_image_paragraph(node),
+            _ => None,
+        };
+        if let Some(custom) = custom {
+            if let Some((text_start, text_end)) = pending_text.take() {
+                push_markdown_text(source, text_start, text_end, &mut segs);
+            }
+            segs.extend(custom);
+            continue;
+        }
+
+        pending_text = match pending_text.take() {
+            Some((text_start, text_end))
+                if source[text_end..start]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count()
+                    < 2 =>
+            {
+                Some((text_start, end))
+            }
+            Some((text_start, text_end)) => {
+                push_markdown_text(source, text_start, text_end, &mut segs);
+                Some((start, end))
+            }
+            None => Some((start, end)),
+        };
+    }
+    if let Some((text_start, text_end)) = pending_text {
+        push_markdown_text(source, text_start, text_end, &mut segs);
+    }
     segs
 }
 
-/// 收一个文本块,顺手把**整行只有图片**的行拆成 [`MdSegment::Images`] 自绘。
-///
-/// 图片行不必单独成段(README 里「一段说明紧跟一张截图」中间常常没有空行),
-/// 所以切分落在这一层而不是 [`split_md_blocks`] 的块级循环里。围栏代码块
-/// 内的行不参与 —— ` ```md ` 示例里的 `![](…)` 是代码,不是图片。
-fn push_text_block(lines: &[&str], segs: &mut Vec<MdSegment>) {
-    let mut start = 0usize;
-    let mut in_fence = false;
-    for (ix, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
-            continue;
-        }
-        let Some(images) = parse_image_line(line) else {
-            continue;
-        };
-        push_plain_text(&lines[start..ix], segs);
-        segs.push(MdSegment::Images(images));
-        start = ix + 1;
-    }
-    push_plain_text(&lines[start..], segs);
+fn markdown_requires_shared_definition_scope(node: &MarkdownNode) -> bool {
+    let Some(children) = node.children() else {
+        return false;
+    };
+    children.iter().any(|child| match child {
+        MarkdownNode::Definition(_) => false,
+        _ => markdown_contains_reference_or_definition(child),
+    })
 }
 
-/// 非空才算一块(连续空行 / 段与表格间的空隙都会产生空切片)。
-fn push_plain_text(lines: &[&str], segs: &mut Vec<MdSegment>) {
-    if lines.iter().any(|l| !l.trim().is_empty()) {
-        segs.push(MdSegment::Text(lines.join("\n")));
-    }
+fn markdown_contains_reference_or_definition(node: &MarkdownNode) -> bool {
+    matches!(
+        node,
+        MarkdownNode::Definition(_)
+            | MarkdownNode::FootnoteDefinition(_)
+            | MarkdownNode::ImageReference(_)
+            | MarkdownNode::LinkReference(_)
+    ) || node.children().is_some_and(|children| {
+        children
+            .iter()
+            .any(markdown_contains_reference_or_definition)
+    })
 }
 
-/// 一行**只有图片**时解析出其中的图片,否则 `None`(那一行照旧交给 TextView)。
-///
-/// 认的形态就是 README 里图片的常见写法:`![alt](url)`、带 title 的
-/// `![alt](url "标题")`、当链接用的 `[![alt](url)](link)`,以及同一行并排多张
-/// (徽章行)。**行里混了文字就整行放弃** —— 拆一半会把段落切碎,而内联图片
-/// 本来就是少数派。
-///
-/// 已知不覆盖(记档,不修):列表项 `- ![a](b)`、引用块 `> ![a](b)`、表格格子
-/// 里的图片 —— 这些行有前缀语法,拆出来会毁掉列表/引用结构,仍走 TextView
-/// (于是本地路径图片在那些位置依旧不显示)。
-fn parse_image_line(line: &str) -> Option<Vec<MdImage>> {
-    // 四个空格 / 制表符缩进是代码块,里面的图片语法是代码
-    if line.starts_with("    ") || line.starts_with('\t') {
-        return None;
-    }
-    let mut rest = line.trim();
-    if rest.is_empty() {
-        return None;
-    }
-    let mut images = Vec::new();
-    while !rest.is_empty() {
-        let (image, tail) = parse_image_at(rest)?;
-        images.push(image);
-        rest = tail.trim_start();
-    }
-    (!images.is_empty()).then_some(images)
+fn markdown_text_only(source: &str) -> Vec<MdSegment> {
+    let mut segs = Vec::new();
+    push_markdown_text(source, 0, source.len(), &mut segs);
+    segs
 }
 
-/// 从开头吃掉一张图片(可带外层链接),返回图片与剩余部分。
-fn parse_image_at(s: &str) -> Option<(MdImage, &str)> {
-    // `[![alt](img)](link)`:方括号里必须**整体**是一张图片,别的都不认
-    if let Some(after) = s.strip_prefix('[') {
-        let (inner, tail) = take_balanced(after, '[', ']')?;
-        let (mut image, inner_tail) = parse_bang_image(inner.trim())?;
-        if !inner_tail.trim().is_empty() {
-            return None;
-        }
-        let tail = tail.strip_prefix('(')?;
-        let (dest, tail) = take_balanced(tail, '(', ')')?;
-        let (link, _) = split_dest(dest);
-        if link.is_empty() {
-            return None;
-        }
-        image.link = Some(link);
-        return Some((image, tail));
-    }
-    parse_bang_image(s)
-}
-
-/// `![alt](url "title")`。
-fn parse_bang_image(s: &str) -> Option<(MdImage, &str)> {
-    let after = s.strip_prefix("![")?;
-    let (alt, tail) = take_balanced(after, '[', ']')?;
-    let tail = tail.strip_prefix('(')?;
-    let (dest, tail) = take_balanced(tail, '(', ')')?;
-    let (url, title) = split_dest(dest);
-    if url.is_empty() {
-        return None;
-    }
-    Some((
-        MdImage {
-            url,
-            alt: alt.trim().to_string(),
-            title,
-            link: None,
-        },
-        tail,
-    ))
-}
-
-/// 吃到与开头配对的 `close`(允许嵌套、`\` 转义),入参是**开符之后**的部分,
-/// 返回 `(括号内, 闭合符之后)`;没配上返回 `None`。
-fn take_balanced(s: &str, open: char, close: char) -> Option<(&str, &str)> {
-    let mut depth = 1usize;
-    let mut escaped = false;
-    for (ix, ch) in s.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' => escaped = true,
-            c if c == open => depth += 1,
-            c if c == close => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some((&s[..ix], &s[ix + ch.len_utf8()..]));
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// 括号里的目标 → `(url, title)`。认 `<路径 带空格>` 与 `url "标题"` 两种写法。
-fn split_dest(dest: &str) -> (String, Option<String>) {
-    let d = dest.trim();
-    if let Some(rest) = d.strip_prefix('<')
-        && let Some((url, tail)) = rest.split_once('>')
+fn push_markdown_text(source: &str, start: usize, end: usize, segs: &mut Vec<MdSegment>) {
+    if let Some(text) = source.get(start..end)
+        && !text.trim().is_empty()
     {
-        return (url.trim().to_string(), title_of(tail));
-    }
-    match d.find(char::is_whitespace) {
-        Some(cut) => (d[..cut].to_string(), title_of(&d[cut..])),
-        None => (d.to_string(), None),
+        segs.push(MdSegment::Text(text.to_string()));
     }
 }
 
-/// 目标后面那截 → title(剥 `"`/`'`/`(`)。空的算没有。
-fn title_of(tail: &str) -> Option<String> {
-    let t = tail
-        .trim()
-        .trim_matches(|c| c == '"' || c == '\'' || c == '(' || c == ')')
-        .trim();
-    (!t.is_empty()).then(|| t.to_string())
+fn parse_table_block(source: &str) -> Option<MdTable> {
+    let mut lines = source.lines();
+    let header = split_cells(lines.next()?);
+    let aligns = parse_separator(lines.next()?)?;
+    if header.is_empty() || header.len() != aligns.len() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            break;
+        }
+        let mut cells = split_cells(line);
+        cells.resize(header.len(), String::new());
+        rows.push(cells);
+    }
+    Some(MdTable {
+        header,
+        aligns,
+        rows,
+    })
+}
+
+fn markdown_image_from_node(node: &MarkdownNode) -> Option<MdImage> {
+    match node {
+        MarkdownNode::Image(image) if !image.url.trim().is_empty() => Some(MdImage {
+            url: image.url.clone(),
+            alt: image.alt.clone(),
+            title: image.title.clone(),
+            link: None,
+        }),
+        MarkdownNode::Link(link) if link.children.len() == 1 => {
+            let MarkdownNode::Image(image) = &link.children[0] else {
+                return None;
+            };
+            if image.url.trim().is_empty() {
+                return None;
+            }
+            Some(MdImage {
+                url: image.url.clone(),
+                alt: image.alt.clone(),
+                title: image.title.clone(),
+                link: (!link.url.is_empty()).then(|| link.url.clone()),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn split_top_level_image_paragraph(node: &MarkdownNode) -> Option<Vec<MdSegment>> {
+    let MarkdownNode::Paragraph(paragraph) = node else {
+        return None;
+    };
+    let mut segs = Vec::new();
+    let mut images = Vec::new();
+    for child in &paragraph.children {
+        if let Some(image) = markdown_image_from_node(child) {
+            images.push(image);
+            continue;
+        }
+        let MarkdownNode::Text(text) = child else {
+            return None;
+        };
+        if !text.value.chars().all(char::is_whitespace) {
+            return None;
+        }
+        if text
+            .value
+            .bytes()
+            .any(|byte| byte == b'\n' || byte == b'\r')
+            && !images.is_empty()
+        {
+            segs.push(MdSegment::Images(std::mem::take(&mut images)));
+        }
+    }
+    if !images.is_empty() {
+        segs.push(MdSegment::Images(images));
+    }
+    (!segs.is_empty()).then_some(segs)
 }
 
 /// 图片目标的落点。
@@ -679,9 +729,15 @@ fn to_file_url(path: &Path) -> Option<String> {
 /// - `http(s)://`:网络图片(README 顶上的徽章、外链截图)。`reqwest::blocking`
 ///   拉回来 —— 与价格表那条链同一个客户端库(见 `pricing::fetch_models_dev`)。
 ///
-/// 其余 scheme 一律拒绝。出网那支有两条硬约束:**10s 超时**(`reqwest::blocking`
-/// 默认无限等)与 **32MB 上限**(坏 URL 不该把内存拖垮),详见 [`fetch_remote_bytes`]。
+/// 其余 scheme 一律拒绝。本地资源只读普通文件并限制 32MB；出网资源另有 10s
+/// 超时(`reqwest::blocking` 默认无限等)，同样限制 32MB。详见
+/// [`fetch_local_preview_bytes`] / [`fetch_remote_bytes`]。
+///
+/// 这是进程级客户端，不只服务文件页；其它富文本入口必须先走对应安全策略。
+/// AI 会话正文统一经 [`sanitize_session_markdown`] 禁掉全部自动资源请求。
 pub struct PreviewHttpClient;
+
+const PREVIEW_IMAGE_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 impl HttpClient for PreviewHttpClient {
     fn type_name(&self) -> &'static str {
@@ -712,7 +768,7 @@ impl HttpClient for PreviewHttpClient {
                     let path = url
                         .to_file_path()
                         .map_err(|_| anyhow::anyhow!("不是本地文件路径: {uri}"))?;
-                    std::fs::read(&path).with_context(|| format!("读不到 {}", path.display()))?
+                    fetch_local_preview_bytes(&path)?
                 }
                 "http" | "https" => fetch_remote_bytes(&uri)?,
                 other => anyhow::bail!("预览不支持的协议 {other}: {uri}"),
@@ -722,6 +778,56 @@ impl HttpClient for PreviewHttpClient {
                 .body(AsyncBody::from(bytes))?)
         })
     }
+}
+
+/// 本地富文本资源只读取普通文件，并与网络资源共用 32MB 硬上限。先 canonicalize
+/// 再检查可同时允许“项目里的图片符号链接”并拒绝设备、FIFO 与目录；打开后再检查
+/// 一次并限量读取，避免路径替换或文件增长绕过预检。
+fn fetch_local_preview_bytes(path: &Path) -> anyhow::Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    let canonical =
+        std::fs::canonicalize(path).with_context(|| format!("读不到 {}", path.display()))?;
+    let metadata = std::fs::symlink_metadata(&canonical)
+        .with_context(|| format!("无法检查 {}", canonical.display()))?;
+    anyhow::ensure!(
+        metadata.file_type().is_file(),
+        "预览资源不是普通文件: {}",
+        canonical.display()
+    );
+    anyhow::ensure!(
+        metadata.len() <= PREVIEW_IMAGE_MAX_BYTES,
+        "预览资源过大({} 字节): {}",
+        metadata.len(),
+        canonical.display()
+    );
+
+    let file = std::fs::File::open(&canonical)
+        .with_context(|| format!("读不到 {}", canonical.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("无法检查 {}", canonical.display()))?;
+    anyhow::ensure!(
+        opened.is_file(),
+        "预览资源打开后不再是普通文件: {}",
+        canonical.display()
+    );
+    anyhow::ensure!(
+        opened.len() <= PREVIEW_IMAGE_MAX_BYTES,
+        "预览资源过大({} 字节): {}",
+        opened.len(),
+        canonical.display()
+    );
+
+    let mut body = Vec::with_capacity(opened.len() as usize);
+    file.take(PREVIEW_IMAGE_MAX_BYTES + 1)
+        .read_to_end(&mut body)?;
+    anyhow::ensure!(
+        body.len() as u64 <= PREVIEW_IMAGE_MAX_BYTES,
+        "预览资源读取时超过大小上限: {}",
+        canonical.display()
+    );
+    Ok(body)
 }
 
 /// 一次 GET,把响应体整个读回来。**阻塞**,只许在后台执行器上调 —— gpui 的
@@ -736,8 +842,6 @@ impl HttpClient for PreviewHttpClient {
 fn fetch_remote_bytes(url: &str) -> anyhow::Result<Vec<u8>> {
     /// 徽章服务(shields.io 之流)对没有 UA 的请求有的直接 403
     const UA: &str = concat!("mini-term/", env!("CARGO_PKG_VERSION"));
-    /// 单张图片的字节上限。超了宁可不画,也不把几百 MB 读进内存
-    const MAX_BYTES: u64 = 32 * 1024 * 1024;
     static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
     use std::io::Read as _;
 
@@ -756,11 +860,18 @@ fn fetch_remote_bytes(url: &str) -> anyhow::Result<Vec<u8>> {
     );
     // content-length 可能缺席(chunked),所以读的时候再兜一次上限
     if let Some(len) = resp.content_length() {
-        anyhow::ensure!(len <= MAX_BYTES, "图片过大({len} 字节): {url}");
+        anyhow::ensure!(
+            len <= PREVIEW_IMAGE_MAX_BYTES,
+            "图片过大({len} 字节): {url}"
+        );
     }
     let mut body = Vec::new();
-    resp.take(MAX_BYTES + 1).read_to_end(&mut body)?;
-    anyhow::ensure!(body.len() as u64 <= MAX_BYTES, "图片过大: {url}");
+    resp.take(PREVIEW_IMAGE_MAX_BYTES + 1)
+        .read_to_end(&mut body)?;
+    anyhow::ensure!(
+        body.len() as u64 <= PREVIEW_IMAGE_MAX_BYTES,
+        "图片过大: {url}"
+    );
     Ok(body)
 }
 
@@ -770,65 +881,289 @@ fn fetch_remote_bytes(url: &str) -> anyhow::Result<Vec<u8>> {
 /// 这条是给**内联**图片兜底的(列表项 `- ![a](b)`、引用块、表格格子里的图片)——
 /// 它们要走 TextView,而那条路只认网络 URI,配上 [`PreviewHttpClient`] 才画得出来。
 ///
-/// 围栏代码块与行内 code 里的图片语法是**代码不是图片**,原样留着。
-fn rewrite_md_image_urls(source: &str, base_dir: &Path) -> String {
-    let mut out = String::with_capacity(source.len());
-    let mut in_fence = false;
-    for (ix, line) in source.split('\n').enumerate() {
-        if ix > 0 {
-            out.push('\n');
+/// 只有 AST 已确认的 Image 节点才改写；代码、无效 CommonMark 和普通文本原样保留。
+fn collect_local_markdown_image_replacements(
+    node: &MarkdownNode,
+    base_dir: &Path,
+    replacements: &mut Vec<MarkdownReplacement>,
+) {
+    if let MarkdownNode::Image(image) = node {
+        if let MdImageSrc::Local(path) = resolve_image_src(&image.url, base_dir)
+            && let Some(url) = to_file_url(&path)
+            && let Some(replacement) = markdown_replacement(
+                node,
+                markdown_image_markup(&image.alt, &url, image.title.as_deref()),
+            )
+        {
+            replacements.push(replacement);
         }
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            out.push_str(line);
-            continue;
-        }
-        // 围栏内 / 四空格缩进的代码块原样
-        if in_fence || line.starts_with("    ") || line.starts_with('\t') {
-            out.push_str(line);
-            continue;
-        }
-        rewrite_md_line_into(line, base_dir, &mut out);
+        return;
     }
-    out
+
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_local_markdown_image_replacements(child, base_dir, replacements);
+        }
+    }
 }
 
-/// 一行里的图片目标逐个改写(行内 code 跳过)。
-fn rewrite_md_line_into(line: &str, base_dir: &Path, out: &mut String) {
-    let mut rest = line;
-    let mut in_code = false;
-    while let Some(ch) = rest.chars().next() {
-        if ch == '`' {
-            in_code = !in_code;
-            out.push('`');
-            rest = &rest[1..];
-            continue;
-        }
-        if !in_code
-            && rest.starts_with("![")
-            && let Some((image, tail)) = parse_bang_image(rest)
-        {
-            let url = match resolve_image_src(&image.url, base_dir) {
-                MdImageSrc::Local(path) => to_file_url(&path).unwrap_or(image.url.clone()),
-                _ => image.url.clone(),
-            };
-            out.push_str("![");
-            out.push_str(&image.alt);
-            out.push_str("](");
-            out.push_str(&url);
-            if let Some(title) = &image.title {
-                out.push_str(" \"");
-                out.push_str(title);
-                out.push('"');
+fn markdown_image_markup(alt: &str, url: &str, title: Option<&str>) -> String {
+    let mut markup = String::with_capacity(alt.len() + url.len() + 8);
+    markup.push_str("![");
+    for ch in alt.chars() {
+        match ch {
+            '\n' | '\r' => markup.push(' '),
+            _ if ch.is_ascii_punctuation() => {
+                markup.push('\\');
+                markup.push(ch);
             }
-            out.push(')');
-            rest = tail;
+            _ => markup.push(ch),
+        }
+    }
+    markup.push_str("](");
+    markup.push_str(url);
+    if let Some(title) = title {
+        markup.push_str(" \"");
+        for ch in title.chars() {
+            match ch {
+                '\n' | '\r' => markup.push(' '),
+                '\\' | '"' => {
+                    markup.push('\\');
+                    markup.push(ch);
+                }
+                _ => markup.push(ch),
+            }
+        }
+        markup.push('"');
+    }
+    markup.push(')');
+    markup
+}
+
+fn rewrite_md_image_urls(source: &str, base_dir: &Path) -> String {
+    let Ok(ast) = markdown::to_mdast(source, &ParseOptions::gfm()) else {
+        return source.to_string();
+    };
+    let mut replacements = Vec::new();
+    collect_local_markdown_image_replacements(&ast, base_dir, &mut replacements);
+    replacements.sort_unstable_by_key(|replacement| std::cmp::Reverse(replacement.start));
+
+    let mut rewritten = source.to_string();
+    let mut next_start = source.len();
+    for replacement in replacements {
+        if replacement.end > next_start
+            || replacement.start > replacement.end
+            || source.get(replacement.start..replacement.end).is_none()
+        {
             continue;
         }
-        out.push(ch);
-        rest = &rest[ch.len_utf8()..];
+        rewritten.replace_range(replacement.start..replacement.end, &replacement.value);
+        next_start = replacement.start;
     }
+    rewritten
+}
+
+fn remote_markdown_url_allowed(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+        || lower.starts_with('#')
+}
+
+#[derive(Debug)]
+struct MarkdownReplacement {
+    start: usize,
+    end: usize,
+    value: String,
+}
+
+const MAX_UNTRUSTED_MARKDOWN_SANITIZE_PASSES: usize = 4;
+
+fn markdown_plain_text(node: &MarkdownNode) -> String {
+    match node {
+        MarkdownNode::Image(image) => image.alt.clone(),
+        MarkdownNode::ImageReference(image) => image.alt.clone(),
+        _ => node
+            .children()
+            .map(|children| {
+                children.iter().fold(String::new(), |mut text, child| {
+                    text.push_str(&markdown_plain_text(child));
+                    text
+                })
+            })
+            .unwrap_or_else(|| node.to_string()),
+    }
+}
+
+fn markdown_safe_plain_label(value: &str, fallback: &str) -> String {
+    if value.trim().is_empty() {
+        return fallback.into();
+    }
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_punctuation() {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+fn markdown_replacement(node: &MarkdownNode, value: String) -> Option<MarkdownReplacement> {
+    let position = node.position()?;
+    Some(MarkdownReplacement {
+        start: position.start.offset,
+        end: position.end.offset,
+        value,
+    })
+}
+
+/// Turn an untrusted raw-HTML AST node into visible Markdown text. Escape every
+/// ASCII punctuation character so a second GFM parse cannot recreate either an
+/// `mdast::Html` node or Markdown links/images hidden inside an attribute value.
+/// Backslash escapes render as the original punctuation, preserving readable
+/// source without giving the replacement any active Markdown syntax.
+fn inert_markdown_html_source(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_punctuation() {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+fn collect_untrusted_markdown_replacements(
+    node: &MarkdownNode,
+    replacements: &mut Vec<MarkdownReplacement>,
+) {
+    match node {
+        MarkdownNode::Link(link) if !remote_markdown_url_allowed(&link.url) => {
+            let label = markdown_safe_plain_label(&markdown_plain_text(node), "link");
+            if let Some(replacement) = markdown_replacement(node, label) {
+                replacements.push(replacement);
+            }
+            return;
+        }
+        MarkdownNode::Image(image) => {
+            let alt = markdown_safe_plain_label(&image.alt, "image");
+            if let Some(replacement) = markdown_replacement(node, alt) {
+                replacements.push(replacement);
+            }
+            return;
+        }
+        MarkdownNode::ImageReference(image) => {
+            let alt = markdown_safe_plain_label(&image.alt, "image");
+            if let Some(replacement) = markdown_replacement(node, alt) {
+                replacements.push(replacement);
+            }
+            return;
+        }
+        MarkdownNode::Definition(definition) if !remote_markdown_url_allowed(&definition.url) => {
+            if let Some(replacement) = markdown_replacement(node, String::new()) {
+                replacements.push(replacement);
+            }
+            return;
+        }
+        MarkdownNode::Html(html) => {
+            if let Some(replacement) =
+                markdown_replacement(node, inert_markdown_html_source(&html.value))
+            {
+                replacements.push(replacement);
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_untrusted_markdown_replacements(child, replacements);
+        }
+    }
+}
+
+#[cfg(test)]
+fn collect_remote_markdown_replacements(
+    node: &MarkdownNode,
+    replacements: &mut Vec<MarkdownReplacement>,
+) {
+    collect_untrusted_markdown_replacements(node, replacements);
+}
+
+fn markdown_as_indented_code(source: &str) -> String {
+    source
+        .split('\n')
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn apply_markdown_replacements(source: &str, mut replacements: Vec<MarkdownReplacement>) -> String {
+    replacements.sort_unstable_by_key(|replacement| std::cmp::Reverse(replacement.start));
+
+    let mut sanitized = source.to_string();
+    let mut next_start = source.len();
+    for replacement in replacements {
+        if replacement.end > next_start
+            || replacement.start > replacement.end
+            || source.get(replacement.start..replacement.end).is_none()
+        {
+            continue;
+        }
+        sanitized.replace_range(replacement.start..replacement.end, &replacement.value);
+        next_start = replacement.start;
+    }
+    sanitized
+}
+
+/// Keep reparsing transformed Markdown until the renderer's own GFM grammar
+/// sees no disallowed nodes. Escaping an HTML block can change the following
+/// indented block into active Markdown, so a single AST generation is not a
+/// sufficient security boundary.
+fn sanitize_untrusted_markdown_with_pass_limit(source: &str, pass_limit: usize) -> String {
+    let mut sanitized = source.to_string();
+    for _ in 0..pass_limit {
+        let Ok(ast) = markdown::to_mdast(&sanitized, &ParseOptions::gfm()) else {
+            return markdown_as_indented_code(source);
+        };
+        let mut replacements = Vec::new();
+        collect_untrusted_markdown_replacements(&ast, &mut replacements);
+        if replacements.is_empty() {
+            return sanitized;
+        }
+        sanitized = apply_markdown_replacements(&sanitized, replacements);
+    }
+
+    // A transformed document is safe to render only after reparsing proves it
+    // has no active replacements. If the bounded loop cannot establish that
+    // fixed point, keep the original source visible as inert code.
+    markdown_as_indented_code(source)
+}
+
+fn sanitize_untrusted_markdown(source: &str) -> String {
+    sanitize_untrusted_markdown_with_pass_limit(source, MAX_UNTRUSTED_MARKDOWN_SANITIZE_PASSES)
+}
+
+/// Remote rich-text is untrusted input from another machine. Parse with the
+/// same GFM AST used by `TextView::markdown`, then replace disallowed links,
+/// images, and reference definitions by source byte range. Every real raw-HTML
+/// node becomes visible inert source; AST positions keep fenced/indented/inline
+/// code byte-for-byte out of scope.
+fn sanitize_remote_markdown(source: &str) -> String {
+    sanitize_untrusted_markdown(source)
+}
+
+/// AI session logs are untrusted rich text and share the process-wide preview
+/// HTTP client. Preserve Markdown formatting and explicit Markdown links, turn
+/// every image into plain alt text, and make raw HTML visible but inert so
+/// opening a history entry cannot read local files or issue background network
+/// requests.
+pub fn sanitize_session_markdown(source: &str) -> String {
+    sanitize_untrusted_markdown(source)
 }
 
 /// 把 HTML 源里 `src` / `href` / `poster` 的**本地**目标改写成 `file:///…`。
@@ -842,56 +1177,362 @@ fn rewrite_html_urls(source: &str, base_dir: &Path) -> String {
     let lower = source.to_ascii_lowercase();
     let mut out = String::with_capacity(source.len());
     let mut pos = 0usize;
-    while let Some((value_start, quote)) = find_next_url_attr(&lower, pos) {
-        let Some(rel) = lower[value_start..].find(quote) else {
-            break;
-        };
-        let value_end = value_start + rel;
-        out.push_str(&source[pos..value_start]);
-        out.push_str(&rewrite_html_value(&source[value_start..value_end], base_dir));
-        pos = value_end;
+    for attr in html_url_attributes(&lower, false) {
+        out.push_str(&source[pos..attr.value_start]);
+        out.push_str(&rewrite_html_value(
+            &source[attr.value_start..attr.value_end],
+            base_dir,
+        ));
+        pos = attr.value_end;
     }
     out.push_str(&source[pos..]);
     out
 }
 
-/// 找下一个 `src=` / `href=` / `poster=` 的**值起点**与它的引号。
-fn find_next_url_attr(lower: &str, from: usize) -> Option<(usize, char)> {
-    const ATTRS: [&str; 3] = ["src", "href", "poster"];
-    let mut best: Option<(usize, usize, char)> = None;
-    for attr in ATTRS {
-        let mut at = from;
-        while let Some(rel) = lower[at..].find(attr) {
-            let name_start = at + rel;
-            at = name_start + attr.len();
-            // 属性名前面必须是空白 —— 挡住 `data-src` / `xlink:href` 这类
-            if !lower[..name_start]
-                .chars()
-                .next_back()
-                .is_some_and(char::is_whitespace)
-            {
-                continue;
-            }
-            // 后面得是 `\s*=\s*` 加引号
-            let after_name = &lower[at..];
-            let trimmed = after_name.trim_start();
-            let Some(after_eq) = trimmed.strip_prefix('=') else {
-                continue;
-            };
-            let value = after_eq.trim_start();
-            let Some(quote) = value.chars().next().filter(|c| *c == '"' || *c == '\'') else {
-                continue;
-            };
-            // `after_name` 与 `value` 的长度差,正好是「空白 + `=` + 空白」那一截
-            let quote_at = at + (after_name.len() - value.len());
-            let candidate = (name_start, quote_at + 1, quote);
-            if best.is_none_or(|(best_start, _, _)| candidate.0 < best_start) {
-                best = Some(candidate);
-            }
+#[derive(Clone, Copy)]
+struct HtmlUrlAttribute {
+    value_start: usize,
+    value_end: usize,
+    #[cfg(test)]
+    name: &'static str,
+}
+
+fn skip_html_tag(lower: &str, cursor: usize) -> usize {
+    let bytes = lower.as_bytes();
+    bytes[cursor..]
+        .iter()
+        .position(|byte| *byte == b'>')
+        .map(|relative| cursor + relative + 1)
+        .unwrap_or(bytes.len())
+}
+
+fn skip_html_end_tag(lower: &str, mut cursor: usize) -> usize {
+    let bytes = lower.as_bytes();
+    while cursor < bytes.len() {
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
             break;
         }
+        if bytes[cursor] == b'>' {
+            return cursor + 1;
+        }
+        if bytes[cursor] == b'/' {
+            cursor += 1;
+            continue;
+        }
+
+        let name_start = cursor;
+        while cursor < bytes.len()
+            && !bytes[cursor].is_ascii_whitespace()
+            && !matches!(bytes[cursor], b'=' | b'/' | b'>' | b'"' | b'\'' | b'<')
+        {
+            cursor += 1;
+        }
+        if cursor == name_start {
+            // 关闭标签里的孤立引号只是解析错误，不会让后面的 `>` 失去结束作用。
+            cursor += 1;
+            continue;
+        }
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'=') {
+            continue;
+        }
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        match bytes.get(cursor).copied() {
+            Some(quote @ (b'"' | b'\'')) => {
+                cursor += 1;
+                while cursor < bytes.len() && bytes[cursor] != quote {
+                    cursor += 1;
+                }
+                if cursor < bytes.len() {
+                    cursor += 1;
+                }
+            }
+            Some(_) => {
+                while cursor < bytes.len()
+                    && !bytes[cursor].is_ascii_whitespace()
+                    && bytes[cursor] != b'>'
+                {
+                    cursor += 1;
+                }
+            }
+            None => break,
+        }
     }
-    best.map(|(_, value_start, quote)| (value_start, quote))
+    bytes.len()
+}
+
+fn skip_html_comment(lower: &str, mut cursor: usize) -> usize {
+    let bytes = lower.as_bytes();
+    // HTML5 的 abrupt-closing empty comment：`<!-->` / `<!--->`。
+    if bytes.get(cursor) == Some(&b'>') {
+        return cursor + 1;
+    }
+    if bytes[cursor..].starts_with(b"->") {
+        return cursor + 2;
+    }
+    while cursor < bytes.len() {
+        if bytes[cursor..].starts_with(b"-->") {
+            return cursor + 3;
+        }
+        if bytes[cursor..].starts_with(b"--!>") {
+            return cursor + 4;
+        }
+        cursor += 1;
+    }
+    bytes.len()
+}
+
+fn is_raw_text_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "script"
+            | "style"
+            | "textarea"
+            | "title"
+            | "xmp"
+            | "iframe"
+            | "noembed"
+            | "noframes"
+            | "plaintext"
+    )
+}
+
+fn skip_raw_text_element(lower: &str, mut cursor: usize, tag: &str) -> usize {
+    if tag == "plaintext" {
+        return lower.len();
+    }
+    let needle = format!("</{tag}");
+    while let Some(relative) = lower[cursor..].find(&needle) {
+        let close_start = cursor + relative;
+        let name_end = close_start + needle.len();
+        let boundary = lower.as_bytes().get(name_end).copied();
+        if boundary.is_none_or(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>')) {
+            return skip_html_end_tag(lower, name_end);
+        }
+        cursor = name_end;
+    }
+    lower.len()
+}
+
+/// 收集真实开始标签里的 `src=` / `href=` / `poster=` 值区间。HTML 允许属性值
+/// 不加引号，也会恢复 `<img/src=x>` 与 `alt="x"src=y` 这类错误写法；同时必须
+/// 跳过普通文本、注释和 HTML namespace 的 raw-text 内容，避免把示例代码当成
+/// 属性；svg/math foreign content 则保守继续扫描，防止 namespace 恢复产生
+/// 活动图片。
+fn html_url_attributes(
+    lower: &str,
+    fail_closed_after_foreign_content: bool,
+) -> Vec<HtmlUrlAttribute> {
+    let bytes = lower.as_bytes();
+    let mut attrs = Vec::new();
+    let mut pos = 0usize;
+    // foreign-content 的 tree-builder 恢复规则无法只靠词法标签栈精确复刻。
+    // 不可信清洗启用 fail-closed 时，一旦见过非自闭合 svg/math，后续都不再
+    // 跳过 raw-text，宁可多清洗也不能漏活动图片；可信本地改写不启用这条
+    // 策略。
+    let mut saw_foreign_content = false;
+
+    while pos < bytes.len() {
+        let Some(relative) = lower[pos..].find('<') else {
+            break;
+        };
+        let open = pos + relative;
+        let mut cursor = open + 1;
+        if lower[cursor..].starts_with("!--") {
+            pos = skip_html_comment(lower, cursor + 3);
+            continue;
+        }
+        let Some(first) = bytes.get(cursor).copied() else {
+            break;
+        };
+        if first == b'/' {
+            let mut name_cursor = cursor + 1;
+            while name_cursor < bytes.len()
+                && !bytes[name_cursor].is_ascii_whitespace()
+                && !matches!(bytes[name_cursor], b'/' | b'>')
+            {
+                name_cursor += 1;
+            }
+            pos = skip_html_end_tag(lower, name_cursor);
+            continue;
+        }
+        if matches!(first, b'!' | b'?') {
+            pos = skip_html_tag(lower, cursor + 1);
+            continue;
+        }
+        if !first.is_ascii_alphabetic() {
+            pos = cursor;
+            continue;
+        }
+
+        let tag_start = cursor;
+        while cursor < bytes.len()
+            && !bytes[cursor].is_ascii_whitespace()
+            && !matches!(bytes[cursor], b'/' | b'>')
+        {
+            cursor += 1;
+        }
+        let tag = &lower[tag_start..cursor];
+        let mut self_closing = false;
+
+        while cursor < bytes.len() {
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor >= bytes.len() {
+                break;
+            }
+            if bytes[cursor] == b'>' {
+                cursor += 1;
+                break;
+            }
+            if bytes[cursor] == b'/' {
+                if bytes.get(cursor + 1) == Some(&b'>') {
+                    self_closing = true;
+                    cursor += 2;
+                    break;
+                }
+                // html5ever 接受 `<img/src=x>`；单独的 `/` 当属性分隔符跳过。
+                cursor += 1;
+                continue;
+            }
+
+            let name_start = cursor;
+            while cursor < bytes.len()
+                && !bytes[cursor].is_ascii_whitespace()
+                && !matches!(bytes[cursor], b'=' | b'/' | b'>' | b'"' | b'\'' | b'<')
+            {
+                cursor += 1;
+            }
+            if cursor == name_start {
+                cursor += 1;
+                continue;
+            }
+            let name = match &lower[name_start..cursor] {
+                "src" => Some("src"),
+                "href" => Some("href"),
+                "poster" => Some("poster"),
+                _ => None,
+            };
+
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if bytes.get(cursor) != Some(&b'=') {
+                continue;
+            }
+            cursor += 1;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+
+            let (value_start, value_end) = match bytes.get(cursor).copied() {
+                Some(quote @ (b'"' | b'\'')) => {
+                    cursor += 1;
+                    let value_start = cursor;
+                    while cursor < bytes.len() && bytes[cursor] != quote {
+                        cursor += 1;
+                    }
+                    let value_end = cursor;
+                    if cursor < bytes.len() {
+                        cursor += 1;
+                    }
+                    (value_start, value_end)
+                }
+                Some(_) => {
+                    let value_start = cursor;
+                    while cursor < bytes.len()
+                        && !bytes[cursor].is_ascii_whitespace()
+                        && bytes[cursor] != b'>'
+                    {
+                        cursor += 1;
+                    }
+                    (value_start, cursor)
+                }
+                None => (cursor, cursor),
+            };
+            if let Some(_name) = name {
+                attrs.push(HtmlUrlAttribute {
+                    value_start,
+                    value_end,
+                    #[cfg(test)]
+                    name: _name,
+                });
+            }
+        }
+
+        pos = if (!fail_closed_after_foreign_content || !saw_foreign_content)
+            && is_raw_text_tag(tag)
+        {
+            skip_raw_text_element(lower, cursor, tag)
+        } else {
+            cursor.max(open + 1)
+        };
+        if fail_closed_after_foreign_content && !self_closing && matches!(tag, "svg" | "math") {
+            saw_foreign_content = true;
+        }
+    }
+
+    attrs
+}
+
+/// Historical lexical sanitizer retained for focused regression tests. It is
+/// not a security boundary: untrusted Markdown raw HTML is made inert by AST
+/// replacement, and standalone remote HTML never enters the rich renderer.
+#[cfg(test)]
+fn sanitize_untrusted_html_urls(
+    source: &str,
+    allow_external_links: bool,
+    allow_external_resources: bool,
+) -> String {
+    let lower = source.to_ascii_lowercase();
+    let mut out = String::with_capacity(source.len());
+    let mut pos = 0usize;
+    for attr in html_url_attributes(&lower, true) {
+        let value = source[attr.value_start..attr.value_end].trim();
+        let value_lower = value.to_ascii_lowercase();
+        let is_web = ["http:", "https:"]
+            .iter()
+            .any(|prefix| value_lower.starts_with(prefix));
+        let replacement = match attr.name {
+            "href" if allow_external_links && value.starts_with('#') => {
+                &source[attr.value_start..attr.value_end]
+            }
+            "href"
+                if allow_external_links
+                    && (is_web
+                        || ["mailto:", "tel:"]
+                            .iter()
+                            .any(|prefix| value_lower.starts_with(prefix))) =>
+            {
+                &source[attr.value_start..attr.value_end]
+            }
+            "src" | "poster" if allow_external_resources && is_web => {
+                &source[attr.value_start..attr.value_end]
+            }
+            "href" => "#",
+            _ => "about:blank",
+        };
+        out.push_str(&source[pos..attr.value_start]);
+        out.push_str(replacement);
+        pos = attr.value_end;
+    }
+    out.push_str(&source[pos..]);
+    out
+}
+
+/// Legacy test helper for the former remote-HTML preview path.
+#[cfg(test)]
+fn sanitize_remote_html_urls(source: &str) -> String {
+    sanitize_untrusted_html_urls(source, true, false)
 }
 
 /// 一个属性值:本地目标转 `file://`,其余原样(排除清单同原版正则)。
@@ -1209,6 +1850,8 @@ fn is_svg_target(url: &str) -> bool {
         .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("svg"))
 }
 
+const MARKDOWN_CONTENT_MAX_WIDTH: f32 = 860.0;
+
 /// 图片该占多宽(逻辑像素):原尺寸与可用宽取小 —— 小图保持原大(原版
 /// `max-width:100%` 也不放大),大图压到可用宽。
 ///
@@ -1218,6 +1861,17 @@ fn is_svg_target(url: &str) -> bool {
 fn image_display_width(data: &gpui::RenderImage, is_svg: bool, avail_w: f32) -> f32 {
     let scale = if is_svg { 2.0 } else { 1.0 };
     (data.size(0).width.0 as f32 / scale).clamp(1.0, avail_w.max(1.0))
+}
+
+fn image_aspect_ratio(data: &gpui::RenderImage) -> f32 {
+    let size = data.size(0);
+    let width = size.width.0.max(1) as f32;
+    let height = size.height.0.max(1) as f32;
+    width / height
+}
+
+fn markdown_image_can_load(is_remote_document: bool, approved: bool) -> bool {
+    !is_remote_document || approved
 }
 
 /// 图片画不出来时的占位:一枚描边小卡片,写 alt(没有就写文件名)。
@@ -1233,6 +1887,8 @@ fn md_image_placeholder(
 ) -> gpui::AnyElement {
     div()
         .id(id)
+        .max_w_full()
+        .min_w_0()
         .flex()
         .items_center()
         .px(px(10.0))
@@ -1243,110 +1899,36 @@ fn md_image_placeholder(
         .bg(ui::bg_elevated())
         .text_size(ui::font_px(12.0))
         .text_color(ui::text_muted())
-        .child(label)
+        .child(div().min_w_0().truncate().child(label))
         .when_some(hint, |el, hint| {
             el.tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
         })
         .when_some(open, |el, url| {
             el.cursor_pointer()
                 .hover(|el| el.text_color(ui::text_primary()))
-                .on_click(move |_: &ClickEvent, _window, cx| cx.open_url(&url))
+                .on_click(move |_: &ClickEvent, _window, cx| {
+                    cx.stop_propagation();
+                    cx.open_url(&url);
+                })
         })
         .into_any_element()
-}
-
-// ─── 单例句柄 ─────────────────────────────────────────────────
-
-thread_local! {
-    /// 当前开着的那一个。[`open`] 用它认出「已经开着 → 换文件而不是叠开」。
-    ///
-    /// 与 [`crate::overlay`] 同一个理由用 `thread_local`:gpui 的视图全在主线程上。
-    /// **弱引用**:强引用会把视图连同它的目录监听一起吊在这张表上 ——
-    /// 除了我们自己那条关闭路,`Root` 层清空对话框栈之类的路径不会来这里摘表,
-    /// 于是 watcher 永远不释放。弱引用则是「谁真的还开着谁说了算」。
-    static CURRENT: RefCell<Option<WeakEntity<FileViewer>>> = const { RefCell::new(None) };
-}
-
-/// 打开预览器。两个入口(文件树单击文件行、全局搜索单击结果)共用。
-///
-/// `highlight_line` 是 1-based 行号(全局搜索的命中行);文件树那条路给 `None`。
-pub fn open(
-    project_root: PathBuf,
-    path: PathBuf,
-    highlight_line: Option<u32>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    // 已经开着 → 换文件(原版是 `filePath` prop 变化那条 effect,不问未保存)
-    let existing = CURRENT
-        .with(|c| c.borrow().clone())
-        .filter(|_| crate::overlay::contains(crate::overlay::key(kind::FILE_VIEWER)))
-        .and_then(|weak| weak.upgrade());
-    if let Some(view) = existing {
-        view.update(cx, |this, cx| {
-            this.navigate(project_root, path, highlight_line, window, cx)
-        });
-        return;
-    }
-
-    // 守卫要在**建视图之前**判:被 `open_guarded` 拦下时视图已经建好、
-    // 焦点也已经排上了,而它永远不会被画出来(与 `search_modal::open` 同一个坑)
-    if crate::overlay::contains(crate::overlay::key(kind::FILE_VIEWER)) {
-        return;
-    }
-
-    let view = cx.new(|cx| FileViewer::new(project_root, path, highlight_line, window, cx));
-    CURRENT.with(|c| *c.borrow_mut() = Some(view.downgrade()));
-
-    open_guarded(kind::FILE_VIEWER, window, cx, {
-        let view = view.clone();
-        move |dialog, window, _cx| {
-            let viewport = window.viewport_size();
-            // 原版 `w-[90vw] h-[80vh]` + `align="center"`
-            dialog
-                .p_0()
-                // 工具栏右侧有自己的 ✕;`close_button` 画的是 `IconName::Close`,
-                // 而 0.5.1 不带 svg 资产(渲染成空白且编译期无感)
-                .close_button(false)
-                // 遮罩点击关闭**关掉**:它绕不过「有未保存修改吗」那道确认
-                // (Dialog 没给拦截口),留着等于给草稿开一条静默丢弃的路
-                .overlay_closable(false)
-                // Esc 也自己接:`keyboard(true)` 时 Dialog 把 escape 绑成 `Cancel`
-                // 动作,动作**先于** `on_key_down` 派发且会吃掉事件
-                // (gpui `window.rs:3834-3846`:先跑 bindings,propagate 为假就 return),
-                // 我们的两段式退出就再也收不到 Esc 了
-                .keyboard(false)
-                .w(viewport.width * 0.9)
-                // Dialog 只认「距顶多少」,居中就是 (100% - 80%) / 2
-                .margin_top(viewport.height * 0.1)
-                .child(div().h(viewport.height * 0.8).child(view.clone()))
-        }
-    });
-
-    // Dialog 打开时会把焦点抢到自己面板上,聚焦要排在它后面
-    window.defer(cx, move |window, cx| {
-        view.update(cx, |this, cx| this.focus_content(window, cx));
-    });
-}
-
-/// 关掉(✕ / Esc 确认之后)。
-fn close(window: &mut Window, cx: &mut App) {
-    CURRENT.with(|c| *c.borrow_mut() = None);
-    close_guarded(kind::FILE_VIEWER, window, cx);
 }
 
 // ─── 视图 ─────────────────────────────────────────────────────
 
 pub struct FileViewer {
+    source: DocumentSource,
     project_root: PathBuf,
-    /// 外部传进来的那一个。`highlight_line` 只在 `current == origin` 时生效
-    /// (`FileViewerModal.tsx:486`:跳走之后行号就失效了)。
-    origin_path: PathBuf,
     current_path: PathBuf,
     highlight_line: Option<u32>,
 
     loading: bool,
+    remote_refreshing: bool,
     error: Option<String>,
+    /// A re-activation refresh failed after usable content was already loaded.
+    /// Keep it separate from `error`: the latter selects the full-page fatal
+    /// branch, while this warning must leave the editor/draft visible.
+    refresh_warning: Option<String>,
     result: Option<FileContentResult>,
     /// 编辑器实体。**换文件 / 显式重载才重建** —— `set_value` 会清撤销栈,
     /// 「预览 ↔ 源码」来回切只是不画它,草稿与撤销栈都留着
@@ -1365,13 +1947,31 @@ pub struct FileViewer {
     /// [`Self::render_markdown`] 只拿得到 `&self`(gpui 的 `Render::render`
     /// 之下全是不可变借用),而这份缓存要在渲染途中回填。
     md_cache: RefCell<Option<MdCache>>,
+    /// 远程 Markdown 图片按文档、按 URL 记录用户明确批准。未命中时只能画
+    /// 占位，绝不能把 URI 交给进程级图片加载器。
+    approved_remote_images: HashSet<String>,
+    /// 预览态(markdown / html)的滚动位置。**必须住在实体上**:裸
+    /// `overflow_y_scroll()` 的偏移存在按帧回收的 element state 里,切去终端页
+    /// 的那几帧预览不渲染、状态被回收,切回来就跳回顶部。一份文件只会走
+    /// md / html 其中一支,共用一个句柄;「预览 ↔ 源码」来回切也靠它保住进度
+    /// (源码态的滚动住在 `InputState` 实体里,组件自己管)。
+    preview_scroll: ScrollHandle,
 
     preview: bool,
     dirty: bool,
     saving: bool,
     save_error: Option<String>,
+    save_warning: Option<String>,
     ext_changed: bool,
     last_save_at: Option<Instant>,
+
+    /// 远程可编辑文件的加载/上次保存基线。二进制、超限和失败分支为 `None`。
+    remote_baseline: Option<crate::remote_ssh::RemoteFileBaseline>,
+    /// 保存前发现远端已变化。保留后端返回的新内容，让“重新加载”无需第二次网络请求。
+    remote_conflict: Option<crate::remote_ssh::RemoteFileReadResult>,
+    /// 当前配置中的 SSH 连接身份已与打开页签时不同；此页签只允许查看，不允许保存。
+    remote_source_invalid: bool,
+    load_generation: u64,
 
     watcher: Arc<FsWatcher>,
     watched: Option<PathBuf>,
@@ -1382,9 +1982,17 @@ pub struct FileViewer {
 }
 
 impl FileViewer {
+    pub fn new_document(
+        source: DocumentSource,
+        highlight_line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new(source, highlight_line, window, cx)
+    }
+
     fn new(
-        project_root: PathBuf,
-        path: PathBuf,
+        source: DocumentSource,
         highlight_line: Option<u32>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1408,13 +2016,17 @@ impl FileViewer {
             }
         });
 
+        let project_root = source.project_root_path();
+        let path = source.path().to_path_buf();
         let mut this = Self {
+            source,
             project_root,
-            origin_path: path.clone(),
             current_path: path,
             highlight_line,
             loading: false,
+            remote_refreshing: false,
             error: None,
+            refresh_warning: None,
             result: None,
             editor: None,
             saved: String::new(),
@@ -1422,13 +2034,21 @@ impl FileViewer {
             preview_draft: None,
             line_ending: LineEnding::Lf,
             md_cache: RefCell::new(None),
-            // 原版初值就是 true(Markdown / HTML 打开先看渲染稿)
-            preview: true,
+            approved_remote_images: HashSet::new(),
+            preview_scroll: ScrollHandle::new(),
+            // 文件树打开 Markdown / HTML 时默认看渲染稿；内容搜索带行号时切到
+            // 源码，否则命中光标虽然已经定位，用户看到的仍是无法对应行号的预览。
+            preview: highlight_line.is_none(),
             dirty: false,
             saving: false,
             save_error: None,
+            save_warning: None,
             ext_changed: false,
             last_save_at: None,
+            remote_baseline: None,
+            remote_conflict: None,
+            remote_source_invalid: false,
+            load_generation: 0,
             watcher,
             watched: None,
             focus: cx.focus_handle(),
@@ -1439,30 +2059,11 @@ impl FileViewer {
         this
     }
 
-    /// 换一个文件(单例被复用时)。**不问未保存修改** —— 原版那条 effect
-    /// (`FileViewerModal.tsx:239-242`)也不问。
-    fn navigate(
-        &mut self,
-        project_root: PathBuf,
-        path: PathBuf,
-        highlight_line: Option<u32>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.project_root = project_root;
-        self.origin_path = path.clone();
-        self.current_path = path;
-        self.highlight_line = highlight_line;
-        self.preview = true;
-        self.reload(window, cx);
-        self.focus_content(window, cx);
-    }
-
     fn path_str(&self) -> String {
         self.current_path.to_string_lossy().to_string()
     }
 
-    fn file_name(&self) -> String {
+    pub fn file_name(&self) -> String {
         let p = self.path_str();
         file_name_of(&p).to_string()
     }
@@ -1471,24 +2072,43 @@ impl FileViewer {
         is_image_file(&self.path_str())
     }
 
-    /// 「预览 / 源码」段控件的显示条件:`(isMd || isHtml) && canEdit`
-    /// (`FileViewerModal.tsx:355`,与原版同口径)。
+    fn renders_local_image(&self) -> bool {
+        !self.source.is_remote() && self.is_img()
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// 「预览 / 源码」段控件的显示条件:Markdown 始终允许，本地 HTML 允许，
+    /// 远程 HTML 只走源码；最后都必须满足 `canEdit`。
     ///
-    /// HTML 那一半曾经被摘掉(模块注释偏差 2 的旧结论:没有 iframe 等价物,
+    /// 本地 HTML 那一半曾经被摘掉(模块注释偏差 2 的旧结论:没有 iframe 等价物,
     /// 富文本渲染器画出来的东西「比不提供更误导人」)。现在**改为提供** ——
     /// 见 [`Self::render_html`]:简版渲染 + 顶上一条说明 + 工具栏常驻
     /// 「用浏览器打开」,把真效果的出口摆明,比只给一屏源码有用。
     fn has_preview_toggle(&self) -> bool {
         let path = self.path_str();
-        (is_markdown_file(&path) || is_html_file(&path))
-            && can_edit(self.is_img(), self.result.as_ref())
+        supports_rich_preview(self.source.is_remote(), &path)
+            && can_edit(self.renders_local_image(), self.result.as_ref())
     }
 
     // ── 读盘 ──────────────────────────────────────────────
 
     /// 读当前文件并重建编辑器。图片分支不读盘(原版 `if (!open || isImg) return`)。
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 保存任务已经拿到旧基线并可能正在落盘。此时重建编辑器会让迟到的保存
+        // 完成跨代修改状态，也会允许用户在旧写入尚未结束时启动第二次保存。
+        if self.saving {
+            return;
+        }
+        self.remote_refreshing = false;
+        self.refresh_warning = None;
         self.rewatch();
+        self.load_generation = self.load_generation.wrapping_add(1);
+        let generation = self.load_generation;
+        self.remote_conflict = None;
+        self.remote_baseline = None;
         if self.is_img() {
             self.loading = false;
             self.result = None;
@@ -1504,38 +2124,199 @@ impl FileViewer {
         self._editor_sub = None;
         cx.notify();
 
-        let root = self.project_root.clone();
         let path = self.current_path.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            // 读盘是阻塞的,**不能在主线程上跑**
-            let probe = (root.clone(), path.clone());
-            let outcome = cx
-                .background_executor()
-                .spawn(async move { mt_project::fs::read_file_content(&probe.0, &probe.1) })
-                .await;
-            let _ = this.update_in(cx, |view: &mut FileViewer, window, cx| {
-                // 回来时可能已经换了文件 —— 只认还对得上号的那一次
-                if view.current_path != path {
-                    return;
-                }
-                view.loading = false;
-                match outcome {
-                    Ok(res) => view.apply_content(res, window, cx),
-                    Err(err) => {
-                        view.error = Some(format!("{err:#}"));
-                        cx.notify();
-                    }
-                }
-            });
-        })
-        .detach();
+        match self.source.clone() {
+            DocumentSource::Local { project_root, .. } => {
+                cx.spawn_in(window, async move |this, cx| {
+                    // 读盘是阻塞的,**不能在主线程上跑**
+                    let probe = (project_root, path.clone());
+                    let outcome = cx
+                        .background_executor()
+                        .spawn(async move { mt_project::fs::read_file_content(&probe.0, &probe.1) })
+                        .await;
+                    let _ = this.update_in(cx, |view: &mut FileViewer, window, cx| {
+                        if view.current_path != path || view.load_generation != generation {
+                            return;
+                        }
+                        view.loading = false;
+                        match outcome {
+                            Ok(res) => view.apply_content(res, window, cx),
+                            Err(err) => {
+                                view.error = Some(format!("{err:#}"));
+                                cx.notify();
+                            }
+                        }
+                    });
+                })
+                .detach();
+            }
+            DocumentSource::Remote {
+                connection,
+                project_root,
+                ..
+            } => {
+                let remote_path = path.to_string_lossy().into_owned();
+                cx.spawn_in(window, async move |this, cx| {
+                    let outcome = cx
+                        .background_executor()
+                        .spawn(async move {
+                            crate::remote_ssh::read_file_content(
+                                &connection,
+                                &project_root,
+                                &remote_path,
+                            )
+                        })
+                        .await;
+                    let _ = this.update_in(cx, |view: &mut FileViewer, window, cx| {
+                        if view.current_path != path || view.load_generation != generation {
+                            return;
+                        }
+                        view.loading = false;
+                        match outcome {
+                            Ok(content) => {
+                                view.apply_remote_content(content, window, cx);
+                            }
+                            Err(err) => {
+                                view.error = Some(err);
+                                cx.notify();
+                            }
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
     }
 
     /// 内容到位:落基线 + 建编辑器。
     ///
     /// 「编辑基线与内容一起落位」是原版注释里点名的一条(`FileViewerModal.tsx:224`)——
     /// 分两步会出现「内容已换、基线还是旧文件」的窗口,那一瞬间的脏态是错的。
-    fn apply_content(&mut self, res: FileContentResult, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_content(
+        &mut self,
+        res: FileContentResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remote_baseline = None;
+        self.remote_conflict = None;
+        self.apply_file_content(res, window, cx);
+    }
+
+    fn apply_remote_content(
+        &mut self,
+        content: crate::remote_ssh::RemoteFileReadResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.validate_remote_source(cx);
+        if self.remote_source_invalid {
+            if self.result.is_none() {
+                self.error = Some(t("fileViewer", "remoteConnectionChanged").to_string());
+            }
+            cx.notify();
+            return;
+        }
+        self.remote_baseline = content.baseline;
+        self.remote_conflict = None;
+        self.apply_file_content(content.content, window, cx);
+    }
+
+    /// Re-activation refresh for a clean remote tab. Keep the existing editor
+    /// entity (and therefore cursor/undo history) when the remote bytes are
+    /// unchanged; only rebuild when the server actually returned new content.
+    fn refresh_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let DocumentSource::Remote {
+            connection,
+            project_root,
+            ..
+        } = self.source.clone()
+        else {
+            return;
+        };
+        self.load_generation = self.load_generation.wrapping_add(1);
+        let generation = self.load_generation;
+        let path = self.current_path.clone();
+        let remote_path = path.to_string_lossy().into_owned();
+        self.remote_refreshing = true;
+        self.refresh_warning = None;
+        self.error = None;
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::remote_ssh::read_file_content(&connection, &project_root, &remote_path)
+                })
+                .await;
+            let _ = this.update_in(cx, |view: &mut FileViewer, window, cx| {
+                if view.current_path != path || view.load_generation != generation {
+                    return;
+                }
+                view.remote_refreshing = false;
+                view.validate_remote_source(cx);
+                if view.remote_source_invalid {
+                    return;
+                }
+                match outcome {
+                    Ok(content) => {
+                        view.refresh_warning = None;
+                        let editable = view.editor.is_some()
+                            && !content.content.is_binary
+                            && !content.content.too_large;
+                        let unchanged = editable
+                            && LineEnding::detect(&content.content.content) == view.line_ending
+                            && normalize_to_lf(&content.content.content) == view.saved;
+                        if unchanged {
+                            view.remote_baseline = content.baseline;
+                            view.remote_conflict = None;
+                            view.error = None;
+                        } else if view.dirty {
+                            // The user started typing while the refresh was in
+                            // flight. Preserve the draft and surface the same
+                            // explicit reload/overwrite decision used by save.
+                            view.remote_conflict = Some(content);
+                        } else {
+                            let save_warning = view.save_warning.clone();
+                            view.apply_remote_content(content, window, cx);
+                            // A successful refresh resolves only the refresh
+                            // warning. A prior committed-save cleanup warning
+                            // remains actionable until the next save/reload.
+                            view.save_warning = save_warning;
+                        }
+                    }
+                    Err(error) => {
+                        match remote_refresh_failure_presentation(
+                            view.result.is_some(),
+                            view.editor.is_some(),
+                        ) {
+                            RemoteRefreshFailurePresentation::Warning => {
+                                view.refresh_warning = Some(error);
+                                view.error = None;
+                            }
+                            RemoteRefreshFailurePresentation::Fatal => {
+                                view.refresh_warning = None;
+                                view.error = Some(error);
+                                if view.can_take_async_focus(window, cx) {
+                                    view.focus.focus(window);
+                                }
+                            }
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_file_content(
+        &mut self,
+        res: FileContentResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.line_ending = LineEnding::detect(&res.content);
         let text = normalize_to_lf(&res.content);
         self.saved = text.clone();
@@ -1544,8 +2325,10 @@ impl FileViewer {
         self.ext_changed = false;
         self.preview_draft = None;
         self.save_error = None;
+        self.save_warning = None;
+        self.refresh_warning = None;
 
-        if can_edit(false, Some(&res)) {
+        if can_edit(self.is_img(), Some(&res)) {
             let name = self.file_name();
             let lang = language_for(&name);
             let wrap = should_wrap(&name);
@@ -1571,18 +2354,107 @@ impl FileViewer {
             // `Position` 是 0-based;越界直接不动(原版
             // `if (highlightLine > view.state.doc.lines) return`)。
             // `set_cursor_position` 内部 `move_to` → `scroll_to`,滚动是白送的。
-            let same_file = self.current_path == self.origin_path;
-            if let Some(line) = highlight_target(self.highlight_line, same_file, &text) {
+            if let Some(line) = highlight_target(self.highlight_line, &text) {
                 editor.update(cx, |state, cx| {
                     state.set_cursor_position(Position::new(line - 1, 0), window, cx);
                 });
             }
+        } else {
+            // A remote file can change from editable text to binary/oversized
+            // between activations. Drop the old hidden editor so `draft()` and a
+            // later refresh cannot reuse stale text behind the fallback view.
+            self.editor = None;
+            self._editor_sub = None;
         }
         self.result = Some(res);
         // 原版编辑器每次都是带 `autoFocus` 重新挂载的(`preview` 态下才不抢焦点),
-        // 这里在内容落位之后统一把焦点摆回该在的地方
-        self.focus_content(window, cx);
+        // 这里在内容落位之后统一把焦点摆回该在的地方。工作区允许多个并发加载
+        // 的文档，后台页签的迟到结果不得抢走当前页的键盘焦点。
+        if self.can_take_async_focus(window, cx) {
+            self.focus_content(window, cx);
+        }
         cx.notify();
+    }
+
+    /// 已经打开的搜索结果再次被点到时，只移动光标，不重建文档或撤销栈。
+    pub fn reveal_line(
+        &mut self,
+        highlight_line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.highlight_line = highlight_line;
+        if highlight_line.is_some() && self.has_preview_toggle() && self.preview {
+            self.preview = false;
+            cx.notify();
+        }
+        let Some(editor) = self.editor.as_ref() else {
+            return;
+        };
+        let text = editor.read(cx).value().to_string();
+        if let Some(line) = highlight_target(highlight_line, &text) {
+            editor.update(cx, |state, cx| {
+                state.set_cursor_position(Position::new(line - 1, 0), window, cx);
+            });
+        }
+    }
+
+    /// 检查远程页签的连接快照是否仍对应当前项目配置。
+    pub fn validate_remote_source(&mut self, cx: &mut Context<Self>) {
+        let DocumentSource::Remote {
+            project_id,
+            connection,
+            project_root,
+            ..
+        } = &self.source
+        else {
+            return;
+        };
+        let (current_root, current) = {
+            let store = crate::store::AppStore::global(cx);
+            let store = store.read(cx);
+            (
+                store
+                    .project(project_id)
+                    .map(|project| project.path.clone()),
+                store.remote_connection_of(project_id),
+            )
+        };
+        let invalid = current_root.as_deref() != Some(project_root.as_str())
+            || current.as_ref().is_none_or(|current| {
+                current.id != connection.id
+                    || crate::remote_ssh::connection_fingerprint(current)
+                        != crate::remote_ssh::connection_fingerprint(connection)
+            });
+        if self.remote_source_invalid != invalid {
+            self.remote_source_invalid = invalid;
+            cx.notify();
+        }
+    }
+
+    /// 页签重新激活时，干净的远程文档后台重读一次；内容未变时保留编辑器实体，
+    /// 脏草稿只做连接身份检查，外部变化继续由保存前基线比较兜底。
+    pub fn on_activated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.validate_remote_source(cx);
+        if self.source.is_remote()
+            && !self.is_img()
+            && !self.remote_source_invalid
+            && !self.loading
+            && !self.remote_refreshing
+            && !self.saving
+            && !self.dirty
+        {
+            // Project switches reach this path from WorkbenchArea's deferred focus
+            // hand-off. Keep focus on the newly visible document while the remote
+            // refresh is in flight; otherwise the hidden editor from the previous
+            // project can continue receiving keystrokes until SFTP completes.
+            if self.can_take_async_focus(window, cx) {
+                self.focus_content(window, cx);
+            }
+            self.refresh_remote(window, cx);
+        } else if self.can_take_async_focus(window, cx) {
+            self.focus_content(window, cx);
+        }
     }
 
     /// 当前草稿(编辑器全文,`\n` 行尾)。没有编辑器时就是磁盘内容。
@@ -1598,6 +2470,12 @@ impl FileViewer {
     /// 换文件时把监听挪到新文件的**父目录**上(notify 是目录级监听)。
     /// `FsWatcher` 内部有引用计数,与文件树同时监听同一目录是安全的。
     fn rewatch(&mut self) {
+        if self.source.is_remote() {
+            if let Some(old) = self.watched.take() {
+                self.watcher.unwatch(&old);
+            }
+            return;
+        }
         let dir = self.current_path.parent().map(|p| p.to_path_buf());
         if self.watched == dir {
             return;
@@ -1615,7 +2493,7 @@ impl FileViewer {
 
     /// 逐条对照 `FileViewerModal.tsx:275-283`。
     fn on_fs_change(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_img() || self.result.is_none() {
+        if self.source.is_remote() || self.is_img() || self.result.is_none() {
             return;
         }
         if !same_path(&path.to_string_lossy(), &self.path_str()) {
@@ -1628,8 +2506,8 @@ impl FileViewer {
         {
             return;
         }
-        if self.draft(cx) != self.saved {
-            // 脏:挂提示条让用户自己决定
+        if self.draft(cx) != self.saved || self.saving {
+            // 脏或正在保存:先挂提示条，不能在旧写入尚未收口时重建编辑器。
             self.ext_changed = true;
             cx.notify();
         } else {
@@ -1643,78 +2521,175 @@ impl FileViewer {
     /// `FileViewerModal.tsx:251-272`。干净或在保存中时**静默返回** ——
     /// Ctrl+S 是肌肉记忆,不该弹任何东西。
     fn save(&mut self, cx: &mut Context<Self>) {
+        self.save_with_mode(false, cx);
+    }
+
+    fn save_with_mode(&mut self, force: bool, cx: &mut Context<Self>) {
         let text = self.draft(cx);
         if self.saving || text == self.saved {
             return;
         }
+        if self.remote_refreshing {
+            // Saving performs its own fresh baseline validation. Invalidate the
+            // older activation refresh so its late result cannot replace a draft
+            // or conflict state owned by this save.
+            self.load_generation = self.load_generation.wrapping_add(1);
+            self.remote_refreshing = false;
+        }
+        self.validate_remote_source(cx);
+        if self.remote_source_invalid {
+            return;
+        }
         self.saving = true;
         self.save_error = None;
+        self.save_warning = None;
+        self.remote_conflict = None;
         cx.notify();
 
-        let root = self.project_root.clone();
         let path = self.current_path.clone();
+        let generation = self.load_generation;
         // 写回磁盘前把行尾还原(见模块注释)
         let on_disk = restore_line_ending(&text, self.line_ending);
-        cx.spawn(async move |this, cx| {
-            let probe = (root, path.clone(), on_disk);
-            let outcome = cx
-                .background_executor()
-                .spawn(async move {
-                    mt_project::fs::write_file_content(&probe.0, &probe.1, &probe.2)
+        match self.source.clone() {
+            DocumentSource::Local { project_root, .. } => {
+                cx.spawn(async move |this, cx| {
+                    let probe = (project_root, path.clone(), on_disk);
+                    let outcome = cx
+                        .background_executor()
+                        .spawn(async move {
+                            mt_project::fs::write_file_content(&probe.0, &probe.1, &probe.2)
+                        })
+                        .await;
+                    let _ = this.update(cx, |view: &mut FileViewer, cx| {
+                        if view.current_path != path || view.load_generation != generation {
+                            return;
+                        }
+                        view.saving = false;
+                        match outcome {
+                            Ok(()) => view.finish_save(text.clone(), None, None, cx),
+                            Err(err) => view.save_error = Some(format!("{err:#}")),
+                        }
+                        cx.notify();
+                    });
                 })
-                .await;
-            let _ = this.update(cx, |view: &mut FileViewer, cx| {
-                view.saving = false;
-                if view.current_path != path {
+                .detach();
+            }
+            DocumentSource::Remote {
+                project_id,
+                project_root,
+                ..
+            } => {
+                let Some(baseline) = self.remote_baseline.clone() else {
+                    self.saving = false;
+                    self.save_error = Some(t("fileViewer", "remoteReadOnly").to_string());
+                    cx.notify();
                     return;
-                }
-                match outcome {
-                    Ok(()) => {
-                        view.saved = text.clone();
-                        view.disk = text.clone();
-                        view.last_save_at = Some(Instant::now());
-                        // 保存期间用户可能又敲了字:按**最新**草稿重新比对,
-                        // 而不是直接置 false(原版 `setDirty(draftRef.current !== text)`)
-                        view.dirty = view.draft(cx) != text;
-                        view.ext_changed = false;
-                    }
-                    // 失败挂顶部红条,不弹窗
-                    Err(err) => view.save_error = Some(format!("{err:#}")),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+                };
+                let connection = {
+                    let store_entity = crate::store::AppStore::global(cx);
+                    let store = store_entity.read(cx);
+                    store.remote_connection_of(&project_id)
+                };
+                let Some(connection) = connection else {
+                    self.saving = false;
+                    self.remote_source_invalid = true;
+                    cx.notify();
+                    return;
+                };
+                let remote_path = path.to_string_lossy().into_owned();
+                cx.spawn(async move |this, cx| {
+                    let outcome = cx
+                        .background_executor()
+                        .spawn(async move {
+                            crate::remote_ssh::save_file_content(
+                                &connection,
+                                &project_root,
+                                &remote_path,
+                                &on_disk,
+                                &baseline,
+                                force,
+                            )
+                        })
+                        .await;
+                    let _ = this.update(cx, |view: &mut FileViewer, cx| {
+                        if view.current_path != path || view.load_generation != generation {
+                            return;
+                        }
+                        view.saving = false;
+                        view.validate_remote_source(cx);
+                        if view.remote_source_invalid {
+                            return;
+                        }
+                        let save_succeeded = matches!(
+                            &outcome,
+                            Ok(crate::remote_ssh::RemoteFileSaveResult::Saved { .. })
+                        );
+                        view.refresh_warning = refresh_warning_after_remote_save(
+                            view.refresh_warning.take(),
+                            save_succeeded,
+                        );
+                        match outcome {
+                            Ok(crate::remote_ssh::RemoteFileSaveResult::Saved {
+                                baseline,
+                                warning,
+                            }) => {
+                                view.finish_save(text.clone(), Some(baseline), warning, cx);
+                            }
+                            Ok(crate::remote_ssh::RemoteFileSaveResult::ExternalChange {
+                                current,
+                            }) => {
+                                view.remote_conflict = Some(current);
+                            }
+                            Err(err) => view.save_error = Some(err),
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn finish_save(
+        &mut self,
+        text: String,
+        remote_baseline: Option<crate::remote_ssh::RemoteFileBaseline>,
+        warning: Option<String>,
+        cx: &App,
+    ) {
+        self.saved = text.clone();
+        self.disk = text.clone();
+        self.last_save_at = Some(Instant::now());
+        self.remote_baseline = remote_baseline.or_else(|| self.remote_baseline.clone());
+        self.remote_conflict = None;
+        self.save_warning = warning;
+        // 保存期间用户可能又敲了字:按**最新**草稿重新比对。
+        self.dirty = self.draft(cx) != text;
+        self.ext_changed = false;
     }
 
     // ── 关闭 ──────────────────────────────────────────────
 
-    /// 两段式退出的第二段:有未保存修改先问一句(`FileViewerModal.tsx:153-164`)。
-    ///
-    /// 第一段(编辑器搜索面板开着时 Esc 只关面板)是 GPUI **结构性免费**的:
-    /// gpui-component 的搜索面板把 `escape` 绑在自己的 `Input` 上下文里、
-    /// `on_action_escape` 不 `cx.propagate()`(`input/search.rs:305-307`),
-    /// 焦点在面板上时 Esc 被它吃掉,根本走不到这里。
+    /// 工作区页签关闭入口。Workbench 会回读当前 `dirty` 状态并统一处理确认框。
     fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.draft(cx) == self.saved {
-            close(window, cx);
-            return;
-        }
-        Confirm::new(t("fileViewer", "unsavedTitle"), t("fileViewer", "unsavedMessage")).open(
-            |window, cx| {
-                // 确认框自己还压在栈顶,`close_guarded` 这时会拒绝动手
-                // (它只关栈顶那一个)—— 排到本轮之后再关
-                window.defer(cx, close);
-            },
-            window,
-            cx,
-        );
+        // Workbench 的关闭检查会回读当前 FileViewer 的 dirty 状态。当前按键
+        // listener 仍持有本实体的 update 租约，直接回调会 double-lease。
+        let source = self.source.clone();
+        window.defer(cx, move |window, cx| {
+            crate::workbench_area::close_document_source(source, window, cx);
+        });
     }
 
     /// 打开 / 换文件后把焦点放到该放的地方:能编辑就进编辑器,
     /// 否则留在容器上(Ctrl+S / Esc 挂在容器的 `on_key_down` 上,
     /// 焦点不在这条链上就收不到键)。
-    fn focus_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn can_take_async_focus(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        crate::workbench_area::is_document_active(&self.source, cx)
+            && !window.has_active_dialog(cx)
+            && crate::overlay::allows(crate::overlay::Yield::ToOverlay)
+    }
+
+    pub fn focus_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.editor {
             Some(editor) if !(self.has_preview_toggle() && self.preview) => {
                 editor.update(cx, |state, cx| state.focus(window, cx));
@@ -1723,10 +2698,45 @@ impl FileViewer {
         }
     }
 
+    /// Route the workspace Ctrl/Cmd+F action into this document. Preview pages
+    /// first reveal source, then dispatch the editor's native search action once
+    /// the Input node exists in the next rendered dispatch tree.
+    pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading || self.error.is_some() || !can_edit(self.is_img(), self.result.as_ref()) {
+            return;
+        }
+        let Some(editor) = self.editor.as_ref() else {
+            return;
+        };
+        let was_preview = self.has_preview_toggle() && self.preview;
+        if was_preview {
+            self.preview = false;
+            cx.notify();
+        }
+        editor.update(cx, |state, cx| state.focus(window, cx));
+        let focus = editor.read(cx).focus_handle(cx);
+        if was_preview {
+            let source = self.source.clone();
+            window.on_next_frame(move |window, cx| {
+                if crate::workbench_area::is_document_active(&source, cx)
+                    && !window.has_active_dialog(cx)
+                    && crate::overlay::allows(crate::overlay::Yield::ToOverlay)
+                {
+                    focus.dispatch_action(&Search, window, cx);
+                }
+            });
+        } else {
+            focus.dispatch_action(&Search, window, cx);
+        }
+    }
+
     /// 「用浏览器打开」。走**协议**关联而不是文件关联 —— `.html` 的默认程序常被
     /// 设成编辑器(用户实测 notepad--),那样点一下只是再开一个编辑器,拿不到
     /// 这个按钮真正想要的东西(见 `mt_project::editor::open_path_in_browser`)。
     fn open_in_browser(&self, cx: &mut App) {
+        if self.source.is_remote() {
+            return;
+        }
         let path = self.current_path.clone();
         cx.background_executor()
             .spawn(async move {
@@ -1738,6 +2748,9 @@ impl FileViewer {
     }
 
     fn open_with_default_app(&self, cx: &mut App) {
+        if self.source.is_remote() {
+            return;
+        }
         let path = self.current_path.clone();
         cx.background_executor()
             .spawn(async move {
@@ -1748,13 +2761,34 @@ impl FileViewer {
             .detach();
     }
 
+    fn download_remote_file(&self, window: &mut Window, cx: &mut App) {
+        let DocumentSource::Remote {
+            project_id,
+            connection,
+            project_root,
+            ..
+        } = &self.source
+        else {
+            return;
+        };
+        crate::file_tree::download_remote_file(
+            project_id,
+            project_root,
+            &connection.id,
+            crate::remote_ssh::connection_fingerprint(connection),
+            self.current_path.clone(),
+            window,
+            cx,
+        );
+    }
+
     // ── 渲染 ──────────────────────────────────────────────
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let name = self.file_name();
         let path = self.path_str();
-        let is_html = is_html_file(&path);
-        let can_edit = can_edit(self.is_img(), self.result.as_ref());
+        let is_html = !self.source.is_remote() && is_html_file(&path);
+        let can_edit = !self.remote_source_invalid && can_edit(self.is_img(), self.result.as_ref());
         let dirty = self.dirty;
         let saving = self.saving;
 
@@ -1864,20 +2898,7 @@ impl FileViewer {
                     })
                     .when(self.has_preview_toggle(), |el| {
                         el.child(self.render_preview_toggle(cx))
-                    })
-                    .child(
-                        div()
-                            .id("file-viewer-close")
-                            .px(px(4.0))
-                            .text_size(ui::font_px(16.0))
-                            .text_color(ui::text_muted())
-                            .cursor_pointer()
-                            .hover(|el| el.text_color(ui::text_primary()))
-                            .child("✕")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.request_close(window, cx)
-                            })),
-                    ),
+                    }),
             )
     }
 
@@ -1923,12 +2944,25 @@ impl FileViewer {
             )
     }
 
-    /// 顶部两条提示条:保存失败(红)、外部修改(黄)。
+    /// 顶部状态条：保存错误、本地/远程外部修改和连接身份失效。
     fn render_banners(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .flex_none()
+            .when(self.remote_source_invalid, |el| {
+                el.child(
+                    div()
+                        .px(px(16.0))
+                        .py(px(6.0))
+                        .border_b_1()
+                        .border_color(ui::border_subtle())
+                        .bg(ui::with_alpha(ui::color_warning(), 0.15))
+                        .text_size(ui::font_px(12.0))
+                        .text_color(ui::color_warning())
+                        .child(t("fileViewer", "remoteConnectionChanged")),
+                )
+            })
             .when_some(self.save_error.clone(), |el, err| {
                 el.child(
                     div()
@@ -1943,6 +2977,80 @@ impl FileViewer {
                         .child(format!("{}: {}", t("fileViewer", "saveFailed"), err)),
                 )
             })
+            .when_some(self.save_warning.clone(), |el, warning| {
+                el.child(
+                    div()
+                        .px(px(16.0))
+                        .py(px(6.0))
+                        .border_b_1()
+                        .border_color(ui::border_subtle())
+                        .bg(ui::with_alpha(ui::color_warning(), 0.15))
+                        .text_size(ui::font_px(12.0))
+                        .text_color(ui::color_warning())
+                        .truncate()
+                        .child(format!("{}: {}", t("fileViewer", "saveWarning"), warning)),
+                )
+            })
+            .when_some(self.refresh_warning.clone(), |el, warning| {
+                el.child(
+                    div()
+                        .px(px(16.0))
+                        .py(px(6.0))
+                        .border_b_1()
+                        .border_color(ui::border_subtle())
+                        .bg(ui::with_alpha(ui::color_warning(), 0.15))
+                        .text_size(ui::font_px(12.0))
+                        .text_color(ui::color_warning())
+                        .truncate()
+                        .child(format!(
+                            "{}: {}",
+                            t("fileViewer", "refreshWarning"),
+                            warning
+                        )),
+                )
+            })
+            .when(
+                self.remote_conflict.is_some() && !self.remote_source_invalid,
+                |el| {
+                    el.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .px(px(16.0))
+                            .py(px(6.0))
+                            .border_b_1()
+                            .border_color(ui::border_subtle())
+                            .bg(ui::accent_subtle())
+                            .text_size(ui::font_px(12.0))
+                            .text_color(ui::color_warning())
+                            .child(t("fileViewer", "remoteExternallyChanged"))
+                            .child(
+                                div()
+                                    .id("file-viewer-remote-reload")
+                                    .cursor_pointer()
+                                    .hover(|el| el.text_color(ui::text_primary()))
+                                    .child(t("fileViewer", "reloadDiscard"))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        let Some(current) = this.remote_conflict.take() else {
+                                            return;
+                                        };
+                                        this.apply_remote_content(current, window, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("file-viewer-remote-force-save")
+                                    .cursor_pointer()
+                                    .hover(|el| el.text_color(ui::text_primary()))
+                                    .child(t("fileViewer", "forceSave"))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                        this.save_with_mode(true, cx);
+                                    })),
+                            ),
+                    )
+                },
+            )
             .when(self.ext_changed, |el| {
                 el.child(
                     div()
@@ -1960,20 +3068,30 @@ impl FileViewer {
                         .child(
                             div()
                                 .id("file-viewer-reload")
-                                .cursor_pointer()
-                                .hover(|el| el.text_color(ui::text_primary()))
+                                .when(!self.saving, |el| {
+                                    el.cursor_pointer()
+                                        .hover(|el| el.text_color(ui::text_primary()))
+                                })
+                                .when(self.saving, |el| el.opacity(0.5))
                                 .child(t("fileViewer", "reloadDiscard"))
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.ext_changed = false;
-                                    this.reload(window, cx);
-                                })),
+                                .when(!self.saving, |el| {
+                                    el.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.reload(window, cx);
+                                    }))
+                                }),
                         ),
                 )
             })
     }
 
     /// 居中一行字 + 一个「使用默认工具打开」按钮(二进制 / 过大 / 图片解不出来)。
-    fn render_fallback(&self, id: &'static str, message: String, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_fallback(
+        &self,
+        id: &'static str,
+        message: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let remote = self.source.is_remote();
         div()
             .size_full()
             .flex()
@@ -1984,11 +3102,23 @@ impl FileViewer {
             .text_size(ui::font_px(13.0))
             .text_color(ui::text_muted())
             .child(message)
-            .child(
-                ui::primary_button(id, t("fileViewer", "openWithDefaultApp")).on_click(
-                    cx.listener(|this, _: &ClickEvent, _window, cx| this.open_with_default_app(cx)),
-                ),
-            )
+            .when(!remote, |el| {
+                el.child(
+                    ui::primary_button(id, t("fileViewer", "openWithDefaultApp")).on_click(
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.open_with_default_app(cx)
+                        }),
+                    ),
+                )
+            })
+            .when(remote, |el| el.child(t("fileViewer", "remoteDownloadHint")))
+            .when(remote && !self.remote_source_invalid, |el| {
+                el.child(
+                    ui::primary_button(id, t("fileTree", "menu.download")).on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| this.download_remote_file(window, cx),
+                    )),
+                )
+            })
     }
 
     fn render_center(&self, text: String, color: gpui::Hsla) -> impl IntoElement {
@@ -2035,20 +3165,18 @@ impl FileViewer {
         }
     }
 
-    /// 自绘一行 md 图片(整行只有图片的那些行,见 [`parse_image_line`])。
+    /// 自绘一行 md 图片(纯图片段落由 [`split_top_level_image_paragraph`] 拆出)。
     ///
     /// TextView 那条路把图片目标一律当**网络 URI**(见本模块「markdown 分段」
     /// 一节),于是 README 里 `![主界面](docs/screenshots/main.png)` 这种相对路径
     /// 在预览里什么都不出 —— 原版是 `convertFileSrc(fileDir + '/' + src)`。
     /// 这里按当前文件所在目录解析成 `Resource::Path` 自己画。
     ///
-    /// 远程图片(徽章、外链截图)走 `Resource::Uri`,字节由 [`PreviewHttpClient`]
-    /// 拉回来 —— gpui 默认的 `NullHttpClient`(`gpui/app.rs:2343`)压根发不出请求。
+    /// 远程图片先画不触网的占位；用户明确点击后才把 `Resource::Uri` 交给
+    /// [`PreviewHttpClient`]。本地 Markdown 维持原来的自动加载行为。
     ///
-    /// 宽度自己算而不是甩给 `max_w`:gpui 的 `img` 在宽高都是 `Auto` 时把两轴
-    /// 一起填成图片原尺寸(`elements/img.rs:337-363`),此后 `max_w` 只压得住宽、
-    /// 高度还是原值,大图会被 `object_fit` 缩成一小条飘在大片留白里。**给定宽度
-    /// 之后**高度那一支才会按比例算。
+    /// 860px 只用于算设计宽；真实布局由带原图宽高比的外层框负责。父栏变窄时
+    /// `max_w_full` 会压缩框宽，`aspect_ratio` 同步重算高度，不再依赖整窗 viewport。
     fn render_md_images(
         &self,
         seg_ix: usize,
@@ -2063,24 +3191,71 @@ impl FileViewer {
         let mut els = Vec::with_capacity(images.len());
         for (ix, image) in images.iter().enumerate() {
             let id = gpui::SharedString::from(format!("file-viewer-md-img-{seg_ix}-{ix}"));
-            let label = gpui::SharedString::from(if image.alt.is_empty() {
+            let label_text = if image.alt.is_empty() {
                 file_name_of(&image.url).to_string()
             } else {
                 image.alt.clone()
-            });
-            let el = match resolve_image_src(&image.url, &base_dir) {
-                MdImageSrc::Local(path) => {
-                    self.render_md_local_image(id, label, &path, each_w, window, cx)
+            };
+            let label = gpui::SharedString::from(label_text.clone());
+            let source = resolve_image_src(&image.url, &base_dir);
+            let el = if self.source.is_remote() {
+                match source {
+                    MdImageSrc::Remote(url)
+                        if markdown_image_can_load(
+                            true,
+                            self.approved_remote_images.contains(&url),
+                        ) =>
+                    {
+                        self.render_md_remote_image(id, label, &url, each_w, window, cx)
+                    }
+                    MdImageSrc::Remote(url) => {
+                        let consent_id = gpui::SharedString::from(format!(
+                            "file-viewer-md-img-consent-{seg_ix}-{ix}"
+                        ));
+                        let approved_url = url.clone();
+                        let prompt = t("fileViewer", "remoteImageClickToLoad");
+                        let placeholder_label =
+                            gpui::SharedString::from(format!("{label_text} · {prompt}"));
+                        div()
+                            .id(consent_id)
+                            .max_w_full()
+                            .min_w_0()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.approved_remote_images.insert(approved_url.clone());
+                                cx.notify();
+                            }))
+                            .child(md_image_placeholder(
+                                id,
+                                placeholder_label,
+                                Some(format!("{prompt}\n{url}")),
+                                None,
+                            ))
+                            .into_any_element()
+                    }
+                    MdImageSrc::Local(_) | MdImageSrc::Unsupported => md_image_placeholder(
+                        id,
+                        label,
+                        Some(t("fileViewer", "remoteRelativeImage").to_string()),
+                        None,
+                    ),
                 }
-                MdImageSrc::Remote(url) => {
-                    self.render_md_remote_image(id, label, &url, each_w, window, cx)
-                }
-                MdImageSrc::Unsupported => {
-                    md_image_placeholder(id, label, Some(image.url.clone()), None)
+            } else {
+                match source {
+                    MdImageSrc::Local(path) => {
+                        self.render_md_local_image(id, label, &path, each_w, window, cx)
+                    }
+                    MdImageSrc::Remote(url) => {
+                        self.render_md_remote_image(id, label, &url, each_w, window, cx)
+                    }
+                    MdImageSrc::Unsupported => {
+                        md_image_placeholder(id, label, Some(image.url.clone()), None)
+                    }
                 }
             };
             // 外层链接(`[![alt](img)](link)`):点图开外链。只认 http(s) ——
-            // 本地目标要走「弹窗内跳转」,而那条路整条不做(见模块注释偏差 1)
+            // 本地目标要走「页内跳转」,而那条路整条不做(见模块注释偏差 1)
             let el = match image.link.as_deref().map(str::trim) {
                 Some(link)
                     if link.starts_with("http://") || link.starts_with("https://") =>
@@ -2091,6 +3266,8 @@ impl FileViewer {
                         .id(gpui::SharedString::from(format!(
                             "file-viewer-md-img-link-{seg_ix}-{ix}"
                         )))
+                        .max_w_full()
+                        .min_w_0()
                         .cursor_pointer()
                         .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                         .on_click(move |_: &ClickEvent, _window, cx| cx.open_url(&url))
@@ -2102,6 +3279,9 @@ impl FileViewer {
             els.push(el);
         }
         div()
+            .w_full()
+            .max_w_full()
+            .min_w_0()
             .flex()
             .flex_wrap()
             .items_center()
@@ -2125,11 +3305,28 @@ impl FileViewer {
         match window.use_asset::<ImageAssetLoader>(&resource, cx) {
             // 还在读 / 读不出来(文件不在、格式解不了)都给占位,不留白
             None | Some(Err(_)) => md_image_placeholder(id, label, Some(hint), None),
-            Some(Ok(data)) => img(path.to_path_buf())
-                .id(id)
-                .object_fit(gpui::ObjectFit::Contain)
-                .w(px(image_display_width(&data, is_svg_target(&hint), avail_w)))
-                .into_any_element(),
+            Some(Ok(data)) => {
+                // ImgState 会按 element id 跨帧保存 GIF/WebP 的 frame_index。资源换代
+                // 后必须换 id，否则旧动画帧下标可能越过新图片的 frame_count。
+                let image_id = gpui::SharedString::from(format!("{id}-{}", data.id.0));
+                let mut frame = div();
+                frame.style().aspect_ratio = Some(image_aspect_ratio(&data));
+                frame
+                    .w(px(image_display_width(
+                        &data,
+                        is_svg_target(&hint),
+                        avail_w,
+                    )))
+                    .max_w_full()
+                    .min_w_0()
+                    .child(
+                        img(data.clone())
+                            .id(image_id)
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Contain),
+                    )
+                    .into_any_element()
+            }
         }
     }
 
@@ -2156,11 +3353,24 @@ impl FileViewer {
                 Some(url.to_string()),
                 Some(url.to_string()),
             ),
-            Some(Ok(data)) => img(uri)
-                .id(id)
-                .object_fit(gpui::ObjectFit::Contain)
-                .w(px(image_display_width(&data, is_svg_target(url), avail_w)))
-                .into_any_element(),
+            Some(Ok(data)) => {
+                // 同一槽位换成另一份 RenderImage 时重置动画状态；同一资源跨帧的
+                // ImageId 保持稳定，因此 GIF/WebP 仍能连续播放。
+                let image_id = gpui::SharedString::from(format!("{id}-{}", data.id.0));
+                let mut frame = div();
+                frame.style().aspect_ratio = Some(image_aspect_ratio(&data));
+                frame
+                    .w(px(image_display_width(&data, is_svg_target(url), avail_w)))
+                    .max_w_full()
+                    .min_w_0()
+                    .child(
+                        img(data.clone())
+                            .id(image_id)
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Contain),
+                    )
+                    .into_any_element()
+            }
         }
     }
 
@@ -2180,10 +3390,16 @@ impl FileViewer {
     }
 
     /// 正文分块(带缓存,见 [`MdCache`])。源码或所在目录变了才重切。
-    fn md_blocks(&self, source: &str, base_dir: &Path) -> Rc<Vec<(f32, MdBlock)>> {
+    fn md_blocks(
+        &self,
+        source: &str,
+        base_dir: &Path,
+        local_resources: bool,
+    ) -> Rc<Vec<(f32, MdBlock)>> {
         // 先把命中与否算完再撒手,别让 borrow 活到 borrow_mut 那一行
         let hit = self.md_cache.borrow().as_ref().and_then(|c| {
-            (c.source == source && c.base_dir == base_dir).then(|| c.blocks.clone())
+            (c.source == source && c.base_dir == base_dir && c.local_resources == local_resources)
+                .then(|| c.blocks.clone())
         });
         if let Some(blocks) = hit {
             return blocks;
@@ -2199,10 +3415,25 @@ impl FileViewer {
                     // 表格格子),它们的本地路径得先转成 file:// 才画得出来
                     // (见 rewrite_md_image_urls);块级图片行不走这里,
                     // 拿的是拆好的原始 url
-                    MdSegment::Text(text) => {
-                        MdBlock::Text(rewrite_md_image_urls(&text, base_dir).into())
+                    MdSegment::Text(text) => MdBlock::Text(if local_resources {
+                        rewrite_md_image_urls(&text, base_dir).into()
+                    } else {
+                        sanitize_remote_markdown(&text).into()
+                    }),
+                    MdSegment::Table(mut table) => {
+                        for cell in table
+                            .header
+                            .iter_mut()
+                            .chain(table.rows.iter_mut().flatten())
+                        {
+                            *cell = if local_resources {
+                                rewrite_md_image_urls(cell, base_dir)
+                            } else {
+                                sanitize_remote_markdown(cell)
+                            };
+                        }
+                        MdBlock::Table(table)
                     }
-                    MdSegment::Table(table) => MdBlock::Table(table),
                     MdSegment::Images(images) => MdBlock::Images(images),
                 };
                 (mt, block)
@@ -2213,6 +3444,7 @@ impl FileViewer {
         *self.md_cache.borrow_mut() = Some(MdCache {
             source: source.to_string(),
             base_dir: base_dir.to_path_buf(),
+            local_resources,
             blocks: blocks.clone(),
         });
         blocks
@@ -2232,7 +3464,7 @@ impl FileViewer {
             // 这里的字号能赢(node.rs:384-386)
             let text = code_block.text.get_or_insert_default();
             text.font_size = Some(ui::font_px(11.9).into());
-            text.line_height = Some(gpui::relative(1.6));
+            text.line_height = Some(gpui::relative(1.6).into());
         }
         TextViewStyle {
             highlight_theme: cx.theme().highlight_theme.clone(),
@@ -2252,10 +3484,32 @@ impl FileViewer {
         })
     }
 
-    /// 正文可用宽度:弹窗宽是 viewport*0.9(见 [`open`]),减掉两侧 24px padding,
-    /// 再夹到正文的 860px 上限。图片自绘要按它定尺寸。
-    fn preview_avail_width(&self, window: &Window) -> f32 {
-        (f32::from(window.viewport_size().width) * 0.9 - 48.0).clamp(80.0, 860.0)
+    /// 预览滚动壳:内容器挂上 [`Self::preview_scroll`](进度跨卸载存活),
+    /// 再叠一层滚动条(显隐跟主题的 `scrollbar_show`,默认滚动时现身、闲置淡出,
+    /// 与终端滚动条同口径)。
+    ///
+    /// 滚动条要自己套一层 `absolute` + 四边贴 0 的壳,理由与 `menu.rs` 那处相同:
+    /// `Scrollbar` 元素自身是 absolute 却不带 inset,直接塞进流式布局会被 taffy
+    /// 按静态位置摆到内容下方去。壳上没有监听器,不挡内容的点击与选择。
+    fn preview_scroll_shell(
+        &self,
+        bar_id: &'static str,
+        content: gpui::Stateful<gpui::Div>,
+    ) -> gpui::AnyElement {
+        div()
+            .size_full()
+            .relative()
+            .child(content.track_scroll(&self.preview_scroll))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .child(Scrollbar::vertical(&self.preview_scroll).id(bar_id)),
+            )
+            .into_any_element()
     }
 
     /// Markdown 预览。样式对照 `src/styles.css:813-943` 的 `.md-preview`:
@@ -2270,9 +3524,8 @@ impl FileViewer {
         // split_md_blocks 一节的说明),其余段落照走 TextView;段落 id 按段序编,
         // 文档不变即稳定。分块结果跨帧缓存(见 MdCache)——「滚一格重画一遍」
         // 这条路上,每帧重切 40 KB 正文是白烧。
-        let blocks = self.md_blocks(self.preview_source(), &base_dir);
-        let avail_w = self.preview_avail_width(window);
-        div()
+        let blocks = self.md_blocks(self.preview_source(), &base_dir, !self.source.is_remote());
+        let content = div()
             .id("file-viewer-md")
             .size_full()
             .overflow_y_scroll()
@@ -2282,45 +3535,57 @@ impl FileViewer {
             // 放宽到 1.85 —— 表格格子行高同源跟随
             .line_height(gpui::relative(1.85))
             .child(
-                div().max_w(px(860.0)).mx_auto().w_full().children(
-                    blocks
-                        .iter()
-                        .enumerate()
-                        .map(|(ix, (mt, block))| {
-                            // 块间距按原版纵向节奏由这里统一给(em 基准,随
-                            // uiFontSize 缩放),TextView 内部的 paragraph_gap
-                            // 在非虚拟化路径上是坏的(见 split_md_blocks 注释)
-                            let content = match block {
-                                MdBlock::Text(text) => TextView::markdown(
-                                    gpui::SharedString::from(format!(
-                                        "file-viewer-md-body-{ix}"
-                                    )),
-                                    text.clone(),
-                                    window,
-                                    cx,
-                                )
-                                .style(style.clone())
-                                .selectable(true)
-                                .into_any_element(),
-                                MdBlock::Table(table) => {
-                                    render_md_table(ix, table, &style, window, cx)
-                                }
-                                MdBlock::Images(images) => {
-                                    self.render_md_images(ix, images, avail_w, window, cx)
-                                }
-                            };
-                            div()
-                                .when(*mt > 0.0, |el| el.mt(ui::font_px(*mt)))
-                                .child(content)
-                                .into_any_element()
-                        })
-                        .collect::<Vec<_>>(),
-                ),
-            )
-            .into_any_element()
+                div()
+                    .w_full()
+                    .max_w(px(MARKDOWN_CONTENT_MAX_WIDTH))
+                    .min_w_0()
+                    .mx_auto()
+                    .children(
+                        blocks
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, (mt, block))| {
+                                // 块间距按原版纵向节奏由这里统一给(em 基准,随
+                                // uiFontSize 缩放),TextView 内部的 paragraph_gap
+                                // 在非虚拟化路径上是坏的(见 split_md_blocks 注释)
+                                let content = match block {
+                                    MdBlock::Text(text) => TextView::markdown(
+                                        gpui::SharedString::from(format!(
+                                            "file-viewer-md-body-{ix}"
+                                        )),
+                                        text.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                    .style(style.clone())
+                                    .selectable(true)
+                                    .into_any_element(),
+                                    MdBlock::Table(table) => {
+                                        render_md_table(ix, table, &style, window, cx)
+                                    }
+                                    MdBlock::Images(images) => self.render_md_images(
+                                        ix,
+                                        images,
+                                        MARKDOWN_CONTENT_MAX_WIDTH,
+                                        window,
+                                        cx,
+                                    ),
+                                };
+                                div()
+                                    .w_full()
+                                    .max_w_full()
+                                    .min_w_0()
+                                    .when(*mt > 0.0, |el| el.mt(ui::font_px(*mt)))
+                                    .child(content)
+                                    .into_any_element()
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+            );
+        self.preview_scroll_shell("file-viewer-md-scrollbar", content)
     }
 
-    /// HTML 预览。**富文本简版渲染,不是浏览器** —— GPUI 侧没有 iframe 等价物,
+    /// Trusted local HTML preview. **富文本简版渲染,不是浏览器** —— GPUI 侧没有 iframe 等价物,
     /// `TextView::html` 与 markdown 那支是同一个渲染器:标题 / 段落 / 列表 /
     /// 表格 / 图片 / 链接认得,CSS 与脚本一概不跑,带样式的页面会走样。
     ///
@@ -2329,9 +3594,10 @@ impl FileViewer {
     /// 图片与其它本地资源靠 [`rewrite_html_urls`] 转 `file://`(原版是
     /// `convertFileSrc`),由 [`PreviewHttpClient`] 读盘。
     fn render_html(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        debug_assert!(!self.source.is_remote());
         let source = rewrite_html_urls(self.preview_source(), &self.preview_base_dir());
         let style = self.preview_text_style(cx);
-        div()
+        let content = div()
             .id("file-viewer-html")
             .size_full()
             .overflow_y_scroll()
@@ -2340,9 +3606,10 @@ impl FileViewer {
             .line_height(gpui::relative(1.85))
             .child(
                 div()
-                    .max_w(px(860.0))
-                    .mx_auto()
                     .w_full()
+                    .max_w(px(MARKDOWN_CONTENT_MAX_WIDTH))
+                    .min_w_0()
+                    .mx_auto()
                     .flex()
                     .flex_col()
                     .gap(px(12.0))
@@ -2364,8 +3631,8 @@ impl FileViewer {
                             .style(style)
                             .selectable(true),
                     ),
-            )
-            .into_any_element()
+            );
+        self.preview_scroll_shell("file-viewer-html-scrollbar", content)
     }
 
     fn render_content(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -2375,6 +3642,13 @@ impl FileViewer {
             self.error.is_some(),
             self.result.as_ref(),
         ) {
+            Branch::Image if self.source.is_remote() => self
+                .render_fallback(
+                    "file-viewer-remote-image",
+                    t("fileViewer", "binaryNotSupported").to_string(),
+                    cx,
+                )
+                .into_any_element(),
             Branch::Image => self.render_image(window, cx),
             Branch::Loading => self
                 .render_center(t("fileViewer", "loading").to_string(), ui::text_muted())
@@ -2431,7 +3705,7 @@ impl FileViewer {
                             "Segoe UI Emoji".into(),
                         ]));
                         ts.font_size = Some(px(13.0).into());
-                        ts.line_height = Some(gpui::relative(1.6));
+                        ts.line_height = Some(gpui::relative(1.6).into());
                         wrap.child(Input::new(editor).h_full().appearance(false).bordered(false))
                             .into_any_element()
                     }
@@ -2458,14 +3732,19 @@ impl Render for FileViewer {
             .flex()
             .flex_col()
             .overflow_hidden()
-            // Ctrl/Cmd+S 与 Esc。挂在容器上而不是绑 action:
-            // 绑成全局 action 要动 `main.rs` 的 bindings 表,而这两个键**只在本弹窗里**
+            // 着色统一由容器层承担**一层**(与终端区同口径,见 terminal_area 的
+            // 「不刷底色」注释):工具栏/横幅/内容区都坐在这一层上,背景图皮肤下
+            // bg_document 半透明,整页透出氛围图;内容区不再自己刷 bg_base,
+            // 免得两层叠乘把图盖死
+            .bg(ui::bg_document())
+            // Ctrl/Cmd+S 与 Ctrl/Cmd+W。挂在容器上而不是绑 action:
+            // 绑成全局 action 要动 `main.rs` 的 bindings 表,而这两个键**只在文件页里**
             // 有意义;`on_key_down` 沿焦点链冒泡上来,焦点在编辑器里照样收得到
             // (gpui-component 的 code editor 不吃 Ctrl+S)。
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let ks = &event.keystroke;
                 let mods = &ks.modifiers;
-                if ks.key == "escape" && !mods.modified() {
+                if ks.key == "w" && mods.secondary() && !mods.shift && !mods.alt {
                     cx.stop_propagation();
                     this.request_close(window, cx);
                     return;
@@ -2482,7 +3761,6 @@ impl Render for FileViewer {
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_hidden()
-                    .bg(ui::bg_base())
                     .child(self.render_content(window, cx)),
             )
     }
@@ -2497,560 +3775,5 @@ impl Drop for FileViewer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn result(content: &str) -> FileContentResult {
-        FileContentResult {
-            content: content.to_string(),
-            is_binary: false,
-            too_large: false,
-        }
-    }
-
-    #[test]
-    fn 文件类型三条判定与原版正则同口径() {
-        assert!(is_markdown_file("D:\\a\\README.md"));
-        assert!(is_markdown_file("/x/notes.MARKDOWN"), "大小写不敏感");
-        assert!(is_markdown_file("a.mkd") && is_markdown_file("a.mdx"));
-        assert!(!is_markdown_file("a.mdx.bak"), "只看最后一段扩展名");
-
-        assert!(is_image_file("a.PNG") && is_image_file("a.jpeg") && is_image_file("a.jpg"));
-        assert!(is_image_file("a.svg") && is_image_file("a.ico") && is_image_file("a.avif"));
-        assert!(is_image_file("a.tif") && is_image_file("a.tiff"));
-        assert!(!is_image_file("a.txt"));
-
-        assert!(is_html_file("a.html") && is_html_file("a.HTM"));
-        assert!(!is_html_file("a.xhtml"), "原版正则是 /\\.html?$/,xhtml 不算");
-
-        // 折行只给散文类(CodeEditor.tsx:203-206)
-        assert!(should_wrap("a.md") && should_wrap("a.txt"));
-        assert!(!should_wrap("a.rs") && !should_wrap("a.json"));
-
-        // 没有扩展名一律不是
-        assert!(!is_markdown_file("Makefile") && !is_image_file("Makefile"));
-    }
-
-    #[test]
-    fn 表格分段_基本两列表() {
-        let src = "前文\n\n| 文件 | 职责 |\n|---|---|\n| `a.rs` | 说明 A |\n| b.rs | 说明 B |\n\n后文";
-        let segs = split_md_blocks(src);
-        assert_eq!(segs.len(), 3);
-        assert!(matches!(&segs[0], MdSegment::Text(t) if t.contains("前文")));
-        let MdSegment::Table(t) = &segs[1] else {
-            panic!("第二段应是表格");
-        };
-        assert_eq!(t.header, vec!["文件", "职责"]);
-        assert_eq!(t.rows.len(), 2);
-        assert_eq!(t.rows[0], vec!["`a.rs`", "说明 A"]);
-        assert!(matches!(&segs[2], MdSegment::Text(t) if t.contains("后文")));
-    }
-
-    #[test]
-    fn 表格分段_围栏代码块里的竖线不算表格() {
-        let src = "```\n| a | b |\n|---|---|\n```\n正文";
-        let segs = split_md_blocks(src);
-        assert_eq!(segs.len(), 1, "围栏内的表格样式行不拆:{segs:?}");
-    }
-
-    #[test]
-    fn 表格分段_对齐与码段竖线() {
-        // 分隔行的 :---: 语法
-        let src = "| a | b | c |\n| :--- | :---: | ---: |\n| 1 | 2 | 3 |";
-        let MdSegment::Table(t) = &split_md_blocks(src)[0] else {
-            panic!()
-        };
-        assert_eq!(t.aligns, vec![MdAlign::Left, MdAlign::Center, MdAlign::Right]);
-
-        // code span 里的 | 不拆格,\| 是字面竖线
-        assert_eq!(split_cells("| `a|b` | c\\|d |"), vec!["`a|b`", "c|d"]);
-
-        // 短行按表头列数补空
-        let src = "| a | b |\n|---|---|\n| 仅一格 |";
-        let MdSegment::Table(t) = &split_md_blocks(src)[0] else {
-            panic!()
-        };
-        assert_eq!(t.rows[0], vec!["仅一格", ""]);
-    }
-
-    #[test]
-    fn 分段_空行拆块_围栏内空行不拆_块距节奏() {
-        // 空行是块边界:三段文本 + 一个标题 = 四块
-        let segs = split_md_blocks("段落一\n\n段落二\n\n### 标题\n\n段落三");
-        assert_eq!(segs.len(), 4, "{segs:?}");
-        // 块距:首块 0、普通块 11、标题块 20(原版 margin-top 1.4em 的近似)
-        assert_eq!(block_top_margin(0, &segs[0]), 0.0);
-        assert_eq!(block_top_margin(1, &segs[1]), 11.0);
-        assert_eq!(block_top_margin(2, &segs[2]), 20.0);
-
-        // 围栏代码块里的空行不拆块
-        let segs = split_md_blocks("```\naaa\n\nbbb\n```");
-        assert_eq!(segs.len(), 1, "{segs:?}");
-
-        // `#` 后没空格不算标题;表格块 13(原版 table margin 1em)
-        assert_eq!(
-            block_top_margin(1, &MdSegment::Text("#hash 不是标题".into())),
-            11.0
-        );
-        let t = MdSegment::Table(MdTable {
-            header: vec![],
-            aligns: vec![],
-            rows: vec![],
-        });
-        assert_eq!(block_top_margin(3, &t), 13.0);
-    }
-
-    #[test]
-    fn 表格列宽_短列有底宽_长列封顶() {
-        let t = MdTable {
-            header: vec!["文件".into(), "职责".into()],
-            aligns: vec![MdAlign::Left, MdAlign::Left],
-            rows: vec![vec![
-                "`process_monitor.rs`".into(),
-                "这一格是很长很长的中文说明,足以超过封顶阈值的长度,再加一点点凑数的文字。".into(),
-            ]],
-        };
-        let w = column_weights(&t);
-        assert_eq!(w.len(), 2);
-        // 第一列 20 字符、第二列封顶 60 → 20/80 = 0.25,短列不至于被压没
-        assert!(w[0] > 0.2 && w[0] < 0.3, "第一列权重 {w:?}");
-        assert!((w[0] + w[1] - 1.0).abs() < 1e-5);
-
-        // 纯短表:两列都吃底宽,均分
-        let t2 = MdTable {
-            header: vec!["a".into(), "b".into()],
-            aligns: vec![MdAlign::Left, MdAlign::Left],
-            rows: vec![],
-        };
-        let w2 = column_weights(&t2);
-        assert!((w2[0] - 0.5).abs() < 1e-5);
-    }
-
-    #[test]
-    fn 表格格子_纯文字走快路_带标记的交回_textview() {
-        // 快路:一句纯文字(表格里的绝大多数)
-        assert!(is_plain_cell("已完成"));
-        assert!(is_plain_cell("用户登录模块"));
-        assert!(is_plain_cell(""), "空格子");
-        assert!(is_plain_cell("P0"));
-        // `-` 不在行首不是标记;`=` 单行永远成不了 setext 标题
-        assert!(is_plain_cell("2026-08-25"));
-        assert!(is_plain_cell("a=b"));
-        assert!(is_plain_cell("张三 李四"), "单个空格照走快路");
-
-        // 行内标记一律交回
-        assert!(!is_plain_cell("`a.rs`"));
-        assert!(!is_plain_cell("**必填**"));
-        assert!(!is_plain_cell("下划_线"));
-        assert!(!is_plain_cell("[文档](a.md)"));
-        assert!(!is_plain_cell("![图](a.png)"));
-        assert!(!is_plain_cell("~~废弃~~"));
-        assert!(!is_plain_cell("<br>"));
-        assert!(!is_plain_cell("a&amp;b"));
-        assert!(!is_plain_cell("a\\|b"), "转义符");
-
-        // GFM autolink literal:裸 URL / www. / 邮箱会自动成链接
-        assert!(!is_plain_cell("https://example.com"));
-        assert!(!is_plain_cell("www.example.com"));
-        assert!(!is_plain_cell("a@b.com"));
-
-        // 块级标记在行首才算,而格子已 trim,只看开头一处
-        assert!(!is_plain_cell("# 标题"));
-        assert!(!is_plain_cell("- 列表项"));
-        assert!(!is_plain_cell("+ 列表项"));
-        assert!(!is_plain_cell("---"), "分隔线");
-        assert!(!is_plain_cell("1. 第一步"));
-        assert!(!is_plain_cell("2) 第二步"));
-        assert!(is_plain_cell("1.5 倍"), "小数不是有序列表");
-        assert!(is_plain_cell("2026 年"), "光是数字开头不算");
-
-        // markdown 折叠空白,纯文本不折 —— 有连续空白就交回,免得排版有差
-        assert!(!is_plain_cell("a  b"));
-        assert!(!is_plain_cell("a\tb"));
-    }
-
-    #[test]
-    fn 表格格子_真实形状的表大头走快路() {
-        // 「文件 | 职责」这类文档表:只有第一列带反引号,其余都是纯文字
-        let src = "| 模块 | 负责人 | 状态 | 备注 |\n|---|---|---|---|\n\
-                   | `auth.rs` | 张三 | 已完成 | 见设计稿 |\n\
-                   | 支付 | 李四 | 进行中 | 依赖第三方 |";
-        let MdSegment::Table(t) = &split_md_blocks(src)[0] else {
-            panic!("应解析成表格")
-        };
-        let cells: Vec<&String> = t.header.iter().chain(t.rows.iter().flatten()).collect();
-        let fast = cells.iter().filter(|c| is_plain_cell(c)).count();
-        assert_eq!(cells.len(), 12);
-        assert_eq!(fast, 11, "只有 `auth.rs` 那一格该交回 TextView");
-    }
-
-    #[test]
-    fn 图片行_认得四种常见写法() {
-        // 单张
-        let imgs = parse_image_line("![主界面](docs/screenshots/main.png)").unwrap();
-        assert_eq!(imgs.len(), 1);
-        assert_eq!(imgs[0].url, "docs/screenshots/main.png");
-        assert_eq!(imgs[0].alt, "主界面");
-        assert!(imgs[0].link.is_none());
-
-        // 带 title
-        let imgs = parse_image_line(r#"  ![图](a.png "标题")  "#).unwrap();
-        assert_eq!(imgs[0].url, "a.png");
-        assert_eq!(imgs[0].title.as_deref(), Some("标题"));
-
-        // 链接包裹(徽章)
-        let imgs = parse_image_line("[![CI](https://img.shields.io/x.svg)](https://ci.example)")
-            .unwrap();
-        assert_eq!(imgs[0].url, "https://img.shields.io/x.svg");
-        assert_eq!(imgs[0].link.as_deref(), Some("https://ci.example"));
-
-        // 一行并排两张
-        let imgs = parse_image_line("![a](1.png) ![b](2.png)").unwrap();
-        assert_eq!(imgs.len(), 2);
-        assert_eq!(imgs[1].url, "2.png");
-
-        // 尖括号写法(路径里有空格)
-        let imgs = parse_image_line("![x](<my shots/a b.png>)").unwrap();
-        assert_eq!(imgs[0].url, "my shots/a b.png");
-    }
-
-    #[test]
-    fn 图片行_混了别的东西就整行放弃() {
-        // 前后有文字 → 交给 TextView(内联图片不自绘)
-        assert!(parse_image_line("看这张 ![a](1.png)").is_none());
-        assert!(parse_image_line("![a](1.png) 就是主界面").is_none());
-        // 列表项 / 引用块有前缀语法,拆出来会毁结构
-        assert!(parse_image_line("- ![a](1.png)").is_none());
-        assert!(parse_image_line("> ![a](1.png)").is_none());
-        // 四空格缩进是代码块
-        assert!(parse_image_line("    ![a](1.png)").is_none());
-        // 空目标 / 只是链接不是图片
-        assert!(parse_image_line("![a]()").is_none());
-        assert!(parse_image_line("[文档](a.md)").is_none());
-        assert!(parse_image_line("").is_none());
-    }
-
-    #[test]
-    fn 图片行_从文本块里拆出来自绘() {
-        let src = "# 标题\n\n上面一句说明\n![主界面](docs/main.png)\n下面一句\n\n结尾";
-        let segs = split_md_blocks(src);
-        // 标题 / 说明 / 图片 / 下面一句 / 结尾
-        assert_eq!(segs.len(), 5, "{segs:?}");
-        let MdSegment::Images(imgs) = &segs[2] else {
-            panic!("第三段应是图片:{segs:?}");
-        };
-        assert_eq!(imgs[0].url, "docs/main.png");
-        assert!(matches!(&segs[1], MdSegment::Text(t) if t == "上面一句说明"));
-        assert!(matches!(&segs[3], MdSegment::Text(t) if t == "下面一句"));
-
-        // 围栏代码块里的图片语法是代码,不拆
-        let segs = split_md_blocks("```md\n![a](1.png)\n```");
-        assert_eq!(segs.len(), 1, "{segs:?}");
-        assert!(matches!(&segs[0], MdSegment::Text(_)));
-    }
-
-    #[test]
-    fn 图片目标_相对路径按当前文件目录解析() {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR"));
-        // 相对路径 → 落到当前文件所在目录(原版 convertFileSrc(fileDir + '/' + src))
-        assert_eq!(
-            resolve_image_src("docs/a.png", base),
-            MdImageSrc::Local(base.join("docs/a.png"))
-        );
-        // %20 还原
-        assert_eq!(
-            resolve_image_src("my%20shots/a.png", base),
-            MdImageSrc::Local(base.join("my shots/a.png"))
-        );
-
-        // 宿主平台的绝对路径原样
-        let absolute = base.join("shots/a.png");
-        assert_eq!(
-            resolve_image_src(&absolute.to_string_lossy(), base),
-            MdImageSrc::Local(absolute)
-        );
-
-        #[cfg(windows)]
-        {
-            // Windows 盘符不能被当成 scheme；file:// 三斜杠会去掉盘符前的 `/`
-            assert_eq!(
-                resolve_image_src("D:/shots/a.png", base),
-                MdImageSrc::Local(PathBuf::from("D:/shots/a.png"))
-            );
-            assert_eq!(
-                resolve_image_src("file:///D:/shots/a.png", base),
-                MdImageSrc::Local(PathBuf::from("D:/shots/a.png"))
-            );
-        }
-        // 远程与不认识的 scheme
-        assert_eq!(
-            resolve_image_src("https://x.dev/a.png", base),
-            MdImageSrc::Remote("https://x.dev/a.png".into())
-        );
-        assert_eq!(
-            resolve_image_src("data:image/png;base64,AAA", base),
-            MdImageSrc::Unsupported
-        );
-        assert_eq!(resolve_image_src("  ", base), MdImageSrc::Unsupported);
-    }
-
-    #[test]
-    fn svg_判定_不被查询串骗到() {
-        // 徽章 URL 常带 `?style=`,扩展名只看路径那一截
-        assert!(is_svg_target("https://img.shields.io/badge/a-b.svg?style=flat"));
-        assert!(is_svg_target("D:\\icons\\a.SVG"));
-        assert!(!is_svg_target("https://x.dev/a.png"));
-        assert!(!is_svg_target("a/b.svg.png"), "只看最后一段扩展名");
-    }
-
-    #[test]
-    fn md_内联图片的本地路径改写成_file_url() {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
-        // 列表项里的内联图片(块级图片行走自绘,不经过这条)
-        let out = rewrite_md_image_urls("- ![图](shots/a.png) 说明", &base);
-        let image_url = to_file_url(&base.join("shots/a.png")).expect("测试基准路径应为绝对路径");
-        assert!(out.starts_with(&format!("- ![图]({image_url})")), "{out}");
-        // title 保留
-        let out = rewrite_md_image_urls(r#"![图](a.png "标题")"#, &base);
-        assert!(out.contains(r#""标题""#), "{out}");
-        // 远程与 data: 原样
-        let remote = "![x](https://x.dev/a.png)";
-        assert_eq!(rewrite_md_image_urls(remote, &base), remote);
-        let data = "![x](data:image/png;base64,AAA)";
-        assert_eq!(rewrite_md_image_urls(data, &base), data);
-        // 围栏代码块 / 行内 code 里的图片语法是代码,不许动
-        let fenced = "```md\n![a](b.png)\n```";
-        assert_eq!(rewrite_md_image_urls(fenced, &base), fenced);
-        let inline_code = "写法是 `![a](b.png)` 这样";
-        assert_eq!(rewrite_md_image_urls(inline_code, &base), inline_code);
-    }
-
-    #[test]
-    fn html_的本地资源改写成_file_url() {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("site");
-        let image_url = to_file_url(&base.join("img/a.png")).expect("测试基准路径应为绝对路径");
-        let out = rewrite_html_urls(r#"<img src="img/a.png" alt="a">"#, &base);
-        assert_eq!(out, format!(r#"<img src="{image_url}" alt="a">"#));
-        // 单引号 / 大写属性名 / 等号旁的空白都认
-        let image_url = to_file_url(&base.join("a.png")).expect("测试基准路径应为绝对路径");
-        let out = rewrite_html_urls("<img SRC = 'a.png'>", &base);
-        assert_eq!(out, format!("<img SRC = '{image_url}'>"));
-        // href / poster 同样处理
-        let poster_url = to_file_url(&base.join("p.jpg")).expect("测试基准路径应为绝对路径");
-        let out = rewrite_html_urls(r#"<video poster="p.jpg"></video>"#, &base);
-        assert!(out.contains(&poster_url), "{out}");
-
-        // 排除清单(原版正则那一串)一律原样
-        for keep in [
-            r#"<a href="https://x.dev">x</a>"#,
-            r#"<img src="data:image/png;base64,AAA">"#,
-            // 井号锚点:`"#` 会提前结束 `r#"…"#`,这条必须用 `r##"…"##`
-            r##"<a href="#anchor">锚</a>"##,
-            r#"<a href="mailto:a@b.c">mail</a>"#,
-            r#"<a href="javascript:void(0)">js</a>"#,
-            r#"<img src="file:///D:/site/a.png">"#,
-        ] {
-            assert_eq!(rewrite_html_urls(keep, &base), keep, "不该改:{keep}");
-        }
-        // `data-src` 不是 src
-        let keep = r#"<img data-src="a.png">"#;
-        assert_eq!(rewrite_html_urls(keep, &base), keep);
-    }
-
-    #[test]
-    fn 路径比对反斜杠归一且不分大小写() {
-        assert!(same_path("D:\\Git\\a.rs", "d:/git/A.RS"));
-        assert!(!same_path("D:\\Git\\a.rs", "D:\\Git\\b.rs"));
-        // 目录级 notify 事件里的兄弟文件不该被认成自己
-        assert!(!same_path("D:/p/README.md", "D:/p/README.md.bak"));
-    }
-
-    /// **本批的钉子测试**:CRLF 文件改一个字保存,行尾一个都不许变。
-    #[test]
-    fn crlf_文件往返不改行尾() {
-        let disk = "line1\r\nline2\r\nline3\r\n";
-        assert_eq!(LineEnding::detect(disk), LineEnding::Crlf);
-
-        // 读入:归一成 \n 喂编辑器
-        let in_editor = normalize_to_lf(disk);
-        assert_eq!(in_editor, "line1\nline2\nline3\n");
-        assert!(!in_editor.contains('\r'), "编辑器里不留 \\r");
-
-        // 编辑:改一个字 + 敲一次回车(gpui-component 插的是 "\n")
-        let edited = in_editor.replace("line2", "LINE2") + "line4\n";
-
-        // 写回:还原成 CRLF —— 新增的那一行也是 CRLF
-        let back = restore_line_ending(&edited, LineEnding::Crlf);
-        assert_eq!(back, "line1\r\nLINE2\r\nline3\r\nline4\r\n");
-        assert_eq!(back.matches('\n').count(), back.matches("\r\n").count());
-    }
-
-    #[test]
-    fn lf_文件不会被写成_crlf() {
-        let disk = "a\nb\n";
-        assert_eq!(LineEnding::detect(disk), LineEnding::Lf);
-        let in_editor = normalize_to_lf(disk);
-        assert_eq!(in_editor, disk);
-        assert_eq!(restore_line_ending(&in_editor, LineEnding::Lf), disk);
-        // 空文件 / 无换行的单行文件都算 LF
-        assert_eq!(LineEnding::detect(""), LineEnding::Lf);
-        assert_eq!(LineEnding::detect("no newline"), LineEnding::Lf);
-    }
-
-    #[test]
-    fn 行尾还原是幂等的() {
-        // 万一有 \r\n 混进编辑器,还原两次也不该变成 \r\r\n
-        let once = restore_line_ending("a\r\nb", LineEnding::Crlf);
-        let twice = restore_line_ending(&once, LineEnding::Crlf);
-        assert_eq!(once, "a\r\nb");
-        assert_eq!(twice, once);
-    }
-
-    #[test]
-    fn 语言按扩展名映射到组件库认得的名字() {
-        assert_eq!(language_for("main.rs"), "rust");
-        assert_eq!(language_for("D:\\p\\src\\store.ts"), "typescript");
-        assert_eq!(language_for("App.tsx"), "tsx");
-        assert_eq!(language_for("index.JS"), "javascript", "大小写不敏感");
-        assert_eq!(language_for("Cargo.toml"), "toml");
-        assert_eq!(language_for("config.yml"), "yaml");
-        assert_eq!(language_for("a.jsonc"), "json");
-        assert_eq!(language_for("run.sh"), "bash");
-        assert_eq!(language_for("a.hpp"), "cpp");
-        assert_eq!(language_for("a.h"), "c");
-        // 特殊文件名压扩展名
-        assert_eq!(language_for("Makefile"), "make");
-        assert_eq!(language_for("CMakeLists.txt"), "cmake");
-        assert_eq!(language_for("Dockerfile"), "bash");
-        // 认不出 → 纯文本(原版「匹配不到就是纯文本」)
-        assert_eq!(language_for("notes.xyz"), "text");
-        assert_eq!(language_for("LICENSE"), "text");
-    }
-
-    #[test]
-    fn 映射出来的语言名组件库全都认得() {
-        // 认不得会静默退成 Plain,画出来没有高亮而编译期无感 —— 用它自己的
-        // `from_str` 钉住:除了 "text",每个名字都要落到非 Plain 的分支
-        use gpui_component::highlighter::Language;
-        for name in [
-            "rust", "typescript", "tsx", "javascript", "json", "python", "go", "ruby", "java",
-            "csharp", "c", "cpp", "css", "html", "bash", "toml", "yaml", "markdown", "sql",
-            "swift", "zig", "elixir", "scala", "proto", "graphql", "diff", "cmake", "ejs", "erb",
-            "make",
-        ] {
-            assert_ne!(
-                Language::from_str(name).name(),
-                Language::Plain.name(),
-                "组件库不认得语言名 {name}"
-            );
-        }
-        assert_eq!(Language::from_str("text").name(), Language::Plain.name());
-    }
-
-    #[test]
-    fn 命中行定位的两道闸() {
-        let text = "a\nb\nc\n";
-        assert_eq!(highlight_target(Some(2), true, text), Some(2));
-        assert_eq!(highlight_target(Some(3), true, text), Some(3));
-        // 越界不动(原版 `highlightLine > doc.lines` 直接 return)
-        assert_eq!(highlight_target(Some(9), true, text), None);
-        assert_eq!(highlight_target(Some(0), true, text), None, "行号是 1-based");
-        // 换了文件(预览器已开着又点了另一条结果)之后旧行号作废
-        assert_eq!(highlight_target(Some(2), false, text), None);
-        // 文件树那条路压根不给行号
-        assert_eq!(highlight_target(None, true, text), None);
-        // 空文件也算有第 1 行
-        assert_eq!(highlight_target(Some(1), true, ""), Some(1));
-    }
-
-    #[test]
-    fn 四种渲染分支的判定顺序() {
-        // 图片先于一切:原版图片分支压根不读文件
-        assert_eq!(branch_of(true, true, false, None), Branch::Image);
-        assert_eq!(branch_of(false, true, false, None), Branch::Loading);
-        assert_eq!(branch_of(false, false, true, None), Branch::Error);
-
-        let mut binary = result("");
-        binary.is_binary = true;
-        let mut large = result("");
-        large.too_large = true;
-        // 二进制先于过大 —— 二进制文件的 content 也是空的,顺序换了会显示成「文件过大」
-        assert_eq!(branch_of(false, false, false, Some(&binary)), Branch::Binary);
-        assert_eq!(branch_of(false, false, false, Some(&large)), Branch::TooLarge);
-        assert_eq!(branch_of(false, false, false, Some(&result("x"))), Branch::Editor);
-        // 读完了但既没结果也没错(不该发生)按 loading 处理,不画空编辑器
-        assert_eq!(branch_of(false, false, false, None), Branch::Loading);
-    }
-
-    #[test]
-    fn 三种不可编辑的情况都不画编辑器() {
-        let mut binary = result("");
-        binary.is_binary = true;
-        let mut large = result("");
-        large.too_large = true;
-        assert!(!can_edit(true, Some(&result("x"))), "图片");
-        assert!(!can_edit(false, Some(&binary)), "二进制");
-        assert!(!can_edit(false, Some(&large)), "过大");
-        assert!(!can_edit(false, None), "还没读到");
-        assert!(can_edit(false, Some(&result("x"))));
-    }
-
-    /// 后端的两道防线(1MB 上限 / 非 UTF-8 即二进制)与前端分支合起来跑一遍真磁盘。
-    #[test]
-    fn 二进制与超限探测走真文件() {
-        let dir = std::env::temp_dir().join(format!("mt-fv-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-
-        // 非 UTF-8 → is_binary
-        let bin = dir.join("bin.dat");
-        std::fs::write(&bin, [0xff, 0xfe, 0x00, 0x01]).unwrap();
-        let res = mt_project::fs::read_file_content(&dir, &bin).unwrap();
-        assert!(res.is_binary && !res.too_large);
-        assert_eq!(branch_of(false, false, false, Some(&res)), Branch::Binary);
-        assert!(!can_edit(false, Some(&res)));
-
-        // > 1MB → too_large(且 content 为空)
-        let big = dir.join("big.txt");
-        std::fs::write(&big, vec![b'a'; (mt_project::fs::MAX_FILE_VIEW_SIZE + 1) as usize]).unwrap();
-        let res = mt_project::fs::read_file_content(&dir, &big).unwrap();
-        assert!(res.too_large && !res.is_binary && res.content.is_empty());
-        assert_eq!(branch_of(false, false, false, Some(&res)), Branch::TooLarge);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 保存路径语义:走 `mt_project::fs::write_file_content`(内部原子写),
-    /// 且 CRLF 文件读→改→写一整圈之后磁盘字节里的行尾一个都没变。
-    #[test]
-    fn 保存走原子写且_crlf_全程不变() {
-        let dir = std::env::temp_dir().join(format!("mt-fv-save-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("crlf.txt");
-        std::fs::write(&file, b"alpha\r\nbeta\r\n").unwrap();
-
-        // 读:后端给的是原文(带 \r\n)
-        let res = mt_project::fs::read_file_content(&dir, &file).unwrap();
-        assert!(res.content.contains("\r\n"), "后端不做行尾归一,归一在 UI 侧");
-        let ending = LineEnding::detect(&res.content);
-        let editor_text = normalize_to_lf(&res.content);
-
-        // 改 + 敲回车
-        let edited = editor_text.replace("beta", "BETA") + "gamma\n";
-
-        // 写
-        mt_project::fs::write_file_content(&dir, &file, &restore_line_ending(&edited, ending))
-            .unwrap();
-
-        let on_disk = std::fs::read(&file).unwrap();
-        assert_eq!(on_disk, b"alpha\r\nBETA\r\ngamma\r\n");
-        // 原子写不留临时文件
-        let leftovers: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
-            .collect();
-        assert!(leftovers.is_empty(), "原子写的临时文件必须已经被 rename 掉");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+#[path = "file_viewer_tests.rs"]
+mod tests;

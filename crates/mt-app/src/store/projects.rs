@@ -292,6 +292,20 @@ impl AppStore {
 
     /// 移除项目:先回收它所有 pane 的 PTY,再从配置里摘掉。
     pub fn remove_project(&mut self, id: &str, cx: &mut Context<Self>) {
+        if crate::workbench_area::project_has_dirty_documents(id, cx) {
+            let project_name = self
+                .project(id)
+                .map(|project| project.name.clone())
+                .unwrap_or_else(|| id.to_string());
+            crate::toast::push_message_deduped(
+                crate::notify::ToastKind::PasteError,
+                id.to_string(),
+                project_name,
+                crate::i18n::t("fileViewer", "projectRemovalBlocked").to_string(),
+                cx,
+            );
+            return;
+        }
         let pty_ids: Vec<u32> = self
             .project_states
             .get(id)
@@ -438,13 +452,9 @@ impl AppStore {
     /// 把节点(项目或分组)移到 `target_group_id` 里的 `index` 位置。
     /// `target_group_id = None` = 根层;`index = None` = 追加到末尾。
     ///
-    /// 两条边界逐条对照 `store.ts:1296-1313`:
-    /// - **树里找不到**:那多半是 worktree 子项目(它按设计就不在树里,位置由
-    ///   父项目派生)。此时「移动 = 脱离父项目」:清掉 `parentProjectId`,再把裸
-    ///   id 当普通树节点插进去。既不是子项目又不在树里 → 什么都不做。
-    /// - **目标组找不到**:原版此时节点已经被摘下来却插不回去(`insertIntoTree`
-    ///   返回 false 就丢了)。这里退回根层末尾 —— 分组被并发删掉是唯一能触发的
-    ///   路径,丢掉一整个子树换不来任何好处。
+    /// 全部边界语义(自环先验 / worktree 子项目脱离父项目 / 树外孤儿收编 /
+    /// 目标组被并发删掉的兜底)在 [`project_tree::move_item_in_tree`],
+    /// 这里只是搬运 + save/notify。
     ///
     /// 返回值 = 这次有没有真的动过树。
     pub fn move_item(
@@ -455,33 +465,15 @@ impl AppStore {
         cx: &mut Context<Self>,
     ) -> bool {
         self.ensure_tree();
-        let removed = self
-            .config
-            .project_tree
-            .as_mut()
-            .and_then(|tree| project_tree::remove_from_tree(tree, item_id));
-
-        let removed = match removed {
-            Some(item) => item,
-            None => {
-                let Some(child) = self
-                    .config
-                    .projects
-                    .iter_mut()
-                    .find(|p| p.id == item_id && p.parent_project_id.is_some())
-                else {
-                    return false;
-                };
-                child.parent_project_id = None;
-                mt_config::ProjectTreeItem::ProjectId(item_id.to_string())
-            }
-        };
-
         let tree = self.config.project_tree.get_or_insert_with(Vec::new);
-        if !project_tree::insert_into_tree(tree, target_group_id, removed, index) {
-            // 上面那段注释的第二条:目标组没了,退回根层末尾而不是把子树扔掉
-            let fallback = mt_config::ProjectTreeItem::ProjectId(item_id.to_string());
-            project_tree::insert_into_tree(tree, None, fallback, None);
+        if !project_tree::move_item_in_tree(
+            tree,
+            &mut self.config.projects,
+            item_id,
+            target_group_id,
+            index,
+        ) {
+            return false;
         }
         self.save_config_soon(cx);
         cx.notify();

@@ -143,6 +143,12 @@ impl ThemePacks {
     ///
     /// 目录已存在时**报错而非覆盖**：用户多半已经在那份上改过东西，静默覆盖等于
     /// 删掉他的皮肤；要重来就先删掉或改名，语义清楚。
+    ///
+    /// ⚠️ **设置页已无入口**：原「生成示例」按钮改成了跳转仓库皮肤库的外链
+    /// （`pages_appearance.rs` 的 `THEME_GALLERY_URL`），本函数眼下没有 UI 调用方。
+    /// 保留它是为了那份编译期对账 —— [`EXAMPLE_THEME_JSON`] 等三个 `include_str!`
+    /// 钉着 `docs/theme-pack-example/`，`embedded_example_pack_matches_frontend_contract`
+    /// 会在坏模板进仓库前就失败。连函数一起删掉，那份字段文档就没人看着了。
     pub fn create_example(&self) -> Result<String> {
         let dir = self.ensure_root()?.join(EXAMPLE_THEME_ID);
         if dir.exists() {
@@ -592,6 +598,96 @@ mod tests {
         // 不存在 / 非法 id 都要报错,不能静默成功
         assert!(packs.delete("dracula").is_err());
         assert!(packs.delete("..").is_err());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 仓库 `theme/` 下的成品皮肤是**给用户下载的分发物**,坏了却没有任何运行时
+    /// 信号 —— 解析不了的包在列表里是静默跳过的,用户只会看到「装了没反应」。
+    /// 这里把每一份都真的导入一遍:`import_dir` 内部要跑 manifest 的
+    /// bytes + sha256 核对,导入成功即证明包既没缺件、也没在提交/签出途中损坏。
+    ///
+    /// ⚠️ manifest 只登记二进制资源。文本文件会被 Git 按 `core.autocrlf` 改写
+    /// 换行,字节数与哈希随平台漂,登记进去等于让每个下载者都撞「大小不符」。
+    #[test]
+    fn 仓库分发的成品皮肤能被导入且不缺件() {
+        let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../theme");
+        let root = unique_test_root("shipped-packs");
+        let packs = ThemePacks::at(root.join("themes"));
+
+        let mut count = 0;
+        for entry in fs::read_dir(&shipped).unwrap().flatten() {
+            let src = entry.path();
+            if !src.is_dir() {
+                continue; // theme/README.md 这类说明文件不是皮肤
+            }
+            let dir_name = entry.file_name().to_string_lossy().into_owned();
+            let id = packs
+                .import_dir(&src)
+                .unwrap_or_else(|e| panic!("{dir_name} 导入失败: {e:#}"));
+            assert_eq!(id, dir_name, "皮肤身份就是目录名");
+
+            // 声明了背景图就必须真的跟着进包:导入只拷**顶层文件**,
+            // 图搁子目录里会被静默丢下,装完只剩一张纯色皮
+            let data = packs.read(&id).unwrap();
+            let def: serde_json::Value = serde_json::from_str(&data.theme_json)
+                .unwrap_or_else(|e| panic!("{dir_name}/theme.json 不是合法 JSON: {e}"));
+            if let Some(image) = def["image"].as_str().filter(|s| !s.trim().is_empty()) {
+                assert!(
+                    data.dir.join(image).is_file(),
+                    "{dir_name} 声明了背景图 {image},包里却没有"
+                );
+            }
+            // 目录名与 json 的 `id` 不一致是踩过的坑(见上一条测试):自家分发的
+            // 包不许再留这个雷,否则文档里写的 id 和实际装出来的对不上
+            assert_eq!(
+                def["id"].as_str(),
+                Some(dir_name.as_str()),
+                "{dir_name}/theme.json 的 id 应与目录名一致"
+            );
+            count += 1;
+        }
+        assert!(count > 0, "theme/ 下一个成品皮肤都没有 —— 路径写错了?");
+
+        // 一键下载的 zip 与同名文件夹必须是**同一份东西**:网页上下 zip 的人
+        // 和 clone 仓库的人拿到的皮肤不能不一样。zip 是手工打的,改了文件夹忘了
+        // 重打包,两边就会静静地漂开。
+        let zip_root = unique_test_root("shipped-zips");
+        let zip_packs = ThemePacks::at(zip_root.join("themes"));
+        for entry in fs::read_dir(&shipped).unwrap().flatten() {
+            let path = entry.path();
+            let is_zip = path
+                .extension()
+                .map(|e| e.eq_ignore_ascii_case("zip"))
+                .unwrap_or(false);
+            if !is_zip {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let id = zip_packs
+                .import_zip(&path)
+                .unwrap_or_else(|e| panic!("{name} 导入失败: {e:#}"));
+
+            let from_zip = zip_packs.read(&id).unwrap();
+            let from_dir = packs
+                .read(&id)
+                .unwrap_or_else(|e| panic!("{name} 没有对应的同名文件夹({id}): {e:#}"));
+            assert_eq!(
+                from_zip.theme_json, from_dir.theme_json,
+                "{name} 与文件夹版的 theme.json 已漂开,重新打包"
+            );
+
+            // 背景图同样要逐字节对齐 —— theme.json 一致但图不同,装出来是两个皮肤
+            let def: serde_json::Value = serde_json::from_str(&from_zip.theme_json).unwrap();
+            if let Some(image) = def["image"].as_str().filter(|s| !s.trim().is_empty()) {
+                assert_eq!(
+                    fs::read(from_zip.dir.join(image)).unwrap(),
+                    fs::read(from_dir.dir.join(image)).unwrap(),
+                    "{name} 与文件夹版的 {image} 不是同一张图,重新打包"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(&zip_root);
 
         let _ = fs::remove_dir_all(&root);
     }

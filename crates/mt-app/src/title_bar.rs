@@ -51,10 +51,10 @@
 //! 可抄的两点(`.window_control_area` 只在 Windows 挂、Drag 区用一个元素声明)已照抄。
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, Context, Div, ElementId, Entity,
-    FocusHandle, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement,
-    Render, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, WindowControlArea,
-    anchored, deferred, div, point, prelude::FluentBuilder, px, relative,
+    AnyElement, App, Context, Div, ElementId, Entity, FocusHandle, Hsla, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, Window, WindowControlArea, anchored, deferred, div, point,
+    prelude::FluentBuilder, px, relative,
 };
 use mt_ui::tooltip::Tooltip;
 use mt_ui::icons::{Geom, Ink, Shape, VectorIcon};
@@ -232,7 +232,7 @@ pub fn kind_color(kind: AiProjectKind) -> Hsla {
 ///
 /// 对应 `styles.css` 的 `@keyframes alertBlink`
 /// (`0%,100% {opacity:1; scale(1)}` / `50% {opacity:0.2; scale(0.75)}`)——
-/// gpui 的 `Animation` 只给一条 0..1 的进度,中点折返得自己算。
+/// 输入是 0..1 的线性进度(来自 `mt_ui::motion::pulse_phase`),中点折返得自己算。
 pub fn blink_phase(delta: f32) -> f32 {
     let triangle = 1.0 - (delta * 2.0 - 1.0).abs();
     // smoothstep,等价于 CSS 的 ease-in-out
@@ -251,7 +251,7 @@ pub fn blink_phase(delta: f32) -> f32 {
 //                                        ↓
 // Linux 降级路径的 ✕ on_click → request_close_window ─→ allow_close()
 //                                        ↓
-//                        有活着的 AI? ── 否 ─→ 落盘 → true(放行)
+//                 有活着的 AI 或未保存文件? ── 否 ─→ 落盘 → true(放行)
 //                              │
 //                              是 ─→ 弹 Confirm → false(这次不关)
 //                                        └─ 点「确定」→ 置 FORCE_CLOSE
@@ -264,7 +264,7 @@ pub fn blink_phase(delta: f32) -> f32 {
 //
 // > 只在真的会毁掉什么时才拦一下。之前无条件弹确认,日常开关十几次全是噪音,
 // > 用户学会的是「闭眼点确定」——那正好让确认框在唯一该起作用的时候
-// > (AI 正在跑)也失效。
+// > (AI 正在跑或文件尚未保存)也失效。
 //
 // # 防重入
 //
@@ -284,6 +284,25 @@ thread_local! {
     static FORCE_CLOSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+const CLOSE_RISK_PREVIEW_LIMIT: usize = 5;
+
+fn close_risk_preview(items: &[String]) -> String {
+    let mut lines = items
+        .iter()
+        .take(CLOSE_RISK_PREVIEW_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
+    let remaining = items.len().saturating_sub(lines.len());
+    if remaining > 0 {
+        lines.push(crate::i18n::tr!(
+            "app",
+            "closeConfirm.remaining",
+            count = remaining
+        ));
+    }
+    lines.join("\n")
+}
+
 /// 现在可以关窗吗。`false` = 这次别关(确认框已经弹出来了 / 或正开着)。
 ///
 /// 这是 `on_window_should_close` 的**同步**回调体:gpui 要求当场返回 bool,
@@ -295,20 +314,46 @@ pub fn allow_close(window: &mut Window, cx: &mut App) -> bool {
     }
 
     let live = crate::pane_actions::collect_live_ai_panes(AppStore::global(cx).read(cx));
-    if live.is_empty() {
+    let dirty_documents = crate::workbench_area::dirty_document_names(cx);
+    if live.is_empty() && dirty_documents.is_empty() {
         finish_close(cx);
         return true;
     }
 
-    let count = live.len();
     // 正文里那两个换行符由 `prompt::body` 拆成多个 child —— gpui 的文本不认转义符
-    let message = crate::i18n::tr!(
-        "app",
-        "closeConfirm.messageWithSessions",
-        count = count,
-        names = live.join("\n")
-    );
-    Confirm::new(t("app", "closeConfirm.titleAi"), message).open(
+    let (title, message) = match (dirty_documents.is_empty(), live.is_empty()) {
+        (true, false) => (
+            t("app", "closeConfirm.titleAi"),
+            crate::i18n::tr!(
+                "app",
+                "closeConfirm.messageWithSessions",
+                count = live.len(),
+                names = close_risk_preview(&live)
+            ),
+        ),
+        (false, true) => (
+            t("app", "closeConfirm.titleUnsaved"),
+            crate::i18n::tr!(
+                "app",
+                "closeConfirm.messageWithDocuments",
+                count = dirty_documents.len(),
+                names = close_risk_preview(&dirty_documents)
+            ),
+        ),
+        (false, false) => (
+            t("app", "closeConfirm.titleUnsaved"),
+            crate::i18n::tr!(
+                "app",
+                "closeConfirm.messageWithDocumentsAndSessions",
+                document_count = dirty_documents.len(),
+                document_names = close_risk_preview(&dirty_documents),
+                session_count = live.len(),
+                session_names = close_risk_preview(&live)
+            ),
+        ),
+        (true, true) => unreachable!("close risks were checked above"),
+    };
+    Confirm::new(title, message).open(
         move |window, cx| {
             FORCE_CLOSE.with(|f| f.set(true));
             finish_close(cx);
@@ -378,6 +423,7 @@ fn focus_attention_target(
         store.set_active_project(&project_id, cx);
         store.activate_pane(&project_id, &pane_id, window, cx);
     });
+    crate::workbench_area::activate_terminal_page(window, cx);
     true
 }
 
@@ -705,7 +751,12 @@ impl TitleBar {
     }
 
     /// 全局状态灯。点一下跳到「下一件该我做的事」(不限项目)。
-    fn status_light(&self, light: TitleBarLight, cx: &mut Context<Self>) -> AnyElement {
+    fn status_light(
+        &self,
+        light: TitleBarLight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let color = light_color(light);
         let alpha = if light == TitleBarLight::Idle { 0.45 } else { 1.0 };
         // 原版 `group-hover:scale-125`(8px → 10px)
@@ -717,22 +768,22 @@ impl TitleBar {
             .h(px(size))
             .rounded_full()
             .bg(ui::with_alpha(color, alpha));
-        // `working` 档闪烁(`animate-blink`)。⚠️ `with_animation` 持续请求帧 ——
-        // 所以只在这一档挂,别的档位必须让它整个从树上消失。
+        // `working` 档闪烁(`animate-blink`),相位来自低频泵
+        // (`mt_ui::motion::pulse_phase`)—— 静态档连泵都不挂。
         // ⚠️ 还要过减弱动效的闸(`mt_ui::motion`):原版的通配规则把
         // `.animate-blink` 停在第一帧 —— 它**不在** reduce 的豁免名单里,
         // 装机版在用户机器上就是不闪的。
         let dot: AnyElement = if light == TitleBarLight::Working && mt_ui::motion::blinks() {
-            dot.with_animation(
-                "titlebar-light-blink",
-                Animation::new(std::time::Duration::from_millis(800)).repeat(),
-                move |el, delta| {
-                    let phase = blink_phase(delta);
-                    let side = px(size - (size * 0.25) * phase);
-                    el.w(side).h(side).opacity(1.0 - 0.8 * phase)
-                },
-            )
-            .into_any_element()
+            let phase = blink_phase(mt_ui::motion::pulse_phase(
+                std::time::Duration::from_millis(800),
+                window,
+                cx,
+            ));
+            let side = px(size - (size * 0.25) * phase);
+            dot.w(side)
+                .h(side)
+                .opacity(1.0 - 0.8 * phase)
+                .into_any_element()
         } else {
             dot.into_any_element()
         };
@@ -855,7 +906,7 @@ impl Render for TitleBar {
                         cx,
                     ))
             }))
-            .child(self.status_light(light, cx))
+            .child(self.status_light(light, window, cx))
             // 中段留白 —— 主要的拖拽区
             .child(
                 div()
@@ -957,6 +1008,22 @@ mod tests {
         assert_eq!(ICON_MAXIMIZE.len(), 1);
         assert_eq!(dump(ICON_RESTORE)[1].len(), 5);
         assert_ne!(dump(ICON_MAXIMIZE), dump(ICON_RESTORE));
+    }
+
+    #[test]
+    fn 关窗风险只预览前五项并汇总剩余数量() {
+        let items = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let preview = close_risk_preview(&items);
+        for name in &items[..CLOSE_RISK_PREVIEW_LIMIT] {
+            assert!(preview.contains(name), "{preview}");
+        }
+        assert!(!preview.contains("foxtrot"), "{preview}");
+        assert_eq!(preview.lines().count(), CLOSE_RISK_PREVIEW_LIMIT + 1);
+        assert!(preview.contains('3'), "剩余数量未显示:{preview}");
     }
 
     /// 三键的 tooltip key 都在字典里(拼错的后果是空 tooltip,真机上很难发现)。

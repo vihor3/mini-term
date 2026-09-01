@@ -14,11 +14,12 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.1.1-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.2.2-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="platform">
   <img src="https://img.shields.io/badge/macOS%20%7C%20Linux-experimental-lightgrey" alt="platform-experimental">
   <img src="https://img.shields.io/badge/GPUI-native-8A2BE2" alt="gpui">
   <img src="https://img.shields.io/badge/Rust-1.95%2B-dea584" alt="rust">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
 
 <p align="center">
@@ -79,6 +80,7 @@ Right-click a project → "Link SSH", tick the connections, and it's enabled for
 ### 🌐 Remote directories as local projects — and WSL too
 
 - **SSH remote projects** — add a directory on a server as a project directly: the file tree lazy-loads over SFTP, the terminal connects via `ssh -t` and lands straight in the project directory, a one-click overlay reconnects after a drop, and the remote machine's Claude / Codex history is readable with full content. Remote cache keys mix in the connection id, so identical paths on two servers never cross-contaminate
+- **Remote file management** — the remote file tree supports copy / paste / upload / download, dragging files in from Explorer uploads them, and the file panel header has shortcut buttons for uploading files / folders, pasting, and creating files / folders; name conflicts can be skipped, overwritten, or kept as copies, with the affected names listed in the dialog. Downloads land in the system Downloads folder by default (configurable in Settings); a remote directory picker lets you browse for the path when adding a remote project, and a context-menu action opens a remote directory in the terminal
 - **WSL support** — `\\wsl$\<distro>\<path>` works as a project root, launching switches to `wsl.exe --cd` automatically so `pwd` really lands inside WSL instead of `C:\Windows`; Windows can also read Claude / Codex session history from inside WSL distros directly
 
 ### 🪟 Multi-project · recursive splits · session history
@@ -86,6 +88,7 @@ Right-click a project → "Link SSH", tick the connections, and it's enabled for
 - A **project sidebar** for multiple workspaces, with up to 3 levels of nested groups, drag-to-reorder, and drag-a-folder-from-Explorer to add
 - **Arbitrarily nested horizontal / vertical splits**, drag to adjust ratios; tabs, splits, and window geometry all persist and restore on restart
 - **Project-level terminal panels** — an icon strip on the terminal area's right edge gives one project multiple **independent terminal workspaces**, each holding its own splits and tabs (one face for the AI session, another split for frontend + backend; click an icon to switch the whole face); buttons carry an AI progress light and a terminal-count badge, double-click to rename, everything restores on restart
+- **New terminal, agent included** — all three "new terminal" entry points (tab-bar +, empty-state button, terminal panel) list your AI launchers alongside the shells (Claude / Codex preset, fully editable): pick one and a new pane opens with the launch command typed in, AI status detection attached; launchers share one config with the mobile "start a new session" flow (hidden on SSH remote projects — the early password prompts would eat the pre-typed command)
 - **Transition animations** — directional pushes when switching tabs / panels, maximize expands from the pane's own cell and restore reverses it back; a single switch in Settings turns them all off
 - **Drag panes to rearrange & maximize** — drag a tab into another group to merge, or onto a terminal-area edge to split off a new pane, with a live drop preview; double-click the tab bar's empty area to temporarily fill the terminal area, and content survives throughout
 - **AI task markers** — every Enter inside a session drops a marker; `Ctrl+Shift+↑/↓` jumps between past submissions
@@ -106,15 +109,16 @@ A VS Code-style **Changes panel** (Staged / Changes / Untracked groups, per-file
 | **Image paste** | Screenshots in the clipboard are detected, saved as a temp PNG, and pasted as a path; handles non-standard formats like PinPix |
 | **Remote-aware landing** | Both of the above remap in remote terminals: SSH projects upload over SFTP and paste the **remote** path; WSL projects rewrite `C:\...` into `/mnt/c/...` |
 | **File drag & drop** | Drag from the file tree or Explorer onto the terminal to insert a quoted absolute path, landing in the exact split pane |
-| **Built-in file editor** | Click any file in the tree to edit in place: tree-sitter syntax highlighting (30+ languages), find & replace, atomic `Ctrl+S` saves, external-change detection |
-| **Document preview** | Images actually render in the Markdown / HTML preview: relative paths resolve against the file's own directory, and remote images are fetched for real (10s timeout, 32MB cap, every other scheme refused). HTML previews also get an "Open in browser" button that resolves through the https protocol handler rather than the `.html` file association |
-| **Global search** | `Ctrl+Shift+F` for filename or content search, substring or regex, streamed from the backend and cancellable anytime |
+| **File workbench** | Local and remote files opened from the tree live in main-area tabs alongside the terminal, where you view, edit, and save them: tree-sitter syntax highlighting (30+ languages), find & replace, atomic `Ctrl+S` saves, external-change detection; remote files are read and written over SFTP, every save is checked against the loaded baseline, conflicts offer reload or force-overwrite, and any remote file can be downloaded |
+| **Document preview** | Images actually render in the Markdown / HTML preview: relative paths resolve against the file's own directory, and remote images are fetched for real (10s timeout, 32MB cap, every other scheme refused). Markdown from remote files is sanitized before rendering: raw HTML shows as source, external images load only on click, and `file://`-style links degrade to plain text; remote HTML is source-view only. HTML previews also get an "Open in browser" button that resolves through the https protocol handler rather than the `.html` file association |
+| **Global search** | `Ctrl+Shift+F` for filename or content search (a `/` in the query matches against the path), substring or regex, streamed from the backend and cancellable anytime |
 | **Per-project env vars** | Injected into the PTY child process per project, with strict POSIX validation and a second defensive filter on the Rust side; passes through to WSL via WSLENV |
 | **Smart Ctrl+C/V** | Optional: copy when there's a selection, interrupt the program when there isn't; large Windows pastes are chunked so ConPTY doesn't drop lines |
 | **Dwell-to-copy selection** | Hold the mouse still after drag-selecting and the selection is copied with a "Copied" tip; dwell time configurable (0 = off) |
+| **Alt+click to place the cursor** | Hold Alt (⌥ on macOS) and click anywhere on the command line to move the cursor there — arrow keys are synthesized from the column delta, same line only; cross-line clicks are ignored so the line editor's history recall never fires. Cell-accurate at shell prompts; Ink-style TUIs such as Claude CLI are best-effort |
 | **Zero network requests at startup** | Native rendering, no web assets — startup makes no network request at all (the price table refreshes daily and falls back to its cache) |
 | **Flood-proof UI** | PTY bytes feed the VT state machine on a background thread while the UI samples the grid per frame — single process, zero IPC, no intermediate buffer to pile up, so `cat`-ing a huge file can't drag the interface down |
-| **External theme packs** | Dream Skin-compatible skins: import from a folder or a zip, sha256-verified against the manifest, hot-reloaded when you edit a file. A pack can ship its own background image, in which case the terminal goes translucent over that ambient layer. External references all pass the same gate (no `@import`; anything pointing outside the pack is rejected). Hit "Example" to drop a ready-to-edit sample skin into the skins folder |
+| **External theme packs** | Dream Skin-compatible skins: import from a folder or a zip, sha256-verified against the manifest, hot-reloaded when you edit a file. A pack can ship its own background image, in which case the terminal goes translucent over that ambient layer. External references all pass the same gate (no `@import`; anything pointing outside the pack is rejected). Hit "More skins" to jump straight to the [`theme/`](theme/) gallery in this repo — pick one, download it, import it; to roll your own, the field reference lives in [`docs/theme-pack-example/`](docs/theme-pack-example/) |
 | **Hover preview for project rows** | Hover for 250ms to pop up a preview of the project's running AI session terminal area |
 | **Grouped settings panel** | A two-level sidebar: Terminal, Appearance, AI, System — every page fits on one screen instead of scrolling half a page to find a toggle |
 
@@ -134,7 +138,7 @@ The whole application is **native Rust**:
 | Git / files | git2 (libgit2) · notify + ignore |
 | Usage stats | rusqlite local ledger · hand-drawn trend charts |
 | Mobile relay | axum + tokio WebSocket (`relay-server/`) · React + Vite PWA (`mobile/`) |
-| Tests | **1,564 Rust tests** (28 test targets) |
+| Tests | **1,677 Rust tests** (28 test targets) |
 
 ---
 
@@ -180,5 +184,9 @@ cargo build --release -p mt-app      # output: target/release/mini-term(.exe)
 - 📖 **[Full feature list](docs/features.md)** — every feature in detail, plus architecture overview and known limitations
 - 📱 **[Relay deployment guide](docs/deploy-relay.md)** — the self-hosted relay behind the mobile features
 - 🐛 **[Issues / PRs](https://github.com/dreamlonglll/mini-term/issues)** — external contributions are merged after functional verification and a security review
+
+## License
+
+Released under the [MIT License](LICENSE).
 
 Learn AI, join the L site — [LinuxDO](https://linux.do/)

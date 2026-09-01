@@ -14,11 +14,12 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.1.1-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.2.2-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="platform">
   <img src="https://img.shields.io/badge/macOS%20%7C%20Linux-experimental-lightgrey" alt="platform-experimental">
   <img src="https://img.shields.io/badge/GPUI-native-8A2BE2" alt="gpui">
   <img src="https://img.shields.io/badge/Rust-1.95%2B-dea584" alt="rust">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
 
 <p align="center">
@@ -81,6 +82,7 @@ Mini-Term 就是为这件事做的：项目列表上的状态灯实时跳动，A
 ### 🌐 远程目录当本地项目用，WSL 也一样
 
 - **SSH 远程项目** — 服务器上的目录直接添加成项目：文件树经 SFTP 懒加载，终端 `ssh -t` 直连并自动落到项目目录，断线后覆盖层一键重连，远程机器上的 Claude / Codex 历史会话也能读出正文。远程缓存键掺入连接 id，两台服务器上的同名路径不会串数据
+- **远程文件管理** — 远程文件树支持复制 / 粘贴 / 上传 / 下载，从资源管理器拖文件进来就是上传，文件栏顶部还有上传文件 / 文件夹、粘贴、新建文件 / 文件夹的快捷按钮；同名冲突可跳过、覆盖或生成副本，弹窗列出具体文件名。下载默认进系统下载目录、可在设置中自选；添加远程项目时可用远程目录选择器直接浏览挑目录，右键还能在终端打开远程目录
 - **WSL 支持** — `\\wsl$\<distro>\<path>` 直接当项目根，自动改用 `wsl.exe --cd` 启动，`pwd` 真的落在 WSL 里而不是 `C:\Windows`；Windows 下还能直接读 WSL 发行版内的 Claude / Codex 会话历史
 
 ### 🪟 多项目 · 递归分屏 · 会话历史
@@ -88,6 +90,7 @@ Mini-Term 就是为这件事做的：项目列表上的状态灯实时跳动，A
 - **左侧项目列表**管理多个工作区，支持最多 3 级嵌套分组、拖拽排序、从资源管理器拖文件夹直接添加
 - **横竖任意嵌套的递归分屏**，拖拽调比例；标签 / 分屏 / 窗口大小位置全部持久化，重启原样恢复
 - **项目级终端面板**——终端区右缘的图标竖条给同一项目开多个**独立终端工作面**，各自持有整套分屏与标签互不影响（跑 AI 的一面、跑前后端的一面，点图标整面切换）；按钮带 AI 进度呼吸灯与终端数角标，双击改名，全部随重启还原
+- **新建终端即启 agent**——三处「新建终端」入口(标签栏 +、空态按钮、终端面板)的菜单里除了各类 shell,还列着 AI 启动器(预置 Claude / Codex,可自行增删):选中即开出新终端并自动敲入启动命令,AI 状态感知随之建立;与移动端「发起新会话」共用同一份启动器配置(SSH 远程项目不出此段——连接初期的口令交互会把预写命令吃掉)
 - **换场动画**——切标签 / 切面板按方向推入推出，最大化从终端所在格子展开到整幅、还原反向收回；不喜欢动画的，设置里一个开关整体关掉
 - **pane 拖拽重排与最大化**——tab 拖到别的分组并入，拖到终端区四边分出新屏，落点实时高亮预览；双击 tab 栏空白处把当前分组临时铺满，终端内容全程不丢
 - **AI 任务标记**——会话里每次按 Enter 自动打点，`Ctrl+Shift+↑/↓` 在历史提交之间跳转
@@ -108,15 +111,16 @@ VS Code 风格的 **Changes 面板**（Staged / Changes / Untracked 分组，单
 | **图片粘贴** | 剪贴板里有截图自动检测，存成临时 PNG 并粘路径，兼容 PinPix 等非标准格式 |
 | **远程自动落地** | 上面两种粘贴在 SSH 远程项目里会经 SFTP 传到远端再粘**远端**路径；WSL 项目自动把 `C:\...` 换算成 `/mnt/c/...` |
 | **文件拖拽** | 从文件树或资源管理器拖文件到终端，插入带引号的绝对路径，精准落到目标分屏 |
-| **内置文件编辑器** | 文件树点开即改：tree-sitter 语法高亮（30+ 语言），查找替换，`Ctrl+S` 原子落盘，外部改动自动感知 |
-| **文档预览** | Markdown / HTML 预览里的图片真的会显示——相对路径按文件所在目录解析，网络图直接拉回来（10s 超时 + 32MB 上限，其余协议一律拒）。HTML 另有一个「用浏览器打开」，走 https 协议关联而不是 `.html` 的文件关联 |
-| **全局搜索** | `Ctrl+Shift+F` 唤起，文件名 / 内容双模式，子串或正则，后端流式推送随时可取消 |
+| **文件工作区** | 文件树点开的本地 / 远程文件在主区页签里查看、编辑、保存，与终端并列切换：tree-sitter 语法高亮（30+ 语言），查找替换，`Ctrl+S` 原子落盘，外部改动自动感知；远程文件经 SFTP 读写，保存前比对基线，冲突时可重载或强制覆盖，也能直接下载 |
+| **文档预览** | Markdown / HTML 预览里的图片真的会显示——相对路径按文件所在目录解析，网络图直接拉回来（10s 超时 + 32MB 上限，其余协议一律拒）。远程文件的 Markdown 先清洗再渲染：原始 HTML 按源码显示、外链图片点击才加载、`file://` 之类的链接降级为纯文本；远程 HTML 只提供源码查看。HTML 另有一个「用浏览器打开」，走 https 协议关联而不是 `.html` 的文件关联 |
+| **全局搜索** | `Ctrl+Shift+F` 唤起，文件名 / 内容双模式（文件名含 `/` 即按路径匹配），子串或正则，后端流式推送随时可取消 |
 | **项目级环境变量** | 按项目注入 PTY 子进程，严格 POSIX 校验，Rust 端二次防御，WSL 下经 WSLENV 透传 |
 | **智能 Ctrl+C/V** | 可选开启：有选区时复制、无选区时中断程序；Windows 大段粘贴自动分块防 ConPTY 丢行 |
 | **拖选停留自动复制** | 拖选后按住鼠标静止超过设定时长自动复制选区并弹「已复制」气泡，时长可调（0 = 关闭） |
+| **Alt+单击定位光标** | 按住 Alt（macOS ⌥）单击命令行任意位置，光标直接挪过去——同一行内按列差合成方向键；跨行一律不动，免得触发行编辑器的历史召回。shell 提示符下逐格准确，Claude CLI 这类 Ink TUI 不保证 |
 | **启动零网络请求** | 原生渲染无 Web 资源，启动不发任何网络请求（价格表按天拉取，拉不到用缓存） |
 | **刷屏不卡界面** | PTY 字节在后台线程直喂 VT 状态机、UI 按帧取格子渲染——单进程零 IPC，没有中间缓冲可堆积，`cat` 大文件也拖不垮界面 |
-| **外置主题包** | 兼容 Dream Skin 格式的皮肤：文件夹或 zip 导入、manifest 的 sha256 校验、改文件即热重载；皮肤可自带背景图，终端随之透明化压在氛围层上。外链一律走同一道闸（禁 `@import`，指向包外的引用全拒）。点「生成示例」落一份可直接改的示例皮肤到皮肤目录 |
+| **外置主题包** | 兼容 Dream Skin 格式的皮肤：文件夹或 zip 导入、manifest 的 sha256 校验、改文件即热重载；皮肤可自带背景图，终端随之透明化压在氛围层上。外链一律走同一道闸（禁 `@import`，指向包外的引用全拒）。点「更多皮肤」直达仓库 [`theme/`](theme/) 皮肤库，挑一份下载后导入即用；想自己做一份，字段说明在 [`docs/theme-pack-example/`](docs/theme-pack-example/) |
 | **项目行悬停预览** | 悬停 250ms 弹出该项目正在运行的 AI Session 终端区 |
 | **设置面板分组** | 侧栏两级菜单：终端、外观、AI、系统，每页只剩一屏，不用滚半页找开关 |
 
@@ -136,7 +140,7 @@ VS Code 风格的 **Changes 面板**（Staged / Changes / Untracked 分组，单
 | Git / 文件 | git2（libgit2）· notify + ignore |
 | 用量统计 | rusqlite 本地账本 · 自绘趋势图 |
 | 移动端中转 | axum + tokio WebSocket（`relay-server/`）· React + Vite PWA（`mobile/`） |
-| 测试 | **1564 个 Rust 测试**（28 个测试目标） |
+| 测试 | **1677 个 Rust 测试**（28 个测试目标） |
 
 ---
 
@@ -182,5 +186,9 @@ cargo build --release -p mt-app      # 产物 target/release/mini-term(.exe)
 - 📖 **[完整功能清单](docs/features.zh-CN.md)** — 每一项功能的详细说明、架构概览与边界条件
 - 📱 **[中转服务部署文档](docs/deploy-relay.zh-CN.md)** — 手机远程功能所需的自托管中转
 - 🐛 **[提 Issue / PR](https://github.com/dreamlonglll/mini-term/issues)** — 外部贡献会经过功能验证和安全审查后合并
+
+## 许可证
+
+本项目基于 [MIT 协议](LICENSE) 开源。
 
 学 AI，上 L 站 — [LinuxDO](https://linux.do/)

@@ -57,14 +57,13 @@ export const fileTree = {
     remote: {
       broken: "SSH 连接已被删除，无法加载远程文件树",
       refreshTitle: "刷新（重新读取远程根 .gitignore）",
-      previewUnsupportedTitle: "暂不支持远程预览",
-      previewUnsupportedMessage: "远程文件不会交给本机程序打开。请先下载文件后查看。",
     },
     conflict: {
       title: "发现同名文件",
       message: "请选择本次批量操作中所有剩余同名冲突的处理方式。覆盖文件夹会递归合并，并保留目标独有内容。",
       skip: "跳过",
       overwrite: "覆盖",
+      remaining: "另有 {count} 项",
       keepBoth: "生成副本",
     },
     operation: {
@@ -94,6 +93,7 @@ export const fileTree = {
       chooseFolderTitle: "选择要上传的文件夹",
     },
     download: {
+      contextChanged: "下载上下文已变化，请重新打开或刷新文件后再试。",
       directoryErrorTitle: "下载目录不可用",
     },
   },
@@ -155,14 +155,13 @@ export const fileTree = {
     remote: {
       broken: "The SSH connection was deleted; cannot load the remote file tree",
       refreshTitle: "Refresh (re-reads the remote root .gitignore)",
-      previewUnsupportedTitle: "Remote Preview Not Supported",
-      previewUnsupportedMessage: "Remote paths are not passed to local applications. Download the file before opening it.",
     },
     conflict: {
       title: "Name Conflicts Found",
       message: "Choose how to handle all remaining conflicts in this batch. Overwriting a folder merges it recursively and keeps destination-only content.",
       skip: "Skip",
       overwrite: "Overwrite",
+      remaining: "{count} more items",
       keepBoth: "Keep Both",
     },
     operation: {
@@ -192,6 +191,7 @@ export const fileTree = {
       chooseFolderTitle: "Choose a Folder to Upload",
     },
     download: {
+      contextChanged: "The download context changed. Reopen or refresh the file and try again.",
       directoryErrorTitle: "Download Directory Unavailable",
     },
   },
