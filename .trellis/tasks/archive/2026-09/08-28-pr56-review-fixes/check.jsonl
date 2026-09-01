@@ -1,0 +1,10 @@
+{"file": ".trellis/spec/mt-app/backend/file-workbench-contract.md", "reason": "Verify workbench identity, search, remote rich-text, and async behavior"}
+{"file": ".trellis/spec/mt-i18n/backend/index.md", "reason": "Verify bilingual generated dictionary consistency"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Audit every sanitizer-renderer and UI-state boundary"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Check for duplicated helpers and divergent policy logic"}
+{"file": ".trellis/tasks/08-28-pr56-review-fixes/research/review-evidence.md", "reason": "Check complete coverage of all maintainer review items"}
+{"file": ".trellis/tasks/08-28-pr56-review-fixes/research/markdown-and-images.md", "reason": "Check security and display regressions against researched behavior"}
+{"file": ".trellis/tasks/08-28-pr56-review-fixes/research/search-feedback-layout.md", "reason": "Check search, toast, layout, and close-list behavior"}
+{"file": ".trellis/spec/mt-ssh/backend/remote-document-io-contract.md", "reason": "Verify stale backup cleanup never deletes ambiguous recovery data"}
+{"file": ".trellis/tasks/08-28-pr56-review-fixes/research/review-round-3.md", "reason": "Verify the third-review payloads and required state/focus fixes"}
+{"file": ".trellis/tasks/08-28-pr56-review-fixes/research/review-round-4.md", "reason": "Verify fixed-point convergence, fail-safe fallback, production namespace, and refresh-warning cleanup"}

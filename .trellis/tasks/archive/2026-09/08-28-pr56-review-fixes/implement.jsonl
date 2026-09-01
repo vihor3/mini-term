@@ -1,0 +1,11 @@
+{"file": ".trellis/spec/mt-app/backend/index.md", "reason": "mt-app package guideline index and active file-workbench contract routing"}
+{"file": ".trellis/spec/mt-app/backend/file-workbench-contract.md", "reason": "Document identity, search, async focus, and untrusted rich-text contract"}
+{"file": ".trellis/spec/mt-i18n/backend/index.md", "reason": "Generated bilingual dictionary ownership and package conventions"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Trace sanitizer, renderer, search overlay, toast, and generated i18n boundaries"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse existing replacement, toast, workbench, and conflict-list patterns"}
+{"file": ".trellis/tasks/08-28-pr56-review-fixes/research/review-evidence.md", "reason": "Authoritative mapping of all eight maintainer review items and prior decisions"}
+{"file": ".trellis/tasks/08-28-pr56-review-fixes/research/markdown-and-images.md", "reason": "Repository-backed sanitizer and deliberate remote-image design evidence"}
+{"file": ".trellis/tasks/08-28-pr56-review-fixes/research/search-feedback-layout.md", "reason": "Search lifecycle, feedback, image width, and close-list evidence"}
+{"file": ".trellis/spec/mt-ssh/backend/remote-document-io-contract.md", "reason": "Deterministic recovery backup classification and safe replacement boundary"}
+{"file": ".trellis/tasks/08-28-pr56-review-fixes/research/review-round-3.md", "reason": "Latest security blocker and three required reproducible fixes"}
+{"file": ".trellis/tasks/08-28-pr56-review-fixes/research/review-round-4.md", "reason": "Fourth-review fixed-point sanitizer blocker and two required lifecycle cleanups"}
