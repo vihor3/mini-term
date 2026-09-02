@@ -74,6 +74,9 @@ pub mod kind {
     /// 登记之后 Esc 关闭是 GPUI 结构性免费的(按键沿焦点链派发)—— 比原版多一条
     /// 关闭路,记为改善。
     pub const MARKER_LIST: &str = "marker-list";
+    /// Orca shell 左侧 Agents 入口打开的全局实时活动浮窗。
+    /// 它获得键盘焦点，并阻止终端快捷键穿透到后台 workbench。
+    pub const AGENT_ACTIVITY: &str = "agent-activity";
     /// 工作区 / 暂存区的单文件 diff(`DiffModal`)。
     pub const GIT_DIFF: &str = "git-diff";
     /// 某次 commit 的多文件 diff(`CommitDiffModal`)。
@@ -284,7 +287,10 @@ mod tests {
 
         stack.push(key(kind::SETTINGS));
         assert!(!stack.allows(Yield::ToOverlay), "弹窗开着必须让路");
-        assert!(stack.allows(Yield::Never), "openSettings / globalSearch 不让路");
+        assert!(
+            stack.allows(Yield::Never),
+            "openSettings / globalSearch 不让路"
+        );
 
         stack.pop(key(kind::SETTINGS));
         assert!(stack.allows(Yield::ToOverlay), "关掉之后恢复");
@@ -304,7 +310,7 @@ mod tests {
     fn 查找条不挡全局快捷键() {
         let mut stack = Stack::default();
         stack.push(terminal_search(3));
-        assert!(stack.blocking() == false);
+        assert!(!stack.blocking());
         assert!(stack.allows(Yield::ToOverlay));
         // 但只要上面再压一个真弹窗,照样让路
         stack.push(key(kind::CONFIRM));

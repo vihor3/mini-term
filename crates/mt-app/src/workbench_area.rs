@@ -84,13 +84,26 @@ enum WorkbenchPage {
     Document(DocumentKey),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DocumentTabState {
+    Preview,
+    Permanent,
+}
+
+impl DocumentTabState {
+    fn promote(&mut self) {
+        *self = Self::Permanent;
+    }
+}
+
 struct DocumentTab {
     key: DocumentKey,
     title: String,
     document: Entity<FileViewer>,
+    state: DocumentTabState,
 }
 
-type RenderDocumentTab = (DocumentKey, String, Entity<FileViewer>);
+type RenderDocumentTab = (DocumentKey, String, Entity<FileViewer>, DocumentTabState);
 type ActiveWorkbenchSnapshot = (String, WorkbenchPage, Vec<RenderDocumentTab>);
 
 struct ProjectDocuments {
@@ -112,6 +125,27 @@ impl ProjectDocuments {
         self.tabs.iter().position(|tab| &tab.key == key)
     }
 
+    fn insert_preview(&mut self, tab: DocumentTab, cx: &App) {
+        insert_preview_tab(
+            &mut self.tabs,
+            tab,
+            |tab| tab.state,
+            |tab| tab.document.read(cx).is_dirty(),
+            |tab| tab.state.promote(),
+        );
+    }
+
+    fn promote(&mut self, key: &DocumentKey) -> bool {
+        let Some(index) = self.index_of(key) else {
+            return false;
+        };
+        if self.tabs[index].state == DocumentTabState::Permanent {
+            return false;
+        }
+        self.tabs[index].state.promote();
+        true
+    }
+
     fn close(&mut self, key: &DocumentKey) -> Option<Entity<FileViewer>> {
         let index = self.index_of(key)?;
         let removed = self.tabs.remove(index).document;
@@ -127,6 +161,29 @@ impl ProjectDocuments {
         }
         Some(removed)
     }
+}
+
+fn insert_preview_tab<T>(
+    tabs: &mut Vec<T>,
+    new_tab: T,
+    tab_state: impl Fn(&T) -> DocumentTabState,
+    tab_is_dirty: impl Fn(&T) -> bool,
+    promote: impl Fn(&mut T),
+) -> usize {
+    if let Some(index) = tabs
+        .iter()
+        .position(|tab| tab_state(tab) == DocumentTabState::Preview)
+    {
+        if tab_is_dirty(&tabs[index]) {
+            promote(&mut tabs[index]);
+        } else {
+            tabs[index] = new_tab;
+            return index;
+        }
+    }
+
+    tabs.push(new_tab);
+    tabs.len() - 1
 }
 
 fn next_document_after_close(
@@ -304,6 +361,18 @@ pub fn reactivate_active_document(expected_project_id: &str, window: &mut Window
     });
 }
 
+/// Restore the active workbench page after switching project/worktree scope.
+/// Each compatibility project keeps its own terminal/document route, so the
+/// handoff must focus that route instead of leaving focus in the hidden source.
+pub fn reactivate_active_page(expected_project_id: &str, window: &mut Window, cx: &mut App) {
+    let Some(area) = global(cx) else {
+        return;
+    };
+    area.update(cx, |area, cx| {
+        area.reactivate_active_page(expected_project_id, window, cx)
+    });
+}
+
 /// 文件页签宿主。
 pub struct WorkbenchArea {
     store: Entity<AppStore>,
@@ -374,7 +443,7 @@ impl WorkbenchArea {
     ) {
         let project_id = source.project_id().to_string();
         let key = DocumentKey::from_source(&source);
-        let project = self.projects.entry(project_id).or_default();
+        let project = self.projects.entry(project_id.clone()).or_default();
         if let Some(index) = project.index_of(&key) {
             let document = project.tabs[index].document.clone();
             project.active = WorkbenchPage::Document(key);
@@ -390,13 +459,24 @@ impl WorkbenchArea {
 
         let title = source.file_name();
         let document = cx.new(|cx| FileViewer::new_document(source, highlight_line, window, cx));
-        cx.observe(&document, |_this, _document, cx| cx.notify())
-            .detach();
-        project.tabs.push(DocumentTab {
-            key: key.clone(),
-            title,
-            document: document.clone(),
-        });
+        let observed_project_id = project_id.clone();
+        let observed_key = key.clone();
+        cx.observe(&document, move |this, document, cx| {
+            if document.read(cx).is_dirty() {
+                this.promote_document(&observed_project_id, &observed_key);
+            }
+            cx.notify();
+        })
+        .detach();
+        project.insert_preview(
+            DocumentTab {
+                key: key.clone(),
+                title,
+                document: document.clone(),
+                state: DocumentTabState::Preview,
+            },
+            cx,
+        );
         project.active = WorkbenchPage::Document(key);
         window.defer(cx, move |window, cx| {
             document.update(cx, |document, cx| document.on_activated(window, cx));
@@ -416,6 +496,13 @@ impl WorkbenchArea {
             });
         }
         cx.notify();
+    }
+
+    fn promote_document(&mut self, project_id: &str, key: &DocumentKey) -> bool {
+        let Some(project) = self.projects.get_mut(project_id) else {
+            return false;
+        };
+        project.promote(key)
     }
 
     fn activate_document(
@@ -458,6 +545,28 @@ impl WorkbenchArea {
             return;
         };
         self.activate_document(expected_project_id, &key, window, cx);
+    }
+
+    fn reactivate_active_page(
+        &mut self,
+        expected_project_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.store.read(cx).active_project_id.as_deref() != Some(expected_project_id) {
+            return;
+        }
+        let page = self
+            .projects
+            .get(expected_project_id)
+            .map(|project| project.active.clone())
+            .unwrap_or(WorkbenchPage::Terminal);
+        match page {
+            WorkbenchPage::Terminal => self.activate_terminal(window, cx),
+            WorkbenchPage::Document(key) => {
+                self.activate_document(expected_project_id, &key, window, cx)
+            }
+        }
     }
 
     pub fn search_active_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -555,7 +664,14 @@ impl WorkbenchArea {
                 project
                     .tabs
                     .iter()
-                    .map(|tab| (tab.key.clone(), tab.title.clone(), tab.document.clone()))
+                    .map(|tab| {
+                        (
+                            tab.key.clone(),
+                            tab.title.clone(),
+                            tab.document.clone(),
+                            tab.state,
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -597,8 +713,8 @@ impl Render for WorkbenchArea {
                     });
                 }
                 WorkbenchPage::Document(key) => {
-                    if let Some((_, _, document)) =
-                        tabs.iter().find(|(candidate, _, _)| candidate == key)
+                    if let Some((_, _, document, _)) =
+                        tabs.iter().find(|(candidate, _, _, _)| candidate == key)
                     {
                         let document = document.clone();
                         window.defer(cx, move |window, cx| {
@@ -658,9 +774,10 @@ impl Render for WorkbenchArea {
                     ),
             );
 
-        for (key, title, document) in &tabs {
+        for (key, title, document, state) in &tabs {
             let selected = active == WorkbenchPage::Document(key.clone());
             let dirty = document.read(cx).is_dirty();
+            let preview = *state == DocumentTabState::Preview;
             let tab_key = key.clone();
             let close_key = key.clone();
             let click_project = project_id.clone();
@@ -702,6 +819,7 @@ impl Render for WorkbenchArea {
                             .min_w(px(0.0))
                             .flex_1()
                             .truncate()
+                            .when(preview, |el| el.opacity(0.76))
                             .child(title.clone()),
                     )
                     .when(dirty, |el| {
@@ -747,9 +865,14 @@ impl Render for WorkbenchArea {
                                 );
                             })),
                     )
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        this.activate_document(&click_project, &tab_key, window, cx)
-                    })),
+                    .on_click(
+                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                            if event.click_count() >= 2 {
+                                this.promote_document(&click_project, &tab_key);
+                            }
+                            this.activate_document(&click_project, &tab_key, window, cx)
+                        }),
+                    ),
             );
         }
 
@@ -757,8 +880,8 @@ impl Render for WorkbenchArea {
             WorkbenchPage::Terminal => self.terminal_area.clone().into_any_element(),
             WorkbenchPage::Document(key) => tabs
                 .iter()
-                .find(|(candidate, _, _)| candidate == key)
-                .map(|(_, _, document)| document.clone().into_any_element())
+                .find(|(candidate, _, _, _)| candidate == key)
+                .map(|(_, _, document, _)| document.clone().into_any_element())
                 .unwrap_or_else(|| self.terminal_area.clone().into_any_element()),
         };
 
@@ -781,6 +904,41 @@ fn stable_hash(key: &DocumentKey) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct TestTab {
+        name: &'static str,
+        state: DocumentTabState,
+        dirty: bool,
+    }
+
+    impl TestTab {
+        fn permanent(name: &'static str) -> Self {
+            Self {
+                name,
+                state: DocumentTabState::Permanent,
+                dirty: false,
+            }
+        }
+
+        fn preview(name: &'static str, dirty: bool) -> Self {
+            Self {
+                name,
+                state: DocumentTabState::Preview,
+                dirty,
+            }
+        }
+    }
+
+    fn insert_test_preview(tabs: &mut Vec<TestTab>, tab: TestTab) -> usize {
+        insert_preview_tab(
+            tabs,
+            tab,
+            |tab| tab.state,
+            |tab| tab.dirty,
+            |tab| tab.state.promote(),
+        )
+    }
 
     fn key(path: &str) -> DocumentKey {
         DocumentKey {
@@ -834,6 +992,35 @@ mod tests {
             normalize_remote_document_path(Path::new("/work/a\\b.rs")),
             normalize_remote_document_path(Path::new("/work/a/b.rs"))
         );
+    }
+
+    #[test]
+    fn opening_new_document_replaces_clean_preview_at_same_index() {
+        let mut tabs = vec![
+            TestTab::permanent("a"),
+            TestTab::preview("b", false),
+            TestTab::permanent("c"),
+        ];
+
+        let inserted_at = insert_test_preview(&mut tabs, TestTab::preview("next", false));
+
+        assert_eq!(inserted_at, 1);
+        assert_eq!(
+            tabs.iter().map(|tab| tab.name).collect::<Vec<_>>(),
+            vec!["a", "next", "c"]
+        );
+        assert_eq!(tabs[1].state, DocumentTabState::Preview);
+    }
+
+    #[test]
+    fn dirty_preview_is_promoted_before_new_preview_is_appended() {
+        let mut tabs = vec![TestTab::permanent("a"), TestTab::preview("b", true)];
+
+        let inserted_at = insert_test_preview(&mut tabs, TestTab::preview("next", false));
+
+        assert_eq!(inserted_at, 2);
+        assert_eq!(tabs[1].state, DocumentTabState::Permanent);
+        assert_eq!(tabs[2].state, DocumentTabState::Preview);
     }
 
     #[test]

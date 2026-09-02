@@ -1,7 +1,10 @@
 // release 构建在 Windows 上走 GUI 子系统:console 子系统的 exe 从快捷方式/Explorer 启动
 // 会被 Windows 新开一个控制台窗口滚启动日志(装机版即此形态)。debug 不挂,保留 console
 // 让 cargo run 的日志照常附着当前终端;代价是 release 版 println!/eprintln! 全部静默丢弃。
-#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 //! mini-term 的 GPUI 应用壳。
 //!
@@ -76,6 +79,7 @@ mod mobile_relay;
 mod modal;
 mod motion;
 mod notify;
+mod orca_sidebar;
 mod overlay;
 mod pane;
 mod pane_actions;
@@ -119,9 +123,9 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use gpui::{
-    AnimationExt as _, AnyView, App, AppContext, Application, Bounds, Context, Entity,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement, StyleRefinement, Styled, Size, Subscription, Task, TitlebarOptions,
+    AnimationExt as _, AnyView, App, AppContext, Application, Bounds, Context, Entity, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Pixels, Render, SharedString,
+    Size, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Task, TitlebarOptions,
     Window, WindowBounds, WindowOptions, actions, div, point, prelude::FluentBuilder, px, size,
 };
 // img 的 `object_fit` 是 StyledImage 的方法(毛玻璃背板那两处在用)
@@ -134,9 +138,10 @@ use crate::ai::AiBridge;
 use crate::file_tree::FileTree;
 use crate::focus_nav::Direction;
 use crate::i18n::{t, tr};
+use crate::orca_sidebar::{OrcaProjectSidebar, OrcaSidebarEvent};
 use crate::project_list::ProjectList;
 use crate::session_panel::SessionPanel;
-use crate::store::{AppStore, DoneScope, PendingAlert};
+use crate::store::{AiProjectKind, AppStore, DoneScope, PendingAlert};
 use crate::terminal_area::TerminalArea;
 use crate::title_bar::TitleBar;
 use crate::tray::{Tray, TrayEvent};
@@ -271,6 +276,63 @@ impl DrawerPanel {
     }
 }
 
+const ORCA_CONTEXT_MIN_WIDTH: f64 = 300.0;
+const ORCA_CONTEXT_MAX_WIDTH: f64 = 420.0;
+const ORCA_AGENTS_MIN_WIDTH: f32 = 180.0;
+const ORCA_AGENTS_MAX_WIDTH: f32 = 480.0;
+const ORCA_AGENTS_MARGIN: f32 = 12.0;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ContextPanel {
+    Files,
+    Git,
+    Tasks,
+    Sessions,
+}
+
+impl ContextPanel {
+    const ALL: [Self; 4] = [Self::Files, Self::Git, Self::Tasks, Self::Sessions];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Files => "files",
+            Self::Git => "git",
+            Self::Tasks => "tasks",
+            Self::Sessions => "sessions",
+        }
+    }
+
+    fn label(self) -> SharedString {
+        match self {
+            Self::Files => t("panels", "files").into(),
+            Self::Git => t("panels", "git").into(),
+            Self::Tasks => "Tasks".into(),
+            Self::Sessions => t("panels", "sessions").into(),
+        }
+    }
+}
+
+fn legacy_shell_requested(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+    })
+}
+
+fn agents_overlay_horizontal_geometry(viewport_width: f32) -> (f32, f32) {
+    let preferred_left = orca_sidebar::WIDTH + ORCA_AGENTS_MARGIN;
+    let max_left = viewport_width - ORCA_AGENTS_MARGIN - ORCA_AGENTS_MIN_WIDTH;
+    let left = preferred_left.min(max_left.max(ORCA_AGENTS_MARGIN));
+    let width = (viewport_width - left - ORCA_AGENTS_MARGIN).clamp(0.0, ORCA_AGENTS_MAX_WIDTH);
+    (left, width)
+}
+
+#[derive(Clone)]
+enum AgentsFocusReturn {
+    Terminal { project_id: String, pane_id: String },
+    Document { project_id: String },
+}
+
 /// 抽屉退场动画的驻留。原版 `useOverlayPresence` + `OVERLAY_EXIT_MS = 400`:
 /// 关闭时 DOM 与**面板内容**都多留 400ms,否则「抽屉在滑出的同时内容先空掉」
 /// (`RightDrawer.tsx:29-30` 原注释)。
@@ -346,6 +408,8 @@ struct Workspace {
     /// 自建 toast 层。与 [`Self::menu_layer`] 同一种分工:状态住在全局
     /// (AI 泵 / pane / store 三处都要往里推),这里只是把它**画出来**的位置。
     toast_layer: Entity<toast::ToastLayer>,
+    /// Orca 对齐的默认左栏；旧 ProjectList 只为回滚壳保留。
+    orca_sidebar: Entity<OrcaProjectSidebar>,
     project_list: Entity<ProjectList>,
     file_tree: Entity<FileTree>,
     terminal_area: Entity<TerminalArea>,
@@ -366,6 +430,12 @@ struct Workspace {
     /// 上一帧的视口尺寸,给上面两个分栏状态判「该不该重新播种」。
     /// 见 [`Workspace::reseed_resizables_on_viewport_change`]。
     last_viewport: Size<Pixels>,
+    /// Orca shell 的右侧常驻上下文路由。
+    context_panel: ContextPanel,
+    /// 全局实时 Agent 浮窗，不替换 workbench route。
+    agents_open: bool,
+    agents_focus: FocusHandle,
+    agents_focus_return: Option<AgentsFocusReturn>,
     /// 右侧悬浮抽屉现在开着哪一块(运行时态,不持久化 —— 与旧版一致)。
     right_drawer: Option<DrawerPanel>,
     /// 正在播退场动画的那一块(见 [`DrawerExit`])。
@@ -399,6 +469,7 @@ struct Workspace {
     /// 与 [`Self::_ai_pump`] 同一种分工)。见 [`mobile_relay`]。
     _relay: Entity<mobile_relay::RelayBridge>,
     _tray_pump: Task<()>,
+    _orca_sidebar_events: Subscription,
     _activation: Subscription,
     /// 窗口大小/位置的观察者 —— 拖动缩放期间每帧回调,由 store 那边的防抖收口。
     _window_bounds: Subscription,
@@ -423,6 +494,7 @@ impl Workspace {
         .detach();
 
         let title_bar = cx.new(|cx| TitleBar::new(store.clone(), cx));
+        let orca_sidebar = cx.new(|cx| OrcaProjectSidebar::new(store.clone(), cx));
         let project_list = cx.new(|cx| ProjectList::new(store.clone(), cx));
         let file_tree = cx.new(|cx| FileTree::new(store.clone(), cx));
         file_tree::install(file_tree.clone(), cx);
@@ -430,12 +502,25 @@ impl Workspace {
         let workbench_area =
             cx.new(|cx| WorkbenchArea::new(store.clone(), terminal_area.clone(), cx));
         workbench_area::install(workbench_area.clone(), cx);
-        let terminals_panel =
-            cx.new(|cx| terminals_panel::TerminalsPanel::new(store.clone(), cx));
+        let terminals_panel = cx.new(|cx| terminals_panel::TerminalsPanel::new(store.clone(), cx));
         let session_panel = cx.new(|cx| SessionPanel::new(store.clone(), cx));
         let git_panel = cx.new(|cx| git_panel::GitPanel::new(store.clone(), window, cx));
         let columns_state = cx.new(|_| ResizableState::default());
         let middle_state = cx.new(|_| ResizableState::default());
+
+        let orca_sidebar_events = cx.subscribe_in(
+            &orca_sidebar,
+            window,
+            |this: &mut Workspace, _sidebar, event: &OrcaSidebarEvent, window, cx| match event {
+                OrcaSidebarEvent::ToggleAgents => this.toggle_agents(window, cx),
+                OrcaSidebarEvent::OpenUsage => this.toggle_usage(window, cx),
+                OrcaSidebarEvent::OpenSettings => {
+                    settings::open_settings(this.store.clone(), None, window, cx)
+                }
+            },
+        );
+        session_panel.update(cx, |panel, cx| panel.set_visible(false, cx));
+        git_panel.update(cx, |panel, cx| panel.set_visible(false, cx));
 
         // 窗口聚焦状态:聚焦时完成的任务用户正看着,不计入「未读完成」
         let store_for_focus = store.clone();
@@ -539,6 +624,7 @@ impl Workspace {
             menu_layer: menu::layer(cx),
             toast_layer: toast::layer(cx),
             title_bar,
+            orca_sidebar,
             project_list,
             file_tree,
             terminal_area,
@@ -550,6 +636,10 @@ impl Workspace {
             columns_state,
             middle_state,
             last_viewport: window.viewport_size(),
+            context_panel: ContextPanel::Files,
+            agents_open: false,
+            agents_focus: cx.focus_handle(),
+            agents_focus_return: None,
             right_drawer: None,
             drawer_exit: None,
             drawer_drag: None,
@@ -564,6 +654,7 @@ impl Workspace {
             _ai_pump: ai_pump,
             _relay: relay,
             _tray_pump: tray_pump,
+            _orca_sidebar_events: orca_sidebar_events,
             _activation: activation,
             _window_bounds: window_bounds,
         };
@@ -670,7 +761,13 @@ impl Workspace {
     fn on_tray_event(&mut self, event: TrayEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             TrayEvent::Clicked => {
-                if !self.store.read(cx).config().tray_click_focus.unwrap_or(true) {
+                if !self
+                    .store
+                    .read(cx)
+                    .config()
+                    .tray_click_focus
+                    .unwrap_or(true)
+                {
                     return;
                 }
                 self.focus_attention_target(None, window, cx);
@@ -718,12 +815,7 @@ impl Workspace {
     /// `IconName` 渲染成空白、去重是「替换」而原版是「忽略」),外加右上角 448px
     /// 的位置尺寸 —— 都不是宿主能绕过去的,见 `toast.rs` 模块注释。跳转与去重
     /// 语义一并搬进那一层,这里只剩「推一条」。
-    fn deliver_alert(
-        &mut self,
-        alert: PendingAlert,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn deliver_alert(&mut self, alert: PendingAlert, window: &mut Window, cx: &mut Context<Self>) {
         if alert.plan.sound {
             notify::play_sound(alert.sound_path.as_deref());
         }
@@ -744,6 +836,471 @@ impl Workspace {
 
     fn terminal_page_active(&self, cx: &App) -> bool {
         self.workbench_area.read(cx).is_terminal_active(cx)
+    }
+
+    fn orca_shell_enabled() -> bool {
+        let legacy_shell = std::env::var("MINI_TERM_LEGACY_SHELL").ok();
+        !legacy_shell_requested(legacy_shell.as_deref())
+    }
+
+    fn set_context_panel(&mut self, panel: ContextPanel, cx: &mut Context<Self>) {
+        if self.context_panel == panel {
+            return;
+        }
+        self.context_panel = panel;
+        self.session_panel.update(cx, |view, cx| {
+            view.set_visible(panel == ContextPanel::Sessions, cx)
+        });
+        self.git_panel.update(cx, |view, cx| {
+            view.set_visible(panel == ContextPanel::Git, cx)
+        });
+        cx.notify();
+    }
+
+    fn toggle_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agents_open {
+            self.close_agents(true, window, cx);
+            return;
+        }
+        if !overlay::allows(overlay::Yield::ToOverlay)
+            || !overlay::push(overlay::key(overlay::kind::AGENT_ACTIVITY))
+        {
+            return;
+        }
+        self.agents_focus_return =
+            self.store
+                .read(cx)
+                .active_project_id
+                .clone()
+                .and_then(|project_id| {
+                    if self.terminal_page_active(cx) {
+                        self.store
+                            .read(cx)
+                            .active_pane_id(&project_id)
+                            .map(|pane_id| AgentsFocusReturn::Terminal {
+                                project_id,
+                                pane_id,
+                            })
+                    } else {
+                        Some(AgentsFocusReturn::Document { project_id })
+                    }
+                });
+        self.agents_open = true;
+        window.focus(&self.agents_focus);
+        cx.notify();
+    }
+
+    fn close_agents(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.agents_open {
+            return;
+        }
+        self.agents_open = false;
+        overlay::pop(overlay::key(overlay::kind::AGENT_ACTIVITY));
+        let target = self.agents_focus_return.take();
+        if restore {
+            let restored = match target {
+                Some(AgentsFocusReturn::Terminal {
+                    project_id,
+                    pane_id,
+                }) => {
+                    let valid = {
+                        let store = self.store.read(cx);
+                        store.active_project_id.as_deref() == Some(project_id.as_str())
+                            && self.terminal_page_active(cx)
+                            && store
+                                .project_state(&project_id)
+                                .is_some_and(|state| state.pane(&pane_id).is_some())
+                    };
+                    if valid {
+                        self.store.update(cx, |store, cx| {
+                            store.focus_pane(&project_id, &pane_id, window, cx)
+                        });
+                    }
+                    valid
+                }
+                Some(AgentsFocusReturn::Document { project_id }) => {
+                    let valid = self.store.read(cx).active_project_id.as_deref()
+                        == Some(project_id.as_str());
+                    if valid {
+                        crate::workbench_area::reactivate_active_page(&project_id, window, cx);
+                    }
+                    valid
+                }
+                None => false,
+            };
+            if !restored && let Some(project_id) = self.store.read(cx).active_project_id.clone() {
+                crate::workbench_area::reactivate_active_page(&project_id, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_workspace_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agents_open && event.keystroke.key == "escape" {
+            cx.stop_propagation();
+            self.close_agents(true, window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
+    fn render_context_tabs(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut tabs = div()
+            .id("orca-context-tabs")
+            .h(px(38.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .border_b_1()
+            .border_color(ui::border_subtle())
+            .bg(ui::bg_elevated());
+        for panel in ContextPanel::ALL {
+            let active = panel == self.context_panel;
+            tabs = tabs.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "orca-context-tab-{}",
+                        panel.key()
+                    )))
+                    .h_full()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .px(px(6.0))
+                    .cursor_pointer()
+                    .text_size(ui::font_px(11.0))
+                    .when(active, |el| {
+                        el.text_color(ui::text_primary())
+                            .border_b_2()
+                            .border_color(ui::accent())
+                    })
+                    .when(!active, |el| {
+                        el.text_color(ui::text_muted())
+                            .border_b_2()
+                            .border_color(gpui::Hsla {
+                                a: 0.0,
+                                ..ui::accent()
+                            })
+                            .hover(|el| el.text_color(ui::text_primary()).bg(ui::border_subtle()))
+                    })
+                    .child(div().truncate().child(panel.label()))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.set_context_panel(panel, cx)
+                    })),
+            );
+        }
+        tabs.into_any_element()
+    }
+
+    fn render_tasks_placeholder(&self) -> gpui::AnyElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(6.0))
+            .px(px(20.0))
+            .text_center()
+            .child(
+                div()
+                    .text_size(ui::font_px(13.0))
+                    .text_color(ui::text_primary())
+                    .child("GitHub Tasks"),
+            )
+            .child(
+                div()
+                    .text_size(ui::font_px(11.0))
+                    .text_color(ui::text_muted())
+                    .child("Not available in this preview build"),
+            )
+            .into_any_element()
+    }
+
+    fn render_context_sidebar(&mut self, width: f64, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let content = match self.context_panel {
+            ContextPanel::Files => self.file_tree.clone().into_any_element(),
+            ContextPanel::Git => self.git_panel.clone().into_any_element(),
+            ContextPanel::Tasks => self.render_tasks_placeholder(),
+            ContextPanel::Sessions => self.session_panel.clone().into_any_element(),
+        };
+        div()
+            .id("orca-context-sidebar")
+            .relative()
+            .w(px(width as f32))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .bg(ui::bg_surface())
+            .border_l_1()
+            .border_color(ui::border_default())
+            .child(self.render_context_tabs(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_hidden()
+                    .child(content),
+            )
+            .child(
+                div()
+                    .id("orca-context-resize-handle")
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .h_full()
+                    .w(px(6.0))
+                    .cursor_col_resize()
+                    .hover(|el| el.bg(ui::with_alpha(ui::accent(), 0.4)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.drawer_drag = Some(DrawerDrag {
+                                start_x: event.position.x,
+                                start_width: width,
+                                width,
+                            });
+                        }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_agents_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !self.agents_open {
+            return None;
+        }
+        let viewport = window.viewport_size();
+        let (left, width) = agents_overlay_horizontal_geometry(f32::from(viewport.width));
+        let available_height = (f32::from(viewport.height) - title_bar::HEIGHT - 24.0).max(0.0);
+        let height = if available_height < 180.0 {
+            available_height
+        } else {
+            available_height.min(560.0)
+        };
+        let activity = self.store.read(cx).ai_projects(DoneScope::All);
+        let mut list = div()
+            .id("orca-agents-list")
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .px(px(8.0))
+            .py(px(6.0));
+        if activity.entries.is_empty() {
+            list = list.child(
+                div()
+                    .py(px(28.0))
+                    .text_center()
+                    .text_size(ui::font_px(11.0))
+                    .text_color(ui::text_muted())
+                    .child("No live agent activity"),
+            );
+        }
+        let mut previous_group = None;
+        for entry in activity.entries {
+            let project_id = entry.id.clone();
+            let (group, label) = match entry.kind {
+                AiProjectKind::Attention => ("Needs You", "Needs You"),
+                AiProjectKind::Working => ("Working", "Working"),
+                AiProjectKind::Done => ("Recent", "Recent"),
+                AiProjectKind::Idle => ("Recent", "Idle"),
+            };
+            if previous_group != Some(group) {
+                previous_group = Some(group);
+                list = list.child(
+                    div()
+                        .px(px(9.0))
+                        .pt(px(8.0))
+                        .pb(px(4.0))
+                        .text_size(ui::font_px(9.5))
+                        .text_color(ui::text_muted())
+                        .child(group),
+                );
+            }
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("orca-agent-row-{}", entry.id)))
+                    .flex()
+                    .items_center()
+                    .gap(px(9.0))
+                    .px(px(9.0))
+                    .py(px(8.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(ui::border_subtle()))
+                    .child(
+                        div()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(crate::title_bar::kind_color(entry.kind)),
+                    )
+                    .child(div().flex_1().min_w(px(0.0)).truncate().child(entry.name))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(ui::font_px(10.0))
+                            .text_color(ui::text_muted())
+                            .child(label),
+                    )
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        let focused = this.focus_attention_target(Some(&project_id), window, cx);
+                        if !focused && this.store.read(cx).project(&project_id).is_some() {
+                            this.store
+                                .update(cx, |store, cx| store.set_active_project(&project_id, cx));
+                            crate::workbench_area::reactivate_active_page(&project_id, window, cx);
+                        }
+                        this.close_agents(false, window, cx);
+                    })),
+            );
+        }
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _event, window, cx| this.close_agents(true, window, cx)),
+                )
+                .child(
+                    div()
+                        .id("orca-agents-overlay")
+                        .track_focus(&self.agents_focus)
+                        .absolute()
+                        .left(px(left))
+                        .top(px(12.0))
+                        .w(px(width))
+                        .h(px(height))
+                        .occlude()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .bg(ui::bg_overlay())
+                        .border_1()
+                        .border_color(ui::border_default())
+                        .rounded(px(6.0))
+                        .shadow_lg()
+                        .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(
+                            div()
+                                .h(px(42.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .px(px(12.0))
+                                .border_b_1()
+                                .border_color(ui::border_subtle())
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_size(ui::font_px(13.0))
+                                                .text_color(ui::text_primary())
+                                                .child("Agents"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(ui::font_px(9.5))
+                                                .text_color(ui::text_muted())
+                                                .child("Live activity"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("orca-agents-close")
+                                        .w(px(24.0))
+                                        .h(px(24.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(4.0))
+                                        .cursor_pointer()
+                                        .text_color(ui::text_muted())
+                                        .hover(|el| {
+                                            el.bg(ui::border_subtle())
+                                                .text_color(ui::text_primary())
+                                        })
+                                        .child("×")
+                                        .on_click(cx.listener(|this, _event, window, cx| {
+                                            this.close_agents(true, window, cx)
+                                        })),
+                                ),
+                        )
+                        .child(list),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_orca_body(
+        &mut self,
+        drawer_width: f64,
+        terminals_visible: bool,
+        terminal_page_active: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let center = div()
+            .flex_1()
+            .min_w(px(0.0))
+            .h_full()
+            .flex()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(self.workbench_area.clone()),
+            )
+            .when(terminals_visible && terminal_page_active, |el| {
+                el.child(cached_panel(
+                    &self.terminals_panel,
+                    StyleRefinement::default()
+                        .w(px(terminals_panel::WIDTH))
+                        .h_full()
+                        .flex_none(),
+                ))
+            });
+        let context = self.render_context_sidebar(drawer_width, cx);
+        let agents = self.render_agents_overlay(window, cx);
+        div()
+            .flex_1()
+            .overflow_hidden()
+            .relative()
+            .flex()
+            .child(cached_panel(
+                &self.orca_sidebar,
+                StyleRefinement::default()
+                    .w(px(orca_sidebar::WIDTH))
+                    .h_full()
+                    .flex_none(),
+            ))
+            .child(center)
+            .child(context)
+            .children(agents)
+            .child(self.toast_layer.clone())
+            .children(Root::render_notification_layer(window, cx))
+            .into_any_element()
     }
 
     fn on_new_terminal(&mut self, _: &NewTerminal, window: &mut Window, cx: &mut Context<Self>) {
@@ -842,7 +1399,8 @@ impl Workspace {
         if yields_to_overlay(window, cx) {
             return;
         }
-        self.store.update(cx, |store, cx| store.toggle_middle_column(cx));
+        self.store
+            .update(cx, |store, cx| store.toggle_middle_column(cx));
     }
 
     /// F2。**这是全仓唯一一条 F2 绑定的唯一处理器** —— 项目列表里那三条行级
@@ -902,7 +1460,11 @@ impl Workspace {
         if yields_to_overlay(window, cx) {
             return;
         }
-        self.toggle_drawer(DrawerPanel::Sessions, cx);
+        if Self::orca_shell_enabled() {
+            self.set_context_panel(ContextPanel::Sessions, cx);
+        } else {
+            self.toggle_drawer(DrawerPanel::Sessions, cx);
+        }
     }
 
     /// 边条两颗按钮用的开关:相同则收起,否则换过去
@@ -994,7 +1556,8 @@ impl Workspace {
             return;
         }
         if self.focus_attention_target(None, window, cx) {
-            self.store.update(cx, |store, cx| store.clear_unread_done(cx));
+            self.store
+                .update(cx, |store, cx| store.clear_unread_done(cx));
         }
     }
 
@@ -1027,7 +1590,12 @@ impl Workspace {
     /// (让 Ctrl+F 原样落进终端,发 `\x06`),而 gpui 的 action 一旦绑上就必然吞掉
     /// 按键、没有「退回按键」的通路。取舍是:PTY 还没起来的空 pane 上按 Ctrl+F
     /// 什么也不发生 —— 那个 pane 本来也没有终端能收这个字节。
-    fn on_terminal_search(&mut self, _: &TerminalSearch, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_terminal_search(
+        &mut self,
+        _: &TerminalSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.terminal_page_active(cx) {
             // 文档编辑器本身也是 `Input`,不能套用终端页的 typing guard,否则编辑器
             // 获得焦点后 Ctrl+F 会被提前吞掉；真正的弹窗仍然必须优先处理快捷键。
@@ -1096,11 +1664,7 @@ impl Workspace {
     /// w-1/2`,`transform: translateX(0% | 100%)`,`--motion-tab-indicator` 0.22s)。
     /// gpui 没有 transform,这里用 `left` 百分比 + `with_animation` 做等效补间:
     /// 换面板时 id 里带目标面板名 → 动画重播,底块从 0% 滑到 50%(或反过来)。
-    fn render_drawer_header(
-        &self,
-        panel: DrawerPanel,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_drawer_header(&self, panel: DrawerPanel, cx: &mut Context<Self>) -> impl IntoElement {
         let to_git = panel == DrawerPanel::Git;
         let mut seg = div()
             .relative()
@@ -1114,7 +1678,10 @@ impl Workspace {
             // 滑动选中块
             .child(
                 div()
-                    .id(SharedString::from(format!("drawer-tab-ind-{}", panel.key())))
+                    .id(SharedString::from(format!(
+                        "drawer-tab-ind-{}",
+                        panel.key()
+                    )))
                     .absolute()
                     .top_0()
                     .bottom_0()
@@ -1155,9 +1722,9 @@ impl Workspace {
                     })
                     .child(label)
                     // 段控件走 open_drawer:**不做「再点一次关闭」**
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.open_drawer(tab, cx)
-                    })),
+                    .on_click(
+                        cx.listener(move |this, _event, _window, cx| this.open_drawer(tab, cx)),
+                    ),
             );
         }
 
@@ -1347,25 +1914,23 @@ impl Render for Workspace {
         // (用户实测);玻璃晚一两帧淡入,压暗层与弹窗本体零延迟。
         let dialog_open = window.has_active_dialog(cx);
         let frost_wanted = dialog_open || self.usage_open;
-        if frost_wanted {
-            if self.frost.is_none() && self.frost_task.is_none() {
-                if let Some(raw) = frost::capture_raw(window) {
-                    self.frost_task = Some(cx.spawn(async move |this, cx| {
-                        let img = cx
-                            .background_executor()
-                            .spawn(async move { frost::finish(raw) })
-                            .await;
-                        let _ = this.update(cx, |this, cx| {
-                            this.frost_task = None;
-                            if let Some(img) = img {
-                                this.frost = Some(img);
-                                cx.notify();
-                            }
-                        });
-                    }));
-                }
+        if frost_wanted && self.frost.is_none() && self.frost_task.is_none() {
+            if let Some(raw) = frost::capture_raw(window) {
+                self.frost_task = Some(cx.spawn(async move |this, cx| {
+                    let img = cx
+                        .background_executor()
+                        .spawn(async move { frost::finish(raw) })
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.frost_task = None;
+                        if let Some(img) = img {
+                            this.frost = Some(img);
+                            cx.notify();
+                        }
+                    });
+                }));
             }
-        } else if self.frost.is_some() || self.frost_task.is_some() {
+        } else if !frost_wanted && (self.frost.is_some() || self.frost_task.is_some()) {
             self.frost = None;
             self.frost_task = None;
         }
@@ -1374,6 +1939,7 @@ impl Render for Workspace {
         let store_for_middle = self.store.clone();
         // 拖拽期间宽度自持,松手才落盘(与原版 `RightDrawer` 的 `onResizeEnd` 同)
         let drawer_width = self.drawer_drag.map(|d| d.width).unwrap_or(drawer_width);
+        let orca_context_width = drawer_width.clamp(ORCA_CONTEXT_MIN_WIDTH, ORCA_CONTEXT_MAX_WIDTH);
 
         // 中间栏是**上下**结构:ProjectList 在上、FileTree 在下(`App.tsx:501-512`
         // 的 `<Allotment vertical>`,minSize 100/120、无上限,高度落 middleColumnSizes)
@@ -1407,7 +1973,12 @@ impl Render for Workspace {
                     )),
             )
             .on_resize(move |state, _window, cx| {
-                let sizes: Vec<f64> = state.read(cx).sizes().iter().map(|p| f32::from(*p) as f64).collect();
+                let sizes: Vec<f64> = state
+                    .read(cx)
+                    .sizes()
+                    .iter()
+                    .map(|p| f32::from(*p) as f64)
+                    .collect();
                 store_for_middle.update(cx, |store, cx| store.set_middle_column_sizes(sizes, cx));
             });
 
@@ -1452,7 +2023,12 @@ impl Render for Workspace {
                 ),
             )
             .on_resize(move |state, _window, cx| {
-                let sizes: Vec<f64> = state.read(cx).sizes().iter().map(|p| f32::from(*p) as f64).collect();
+                let sizes: Vec<f64> = state
+                    .read(cx)
+                    .sizes()
+                    .iter()
+                    .map(|p| f32::from(*p) as f64)
+                    .collect();
                 store_for_columns.update(cx, |store, cx| {
                     // 折叠/收起的那一栏**不写回**:gpui-component 的
                     // `ResizableState` 按 children 个数占位,不可见的面板既不
@@ -1522,7 +2098,8 @@ impl Render for Workspace {
                     el.child(activity_bar::status_badge(global_status))
                 })
                 .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.store.update(cx, |store, cx| store.toggle_middle_column(cx));
+                    this.store
+                        .update(cx, |store, cx| store.toggle_middle_column(cx));
                 })),
             )
             .child(
@@ -1549,9 +2126,11 @@ impl Render for Workspace {
                     self.activity_bar_hover.is_visible("toggle-git"),
                     Self::activity_bar_item_hover_listener("toggle-git", cx),
                 )
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.toggle_drawer(DrawerPanel::Git, cx)
-                })),
+                .on_click(
+                    cx.listener(|this, _event, _window, cx| {
+                        this.toggle_drawer(DrawerPanel::Git, cx)
+                    }),
+                ),
             )
             // 终端列表竖条(GPUI 版新增,原版边条没有这颗)。开关的是终端区
             // 右缘的**停靠竖条**而不是右抽屉,所以激活态跟 store 的持久化显隐走
@@ -1748,14 +2327,19 @@ impl Render for Workspace {
                         .hover(|el| el.bg(ui::with_alpha(ui::accent(), 0.4)))
                         .on_mouse_down(
                             gpui::MouseButton::Left,
-                            cx.listener(move |this: &mut Self, event: &gpui::MouseDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                                this.drawer_drag = Some(DrawerDrag {
-                                    start_x: event.position.x,
-                                    start_width: drawer_width,
-                                    width: drawer_width,
-                                });
-                            }),
+                            cx.listener(
+                                move |this: &mut Self,
+                                      event: &gpui::MouseDownEvent,
+                                      _window,
+                                      cx| {
+                                    cx.stop_propagation();
+                                    this.drawer_drag = Some(DrawerDrag {
+                                        start_x: event.position.x,
+                                        start_width: drawer_width,
+                                        width: drawer_width,
+                                    });
+                                },
+                            ),
                         ),
                 )
                 .with_animation(
@@ -1881,28 +2465,39 @@ impl Render for Workspace {
         // 原版同款(`App.tsx:478` 的 `flex-1 overflow-hidden flex`),抽屉的
         // `absolute` 于是不会盖到标题栏上。用量面板**不在这里**:它是 Modal
         // (原版 fixed inset-0,遮罩要盖住标题栏),挂根层与 Dialog 族同构。
-        let body = div()
-            .flex_1()
-            .overflow_hidden()
-            .relative()
-            .flex()
-            // Activity Bar 的 flex 占位仍是 44px;视觉条本体在 columns 后面以
-            // absolute sibling 画,让右伸的标签不被 columns 覆盖。
-            .child(div().flex_none().w(px(activity_bar::WIDTH)).h_full())
-            .child(div().flex_1().h_full().child(columns_group))
-            .child(toggle_strip)
-            .children(drawer_layer)
-            // 自建 toast 层。挂在 `body`(它是 `relative`)里而不是根上 ——
-            // 原版 `.toast-stack` 贴的是视口右下角(`fixed right:16 bottom:16`),
-            // 标题栏在上面本来就碰不到它;挂进 body 后底边就是窗口底边,等价。
-            // 排在抽屉与用量面板**之后** = 画在它们之上,对应原版 `z-index:70`
-            // (浮层 50 / 分隔条 35)。
-            //
-            // S 批记档的「gpui-component 是右上角起堆」这条差异到此为止:自建层
-            // 按原版右下角起堆。`render_notification_layer` 留着不动(组件库内部
-            // 别处可能还用),只是 mt-app 不再往它里面推东西。
-            .child(self.toast_layer.clone())
-            .children(Root::render_notification_layer(window, cx));
+        let body = if Self::orca_shell_enabled() {
+            self.render_orca_body(
+                orca_context_width,
+                terminals_visible,
+                terminal_page_active,
+                window,
+                cx,
+            )
+        } else {
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .relative()
+                .flex()
+                // Activity Bar 的 flex 占位仍是 44px;视觉条本体在 columns 后面以
+                // absolute sibling 画,让右伸的标签不被 columns 覆盖。
+                .child(div().flex_none().w(px(activity_bar::WIDTH)).h_full())
+                .child(div().flex_1().h_full().child(columns_group))
+                .child(toggle_strip)
+                .children(drawer_layer)
+                // 自建 toast 层。挂在 `body`(它是 `relative`)里而不是根上 ——
+                // 原版 `.toast-stack` 贴的是视口右下角(`fixed right:16 bottom:16`),
+                // 标题栏在上面本来就碰不到它;挂进 body 后底边就是窗口底边,等价。
+                // 排在抽屉与用量面板**之后** = 画在它们之上,对应原版 `z-index:70`
+                // (浮层 50 / 分隔条 35)。
+                //
+                // S 批记档的「gpui-component 是右上角起堆」这条差异到此为止:自建层
+                // 按原版右下角起堆。`render_notification_layer` 留着不动(组件库内部
+                // 别处可能还用),只是 mt-app 不再往它里面推东西。
+                .child(self.toast_layer.clone())
+                .children(Root::render_notification_layer(window, cx))
+                .into_any_element()
+        };
 
         div()
             .size_full()
@@ -1927,14 +2522,10 @@ impl Render for Workspace {
             // 同时开等于同一块像素画两遍图、两层纱罩把 dim 平方。逐终端那路
             // 从没接过线(`pane.rs` 不调 `set_background_art`),这里是唯一一处。
             .when_some(background, |el, art| {
-                el.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .child(mt_ui::background_art(art)),
-                )
+                el.child(div().absolute().inset_0().child(mt_ui::background_art(art)))
             })
             .key_context("Workspace")
+            .capture_key_down(cx.listener(Self::on_workspace_key_down))
             .on_action(cx.listener(Self::on_new_terminal))
             .on_action(cx.listener(Self::on_close_pane))
             .on_action(cx.listener(Self::on_split_right))
@@ -1960,23 +2551,33 @@ impl Render for Workspace {
             // 拖拽期间鼠标可能划出手柄(甚至划过终端),所以移动/松手挂在**根**上
             // —— 等价于原版往 document 上挂 mousemove/mouseup
             .when(self.drawer_drag.is_some(), |el| {
-                el.on_mouse_move(cx.listener(|this: &mut Self, event: &gpui::MouseMoveEvent, _window, cx| {
-                    if let Some(drag) = this.drawer_drag.as_mut() {
-                        let delta = f32::from(drag.start_x - event.position.x) as f64;
-                        drag.width = (drag.start_width + delta).clamp(240.0, 720.0);
-                        cx.notify();
-                    }
-                }))
+                el.on_mouse_move(cx.listener(
+                    |this: &mut Self, event: &gpui::MouseMoveEvent, _window, cx| {
+                        if let Some(drag) = this.drawer_drag.as_mut() {
+                            let delta = f32::from(drag.start_x - event.position.x) as f64;
+                            let (min_width, max_width) = if Self::orca_shell_enabled() {
+                                (ORCA_CONTEXT_MIN_WIDTH, ORCA_CONTEXT_MAX_WIDTH)
+                            } else {
+                                (240.0, 720.0)
+                            };
+                            drag.width = (drag.start_width + delta).clamp(min_width, max_width);
+                            cx.notify();
+                        }
+                    },
+                ))
                 .on_mouse_up(
                     gpui::MouseButton::Left,
-                    cx.listener(|this: &mut Self, _event: &gpui::MouseUpEvent, _window, cx| {
-                        let Some(drag) = this.drawer_drag.take() else {
-                            return;
-                        };
-                        this.store
-                            .update(cx, |store, cx| store.set_right_drawer_width(drag.width, cx));
-                        cx.notify();
-                    }),
+                    cx.listener(
+                        |this: &mut Self, _event: &gpui::MouseUpEvent, _window, cx| {
+                            let Some(drag) = this.drawer_drag.take() else {
+                                return;
+                            };
+                            this.store.update(cx, |store, cx| {
+                                store.set_right_drawer_width(drag.width, cx)
+                            });
+                            cx.notify();
+                        },
+                    ),
                 )
             })
             // ⚠️ 标题栏**不套** [`cached_panel`]:它靠 `.window_control_area(..)`
@@ -1992,11 +2593,10 @@ impl Render for Workspace {
             // theme.rs::apply 钉的),用量面板走 usage_layer 自己的 black/50 ——
             // 两族弹窗共用同一张玻璃,观感一致(用户实测口径)。
             .children(self.frost.clone().filter(|_| frost_wanted).map(|img| {
-                div().absolute().inset_0().child(
-                    gpui::img(img)
-                        .size_full()
-                        .object_fit(gpui::ObjectFit::Fill),
-                )
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(gpui::img(img).size_full().object_fit(gpui::ObjectFit::Fill))
             }))
             // 用量统计(自绘 Modal):玻璃之上、Dialog 层之下 —— Dialog 叠开时
             // (如面板里再弹确认框)压在它上面,与原版 Modal 叠 Modal 同序。
@@ -2225,4 +2825,36 @@ fn main() {
         // 差的只有 GPU 那一帧,于是收在这里。
         startup_trace::mark("setup exit (window opened)");
     });
+}
+
+#[cfg(test)]
+mod orca_shell_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_shell_requires_explicit_opt_in() {
+        assert!(!legacy_shell_requested(None));
+        assert!(!legacy_shell_requested(Some("0")));
+        assert!(legacy_shell_requested(Some("1")));
+        assert!(legacy_shell_requested(Some(" TRUE ")));
+        assert!(legacy_shell_requested(Some("Yes")));
+    }
+
+    #[test]
+    fn context_tabs_keep_required_order() {
+        assert_eq!(
+            ContextPanel::ALL.map(ContextPanel::key),
+            ["files", "git", "tasks", "sessions"]
+        );
+    }
+
+    #[test]
+    fn agents_overlay_stays_inside_narrow_viewports() {
+        for viewport_width in [120.0, 480.0, 800.0, 1280.0] {
+            let (left, width) = agents_overlay_horizontal_geometry(viewport_width);
+            assert!(left >= 0.0);
+            assert!(width >= 0.0);
+            assert!(left + width + ORCA_AGENTS_MARGIN <= viewport_width);
+        }
+    }
 }

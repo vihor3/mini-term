@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{ClipboardItem, Entity};
+use gpui::{App, ClipboardItem, Entity, Window};
 
 use crate::file_ops::{FileBackendIdentity, FileClipboardEntry, FileOperationContext};
 use crate::fs_ops;
@@ -77,6 +77,70 @@ pub(super) fn file_menu_actions(
         actions.extend([None, Some(ViewDiff)]);
     }
     actions
+}
+
+pub(super) fn open_rename_prompt(
+    tree: Entity<FileTree>,
+    row: Row,
+    context: FileOperationContext,
+    connection: Option<mt_config::SshConnection>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let root = context.root.clone();
+    let remote = matches!(&context.backend, FileBackendIdentity::Remote { .. });
+    let path = row.path;
+    let parent = if remote {
+        crate::remote_ssh::parent_posix(&path.to_string_lossy())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.clone())
+    } else {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| root.clone())
+    };
+    let detach_before = row.is_dir.then(|| path.clone());
+    let old_name = row.name;
+    show_prompt(
+        t("fileTree", "prompt.renameTitle"),
+        t("fileTree", "prompt.renameMessage"),
+        old_name.clone(),
+        move |value, window, cx| {
+            let new_name = value.trim().to_string();
+            if new_name.is_empty() || new_name == old_name {
+                return;
+            }
+            let root = root.clone();
+            let path = path.clone();
+            let detach_before = detach_before.clone();
+            let context = context.clone();
+            let connection = connection.clone();
+            spawn_tree_op(
+                tree.clone(),
+                context,
+                Some(parent.clone()),
+                false,
+                detach_before,
+                t("fileTree", "operation.renaming").into(),
+                move || match connection {
+                    Some(conn) => crate::remote_ssh::rename_entry(
+                        &conn,
+                        &root.to_string_lossy(),
+                        &path.to_string_lossy(),
+                        &new_name,
+                    )
+                    .map(|_| None),
+                    None => mt_project::fs::rename_entry(&root, &path, &new_name)
+                        .map(|_| None)
+                        .map_err(|e| format!("{e:#}")),
+                },
+                window,
+                cx,
+            );
+        },
+        window,
+        cx,
+    );
 }
 
 /// 一行(文件/目录)的右键菜单。
@@ -230,51 +294,13 @@ pub(super) fn file_menu(
                 })
             }
             FileMenuAction::Rename => {
-                let is_dir = row.is_dir;
+                let row = row.clone();
                 menu::item(t("fileTree", "menu.rename"), move |window, cx| {
-                    let (tree, root, path, parent) =
-                        (tree.clone(), root.clone(), path.clone(), parent.clone());
-                    let detach_before = is_dir.then(|| path.clone());
-                    let old_name = name.clone();
-                    let context = context.clone();
-                    let connection = connection.clone();
-                    show_prompt(
-                        t("fileTree", "prompt.renameTitle"),
-                        t("fileTree", "prompt.renameMessage"),
-                        old_name.clone(),
-                        move |value, window, cx| {
-                            let new_name = value.trim().to_string();
-                            // 空名 / 没改都当没点(原版同一条判断)
-                            if new_name.is_empty() || new_name == old_name {
-                                return;
-                            }
-                            let (root, path) = (root.clone(), path.clone());
-                            let detach_before = detach_before.clone();
-                            let context = context.clone();
-                            let connection = connection.clone();
-                            spawn_tree_op(
-                                tree.clone(),
-                                context,
-                                Some(parent.clone()),
-                                false,
-                                detach_before,
-                                t("fileTree", "operation.renaming").into(),
-                                move || match connection {
-                                    Some(conn) => crate::remote_ssh::rename_entry(
-                                        &conn,
-                                        &root.to_string_lossy(),
-                                        &path.to_string_lossy(),
-                                        &new_name,
-                                    )
-                                    .map(|_| None),
-                                    None => mt_project::fs::rename_entry(&root, &path, &new_name)
-                                        .map(|_| None)
-                                        .map_err(|e| format!("{e:#}")),
-                                },
-                                window,
-                                cx,
-                            );
-                        },
+                    open_rename_prompt(
+                        tree.clone(),
+                        row.clone(),
+                        context.clone(),
+                        connection.clone(),
                         window,
                         cx,
                     );

@@ -67,7 +67,7 @@ mod ops;
 #[cfg(test)]
 mod tests;
 
-use menu::{background_menu, file_menu, header_action_capabilities, mod_label};
+use menu::{background_menu, file_menu, header_action_capabilities, mod_label, open_rename_prompt};
 use ops::{
     choose_upload_paths, new_entry_prompt, paste_file_clipboard, start_download, start_upload,
 };
@@ -980,6 +980,29 @@ fn missing_expanded_dirs(
         } else {
             out.push(entry.path.clone());
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowClickAction {
+    ToggleDirectory,
+    OpenPreview,
+    Rename,
+    None,
+}
+
+fn row_click_action(is_dir: bool, click_count: usize) -> RowClickAction {
+    if is_dir {
+        return match click_count {
+            1 => RowClickAction::ToggleDirectory,
+            2 => RowClickAction::Rename,
+            _ => RowClickAction::None,
+        };
+    }
+    match click_count {
+        1 => RowClickAction::OpenPreview,
+        2 => RowClickAction::Rename,
+        _ => RowClickAction::None,
     }
 }
 
@@ -1918,6 +1941,7 @@ impl FileTree {
         let path = row.path.clone();
         let is_dir = row.is_dir;
         let row_for_menu = row.clone();
+        let row_for_click = row.clone();
         let drag_path = row.path.clone();
         let drag_name = row.name.clone();
         let drag_is_dir = row.is_dir;
@@ -1957,6 +1981,8 @@ impl FileTree {
         let row_context = self.operation_context(cx);
         let key_context = row_context.clone();
         let click_context = row_context.clone();
+        let click_connection = self.remote_conn(cx);
+        let tree_for_click = cx.entity();
         let drop_context = row_context.clone();
         let upload_target = if row.is_dir {
             row.path.clone()
@@ -2013,12 +2039,23 @@ impl FileTree {
                     if this.operation_context(cx).as_ref() != click_context.as_ref() {
                         return;
                     }
-                    if is_dir {
-                        this.toggle_dir(path.clone(), cx);
-                    } else if event.click_count() <= 1 {
-                        // 单击开预览器;双击的第二个事件(click_count == 2)不再做别的,
-                        // 见 `open_file` 的注释
-                        this.open_file(path.clone(), window, cx);
+                    match row_click_action(is_dir, event.click_count()) {
+                        RowClickAction::ToggleDirectory => this.toggle_dir(path.clone(), cx),
+                        RowClickAction::OpenPreview => this.open_file(path.clone(), window, cx),
+                        RowClickAction::Rename => {
+                            let Some(context) = click_context.clone() else {
+                                return;
+                            };
+                            open_rename_prompt(
+                                tree_for_click.clone(),
+                                row_for_click.clone(),
+                                context,
+                                click_connection.clone(),
+                                window,
+                                cx,
+                            );
+                        }
+                        RowClickAction::None => {}
                     }
                 }),
             )

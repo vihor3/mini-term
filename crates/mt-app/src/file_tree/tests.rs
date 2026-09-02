@@ -3,6 +3,20 @@ use super::menu::{HeaderActionCapabilities, file_menu_actions, header_action_cap
 use super::*;
 
 #[test]
+fn 文件行单击预览双击重命名() {
+    assert_eq!(row_click_action(false, 1), RowClickAction::OpenPreview);
+    assert_eq!(row_click_action(false, 2), RowClickAction::Rename);
+    assert_eq!(row_click_action(false, 3), RowClickAction::None);
+}
+
+#[test]
+fn 目录单击展开双击重命名() {
+    assert_eq!(row_click_action(true, 1), RowClickAction::ToggleDirectory);
+    assert_eq!(row_click_action(true, 2), RowClickAction::Rename);
+    assert_eq!(row_click_action(true, 3), RowClickAction::None);
+}
+
+#[test]
 fn 远程下载上下文要求项目根目录和连接身份完全一致() {
     let context = FileOperationContext {
         project_id: "project-a".into(),
