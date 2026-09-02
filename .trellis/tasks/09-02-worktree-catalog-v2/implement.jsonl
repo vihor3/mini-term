@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "The catalog fact/source contract flows from Git command output through compatibility projections into destructive and non-destructive app decisions."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "The new parser/catalog must become the single source for legacy list and branch projections instead of duplicating Git parsing."}
+{"file": ".trellis/spec/mt-project/backend/index.md", "reason": "Entry point for mt-project backend conventions before adding the worktree domain module."}
+{"file": ".trellis/spec/mt-project/backend/quality-guidelines.md", "reason": "Quality checklist for strict parsing, failure behavior, and tests in mt-project."}
+{"file": ".trellis/spec/mt-app/backend/index.md", "reason": "Entry point for app orchestration conventions used by modal/project-list generation fencing."}
+{"file": ".trellis/spec/mt-app/backend/quality-guidelines.md", "reason": "Async ownership and UI-state consistency requirements for background scan completion."}
+{"file": ".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/orca-worktree-terminal-agent-architecture.md", "reason": "Source-backed Orca worktree parser, authority, identity-boundary, and rollout findings."}
+{"file": ".trellis/tasks/09-02-worktree-catalog-v2/research/codebase-findings.md", "reason": "Current mini-term API, failure-mode, app-race, and identity-boundary audit for this child."}
+{"file": ".trellis/spec/mt-project/backend/worktree-catalog-contract.md", "reason": "Executable parser, authority, generation, path, compatibility, and destructive-cleanup contract established by this child."}

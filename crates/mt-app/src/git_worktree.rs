@@ -48,11 +48,7 @@ use crate::ui;
 /// `src/utils/projectActions.ts:9-11`。worktree「是否已是项目」的比对全靠它,
 /// **必须逐字移植**。
 pub fn normalize_path(p: &str) -> String {
-    let unified: String = p
-        .chars()
-        .map(|c| if c == '\\' { '/' } else { c })
-        .collect();
-    unified.trim_end_matches('/').to_lowercase()
+    mt_project::worktree::normalize_path_for_comparison(p)
 }
 
 /// 分支名 → 目录名片段(`GitWorktreeModal.tsx:45-47`)。
@@ -82,14 +78,27 @@ pub fn sanitize_branch_for_dir(branch: &str) -> String {
 
 /// 拼路径(分隔符跟随输入)。
 pub fn join_path(base: &str, child: &str, sep: char) -> String {
-    let base = base.trim_end_matches(['/', '\\']);
+    let base = if cfg!(windows) {
+        base.trim_end_matches(['/', '\\'])
+    } else {
+        base.trim_end_matches('/')
+    };
     format!("{base}{sep}{child}")
 }
 
 /// 父目录。没有父级时返回原串。
 pub fn parent_dir(path: &str) -> &str {
-    let trimmed = path.trim_end_matches(['/', '\\']);
-    match trimmed.rfind(['/', '\\']) {
+    let trimmed = if cfg!(windows) {
+        path.trim_end_matches(['/', '\\'])
+    } else {
+        path.trim_end_matches('/')
+    };
+    let separator = if cfg!(windows) {
+        trimmed.rfind(['/', '\\'])
+    } else {
+        trimmed.rfind('/')
+    };
+    match separator {
         Some(0) => &trimmed[..1],
         Some(idx) => &trimmed[..idx],
         None => trimmed,
@@ -98,8 +107,17 @@ pub fn parent_dir(path: &str) -> &str {
 
 /// 末段名。
 pub fn base_name(path: &str) -> &str {
-    let trimmed = path.trim_end_matches(['/', '\\']);
-    match trimmed.rfind(['/', '\\']) {
+    let trimmed = if cfg!(windows) {
+        path.trim_end_matches(['/', '\\'])
+    } else {
+        path.trim_end_matches('/')
+    };
+    let separator = if cfg!(windows) {
+        trimmed.rfind(['/', '\\'])
+    } else {
+        trimmed.rfind('/')
+    };
+    match separator {
         Some(idx) => &trimmed[idx + 1..],
         None => trimmed,
     }
@@ -157,33 +175,68 @@ struct RepoGroup {
     /// git 命令的执行路径:worktree 增删必须落在主仓库上。
     main_path: String,
     worktrees: Vec<WorktreeInfo>,
+    authoritative: bool,
     error: Option<String>,
 }
 
-/// 把逐仓库的 `list_worktrees` 结果归并成组。
-fn merge_groups(items: Vec<(String, Result<Vec<WorktreeInfo>, String>)>) -> Vec<RepoGroup> {
+struct RepoLoad {
+    path: String,
+    result: Result<mt_project::worktree::WorktreeScan, String>,
+}
+
+fn previous_group_for_path<'a>(previous: &'a [RepoGroup], path: &str) -> Option<&'a RepoGroup> {
+    previous.iter().find(|group| {
+        normalize_path(&group.main_path) == normalize_path(path)
+            || group
+                .worktrees
+                .iter()
+                .any(|worktree| normalize_path(&worktree.path) == normalize_path(path))
+    })
+}
+
+/// 把逐仓库的 catalog 结果归并成组。非权威结果或失败会保留上一帧的组。
+fn merge_groups(items: Vec<RepoLoad>, previous: &[RepoGroup]) -> Vec<RepoGroup> {
     let mut out: Vec<RepoGroup> = Vec::new();
-    for (path, result) in items {
+    for RepoLoad { path, result } in items {
         match result {
-            Ok(worktrees) => {
+            Ok(scan) => {
+                let mut worktrees = mt_project::git::project_worktree_scan(&scan);
+                if !scan.authoritative
+                    && let Some(old) = previous_group_for_path(previous, &path)
+                {
+                    worktrees = old.worktrees.clone();
+                }
                 let main_path = worktrees
                     .iter()
                     .find(|w| w.is_main)
                     .map(|w| w.path.clone())
                     .unwrap_or_else(|| path.clone());
                 let key = normalize_path(&main_path);
-                if out.iter().any(|g| g.key == key) {
-                    continue;
-                }
-                out.push(RepoGroup {
-                    key,
+                let group = RepoGroup {
+                    key: key.clone(),
                     name: base_name(&main_path).to_string(),
                     main_path,
                     worktrees,
+                    authoritative: scan.authoritative,
                     error: None,
-                });
+                };
+                if let Some(index) = out.iter().position(|existing| existing.key == key) {
+                    if group.authoritative && !out[index].authoritative {
+                        out[index] = group;
+                    }
+                } else {
+                    out.push(group);
+                }
             }
             Err(err) => {
+                if let Some(old) = previous_group_for_path(previous, &path) {
+                    if !out.iter().any(|group| group.key == old.key) {
+                        let mut retained = old.clone();
+                        retained.authoritative = false;
+                        out.push(retained);
+                    }
+                    continue;
+                }
                 let key = normalize_path(&path);
                 if out.iter().any(|g| g.key == key) {
                     continue;
@@ -193,6 +246,7 @@ fn merge_groups(items: Vec<(String, Result<Vec<WorktreeInfo>, String>)>) -> Vec<
                     name: base_name(&path).to_string(),
                     main_path: path,
                     worktrees: Vec::new(),
+                    authoritative: false,
                     error: Some(err),
                 });
             }
@@ -217,6 +271,7 @@ struct WorktreeModal {
     /// `None` = 还在加载。
     groups: Option<Vec<RepoGroup>>,
     load_error: Option<String>,
+    load_generation: u64,
     selected_keys: Vec<String>,
     branches_by_repo: HashMap<String, Vec<BranchInfo>>,
     mode: Mode,
@@ -262,6 +317,7 @@ pub fn open(
         project_id,
         groups: None,
         load_error: None,
+        load_generation: 0,
         selected_keys: Vec::new(),
         branches_by_repo: HashMap::new(),
         mode: Mode::Existing,
@@ -300,12 +356,16 @@ pub fn open(
 
 /// 加载分组。
 fn load(state: &Entity<WorktreeModal>, cx: &mut App) {
-    let (repo_path, discover) = {
+    let (repo_path, discover, request_generation) = {
         let s = state.read(cx);
-        (s.repo_path.clone(), s.discover_repos)
+        (
+            s.repo_path.clone(),
+            s.discover_repos,
+            s.load_generation.wrapping_add(1),
+        )
     };
     state.update(cx, |s, cx| {
-        s.groups = None;
+        s.load_generation = request_generation;
         s.load_error = None;
         cx.notify();
     });
@@ -330,38 +390,54 @@ fn load(state: &Entity<WorktreeModal>, cx: &mut App) {
                 Ok(paths
                     .into_iter()
                     .map(|path| {
-                        let result = mt_project::git::list_worktrees(std::path::Path::new(&path))
+                        let result = mt_project::worktree::scan(std::path::Path::new(&path))
                             .map_err(|err| format!("{err:#}"));
-                        (path, result)
+                        RepoLoad { path, result }
                     })
                     .collect::<Vec<_>>())
             })
             .await;
 
         let _ = state.update(cx, |s: &mut WorktreeModal, cx| {
+            if s.load_generation != request_generation {
+                return;
+            }
             match loaded {
                 Err(err) => {
-                    s.groups = Some(Vec::new());
+                    if s.groups.is_none() {
+                        s.groups = Some(Vec::new());
+                    }
                     s.load_error = Some(err);
                 }
-                Ok(items) => {
+                Ok(mut items) => {
+                    for item in &mut items {
+                        if let Ok(scan) = &mut item.result
+                            && mt_project::worktree::current_generation(std::path::Path::new(
+                                &item.path,
+                            )) != scan.generation
+                        {
+                            scan.authoritative = false;
+                        }
+                    }
                     // 单仓库时沿用旧行为:加载失败即整体报错,不显示空壳分组
                     if !s.discover_repos
                         && items.len() == 1
-                        && let Some((_, Err(err))) = items.first()
+                        && let Some(RepoLoad {
+                            result: Err(err), ..
+                        }) = items.first()
+                        && s.groups.is_none()
                     {
                         s.groups = Some(Vec::new());
                         s.load_error = Some(err.clone());
                         cx.notify();
                         return;
                     }
-                    let groups = merge_groups(items);
+                    let previous = s.groups.as_deref().unwrap_or_default();
+                    let groups = merge_groups(items, previous);
                     // 勾选保留:剔除消失的键;只剩一个可用仓库时自动勾上
                     s.selected_keys
                         .retain(|k| groups.iter().any(|g| &g.key == k));
-                    if s.selected_keys.is_empty()
-                        && groups.len() == 1
-                        && groups[0].error.is_none()
+                    if s.selected_keys.is_empty() && groups.len() == 1 && groups[0].error.is_none()
                     {
                         s.selected_keys = vec![groups[0].key.clone()];
                     }
@@ -548,7 +624,11 @@ fn sync_path_suggestion(
             .iter()
             .filter(|g| s.selected_keys.contains(&g.key))
             .collect();
-        let sep = if s.repo_path.contains('\\') { '\\' } else { '/' };
+        let sep = if cfg!(windows) && s.repo_path.contains('\\') {
+            '\\'
+        } else {
+            '/'
+        };
         let branch = match s.mode {
             Mode::Existing => s.sel_branch.clone(),
             Mode::New => s.new_branch.read(cx).value().trim().to_string(),
@@ -1254,7 +1334,11 @@ fn create(
         if raw_path.is_empty() {
             return;
         }
-        let sep = if s.repo_path.contains('\\') { '\\' } else { '/' };
+        let sep = if cfg!(windows) && s.repo_path.contains('\\') {
+            '\\'
+        } else {
+            '/'
+        };
         let selected: Vec<&RepoGroup> = groups
             .iter()
             .filter(|g| s.selected_keys.contains(&g.key))
@@ -1700,14 +1784,35 @@ fn prune(state: &Entity<WorktreeModal>, group: &RepoGroup, cx: &mut App) {
 mod tests {
     use super::*;
 
-    fn wt(name: &str, path: &str, is_main: bool, branch: Option<&str>) -> WorktreeInfo {
-        WorktreeInfo {
-            name: name.to_string(),
-            path: path.to_string(),
-            branch: branch.map(str::to_string),
+    fn fact(path: &str, is_main: bool, branch: Option<&str>) -> mt_project::worktree::WorktreeFact {
+        mt_project::worktree::WorktreeFact {
+            path: PathBuf::from(path),
+            head: Some("abc".into()),
+            branch_ref: branch.map(|branch| format!("refs/heads/{branch}")),
             is_main,
-            is_valid: true,
-            is_locked: false,
+            is_detached: branch.is_none(),
+            is_bare: false,
+            is_sparse: false,
+            locked: None,
+            prunable: None,
+            path_state: mt_project::worktree::WorktreePathState::Present,
+        }
+    }
+
+    fn scan(
+        worktrees: Vec<mt_project::worktree::WorktreeFact>,
+        authoritative: bool,
+    ) -> mt_project::worktree::WorktreeScan {
+        mt_project::worktree::WorktreeScan {
+            generation: 0,
+            source: if authoritative {
+                mt_project::worktree::WorktreeScanSource::PorcelainZ
+            } else {
+                mt_project::worktree::WorktreeScanSource::LastKnown
+            },
+            authoritative,
+            worktrees,
+            warning: None,
         }
     }
 
@@ -1720,13 +1825,23 @@ mod tests {
         }
     }
 
-    /// `normalizePath`:分隔符统一、去尾斜杠、转小写。三条都不能少 ——
-    /// worktree「是否已是项目」的比对全靠它。
+    /// 路径分隔符与尾斜杠统一；只有 Windows 本地路径按平台规则折叠大小写。
     #[test]
     fn 路径归一化() {
-        assert_eq!(normalize_path(r"D:\Git\Repo\"), "d:/git/repo");
-        assert_eq!(normalize_path("/home/U/Proj/"), "/home/u/proj");
-        assert_eq!(normalize_path(r"D:\Git\Repo"), normalize_path("D:/Git/repo"));
+        if cfg!(windows) {
+            assert_eq!(normalize_path(r"D:\Git\Repo\"), "d:/git/repo");
+            assert_eq!(
+                normalize_path(r"D:\Git\Repo"),
+                normalize_path("D:/Git/repo")
+            );
+        } else {
+            assert_eq!(normalize_path("/home/U/Proj/"), "/home/U/Proj");
+            assert_ne!(
+                normalize_path("/home/U/Proj"),
+                normalize_path("/home/u/proj")
+            );
+            assert_ne!(normalize_path(r"/tmp/a\b"), normalize_path("/tmp/a/b"));
+        }
         assert_eq!(normalize_path(""), "");
     }
 
@@ -1745,31 +1860,45 @@ mod tests {
     /// 路径拼接 / 父目录 / 末段名。
     #[test]
     fn 路径小件() {
-        assert_eq!(join_path(r"D:\Git", "repo", '\\'), r"D:\Git\repo");
-        assert_eq!(join_path(r"D:\Git\", "repo", '\\'), r"D:\Git\repo");
         assert_eq!(join_path("/home/u", "p", '/'), "/home/u/p");
-
-        assert_eq!(parent_dir(r"D:\Git\repo"), r"D:\Git");
         assert_eq!(parent_dir("/home/u/p/"), "/home/u");
         assert_eq!(parent_dir("repo"), "repo", "没有父级时返回原串");
-
-        assert_eq!(base_name(r"D:\Git\repo"), "repo");
         assert_eq!(base_name("/home/u/p/"), "p");
         assert_eq!(base_name("repo"), "repo");
+        if cfg!(windows) {
+            assert_eq!(join_path(r"D:\Git", "repo", '\\'), r"D:\Git\repo");
+            assert_eq!(join_path(r"D:\Git\", "repo", '\\'), r"D:\Git\repo");
+            assert_eq!(parent_dir(r"D:\Git\repo"), r"D:\Git");
+            assert_eq!(base_name(r"D:\Git\repo"), "repo");
+        } else {
+            assert_eq!(join_path(r"/tmp/base\", "repo", '/'), r"/tmp/base\/repo");
+            assert_eq!(parent_dir(r"/tmp/foo\bar"), "/tmp");
+            assert_eq!(base_name(r"/tmp/foo\bar"), r"foo\bar");
+            assert_eq!(base_name(r"/tmp/repo\"), r"repo\");
+        }
     }
 
     /// 归并:主仓库与它内部的 worktree 扫出来结果完全相同,必须合成一组。
     #[test]
     fn 按主工作区归并() {
         let list = vec![
-            wt("repo", "/a/repo", true, Some("main")),
-            wt("wt1", "/a/repo-wt1", false, Some("feat")),
+            fact("/a/repo", true, Some("main")),
+            fact("/a/repo-wt1", false, Some("feat")),
         ];
-        let groups = merge_groups(vec![
-            ("/a/repo".into(), Ok(list.clone())),
-            // 同一份结果(从 worktree 目录扫到的)—— 不该重复展示
-            ("/a/repo-wt1".into(), Ok(list.clone())),
-        ]);
+        let groups = merge_groups(
+            vec![
+                RepoLoad {
+                    path: "/a/repo".into(),
+                    result: Ok(scan(list.clone(), true)),
+                },
+                // 同一份结果(从 worktree 目录扫到的)—— 不该重复展示
+                RepoLoad {
+                    path: "/a/repo-wt1".into(),
+                    result: Ok(scan(list, true)),
+                },
+            ],
+            &[],
+        );
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].main_path, "/a/repo");
         assert_eq!(groups[0].name, "repo");
@@ -1779,14 +1908,52 @@ mod tests {
     /// 某个仓库 `list_worktrees` 失败时只让那一组显示错误,别的组照常。
     #[test]
     fn 单组失败不拖垮别的组() {
-        let groups = merge_groups(vec![
-            ("/a/ok".into(), Ok(vec![wt("ok", "/a/ok", true, None)])),
-            ("/a/bad".into(), Err("仓库损坏".into())),
-        ]);
+        let groups = merge_groups(
+            vec![
+                RepoLoad {
+                    path: "/a/ok".into(),
+                    result: Ok(scan(vec![fact("/a/ok", true, None)], true)),
+                },
+                RepoLoad {
+                    path: "/a/bad".into(),
+                    result: Err("仓库损坏".into()),
+                },
+            ],
+            &[],
+        );
         assert_eq!(groups.len(), 2);
         assert!(groups[0].error.is_none());
         assert_eq!(groups[1].error.as_deref(), Some("仓库损坏"));
         assert!(groups[1].worktrees.is_empty());
+    }
+
+    #[test]
+    fn 非权威结果保留上一帧而不采用部分列表() {
+        let previous = merge_groups(
+            vec![RepoLoad {
+                path: "/a/repo".into(),
+                result: Ok(scan(
+                    vec![
+                        fact("/a/repo", true, Some("main")),
+                        fact("/a/repo-wt", false, Some("feature")),
+                    ],
+                    true,
+                )),
+            }],
+            &[],
+        );
+        let groups = merge_groups(
+            vec![RepoLoad {
+                path: "/a/repo".into(),
+                result: Ok(scan(vec![fact("/a/repo", true, Some("main"))], false)),
+            }],
+            &previous,
+        );
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].worktrees.len(), 2);
+        assert_eq!(groups[0].worktrees[0].branch.as_deref(), Some("main"));
+        assert_eq!(groups[0].worktrees[1].branch.as_deref(), Some("feature"));
+        assert!(!groups[0].authoritative);
     }
 
     /// 「检出现有分支」:本地分支减去已被占用的,再取全组交集。
@@ -1801,10 +1968,14 @@ mod tests {
             // main 被主工作区占着
             vec![Some("main".to_string())],
         );
-        assert_eq!(available_branches(&[g1.clone()]), vec!["feat"]);
+        assert_eq!(available_branches(std::slice::from_ref(&g1)), vec!["feat"]);
 
         let g2 = (
-            vec![branch("main", false), branch("feat", false), branch("x", false)],
+            vec![
+                branch("main", false),
+                branch("feat", false),
+                branch("x", false),
+            ],
             vec![Some("main".to_string())],
         );
         // 两组交集仍是 feat(x 只有第二组有)

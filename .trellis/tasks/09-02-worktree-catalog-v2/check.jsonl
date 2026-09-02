@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Verify raw Git facts, source authority, legacy projections, and app cleanup decisions remain consistent end to end."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Verify no second parser or divergent worktree authority remains in git.rs or app callers."}
+{"file": ".trellis/spec/mt-project/backend/index.md", "reason": "Locate mt-project quality and pre-development rules for the new worktree module."}
+{"file": ".trellis/spec/mt-project/backend/quality-guidelines.md", "reason": "Check parser strictness, error propagation, command boundaries, and fixture coverage."}
+{"file": ".trellis/spec/mt-app/backend/index.md", "reason": "Locate app quality rules for async generation and state application."}
+{"file": ".trellis/spec/mt-app/backend/quality-guidelines.md", "reason": "Verify stale background results and non-authoritative scans cannot replace or delete current UI state."}
+{"file": ".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/orca-worktree-terminal-agent-architecture.md", "reason": "Check implementation against the approved Orca mechanisms and authoritative/fallback safety boundary."}
+{"file": ".trellis/tasks/09-02-worktree-catalog-v2/research/codebase-findings.md", "reason": "Check every audited failure mode and caller race has an implementation or explicit out-of-scope disposition."}
+{"file": ".trellis/spec/mt-project/backend/worktree-catalog-contract.md", "reason": "Verify the implemented catalog and app consumers against the finalized executable worktree contract."}

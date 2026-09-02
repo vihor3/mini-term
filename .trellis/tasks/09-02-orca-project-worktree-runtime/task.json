@@ -1,0 +1,28 @@
+{
+  "id": "orca-project-worktree-runtime",
+  "name": "orca-project-worktree-runtime",
+  "title": "Orca Project Worktree Runtime",
+  "description": "Implement the approved Orca-aligned Project -> Worktree architecture across catalog identity, workbench state, detached terminal recovery, remote runtime/agent status, contextual sidebar, GitHub Tasks, and global Agents feed.",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "leo",
+  "assignee": "leo",
+  "createdAt": "2026-09-02",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "09-02-worktree-catalog-v2"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

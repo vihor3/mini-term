@@ -1112,7 +1112,7 @@ pub fn get_git_diff(
 /// 在 Windows GUI 应用下 spawn console 子进程(比如 git.exe)默认会弹出 conhost
 /// 黑框,并且窗口创建/焦点切换会让 UI 感知卡顿。这里统一给 `Command` 加
 /// CREATE_NO_WINDOW 抑制掉控制台分配。
-fn hide_console_window(_cmd: &mut std::process::Command) {
+pub(crate) fn hide_console_window(_cmd: &mut std::process::Command) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -1359,10 +1359,10 @@ pub fn git_discard_file(repo_path: &Path, files: &[String]) -> Result<()> {
 pub struct WorktreeInfo {
     pub name: String,
     pub path: String,
-    /// HEAD 所在分支;detached / 失效条目为 None
+    /// HEAD 所在的本地分支;detached / bare 为 None,prunable 条目仍保留占用分支。
     pub branch: Option<String>,
     pub is_main: bool,
-    /// 目录还在且元数据能通过校验;false = 可被 prune 的失效条目
+    /// 目录未确认缺失且 Git 未标记 prunable。
     pub is_valid: bool,
     pub is_locked: bool,
 }
@@ -1371,80 +1371,47 @@ pub struct WorktreeInfo {
 /// 统一后才能做「该 worktree 是否已是项目」的对比。
 fn display_path(p: &Path) -> String {
     let s = p.to_string_lossy();
-    s.trim_end_matches(['/', '\\']).to_string()
+    if cfg!(windows) {
+        s.trim_end_matches(['/', '\\']).to_string()
+    } else {
+        s.trim_end_matches('/').to_string()
+    }
 }
 
-fn head_branch(repo: &Repository) -> Option<String> {
-    repo.head().ok().and_then(|h| {
-        if h.is_branch() {
-            h.shorthand().map(|s| s.to_string())
-        } else {
-            None
-        }
-    })
+fn project_worktree_fact(fact: &crate::worktree::WorktreeFact) -> WorktreeInfo {
+    let path = display_path(&fact.path);
+    let name = fact
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "main".to_string());
+    WorktreeInfo {
+        name,
+        path,
+        branch: fact
+            .branch_ref
+            .as_deref()
+            .and_then(|branch| branch.strip_prefix("refs/heads/"))
+            .map(str::to_string),
+        is_main: fact.is_main,
+        is_valid: fact.prunable.is_none()
+            && fact.path_state != crate::worktree::WorktreePathState::Missing,
+        is_locked: fact.locked.is_some(),
+    }
+}
+
+/// Compatibility projection for existing app callers that still render the
+/// six-field worktree model.
+pub fn project_worktree_scan(scan: &crate::worktree::WorktreeScan) -> Vec<WorktreeInfo> {
+    scan.worktrees.iter().map(project_worktree_fact).collect()
 }
 
 /// 列出某仓库的主工作区 + 全部 linked worktree(含失效条目,供管理面板展示与清理)。
 /// 从 worktree 路径调用同样可行:元数据都在主仓库 .git/worktrees 下。
 pub fn list_worktrees(repo_path: &Path) -> Result<Vec<WorktreeInfo>> {
-    let repo = Repository::open(repo_path)?;
-    // 从 linked worktree 打开时回到主仓库:linked worktree 的 gitdir 形如
-    // `<main>/.git/worktrees/<name>`,上溯两级即主仓库 .git(git2 0.19 未暴露 commondir)
-    let main_repo = if repo.is_worktree() {
-        let git_dir = repo.path().to_path_buf();
-        let main_git = git_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .ok_or_else(|| anyhow!("无法定位主仓库"))?;
-        Repository::open(main_git)?
-    } else {
-        repo
-    };
-
-    let mut out = Vec::new();
-    if let Some(workdir) = main_repo.workdir() {
-        let name = workdir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "main".to_string());
-        out.push(WorktreeInfo {
-            name,
-            path: display_path(workdir),
-            branch: head_branch(&main_repo),
-            is_main: true,
-            is_valid: true,
-            is_locked: false,
-        });
-    }
-
-    if let Ok(names) = main_repo.worktrees() {
-        for wt_name in names.iter().flatten() {
-            let wt = match main_repo.find_worktree(wt_name) {
-                Ok(w) => w,
-                Err(_) => continue,
-            };
-            let wt_path = wt.path().to_path_buf();
-            let is_valid = wt_path.exists() && wt.validate().is_ok();
-            let is_locked = matches!(wt.is_locked(), Ok(git2::WorktreeLockStatus::Locked(_)));
-            let branch = if is_valid {
-                Repository::open_from_worktree(&wt)
-                    .ok()
-                    .and_then(|r| head_branch(&r))
-            } else {
-                None
-            };
-            out.push(WorktreeInfo {
-                name: wt_name.to_string(),
-                path: display_path(&wt_path),
-                branch,
-                is_main: false,
-                is_valid,
-                is_locked,
-            });
-        }
-    }
-
-    Ok(out)
+    let scan = crate::worktree::scan(repo_path)?;
+    Ok(project_worktree_scan(&scan))
 }
 
 /// 新建 worktree。`create_branch=true` 时以 `base`(缺省 HEAD)为起点建新分支,
@@ -1462,10 +1429,10 @@ pub fn add_worktree(
         args.push("-b");
         args.push(branch);
         args.push(worktree_path);
-        if let Some(b) = base {
-            if !b.is_empty() {
-                args.push(b);
-            }
+        if let Some(b) = base
+            && !b.is_empty()
+        {
+            args.push(b);
         }
     } else {
         args.push(worktree_path);
@@ -1479,6 +1446,7 @@ pub fn add_worktree(
     );
     if result.is_ok() {
         invalidate_repo_cache();
+        crate::worktree::invalidate(repo_path);
     }
     result
 }
@@ -1494,6 +1462,7 @@ pub fn remove_worktree(repo_path: &Path, worktree_path: &str, force: bool) -> Re
     let result = run_git_command(repo_path, &args, Duration::from_secs(60), "");
     if result.is_ok() {
         invalidate_repo_cache();
+        crate::worktree::invalidate(repo_path);
     }
     result
 }
@@ -1508,6 +1477,7 @@ pub fn prune_worktrees(repo_path: &Path) -> Result<String> {
     );
     if result.is_ok() {
         invalidate_repo_cache();
+        crate::worktree::invalidate(repo_path);
     }
     result
 }
@@ -1523,11 +1493,14 @@ pub fn get_worktree_branches(paths: &[PathBuf]) -> Vec<Option<String>> {
             if p.to_string_lossy().starts_with(r"\\") {
                 return None;
             }
-            let repo = Repository::open(p).ok()?;
-            if !repo.is_worktree() {
-                return None;
-            }
-            head_branch(&repo)
+            let scan = crate::worktree::scan(p).ok()?;
+            scan.worktrees
+                .iter()
+                .find(|worktree| crate::worktree::paths_equal(&worktree.path, p))
+                .filter(|worktree| !worktree.is_main)
+                .and_then(|worktree| worktree.branch_ref.as_deref())
+                .and_then(|branch| branch.strip_prefix("refs/heads/"))
+                .map(str::to_string)
         })
         .collect()
 }
@@ -1679,9 +1652,80 @@ mod tests {
     }
 
     #[test]
-    fn display_path_trims_trailing_separators() {
-        assert_eq!(display_path(Path::new(r"C:\proj\")), r"C:\proj");
+    fn display_path_trims_only_platform_separators() {
         assert_eq!(display_path(Path::new("/home/u/proj/")), "/home/u/proj");
+        if cfg!(windows) {
+            assert_eq!(display_path(Path::new(r"C:\proj\")), r"C:\proj");
+        } else {
+            assert_eq!(display_path(Path::new(r"/home/u/proj\")), r"/home/u/proj\");
+        }
+    }
+
+    #[test]
+    fn compatibility_projection_keeps_prunable_branch_and_all_rows() {
+        let scan = crate::worktree::WorktreeScan {
+            generation: 0,
+            source: crate::worktree::WorktreeScanSource::PorcelainZ,
+            authoritative: true,
+            worktrees: vec![
+                crate::worktree::WorktreeFact {
+                    path: PathBuf::from("/repo"),
+                    head: Some("abc".into()),
+                    branch_ref: Some("refs/heads/main".into()),
+                    is_main: true,
+                    is_detached: false,
+                    is_bare: false,
+                    is_sparse: false,
+                    locked: None,
+                    prunable: None,
+                    path_state: crate::worktree::WorktreePathState::Present,
+                },
+                crate::worktree::WorktreeFact {
+                    path: PathBuf::from("/missing"),
+                    head: Some("def".into()),
+                    branch_ref: Some("refs/heads/occupied".into()),
+                    is_main: false,
+                    is_detached: false,
+                    is_bare: false,
+                    is_sparse: false,
+                    locked: None,
+                    prunable: Some(crate::worktree::GitAnnotation { reason: None }),
+                    path_state: crate::worktree::WorktreePathState::Missing,
+                },
+                crate::worktree::WorktreeFact {
+                    path: PathBuf::from("/detached"),
+                    head: Some("123".into()),
+                    branch_ref: None,
+                    is_main: false,
+                    is_detached: true,
+                    is_bare: false,
+                    is_sparse: false,
+                    locked: None,
+                    prunable: None,
+                    path_state: crate::worktree::WorktreePathState::Present,
+                },
+                crate::worktree::WorktreeFact {
+                    path: PathBuf::from("/repo.git"),
+                    head: None,
+                    branch_ref: None,
+                    is_main: false,
+                    is_detached: false,
+                    is_bare: true,
+                    is_sparse: false,
+                    locked: None,
+                    prunable: None,
+                    path_state: crate::worktree::WorktreePathState::Present,
+                },
+            ],
+            warning: None,
+        };
+
+        let projected = project_worktree_scan(&scan);
+        assert_eq!(projected.len(), 4);
+        assert_eq!(projected[1].branch.as_deref(), Some("occupied"));
+        assert!(!projected[1].is_valid);
+        assert!(projected[2].branch.is_none());
+        assert!(projected[3].branch.is_none());
     }
 
     #[test]

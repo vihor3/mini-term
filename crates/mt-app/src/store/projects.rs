@@ -82,8 +82,8 @@ impl AppStore {
 
     /// 按路径找项目(`store.ts::findProjectByPath`)。
     ///
-    /// 比对走 [`normalize_path`](crate::git_worktree::normalize_path)(分隔符统一 +
-    /// 去尾斜杠 + 转小写),与 worktree「是否已是项目」的判据同一份。
+    /// 比对走 [`normalize_path`](crate::git_worktree::normalize_path):Windows 统一
+    /// 分隔符并忽略大小写,POSIX 保留原生分隔符与大小写;两边都去尾斜杠。
     /// SSH 远程项目排除在外 —— worktree 的路径是本机路径。
     pub fn find_project_by_path(&self, path: &str) -> Option<&ProjectConfig> {
         let target = crate::git_worktree::normalize_path(path);

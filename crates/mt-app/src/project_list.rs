@@ -437,33 +437,67 @@ fn reconcilable_children(projects: &[ProjectConfig]) -> Vec<(&ProjectConfig, &Pr
     out
 }
 
-/// 待探测的路径集合(去重):worktree 子项目自身路径 + 其父项目路径。
-///
-/// 父项目路径也要探测:整棵目录树一起消失(盘符拔出等)时不能把子项目误判成
-/// 「worktree 被外部删除」而清掉。
-fn collect_worktree_probe_paths(projects: &[ProjectConfig]) -> Vec<String> {
+/// 待扫描的父仓库路径集合(去重)。只有父仓库的权威 Git inventory 能证明
+/// worktree 注册已经消失。
+fn collect_worktree_reconcile_repos(projects: &[ProjectConfig]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for (child, parent) in reconcilable_children(projects) {
-        for path in [&child.path, &parent.path] {
-            if seen.insert(path.clone()) {
-                out.push(path.clone());
-            }
+    for (_, parent) in reconcilable_children(projects) {
+        let key = crate::git_worktree::normalize_path(&parent.path);
+        if seen.insert(key) {
+            out.push(parent.path.clone());
         }
     }
     out
 }
 
-/// 应清理的失效 worktree 子项目(返回项目 id):自身目录已不存在、而父项目目录仍在。
+struct ReconcileScan {
+    repo_path: String,
+    scan: mt_project::worktree::WorktreeScan,
+}
+
+/// 应清理的 worktree 子项目(返回项目 id):只有父仓库的当前权威扫描不再包含
+/// 该注册路径时才能清理。失败、fallback 与 last-known 都不能证明删除。
 fn find_stale_worktree_projects(
     projects: &[ProjectConfig],
-    alive: &HashSet<String>,
+    scans: &[ReconcileScan],
 ) -> Vec<String> {
     reconcilable_children(projects)
         .into_iter()
-        .filter(|(child, parent)| !alive.contains(&child.path) && alive.contains(&parent.path))
+        .filter(|(child, parent)| {
+            scans
+                .iter()
+                .find(|result| {
+                    crate::git_worktree::normalize_path(&result.repo_path)
+                        == crate::git_worktree::normalize_path(&parent.path)
+                })
+                .filter(|result| result.scan.authoritative)
+                .is_some_and(|result| {
+                    !result.scan.worktrees.iter().any(|worktree| {
+                        mt_project::worktree::paths_equal(
+                            &worktree.path,
+                            std::path::Path::new(&child.path),
+                        )
+                    })
+                })
+        })
         .map(|(child, _)| child.id.clone())
         .collect()
+}
+
+fn branch_for_project_path(
+    scan: &mt_project::worktree::WorktreeScan,
+    path: &str,
+) -> Option<String> {
+    scan.worktrees
+        .iter()
+        .find(|worktree| {
+            mt_project::worktree::paths_equal(&worktree.path, std::path::Path::new(path))
+        })
+        .filter(|worktree| !worktree.is_main)
+        .and_then(|worktree| worktree.branch_ref.as_deref())
+        .and_then(|branch| branch.strip_prefix("refs/heads/"))
+        .map(str::to_string)
 }
 
 /// 一行要画的东西。渲染前先从 store 抠出来 —— `store.read(cx)` 的借用
@@ -1086,6 +1120,8 @@ pub struct ProjectList {
     hovered: Option<String>,
     /// 项目路径 → worktree 分支名。批量探测的结果,见 [`Self::probe_worktrees`]。
     worktree_branches: HashMap<String, String>,
+    worktree_probe_generation: u64,
+    worktree_reconcile_generation: u64,
     /// 上次探测用的路径清单(拼成一条),变了才重探。
     probe_key: String,
     /// 上次喂给技术栈探测的**待探路径**清单(拼成一条),变了才再喂一次。
@@ -1139,6 +1175,8 @@ impl ProjectList {
             editing: None,
             hovered: None,
             worktree_branches: HashMap::new(),
+            worktree_probe_generation: 0,
+            worktree_reconcile_generation: 0,
             probe_key: String::new(),
             kinds_key: String::new(),
             was_focused: true,
@@ -1148,7 +1186,7 @@ impl ProjectList {
             hover_rect: None,
             pending_select_all: None,
             done_tags: HashMap::new(),
-            };
+        };
         // 挂载时先探一次(原版两个 effect 都在挂载时跑一遍)
         this.probe_worktrees(true, cx);
         this.reconcile_worktrees(cx);
@@ -1515,7 +1553,7 @@ impl ProjectList {
     /// 批量探测哪些项目路径是 linked worktree。`force` = 路径没变也重探
     /// (窗口重获焦点那条:分支切换发生在窗外,路径清单不会变)。
     ///
-    /// `get_worktree_branches` 逐个 `Repository::open`,**阻塞**,必须丢后台。
+    /// Catalog scan 会启动 Git CLI,**阻塞**,必须丢后台。
     fn probe_worktrees(&mut self, force: bool, cx: &mut Context<Self>) {
         // 这个方法挂在 store 观察者上、每次 notify 都会走一遍(AI 状态变化就有一次),
         // 所以先只拼一条比较用的键,确定要探了才真去收集路径
@@ -1528,7 +1566,7 @@ impl ProjectList {
             .filter(|p| p.ssh_connection_id.is_none())
         {
             key.push_str(&p.path);
-            key.push('\n');
+            key.push('\0');
         }
         if !force && key == self.probe_key {
             return;
@@ -1542,53 +1580,101 @@ impl ProjectList {
             .map(|p| p.path.clone())
             .collect();
         self.probe_key = key;
+        self.worktree_probe_generation = self.worktree_probe_generation.wrapping_add(1);
+        let request_generation = self.worktree_probe_generation;
         if paths.is_empty() {
             self.worktree_branches.clear();
             return;
         }
         cx.spawn(async move |this, cx| {
-            let probe: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-            let branches = cx
+            let paths_for_task = paths.clone();
+            let probes = cx
                 .background_executor()
-                .spawn(async move { mt_project::git::get_worktree_branches(&probe) })
+                .spawn(async move {
+                    paths_for_task
+                        .into_iter()
+                        .map(|path| {
+                            let scan = mt_project::worktree::scan(std::path::Path::new(&path))
+                                .map_err(|err| format!("{err:#}"));
+                            (path, scan)
+                        })
+                        .collect::<Vec<_>>()
+                })
                 .await;
             let _ = this.update(cx, |this: &mut ProjectList, cx| {
-                this.worktree_branches = paths
-                    .into_iter()
-                    .zip(branches)
-                    .filter_map(|(path, branch)| branch.map(|b| (path, b)))
-                    .collect();
+                if this.worktree_probe_generation != request_generation {
+                    return;
+                }
+                this.worktree_branches
+                    .retain(|path, _| paths.iter().any(|current| current == path));
+                for (path, scan) in probes {
+                    let Ok(scan) = scan else {
+                        continue;
+                    };
+                    if !scan.authoritative
+                        || mt_project::worktree::current_generation(std::path::Path::new(&path))
+                            != scan.generation
+                    {
+                        continue;
+                    }
+                    match branch_for_project_path(&scan, &path) {
+                        Some(branch) => {
+                            this.worktree_branches.insert(path, branch);
+                        }
+                        None => {
+                            this.worktree_branches.remove(&path);
+                        }
+                    }
+                }
                 cx.notify();
             });
         })
         .detach();
     }
 
-    /// 失效 worktree 子项目自动清理:目录已消失(**且父项目目录仍在**,排除盘符级
-    /// 整树消失的误判)的子项目连终端资源一起移除。
+    /// 失效 worktree 子项目自动清理:只有父仓库的当前权威 Git inventory 已不再
+    /// 包含该注册路径时,才把子项目连终端资源一起移除。
     ///
     /// 外部 / AI agent 在终端里 `git worktree remove` 之后没有任何事件通知,
     /// 只能在挂载与窗口重获焦点时探一次。
     fn reconcile_worktrees(&mut self, cx: &mut Context<Self>) {
         let projects: Vec<ProjectConfig> = self.store.read(cx).projects().to_vec();
-        let probe = collect_worktree_probe_paths(&projects);
-        if probe.is_empty() {
+        let repos = collect_worktree_reconcile_repos(&projects);
+        self.worktree_reconcile_generation = self.worktree_reconcile_generation.wrapping_add(1);
+        let request_generation = self.worktree_reconcile_generation;
+        if repos.is_empty() {
             return;
         }
         cx.spawn(async move |this, cx| {
-            let paths: Vec<PathBuf> = probe.iter().map(PathBuf::from).collect();
-            let alive = cx
+            let scans = cx
                 .background_executor()
-                .spawn(async move { mt_project::fs::filter_directories(paths) })
+                .spawn(async move {
+                    repos
+                        .into_iter()
+                        .filter_map(|repo_path| {
+                            let scan = mt_project::worktree::scan(std::path::Path::new(&repo_path))
+                                .ok()?;
+                            Some(ReconcileScan { repo_path, scan })
+                        })
+                        .collect::<Vec<_>>()
+                })
                 .await;
-            let alive: HashSet<String> = alive
-                .into_iter()
-                .map(|p| p.to_string_lossy().to_string())
-                .collect();
             let _ = this.update(cx, |this: &mut ProjectList, cx| {
+                if this.worktree_reconcile_generation != request_generation {
+                    return;
+                }
+                let scans: Vec<ReconcileScan> = scans
+                    .into_iter()
+                    .filter(|result| {
+                        result.scan.authoritative
+                            && mt_project::worktree::current_generation(std::path::Path::new(
+                                &result.repo_path,
+                            )) == result.scan.generation
+                    })
+                    .collect();
                 // 探测回来时项目表可能已经变了 —— 按**当下**的表重算一遍
                 let projects: Vec<ProjectConfig> = this.store.read(cx).projects().to_vec();
-                let stale = find_stale_worktree_projects(&projects, &alive);
+                let stale = find_stale_worktree_projects(&projects, &scans);
                 if stale.is_empty() {
                     return;
                 }
@@ -2997,52 +3083,118 @@ mod tests {
         }
     }
 
-    /// 探测清单 = 子项目路径 + 父项目路径,**去重**;没有子项目就一条都不探。
+    fn worktree_fact(
+        path: &str,
+        is_main: bool,
+        branch: Option<&str>,
+    ) -> mt_project::worktree::WorktreeFact {
+        mt_project::worktree::WorktreeFact {
+            path: PathBuf::from(path),
+            head: Some("abc".into()),
+            branch_ref: branch.map(|branch| format!("refs/heads/{branch}")),
+            is_main,
+            is_detached: branch.is_none(),
+            is_bare: false,
+            is_sparse: false,
+            locked: None,
+            prunable: None,
+            path_state: mt_project::worktree::WorktreePathState::Present,
+        }
+    }
+
+    fn reconcile_scan(
+        repo_path: &str,
+        authoritative: bool,
+        worktrees: Vec<mt_project::worktree::WorktreeFact>,
+    ) -> ReconcileScan {
+        ReconcileScan {
+            repo_path: repo_path.into(),
+            scan: mt_project::worktree::WorktreeScan {
+                generation: 0,
+                source: if authoritative {
+                    mt_project::worktree::WorktreeScanSource::PorcelainZ
+                } else {
+                    mt_project::worktree::WorktreeScanSource::LastKnown
+                },
+                authoritative,
+                worktrees,
+                warning: None,
+            },
+        }
+    }
+
+    /// 每个父仓库只扫描一次；没有 worktree 子项目就不扫描。
     #[test]
-    fn 探测清单含父项目且去重() {
+    fn 清理扫描按父仓库去重() {
         let projects = vec![
             project("root", r"D:\repo", None),
             project("wt1", r"D:\wt\a", Some("root")),
             project("wt2", r"D:\wt\b", Some("root")),
         ];
-        let paths = collect_worktree_probe_paths(&projects);
-        assert_eq!(paths, vec![r"D:\wt\a", r"D:\repo", r"D:\wt\b"]);
-
-        // 没有 worktree 子项目 = 不必探测(原版 `probe.length === 0` 直接 return)
-        assert!(collect_worktree_probe_paths(&[project("root", r"D:\repo", None)]).is_empty());
+        assert_eq!(
+            collect_worktree_reconcile_repos(&projects),
+            vec![r"D:\repo"]
+        );
+        assert!(collect_worktree_reconcile_repos(&[project("root", r"D:\repo", None)]).is_empty());
     }
 
-    /// 只清「自己没了、父项目还在」的那些;整棵树一起消失时一个都不动。
+    /// 权威 Git absence 才能清理；仍注册的 linked worktree 即使目录缺失也保留。
     #[test]
-    fn 只清父项目仍在的失效子项目() {
+    fn 只按权威注册消失清理子项目() {
         let projects = vec![
             project("root", r"D:\repo", None),
             project("gone", r"D:\wt\gone", Some("root")),
             project("alive", r"D:\wt\alive", Some("root")),
         ];
+        let mut registered_missing = worktree_fact(r"D:\wt\alive", false, Some("feature"));
+        registered_missing.path_state = mt_project::worktree::WorktreePathState::Missing;
+        let scans = vec![reconcile_scan(
+            r"D:\repo",
+            true,
+            vec![
+                worktree_fact(r"D:\repo", true, Some("main")),
+                registered_missing,
+            ],
+        )];
+        assert_eq!(
+            find_stale_worktree_projects(&projects, &scans),
+            vec!["gone"]
+        );
 
-        let alive: HashSet<String> = [r"D:\repo", r"D:\wt\alive"]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        assert_eq!(find_stale_worktree_projects(&projects, &alive), vec!["gone"]);
-
-        // 盘符整个不见了(父项目也探不到)→ 一个都不清
-        let none: HashSet<String> = HashSet::new();
-        assert!(find_stale_worktree_projects(&projects, &none).is_empty());
+        let degraded = vec![reconcile_scan(r"D:\repo", false, Vec::new())];
+        assert!(find_stale_worktree_projects(&projects, &degraded).is_empty());
+        assert!(find_stale_worktree_projects(&projects, &[]).is_empty());
     }
 
-    /// UNC(WSL)路径两侧都不参与:存在性探测依赖 WSL 状态,误判风险高。
+    #[test]
+    fn 分支徽章投影保留posix大小写语义() {
+        let scan = reconcile_scan(
+            "/repo",
+            true,
+            vec![
+                worktree_fact("/repo", true, Some("main")),
+                worktree_fact("/repo/Feature", false, Some("Feature")),
+            ],
+        );
+        assert_eq!(
+            branch_for_project_path(&scan.scan, "/repo/Feature").as_deref(),
+            Some("Feature")
+        );
+        if !cfg!(windows) {
+            assert!(branch_for_project_path(&scan.scan, "/repo/feature").is_none());
+        }
+    }
+
+    /// UNC(WSL)路径两侧都不参与:Git inventory 仍属于后续远程 transport 范围。
     #[test]
     fn unc路径不参与清理() {
         let projects = vec![
             project("root", r"\\wsl$\Ubuntu\repo", None),
             project("child", r"\\wsl$\Ubuntu\wt", Some("root")),
             project("local", r"D:\repo", None),
-            // 本地子项目挂在 UNC 父项目下:父那侧不可靠,同样不清
             project("mixed", r"D:\wt\x", Some("root")),
         ];
-        assert!(collect_worktree_probe_paths(&projects).is_empty());
+        assert!(collect_worktree_reconcile_repos(&projects).is_empty());
         assert!(is_unc_path(r"\\wsl$\Ubuntu"));
         assert!(!is_unc_path(r"D:\repo"));
     }
@@ -3051,8 +3203,7 @@ mod tests {
     #[test]
     fn 父项目缺失时不清() {
         let projects = vec![project("orphan", r"D:\wt\x", Some("没有这个父项目"))];
-        assert!(collect_worktree_probe_paths(&projects).is_empty());
-        let alive: HashSet<String> = HashSet::new();
-        assert!(find_stale_worktree_projects(&projects, &alive).is_empty());
+        assert!(collect_worktree_reconcile_repos(&projects).is_empty());
+        assert!(find_stale_worktree_projects(&projects, &[]).is_empty());
     }
 }
