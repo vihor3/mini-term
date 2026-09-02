@@ -55,7 +55,7 @@ use std::time::Duration;
 
 use mt_config::SshConnection;
 use mt_project::fs::{MAX_FILE_VIEW_SIZE, TextGitignore};
-use mt_ssh::{CachedSession, SftpHandle, SshPool};
+use mt_ssh::{CachedSession, RemoteRuntimeSnapshot, SftpHandle, SshPool};
 
 mod delete;
 mod dirs;
@@ -79,6 +79,7 @@ const REMOTE_DOCUMENT_MAX_BYTES: usize = MAX_FILE_VIEW_SIZE as usize;
 const REMOTE_DOCUMENT_TOO_LARGE_SAVE_ERROR: &str =
     "远程文件已超过 1MB，请重新下载或使用外部工具处理";
 const REMOTE_DELETE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_RUNTIME_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const REMOTE_DELETE_EXEC_TIMEOUT: Duration = Duration::from_secs(70);
 const REMOTE_DELETE_SERVER_TIMEOUT_SECS: u64 = 60;
 const REMOTE_DELETE_OUTPUT_CAP: usize = 16 * 1024;
@@ -137,6 +138,8 @@ pub struct RemoteSshState {
     home_cache: Mutex<HashMap<String, String>>,
     /// 会话 id → 远程文件路径映射(列表扫描时填充,正文读取直接命中免再扫)。
     session_paths: Mutex<HashMap<String, String>>,
+    // Latest authenticated epoch observed for each connection in this process.
+    connection_epochs: Mutex<HashMap<String, u64>>,
 }
 
 /// std Mutex 取锁,poisoned 时取回内部数据继续(缓存均可容忍脏读,绝不 panic)。
@@ -152,6 +155,7 @@ impl RemoteSshState {
             gitignore_cache: Mutex::new(HashMap::new()),
             home_cache: Mutex::new(HashMap::new()),
             session_paths: Mutex::new(HashMap::new()),
+            connection_epochs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -197,7 +201,7 @@ impl RemoteSshState {
     }
 
     /// 一条 SSH 连接的配置被改动/删除时,把它在本进程里的**全部残留**作废:
-    /// 池里那条 session + 两张按连接缓存(`home_cache` / `gitignore_cache`)+
+    /// 池里那条 session + 按连接派生缓存(`home_cache` / `gitignore_cache`)+
     /// 会话路径映射。
     ///
     /// 为什么仍需主动失效:池的 map key 是稳定的 `connection.id`；虽然
@@ -218,6 +222,7 @@ impl RemoteSshState {
         lock(&self.home_cache).remove(conn_id);
         lock(&self.gitignore_cache).retain(|k, _| !k.starts_with(&prefix));
         lock(&self.session_paths).retain(|k, _| !k.starts_with(&prefix));
+        lock(&self.connection_epochs).remove(conn_id);
 
         // 2) 池里的 session。池未建 = 没连过任何远程,无事可做;池已建则运行时
         //    必然也已建(池只在 `block_on` 内部懒建),`runtime()` 不会新建一个。
@@ -228,6 +233,27 @@ impl RemoteSshState {
         rt.spawn(async move {
             pool.evict(&id).await;
         });
+    }
+
+    fn remember_connection_epoch(&self, conn_id: &str, epoch: u64) {
+        let mut epochs = lock(&self.connection_epochs);
+        let entry = epochs.entry(conn_id.to_string()).or_insert(epoch);
+        *entry = (*entry).max(epoch);
+    }
+
+    fn forget_connection_epoch_if(&self, conn_id: &str, epoch: u64) {
+        let mut epochs = lock(&self.connection_epochs);
+        if epochs.get(conn_id).copied() == Some(epoch) {
+            epochs.remove(conn_id);
+        }
+    }
+
+    fn current_connection_epoch(&self, conn_id: &str) -> Option<u64> {
+        lock(&self.connection_epochs).get(conn_id).copied()
+    }
+
+    fn connection_epoch_is_current(&self, conn_id: &str, epoch: u64) -> bool {
+        self.current_connection_epoch(conn_id) == Some(epoch)
     }
 
     /// app 退出时优雅关池:abort reaper + 并发 disconnect 全部 session
@@ -270,6 +296,10 @@ pub fn invalidate_connection(conn_id: &str) {
     state().invalidate_connection(conn_id);
 }
 
+pub fn current_connection_epoch(conn_id: &str) -> Option<u64> {
+    state().current_connection_epoch(conn_id)
+}
+
 // ---------------------------------------------------------------------------
 // 连接查找 / session 编排
 // ---------------------------------------------------------------------------
@@ -309,6 +339,7 @@ pub fn connection_fingerprint(connection: &SshConnection) -> u64 {
 
 /// 从池里拿一条可用 session(带外层超时 + gatetime cooldown 检查)。
 async fn acquire_session(
+    st: &RemoteSshState,
     pool: &SshPool,
     conn: &SshConnection,
 ) -> Result<Arc<CachedSession>, String> {
@@ -318,7 +349,21 @@ async fn acquire_session(
     if session.is_unhealthy_now() {
         return Err("SSH 会话处于冷却期(上次失败后短时间内不再重试),请稍后再试".into());
     }
+    st.remember_connection_epoch(&conn.id, session.connection_epoch().get());
     Ok(session)
+}
+
+pub(super) async fn evict_session_if_same(
+    st: &RemoteSshState,
+    pool: &SshPool,
+    conn_id: &str,
+    session: &Arc<CachedSession>,
+) -> bool {
+    let removed = pool.evict_if_same(conn_id, session).await;
+    if removed {
+        st.forget_connection_epoch_if(conn_id, session.connection_epoch().get());
+    }
+    removed
 }
 
 /// 开一个 SFTP 会话句柄,**并把承载它的 session 一并返回**。
@@ -332,7 +377,7 @@ async fn open_sftp_with_session(
     conn: &SshConnection,
 ) -> Result<(Arc<CachedSession>, SftpHandle), String> {
     let pool = st.pool();
-    let session = acquire_session(&pool, conn).await?;
+    let session = acquire_session(st, &pool, conn).await?;
     match SftpHandle::open_on_session(session.clone(), SFTP_REQUEST_TIMEOUT).await {
         Ok(h) => {
             session.touch();
@@ -340,8 +385,8 @@ async fn open_sftp_with_session(
         }
         Err(e) if e.is_transport() => {
             eprintln!("[remote-ssh] sftp open failed (transport), retrying once: {e}");
-            pool.evict_if_same(&conn.id, &session).await;
-            let session2 = acquire_session(&pool, conn).await?;
+            evict_session_if_same(st, &pool, &conn.id, &session).await;
+            let session2 = acquire_session(st, &pool, conn).await?;
             let h = SftpHandle::open_on_session(session2.clone(), SFTP_REQUEST_TIMEOUT)
                 .await
                 .map_err(|e| e.message().to_string())?;
@@ -372,6 +417,58 @@ async fn remote_home(
         .map_err(|e| format!("获取远程 home 目录失败: {}", e.message()))?;
     lock(&st.home_cache).insert(conn_id.to_string(), home.clone());
     Ok(home)
+}
+
+/// Resolve authenticated execution-host and worktree identity over the same
+/// pooled SSH transport used by files and terminals. The caller must execute
+/// this blocking facade on GPUI's background executor.
+pub fn runtime_snapshot(
+    conn: &SshConnection,
+    remote_path: &str,
+) -> Result<RemoteRuntimeSnapshot, String> {
+    let conn = conn.clone();
+    let remote_path = remote_path.to_string();
+    let st = state();
+    st.block_on(async move {
+        let pool = st.pool();
+        let mut attempt = 0usize;
+        loop {
+            let session = acquire_session(st, &pool, &conn).await?;
+            match mt_ssh::inspect_remote_runtime(
+                session.clone(),
+                &remote_path,
+                REMOTE_RUNTIME_REQUEST_TIMEOUT,
+            )
+            .await
+            {
+                Ok(snapshot)
+                    if pool.is_current_session(&conn.id, &session).await
+                        && st.connection_epoch_is_current(
+                            &conn.id,
+                            snapshot.identity.connection_epoch,
+                        ) =>
+                {
+                    return Ok(snapshot);
+                }
+                Ok(_) => {
+                    return Err(
+                        "remote runtime result was superseded by a newer SSH connection".into(),
+                    );
+                }
+                Err(error) if should_retry_runtime(attempt, error.should_retry()) => {
+                    if error.requires_session_retirement() {
+                        evict_session_if_same(st, &pool, &conn.id, &session).await;
+                    }
+                    attempt += 1;
+                }
+                Err(error) => return Err(error.message().to_string()),
+            }
+        }
+    })
+}
+
+fn should_retry_runtime(attempt: usize, retryable: bool) -> bool {
+    attempt == 0 && retryable
 }
 
 // ---------------------------------------------------------------------------

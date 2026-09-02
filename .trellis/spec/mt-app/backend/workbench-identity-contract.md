@@ -11,8 +11,10 @@ changed.
 
 This contract establishes stable routing identities. Local PTY ownership, warm
 reattach, and output replay are layered through the
-`mt-terminal-host/backend/terminal-host-contract.md` contract. Authoritative remote-device
-identity remains outside this contract.
+`mt-terminal-host/backend/terminal-host-contract.md` contract. Authenticated
+SSH runtime identity and pre-hydration rebinding are defined by
+`mt-app/backend/remote-runtime-reconciliation-contract.md` and
+`mt-ssh/backend/remote-runtime-contract.md`.
 
 ### 2. Signatures
 
@@ -105,6 +107,10 @@ pub fn reactivate_active_page(
   `MINITERM_EXECUTION_HOST_ID`, and `MINITERM_WORKTREE_ID`.
 - Identity environment values are correlation/fencing keys, not credentials
   or remote attestation.
+- A provisional SSH binding may be replaced with an authoritative remote binding
+  only before PTY hydration and while no document from that project is open.
+  Existing panes or documents force a visible deferred-rebind state; they are
+  never silently retagged.
 
 ### 4. Validation & Error Matrix
 
@@ -118,6 +124,8 @@ pub fn reactivate_active_page(
 | New PTY is spawned | Preserve pane/session identity and rotate incarnation |
 | Pane is moved or reordered | Preserve pane key, session, incarnation, and current PTY attachment |
 | Remote/WSL identity is provisional | Route consistently but never present it as verified host authority |
+| Authenticated remote identity differs before hydration | Reconcile layout transactionally, install binding, then hydrate |
+| Authenticated remote identity differs with live PTY or open document | Defer the binding change and preserve the current route |
 | Hosted session remains live after GUI restart | Attach-only and preserve its PID/incarnation |
 | Hosted session is missing or has a replay gap with valid history | Explicitly restore, apply snapshot first, and rotate incarnation |
 | Recovery history is missing or corrupt | Start clean with a visible unavailable notice; never label it reattached |
@@ -153,6 +161,9 @@ pub fn reactivate_active_page(
 - Workbench tests assert worktree-isolated previews and stale callback rejection.
 - Search/overlay tests assert same project/path with a different `WorktreeId`
   cannot receive deferred focus.
+- Remote runtime tests assert authoritative rebind is blocked by either live PTYs
+  or open documents and that a safe rebind uses layout reconciliation before
+  hydration.
 
 ### 7. Wrong vs Correct
 

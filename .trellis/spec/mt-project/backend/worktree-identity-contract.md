@@ -6,8 +6,8 @@
 
 Use this contract whenever a configured project is converted into execution
 host, repository, and worktree identity. Canonicalization belongs to the host
-that owns the path. Current WSL/SSH resolution is deliberately provisional and
-must remain replaceable by a later authenticated runtime binding.
+that owns the path. WSL/SSH configuration resolution is provisional and must
+remain replaceable by an authenticated remote runtime binding.
 
 ### 2. Signatures
 
@@ -15,6 +15,8 @@ must remain replaceable by a later authenticated runtime binding.
 pub enum WorktreeIdentitySource {
     AuthoritativeLocalGit,
     LocalDirectory,
+    AuthoritativeRemoteGit,
+    AuthoritativeRemoteDirectory,
     ProvisionalLocal,
     ProvisionalWsl,
     ProvisionalSsh,
@@ -66,6 +68,11 @@ pub fn resolve_provisional_ssh(
 - Provisional SSH identity uses the stable configured connection ID plus a
   normalized absolute remote POSIX path. Connection display names are not an
   identity source.
+- `AuthoritativeRemoteGit` and `AuthoritativeRemoteDirectory` are installed only
+  from an authenticated runtime snapshot. They use the verified execution host,
+  canonical remote path, and canonical Git common directory when present.
+- A changed remote host key or remote install ID produces a different
+  `ExecutionHostId`; configuration IDs and labels never override that result.
 - Resolution functions are pure for provisional inputs and perform no network
   calls. They do not claim remote host-key or runtime authority.
 - AppStore may reuse a persisted binding as `PersistedFallback` when local,
@@ -83,6 +90,8 @@ pub fn resolve_provisional_ssh(
 | WSL UNC distro differs from requested distro | Reject input |
 | WSL/SSH path is not absolute POSIX | Reject input |
 | SSH connection ID is empty or contains NUL | Reject input |
+| Authenticated remote Git common directory is present | Resolve as `AuthoritativeRemoteGit` using that directory for `RepoId` |
+| Authenticated remote folder has no Git repository | Resolve as `AuthoritativeRemoteDirectory` using the canonical folder path |
 | Same install/common-dir/worktree path is resolved twice | Return identical derived identities |
 | Same repository has two linked worktree paths | Return same `RepoId`, different `WorktreeId` |
 
@@ -108,6 +117,8 @@ pub fn resolve_provisional_ssh(
   main and linked paths assert shared common-dir identity.
 - Non-Git directory tests assert stable host-qualified identity.
 - Provisional local/WSL/SSH tests assert normalization and source markers.
+- Authoritative remote source serde tests freeze camel-case storage names and
+  assert both remote variants report `is_authoritative()`.
 - Invalid absolute-path, NUL, empty ID, and mismatched WSL distro cases fail.
 - Persisted fallback tests cover local and SSH resolution failure without
   identity churn.

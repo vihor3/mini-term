@@ -22,6 +22,8 @@ pub const LOCAL_HOST_FINGERPRINT: &str = "local";
 pub enum WorktreeIdentitySource {
     AuthoritativeLocalGit,
     LocalDirectory,
+    AuthoritativeRemoteGit,
+    AuthoritativeRemoteDirectory,
     ProvisionalLocal,
     ProvisionalWsl,
     ProvisionalSsh,
@@ -33,6 +35,8 @@ impl WorktreeIdentitySource {
         match self {
             Self::AuthoritativeLocalGit => "authoritativeLocalGit",
             Self::LocalDirectory => "localDirectory",
+            Self::AuthoritativeRemoteGit => "authoritativeRemoteGit",
+            Self::AuthoritativeRemoteDirectory => "authoritativeRemoteDirectory",
             Self::ProvisionalLocal => "provisionalLocal",
             Self::ProvisionalWsl => "provisionalWsl",
             Self::ProvisionalSsh => "provisionalSsh",
@@ -41,7 +45,13 @@ impl WorktreeIdentitySource {
     }
 
     pub const fn is_authoritative(self) -> bool {
-        matches!(self, Self::AuthoritativeLocalGit | Self::LocalDirectory)
+        matches!(
+            self,
+            Self::AuthoritativeLocalGit
+                | Self::LocalDirectory
+                | Self::AuthoritativeRemoteGit
+                | Self::AuthoritativeRemoteDirectory
+        )
     }
 }
 
@@ -472,6 +482,12 @@ mod tests {
             "authoritativeLocalGit"
         );
         assert!(WorktreeIdentitySource::LocalDirectory.is_authoritative());
+        assert!(WorktreeIdentitySource::AuthoritativeRemoteGit.is_authoritative());
+        assert!(WorktreeIdentitySource::AuthoritativeRemoteDirectory.is_authoritative());
+        assert_eq!(
+            serde_json::to_string(&WorktreeIdentitySource::AuthoritativeRemoteGit).unwrap(),
+            "\"authoritativeRemoteGit\""
+        );
         assert!(!WorktreeIdentitySource::ProvisionalSsh.is_authoritative());
     }
 

@@ -1,0 +1,4 @@
+{"file":".trellis/spec/mt-ssh/backend/remote-document-io-contract.md","reason":"Review pooled SSH/SFTP regressions and bounded transport behavior."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Review generation fencing and authoritative worktree rebinding."}
+{"file":".trellis/spec/mt-terminal-host/backend/terminal-host-contract.md","reason":"Verify runtime boundaries do not merge unrelated daemons."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/design.md","reason":"Check implementation against approved remote runtime architecture."}

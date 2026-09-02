@@ -7,7 +7,7 @@ use mt_ssh::{CachedSession, SftpHandle, SftpNodeKind, run_bounded_exec_on_sessio
 use super::{
     LOCAL_TRANSFER_SEQUENCE, REMOTE_DELETE_EXEC_TIMEOUT, REMOTE_DELETE_OUTPUT_CAP,
     REMOTE_DELETE_PROBE_TIMEOUT, REMOTE_DELETE_SERVER_TIMEOUT_SECS, RemoteSshState,
-    canonical_project_root, join_posix, normalize_absolute_posix, open_sftp,
+    canonical_project_root, evict_session_if_same, join_posix, normalize_absolute_posix, open_sftp,
     open_sftp_with_session, posix_relative, state, validate_remote_leaf_against_root,
 };
 
@@ -396,7 +396,7 @@ async fn delete_remote_directory(
                 && !output.timed_out
                 && output.exit_code == Some(0) => {}
         Ok(output) if output.requires_session_retirement() => {
-            st.pool().evict_if_same(&conn.id, session).await;
+            evict_session_if_same(st, &st.pool(), &conn.id, session).await;
             return remove_remote_directory_via_fresh_session(st, conn, project_root, &target)
                 .await;
         }
@@ -404,7 +404,7 @@ async fn delete_remote_directory(
             return remove_remote_directory_via_isolation(sftp, canonical_root, &target).await;
         }
         Err(_) => {
-            st.pool().evict_if_same(&conn.id, session).await;
+            evict_session_if_same(st, &st.pool(), &conn.id, session).await;
             return remove_remote_directory_via_fresh_session(st, conn, project_root, &target)
                 .await;
         }
@@ -426,10 +426,10 @@ async fn delete_remote_directory(
     .await;
     match &execution {
         Ok(output) if output.requires_session_retirement() => {
-            st.pool().evict_if_same(&conn.id, session).await;
+            evict_session_if_same(st, &st.pool(), &conn.id, session).await;
         }
         Err(_) => {
-            st.pool().evict_if_same(&conn.id, session).await;
+            evict_session_if_same(st, &st.pool(), &conn.id, session).await;
         }
         _ => {}
     }

@@ -22,13 +22,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mt_core::SshConnection;
-use russh::ChannelMsg;
 use russh::client::{self, Handle, Handler};
-use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
+use russh::keys::{load_secret_key, PrivateKeyWithHashAlg};
+use russh::ChannelMsg;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -75,19 +75,42 @@ struct PoolInner {
     sessions: HashMap<String, Arc<CachedSession>>,
 }
 
+/// Immutable process-local generation assigned after one SSH session has
+/// completed host-key verification and authentication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConnectionEpoch(u64);
+
+impl ConnectionEpoch {
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+fn allocate_connection_epoch(counter: &AtomicU64) -> Result<ConnectionEpoch, String> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map(ConnectionEpoch)
+        .map_err(|_| "SSH connection epoch space exhausted".to_string())
+}
+
 /// 只有 map 里仍是 caller 看到的那个 `Arc` 时才移除。
 ///
 /// 抽成泛型纯函数，让 acquire / evict 共用同一份 TOCTOU 规则，
 /// 也能用不含真 SSH handle 的 `Arc` fixture 做单测。
+fn arc_is_current<T>(entries: &HashMap<String, Arc<T>>, id: &str, expected: &Arc<T>) -> bool {
+    entries
+        .get(id)
+        .is_some_and(|current| Arc::ptr_eq(current, expected))
+}
+
 fn remove_arc_if_same<T>(
     entries: &mut HashMap<String, Arc<T>>,
     id: &str,
     expected: &Arc<T>,
 ) -> Option<Arc<T>> {
-    if entries
-        .get(id)
-        .is_some_and(|current| Arc::ptr_eq(current, expected))
-    {
+    if arc_is_current(entries, id, expected) {
         entries.remove(id)
     } else {
         None
@@ -100,6 +123,11 @@ pub struct CachedSession {
     /// connection id，但复用前必须逐字段核对这一份，避免用户原地修改 host、
     /// port、user 或凭据后短暂命中旧服务器 session。
     connection_identity: CachedConnectionIdentity,
+    /// SHA-256 fingerprint of the server key accepted by known-host policy.
+    /// The session is exposed only after authentication succeeds.
+    host_key_fingerprint: String,
+    /// Process-monotonic authenticated connection generation.
+    connection_epoch: ConnectionEpoch,
     /// 串行化同 session 上的 channel 操作。russh Handle 自身 Clone 廉价,但允许
     /// 并发开 channel 会让审计日志顺序与"标记 unhealthy"的语义复杂化。
     handle: Mutex<Handle<MtClient>>,
@@ -148,6 +176,14 @@ impl CachedConnectionIdentity {
 impl CachedSession {
     fn matches_connection(&self, connection: &SshConnection) -> bool {
         self.connection_identity.matches(connection)
+    }
+
+    pub fn host_key_fingerprint(&self) -> &str {
+        &self.host_key_fingerprint
+    }
+
+    pub const fn connection_epoch(&self) -> ConnectionEpoch {
+        self.connection_epoch
     }
 
     /// 现在是否处于 gatetime cooldown 内。
@@ -212,6 +248,9 @@ pub struct SshPool {
     config: PoolConfig,
     /// known_hosts 文件路径。为了便于测试,允许在构造时显式覆盖默认 `~/.ssh/known_hosts`。
     known_hosts_path: PathBuf,
+    /// Starts at one so zero remains an uninitialized sentinel in callers.
+    /// Concurrent connection candidates may consume gaps.
+    next_connection_epoch: AtomicU64,
     /// 后台 reaper task 句柄,持有以便在 Drop 时 abort。
     ///
     /// 用 `std::sync::Mutex` 而非 `tokio::sync::Mutex`:Drop 是同步上下文,不能
@@ -257,6 +296,7 @@ impl SshPool {
             inner,
             config,
             known_hosts_path,
+            next_connection_epoch: AtomicU64::new(1),
             reaper: std::sync::Mutex::new(Some(reaper_handle)),
         }
     }
@@ -408,6 +448,11 @@ impl SshPool {
         }
     }
 
+    /// Whether the exact authenticated session is still the cached winner.
+    pub async fn is_current_session(&self, id: &str, expected: &Arc<CachedSession>) -> bool {
+        arc_is_current(&self.inner.lock().await.sessions, id, expected)
+    }
+
     /// 仅当 `id` 仍指向 caller 遇到错误的那条 session 时才淘汰。
     ///
     /// 返回是否真正从池中移除。这个 API 用于 transport 失败后的精确重连：
@@ -468,10 +513,12 @@ impl SshPool {
             ..Default::default()
         });
 
+        let verified_host_key = Arc::new(OnceLock::new());
         let handler = MtClient {
             host: conn.host.clone(),
             port: conn.port,
             known_hosts_path: self.known_hosts_path.clone(),
+            verified_host_key: verified_host_key.clone(),
         };
 
         let port = if conn.port == 0 { 22 } else { conn.port };
@@ -480,9 +527,15 @@ impl SshPool {
             .map_err(|e| format!("ssh connect to {}:{} failed: {e}", conn.host, port))?;
 
         authenticate(&mut handle, conn).await?;
+        let host_key_fingerprint = verified_host_key.get().cloned().ok_or_else(|| {
+            "SSH authentication completed without a verified server-key fingerprint".to_string()
+        })?;
+        let connection_epoch = allocate_connection_epoch(&self.next_connection_epoch)?;
 
         Ok(CachedSession {
             connection_identity: CachedConnectionIdentity::from_connection(conn),
+            host_key_fingerprint,
+            connection_epoch,
             handle: Mutex::new(handle),
             opened_at: Instant::now(),
             last_used: AtomicU64::new(now_millis()),
@@ -1348,6 +1401,7 @@ pub struct MtClient {
     host: String,
     port: u16,
     known_hosts_path: PathBuf,
+    verified_host_key: Arc<OnceLock<String>>,
 }
 
 impl Handler for MtClient {
@@ -1365,7 +1419,10 @@ impl Handler for MtClient {
         let host_pattern = host_pattern(&self.host, self.port);
         let raw = std::fs::read_to_string(&self.known_hosts_path).unwrap_or_default();
         match match_known_host(&raw, &host_pattern, server_pubkey) {
-            HostKeyMatch::Match => Ok(true),
+            HostKeyMatch::Match => Ok(remember_verified_server_key(
+                &self.verified_host_key,
+                server_pubkey,
+            )),
             HostKeyMatch::Mismatch => {
                 eprintln!(
                     "[mt-ssh] host key MISMATCH for {host_pattern}; refusing to connect. \
@@ -1384,9 +1441,29 @@ impl Handler for MtClient {
                     );
                     return Ok(false);
                 }
-                Ok(true)
+                Ok(remember_verified_server_key(
+                    &self.verified_host_key,
+                    server_pubkey,
+                ))
             }
         }
+    }
+}
+
+fn server_key_fingerprint(server_pubkey: &russh::keys::ssh_key::PublicKey) -> String {
+    use russh::keys::ssh_key::HashAlg;
+
+    server_pubkey.fingerprint(HashAlg::Sha256).to_string()
+}
+
+fn remember_verified_server_key(
+    slot: &OnceLock<String>,
+    server_pubkey: &russh::keys::ssh_key::PublicKey,
+) -> bool {
+    let fingerprint = server_key_fingerprint(server_pubkey);
+    match slot.get() {
+        Some(existing) => existing == &fingerprint,
+        None => slot.set(fingerprint.clone()).is_ok() || slot.get() == Some(&fingerprint),
     }
 }
 
@@ -1580,6 +1657,22 @@ mod tests {
     }
 
     #[test]
+    fn connection_epochs_are_monotonic_and_never_zero() {
+        let counter = AtomicU64::new(1);
+        let first = allocate_connection_epoch(&counter).unwrap();
+        let second = allocate_connection_epoch(&counter).unwrap();
+        assert_eq!(first.get(), 1);
+        assert_eq!(second.get(), 2);
+        assert!(second > first);
+    }
+
+    #[test]
+    fn connection_epoch_overflow_fails_closed() {
+        let counter = AtomicU64::new(u64::MAX);
+        assert!(allocate_connection_epoch(&counter).is_err());
+    }
+
+    #[test]
     fn sftp_request_timeout_tracks_transfer_window() {
         // 协议层每请求超时随外层传输窗口放宽,而非停在默认 10s。
         assert_eq!(sftp_request_timeout_secs(Duration::from_secs(300)), 300);
@@ -1679,6 +1772,9 @@ mod tests {
         let stale = Arc::new(1_u8);
         let winner = Arc::new(2_u8);
         let mut entries = HashMap::from([("connection".to_string(), winner.clone())]);
+
+        assert!(!arc_is_current(&entries, "connection", &stale));
+        assert!(arc_is_current(&entries, "connection", &winner));
 
         assert!(remove_arc_if_same(&mut entries, "connection", &stale).is_none());
         assert!(Arc::ptr_eq(
@@ -1805,6 +1901,21 @@ mod tests {
             pubkey_b64(&pub_key)
         );
         assert_eq!(match_known_host(&raw, host, &pub_key), HostKeyMatch::Match);
+    }
+
+    #[test]
+    fn accepted_server_key_records_one_canonical_sha256_fingerprint() {
+        let first_key = test_pubkey_from_bytes(KEY_BYTES_A);
+        let second_key = test_pubkey_from_bytes(KEY_BYTES_B);
+        let slot = OnceLock::new();
+
+        assert!(remember_verified_server_key(&slot, &first_key));
+        let fingerprint = slot.get().unwrap();
+        assert!(fingerprint.starts_with("SHA256:"));
+        assert_eq!(fingerprint, &server_key_fingerprint(&first_key));
+        assert!(remember_verified_server_key(&slot, &first_key));
+        assert!(!remember_verified_server_key(&slot, &second_key));
+        assert_eq!(slot.get(), Some(&server_key_fingerprint(&first_key)));
     }
 
     #[test]

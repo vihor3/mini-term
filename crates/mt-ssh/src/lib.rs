@@ -11,6 +11,7 @@
 //! Cargo.toml 注释与 spec/backend/russh-rsa-key-loading.md),不要动。
 
 pub mod pool;
+pub mod runtime;
 pub mod sftp;
 
 /// 再导出 russh:消费方(如 mt-ssh-mcp 对 `ChannelMsg` 的匹配)必须与池用同一个
@@ -19,7 +20,13 @@ pub mod sftp;
 pub use russh;
 
 pub use pool::{
-    BoundedExecOutput, BoundedExecState, CachedSession, MtClient, PoolConfig, SftpTransferError,
-    SshPool, run_bounded_exec_on_session, run_sftp_download_on_session, run_sftp_upload_on_session,
+    run_bounded_exec_on_session, run_sftp_download_on_session, run_sftp_upload_on_session,
+    BoundedExecOutput, BoundedExecState, CachedSession, ConnectionEpoch, MtClient, PoolConfig,
+    SftpTransferError, SshPool,
+};
+pub use runtime::{
+    inspect_remote_runtime, remote_runtime_heartbeat, RemoteRuntimeCapabilities,
+    RemoteRuntimeError, RemoteRuntimeIdentity, RemoteRuntimeSnapshot,
+    REMOTE_RUNTIME_PROTOCOL_VERSION,
 };
 pub use sftp::{SftpDirEntry, SftpHandle, SftpNodeKind};

@@ -60,6 +60,7 @@ impl AppStore {
         }
         if identity_changed {
             crate::remote_ssh::invalidate_connection(&id);
+            self.invalidate_remote_runtime_connection(&id);
         }
         self.save_config_now();
         cx.notify();
@@ -80,6 +81,7 @@ impl AppStore {
             return;
         }
         crate::remote_ssh::invalidate_connection(id);
+        self.invalidate_remote_runtime_connection(id);
         self.save_config_now();
         cx.notify();
     }

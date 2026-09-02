@@ -7,13 +7,15 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use gpui::Context;
 use mt_config::ProjectConfig;
 use mt_identity::{
     ExecutionHostId, HostInstallId, PaneKey, TabId, TerminalIncarnationId, TerminalSessionId,
     WorktreeId,
 };
 use mt_layout::ProjectWorktreeBinding;
-use mt_project::worktree::{self, ResolvedWorktreeIdentity};
+use mt_project::worktree::{self, ResolvedWorktreeIdentity, WorktreeIdentitySource};
+use mt_ssh::RemoteRuntimeSnapshot;
 
 use crate::persist;
 
@@ -27,6 +29,29 @@ pub(super) struct TerminalRoute {
     pub pane_key: PaneKey,
     pub terminal_session_id: TerminalSessionId,
     pub terminal_incarnation_id: TerminalIncarnationId,
+}
+
+pub(super) enum AuthoritativeBindingInstall {
+    Installed,
+    Unchanged,
+    Deferred(String),
+    Failed(String),
+}
+
+fn authoritative_rebind_blocker(
+    worktree_changed: bool,
+    has_live_pty: bool,
+    has_documents: bool,
+) -> Option<&'static str> {
+    if !worktree_changed {
+        None
+    } else if has_live_pty {
+        Some("existing terminal sessions still use the compatibility identity")
+    } else if has_documents {
+        Some("open documents still use the compatibility identity")
+    } else {
+        None
+    }
 }
 
 pub(super) fn resolve_project_bindings(
@@ -92,7 +117,7 @@ fn resolve_project_binding(
     Ok(binding_from_resolved(project.id.clone(), resolved))
 }
 
-fn binding_from_resolved(
+pub(super) fn binding_from_resolved(
     project_id: String,
     resolved: ResolvedWorktreeIdentity,
 ) -> ProjectWorktreeBinding {
@@ -222,6 +247,101 @@ impl AppStore {
         self.sync_active_worktree();
     }
 
+    pub(super) fn install_authoritative_remote_binding(
+        &mut self,
+        project_id: &str,
+        snapshot: &RemoteRuntimeSnapshot,
+        cx: &mut Context<Self>,
+    ) -> AuthoritativeBindingInstall {
+        let Some(project) = self.project(project_id) else {
+            return AuthoritativeBindingInstall::Failed("project no longer exists".into());
+        };
+        if project.ssh_connection_id.is_none() {
+            return AuthoritativeBindingInstall::Failed(
+                "project is no longer an SSH project".into(),
+            );
+        }
+
+        let source = if snapshot.canonical_git_common_dir.is_some() {
+            WorktreeIdentitySource::AuthoritativeRemoteGit
+        } else {
+            WorktreeIdentitySource::AuthoritativeRemoteDirectory
+        };
+        let binding = binding_from_resolved(
+            project_id.to_string(),
+            ResolvedWorktreeIdentity {
+                execution_host_id: snapshot.identity.execution_host_id.clone(),
+                repo_id: snapshot.repo_id.clone(),
+                worktree_id: snapshot.worktree_id.clone(),
+                canonical_worktree_path: snapshot.canonical_worktree_path.clone(),
+                canonical_git_common_dir: snapshot.canonical_git_common_dir.clone(),
+                source,
+            },
+        );
+
+        let previous = self.project_worktree_bindings.get(project_id).cloned();
+        if previous.as_ref() == Some(&binding) {
+            return AuthoritativeBindingInstall::Unchanged;
+        }
+        let worktree_changed = previous
+            .as_ref()
+            .is_some_and(|previous| previous.worktree_id != binding.worktree_id);
+        let has_live_pty = self
+            .project_states
+            .get(project_id)
+            .is_some_and(|state| !state.pty_ids().is_empty());
+        let has_documents = crate::workbench_area::project_has_documents(project_id, cx);
+        if let Some(reason) =
+            authoritative_rebind_blocker(worktree_changed, has_live_pty, has_documents)
+        {
+            return AuthoritativeBindingInstall::Deferred(reason.into());
+        }
+
+        let mut restored_layout = None;
+        if let Some(store) = self.layout_store.as_ref() {
+            let now_ms = super::layout::unix_time_ms();
+            let mut reconciled =
+                match store.reconcile_worktree_layouts(std::slice::from_ref(&binding), now_ms) {
+                    Ok(reconciled) => reconciled,
+                    Err(error) => {
+                        return AuthoritativeBindingInstall::Failed(format!(
+                            "authoritative worktree binding could not be persisted: {error:#}"
+                        ));
+                    }
+                };
+            restored_layout = reconciled.layouts.remove(project_id);
+            self.project_worktree_bindings.extend(reconciled.bindings);
+        } else {
+            self.project_worktree_bindings
+                .insert(project_id.to_string(), binding);
+        }
+
+        if let Some(layout) = restored_layout {
+            if let Some(project) = self
+                .config
+                .projects
+                .iter_mut()
+                .find(|project| project.id == project_id)
+            {
+                project.saved_layout = Some(layout.clone());
+            }
+            if self
+                .project_states
+                .get(project_id)
+                .is_some_and(|state| state.panels.is_empty())
+            {
+                let (panels, active_panel_id) = persist::restore_layout(&layout, &self.config);
+                if let Some(state) = self.project_states.get_mut(project_id) {
+                    state.panels = panels;
+                    state.active_panel_id = active_panel_id;
+                    state.status = state.highest_status();
+                }
+            }
+        }
+        self.sync_active_worktree();
+        AuthoritativeBindingInstall::Installed
+    }
+
     pub(super) fn remove_project_identity(&mut self, project_id: &str) {
         if let Some(store) = self.layout_store.as_ref()
             && let Err(error) = store.delete_project_binding(project_id)
@@ -279,6 +399,20 @@ mod tests {
         assert_ne!(old, current);
         assert_eq!(old.terminal_session_id, current.terminal_session_id);
         assert_eq!(old.pane_key, current.pane_key);
+    }
+
+    #[test]
+    fn authoritative_rebind_defers_for_live_terminal_or_document_scope() {
+        assert_eq!(
+            authoritative_rebind_blocker(true, true, false),
+            Some("existing terminal sessions still use the compatibility identity")
+        );
+        assert_eq!(
+            authoritative_rebind_blocker(true, false, true),
+            Some("open documents still use the compatibility identity")
+        );
+        assert_eq!(authoritative_rebind_blocker(true, false, false), None);
+        assert_eq!(authoritative_rebind_blocker(false, true, true), None);
     }
 
     #[test]

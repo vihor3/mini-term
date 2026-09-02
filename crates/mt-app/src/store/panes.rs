@@ -638,6 +638,9 @@ impl AppStore {
     ///    codex resume 不会重新上报 SessionStart,身份清了第二次重启就断代;
     /// 4. 否决条件全在 [`resolve_auto_resume_command`]。
     pub fn hydrate_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if self.defer_remote_hydration(project_id, cx) {
+            return;
+        }
         let Some(project) = self.project(project_id).cloned() else {
             return;
         };
@@ -788,6 +791,9 @@ impl AppStore {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<PaneState> {
+        if self.defer_remote_hydration(&project.id, cx) {
+            return None;
+        }
         let mut pane = PaneState::new(shell.name.clone());
         let (pty_id, incarnation_id, _) = self.start_pty(
             project,

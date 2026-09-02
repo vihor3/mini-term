@@ -15,8 +15,8 @@
 //! 同步到调用方给的窗口,见 spec/backend/russh-sftp-file-transfer.md 坑 1。
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use russh_sftp::client::SftpSession;
@@ -454,6 +454,17 @@ impl SftpHandle {
                     "sftp preserve permissions on '{path}' failed: {error}"
                 ))
             })
+    }
+
+    /// Apply a POSIX permission mode to an already validated remote entry.
+    /// Callers remain responsible for lstat/type validation before invoking
+    /// this method; it deliberately does not introduce a second path policy.
+    pub async fn set_permissions(
+        &self,
+        path: &str,
+        permissions: u32,
+    ) -> Result<(), SftpTransferError> {
+        self.set_file_permissions(path, permissions).await
     }
 
     /// 逐级创建远程目录(`mkdir -p` 语义)。`path` 必须是 POSIX 绝对路径。

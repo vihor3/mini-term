@@ -29,6 +29,14 @@ fn remote_baseline(conn: &SshConnection, bytes: &[u8]) -> RemoteFileBaseline {
     }
 }
 
+#[test]
+fn remote_runtime_retries_only_the_first_retryable_failure() {
+    assert!(should_retry_runtime(0, true));
+    assert!(!should_retry_runtime(1, true));
+    assert!(!should_retry_runtime(2, true));
+    assert!(!should_retry_runtime(0, false));
+}
+
 // --- 断链查找 ---
 
 #[test]
@@ -549,6 +557,18 @@ fn remote_state_caches_are_isolated_per_key() {
 }
 
 #[test]
+fn connection_epoch_registry_is_monotonic_and_exactly_cleared() {
+    let st = RemoteSshState::new();
+    st.remember_connection_epoch("c1", 9);
+    st.remember_connection_epoch("c1", 8);
+    assert!(st.connection_epoch_is_current("c1", 9));
+    st.forget_connection_epoch_if("c1", 8);
+    assert!(st.connection_epoch_is_current("c1", 9));
+    st.forget_connection_epoch_if("c1", 9);
+    assert!(!st.connection_epoch_is_current("c1", 9));
+}
+
+#[test]
 fn invalidate_connection_clears_only_that_connections_caches() {
     let st = RemoteSshState::new();
     remember_session_path(&st, "c1", "s1", "/p/a.jsonl");
@@ -563,6 +583,8 @@ fn invalidate_connection_clears_only_that_connections_caches() {
         "c2|/home/u2/proj".into(),
         Arc::new(TextGitignore::from_text("target/\n")),
     );
+    st.remember_connection_epoch("c1", 7);
+    st.remember_connection_epoch("c2", 8);
 
     st.invalidate_connection("c1");
 
@@ -570,6 +592,7 @@ fn invalidate_connection_clears_only_that_connections_caches() {
     assert!(lock(&st.session_paths).get("c1|s1").is_none());
     assert!(lock(&st.home_cache).get("c1").is_none());
     assert!(lock(&st.gitignore_cache).get("c1|/home/u1/proj").is_none());
+    assert!(!st.connection_epoch_is_current("c1", 7));
     // c2 一条都不许被误伤(前缀匹配必须带上分隔符)。
     assert_eq!(
         lock(&st.session_paths).get("c2|s1").map(String::as_str),
@@ -580,6 +603,7 @@ fn invalidate_connection_clears_only_that_connections_caches() {
         Some("/home/u2")
     );
     assert!(lock(&st.gitignore_cache).get("c2|/home/u2/proj").is_some());
+    assert!(st.connection_epoch_is_current("c2", 8));
     // 池没建过 → 不该为了 evict 现建一个运行时。
     assert!(lock(&st.runtime).is_none(), "不该为了 evict 现建运行时");
 }

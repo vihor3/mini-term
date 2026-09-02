@@ -343,6 +343,7 @@ impl AppStore {
             self.active_project_id = self.config.projects.first().map(|p| p.id.clone());
             self.config.last_active_project_id = self.active_project_id.clone();
         }
+        self.remove_remote_runtime_project(id);
         self.remove_project_identity(id);
         self.save_config_soon(cx);
         cx.notify();

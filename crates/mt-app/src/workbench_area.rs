@@ -303,6 +303,20 @@ pub fn project_has_dirty_documents(project_id: &str, cx: &App) -> bool {
     })
 }
 
+/// Rebinding a compatibility project while any of its documents are open
+/// would either retag an in-flight callback or make the old tab unreachable.
+/// Remote runtime identity therefore defers until the next clean activation.
+pub fn project_has_documents(project_id: &str, cx: &App) -> bool {
+    global(cx).is_some_and(|area| {
+        area.read(cx).worktrees.values().any(|documents| {
+            documents
+                .tabs
+                .iter()
+                .any(|tab| tab.source_project_id == project_id)
+        })
+    })
+}
+
 /// 关窗确认使用的未保存文档列表。项目名与页签名一起展示，避免不同项目中的
 /// 同名文件让用户无法判断哪些草稿会被丢弃。
 pub fn dirty_document_names(cx: &App) -> Vec<String> {

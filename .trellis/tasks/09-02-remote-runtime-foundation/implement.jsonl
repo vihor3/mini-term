@@ -1,0 +1,4 @@
+{"file":".trellis/spec/mt-ssh/backend/remote-document-io-contract.md","reason":"Preserve existing pooled SSH/SFTP safety and exact-session retry contracts."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Keep remote authoritative rebinding consistent with stable pane/worktree routing."}
+{"file":".trellis/spec/mt-terminal-host/backend/terminal-host-contract.md","reason":"Keep remote runtime transport separate from local terminal-host ownership."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/design.md","reason":"Normative remote runtime identity, heartbeat, inventory, and reconnect architecture."}
