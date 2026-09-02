@@ -1,0 +1,14 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"The architecture crosses worktree discovery, layout identity, PTY ownership, terminal serialization, SSH transport, agent hooks, persistence, and UI projection."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Reuse the existing SSH daemon, SFTP, Hook adapters, layout persistence, and terminal emulator patterns without duplicating divergent policy."}
+{"file":".trellis/spec/mt-project/backend/index.md","reason":"Owns Git worktree command execution, parsing, identity, mutation boundaries, and tests."}
+{"file":".trellis/spec/mt-layout/backend/index.md","reason":"Owns versioned workspace, pane, terminal binding, migration, and salvage contracts."}
+{"file":".trellis/spec/mt-pty/backend/index.md","reason":"Owns PTY spawn/control behavior that will move behind the detached terminal host."}
+{"file":".trellis/spec/mt-terminal/backend/index.md","reason":"Owns the terminal model, replayable snapshot codec, modes, cursor, and scrollback fidelity."}
+{"file":".trellis/spec/mt-ai/backend/index.md","reason":"Owns provider adapters, Hook normalization, agent identity, status, session resume, and legacy projection."}
+{"file":".trellis/spec/mt-ssh/backend/index.md","reason":"Owns authenticated remote runtime transport, host identity, reconnect, heartbeat, and remote filesystem primitives."}
+{"file":".trellis/spec/mt-app/backend/index.md","reason":"Owns orchestration and UI projection for worktree, terminal recovery, remote connectivity, and agent state."}
+{"file":".trellis/spec/mt-app/backend/file-workbench-contract.md","reason":"Defines file-tab identity, project/worktree binding, preview behavior, and persistence constraints needed for independent per-worktree open files."}
+{"file":".trellis/spec/mt-usage/backend/index.md","reason":"Owns the existing usage ledger and aggregation surface that the Project Sidebar footer must reuse instead of inventing a second usage metric."}
+{"file":".trellis/tasks/09-01-orca-worktree-terminal-research/research/orca-worktree-terminal-agent-architecture.md","reason":"Source-backed Orca analysis, mini-term gap inventory, evidence priority, recovery boundaries, and recommended rollout order."}
+{"file":".trellis/tasks/09-01-orca-worktree-terminal-research/research/orca-ui-ux-mapping.md","reason":"Source-backed mapping from Orca's shell to mini-term's Project -> Worktree sidebar, independent worktree tabs/files, top Files/Git/Tasks/Sessions context tabs, creation flow, and agent surfaces."}
+{"file":".trellis/tasks/09-01-orca-worktree-terminal-research/research/operation-logic.md","reason":"Defines concrete click behavior, state ownership, async fencing, close/restore semantics, global Agents routing, contextual tabs, worktree creation, and remote reconnect behavior."}

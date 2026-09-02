@@ -1,0 +1,1571 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mini-term · Orca 式目标壳原型 v2</title>
+<style>
+  html, body { margin: 0; }
+</style>
+</head>
+<body>
+<div id="mini-term-orca-mockup">
+  <style>
+    #mini-term-orca-mockup {
+      color-scheme: light dark;
+      min-height: 100vh;
+      padding: 20px;
+      box-sizing: border-box;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: light-dark(#202124, #e8e8e4);
+      letter-spacing: 0;
+      background: light-dark(#e9eae8, #0c0d0e);
+    }
+
+    #mini-term-orca-mockup * { box-sizing: border-box; }
+    #mini-term-orca-mockup button { font: inherit; color: inherit; }
+
+    #mini-term-orca-mockup .mt-window {
+      max-width: 1480px;
+      margin: 0 auto;
+      height: min(720px, 86vh);
+      min-height: 600px;
+      overflow: hidden;
+      border: 1px solid light-dark(#cfd0d2, #303236);
+      border-radius: 8px;
+      background: light-dark(#f7f7f6, #111213);
+      box-shadow: 0 18px 50px light-dark(rgba(30, 31, 33, 0.12), rgba(0, 0, 0, 0.34));
+    }
+
+    /* ---------- titlebar ---------- */
+
+    #mini-term-orca-mockup .mt-titlebar {
+      height: 38px;
+      display: grid;
+      grid-template-columns: minmax(190px, 250px) minmax(0, 1fr) auto;
+      align-items: center;
+      border-bottom: 1px solid light-dark(#dadbdd, #292b2e);
+      background: light-dark(#f0f0ef, #171819);
+      user-select: none;
+    }
+
+    #mini-term-orca-mockup .mt-brand,
+    #mini-term-orca-mockup .mt-title-current,
+    #mini-term-orca-mockup .mt-title-actions {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+    }
+
+    #mini-term-orca-mockup .mt-brand { gap: 8px; padding: 0 11px; font-size: 12px; font-weight: 650; }
+
+    #mini-term-orca-mockup .mt-brand-mark {
+      width: 20px;
+      height: 20px;
+      display: grid;
+      place-items: center;
+      border-radius: 5px;
+      color: light-dark(#ffffff, #111213);
+      background: light-dark(#25272a, #e8e8e4);
+    }
+
+    #mini-term-orca-mockup .mt-brand-mark svg { width: 13px; height: 13px; stroke-width: 2.2; }
+
+    #mini-term-orca-mockup .mt-title-current {
+      justify-content: center;
+      gap: 7px;
+      padding: 0 12px;
+      color: light-dark(#5f6165, #a2a4a8);
+      font-size: 11px;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    #mini-term-orca-mockup .mt-title-current strong {
+      color: light-dark(#26272a, #deded9);
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #mini-term-orca-mockup .mt-title-actions { gap: 2px; padding-right: 7px; }
+
+    #mini-term-orca-mockup .mt-icon-action,
+    #mini-term-orca-mockup .mt-header-action,
+    #mini-term-orca-mockup .mt-tab-action,
+    #mini-term-orca-mockup .mt-context-action {
+      display: inline-grid;
+      place-items: center;
+      padding: 0;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: light-dark(#67696d, #96989c);
+      cursor: pointer;
+    }
+
+    #mini-term-orca-mockup .mt-icon-action { width: 28px; height: 28px; }
+
+    #mini-term-orca-mockup .mt-icon-action:hover,
+    #mini-term-orca-mockup .mt-header-action:hover,
+    #mini-term-orca-mockup .mt-tab-action:hover,
+    #mini-term-orca-mockup .mt-context-action:hover {
+      color: light-dark(#202124, #eeeeea);
+      background: light-dark(#e1e2e2, #26282a);
+    }
+
+    #mini-term-orca-mockup svg { width: 15px; height: 15px; stroke-width: 1.8; }
+
+    /* ---------- shell ---------- */
+
+    #mini-term-orca-mockup .mt-shell {
+      height: calc(100% - 38px);
+      display: grid;
+      grid-template-columns: minmax(280px, 340px) minmax(0, 1fr) minmax(300px, 380px);
+      min-width: 0;
+    }
+
+    /* ---------- left sidebar ---------- */
+
+    #mini-term-orca-mockup .mt-sidebar {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid light-dark(#d8d9db, #292b2e);
+      background: light-dark(#eeeeed, #18191a);
+    }
+
+    #mini-term-orca-mockup .mt-global-nav {
+      padding: 8px 7px 7px;
+      border-bottom: 1px solid light-dark(#d8d9db, #292b2e);
+    }
+
+    #mini-term-orca-mockup .mt-nav-entry {
+      width: 100%;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: light-dark(#55575b, #a2a4a8);
+      font-size: 12px;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    #mini-term-orca-mockup .mt-nav-entry:hover,
+    #mini-term-orca-mockup .mt-nav-entry[aria-current="page"] {
+      color: light-dark(#222326, #f0f0ec);
+      background: light-dark(#dedfdf, #252729);
+    }
+
+    #mini-term-orca-mockup .mt-nav-entry svg { width: 14px; height: 14px; }
+    #mini-term-orca-mockup .mt-nav-kbd {
+      margin-left: auto;
+      font-size: 9px;
+      color: light-dark(#8b8d91, #696c70);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    #mini-term-orca-mockup .mt-projects-head {
+      height: 39px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 0 8px 0 12px;
+      border-bottom: 1px solid light-dark(#d8d9db, #292b2e);
+    }
+
+    #mini-term-orca-mockup .mt-projects-title {
+      margin-right: auto;
+      font-size: 12px;
+      font-weight: 650;
+      color: light-dark(#333438, #d7d7d2);
+    }
+
+    #mini-term-orca-mockup .mt-header-action { width: 25px; height: 25px; }
+
+    #mini-term-orca-mockup .mt-worktree-scroll {
+      min-height: 0;
+      flex: 1;
+      overflow: auto;
+      padding: 0 7px 8px;
+      scrollbar-width: thin;
+    }
+
+    #mini-term-orca-mockup .mt-worktree-group { margin-top: 4px; }
+
+    #mini-term-orca-mockup .mt-group-heading {
+      height: 26px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 6px;
+      color: light-dark(#74767a, #777a7e);
+      font-size: 10px;
+      font-weight: 650;
+      text-transform: uppercase;
+    }
+
+    #mini-term-orca-mockup .mt-group-heading svg { width: 12px; height: 12px; }
+
+    #mini-term-orca-mockup .mt-worktree-row {
+      width: 100%;
+      min-height: 58px;
+      display: grid;
+      grid-template-columns: 20px minmax(0, 1fr) 22px;
+      gap: 6px;
+      padding: 7px 5px 7px 3px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+      color: inherit;
+      font: inherit;
+    }
+
+    #mini-term-orca-mockup .mt-worktree-row + .mt-worktree-row { margin-top: 2px; }
+
+    #mini-term-orca-mockup .mt-worktree-row:hover { background: light-dark(#e2e3e2, #212325); }
+
+    #mini-term-orca-mockup .mt-worktree-row[aria-selected="true"] {
+      border-color: light-dark(#c7c9cb, #383a3e);
+      background: light-dark(#ffffff, #252729);
+      box-shadow: 0 1px 3px light-dark(rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.24));
+    }
+
+    /* 断线覆盖态：降低对比度，不用红点假装 activity */
+    #mini-term-orca-mockup .mt-worktree-row.is-disconnected { opacity: 0.58; }
+    #mini-term-orca-mockup .mt-worktree-row.is-disconnected:hover { opacity: 0.82; }
+
+    #mini-term-orca-mockup .mt-status-lane {
+      position: relative;
+      width: 20px;
+      height: 20px;
+      display: grid;
+      place-items: center;
+      color: light-dark(#77797c, #808286);
+    }
+
+    #mini-term-orca-mockup .mt-state-spinner {
+      width: 11px;
+      height: 11px;
+      border: 1.5px solid light-dark(#b4b6b8, #55585c);
+      border-top-color: light-dark(#4f8588, #79aeb0);
+      border-radius: 50%;
+      animation: mt-orca-spin 1s linear infinite;
+    }
+
+    @keyframes mt-orca-spin { to { transform: rotate(360deg); } }
+
+    #mini-term-orca-mockup .mt-state-question,
+    #mini-term-orca-mockup .mt-state-done,
+    #mini-term-orca-mockup .mt-state-error {
+      width: 11px;
+      height: 11px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      font-size: 8px;
+      line-height: 1;
+      font-weight: 800;
+    }
+
+    #mini-term-orca-mockup .mt-state-question { background: light-dark(#d6a64a, #d6a64a); color: #19140c; }
+    #mini-term-orca-mockup .mt-state-done { background: light-dark(#4aa176, #59b887); color: #07150f; }
+    #mini-term-orca-mockup .mt-state-error { background: light-dark(#cc6262, #d36d6d); }
+    #mini-term-orca-mockup .mt-state-idle {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: light-dark(#a2a4a7, #65686c);
+    }
+
+    #mini-term-orca-mockup .mt-state-disconnected { color: light-dark(#8f9194, #6d7074); }
+    #mini-term-orca-mockup .mt-state-disconnected svg { width: 12px; height: 12px; }
+
+    /* unread 叠在状态列同一位置，不挤动标题 */
+    #mini-term-orca-mockup .mt-unread-dot {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: light-dark(#4a7fa1, #6aa9cc);
+      box-shadow: 0 0 0 2px light-dark(#eeeeed, #18191a);
+    }
+
+    #mini-term-orca-mockup .mt-worktree-copy { min-width: 0; }
+
+    #mini-term-orca-mockup .mt-worktree-name {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+      color: light-dark(#27282b, #e7e7e2);
+      font-size: 12px;
+      line-height: 17px;
+      font-weight: 610;
+    }
+
+    #mini-term-orca-mockup .mt-worktree-name span:first-child {
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    #mini-term-orca-mockup .mt-worktree-row[data-unread="true"] .mt-worktree-name span:first-child { font-weight: 720; }
+
+    #mini-term-orca-mockup .mt-primary-label,
+    #mini-term-orca-mockup .mt-remote-label {
+      flex: 0 0 auto;
+      padding: 0 4px;
+      border: 1px solid light-dark(#cacbcd, #3a3c40);
+      border-radius: 4px;
+      color: light-dark(#717377, #8c8e92);
+      font-size: 8px;
+      font-weight: 600;
+      line-height: 13px;
+      text-transform: uppercase;
+    }
+
+    #mini-term-orca-mockup .mt-worktree-meta {
+      overflow: hidden;
+      color: light-dark(#838589, #777a7e);
+      font-size: 10px;
+      line-height: 15px;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    #mini-term-orca-mockup .mt-agent-line {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+      margin-top: 3px;
+      color: light-dark(#585a5e, #a5a7aa);
+      font-size: 10px;
+      line-height: 15px;
+    }
+
+    #mini-term-orca-mockup .mt-provider-mark {
+      flex: 0 0 auto;
+      width: 14px;
+      height: 14px;
+      display: grid;
+      place-items: center;
+      border-radius: 3px;
+      background: light-dark(#d8d9d9, #333538);
+      color: light-dark(#45474a, #d1d2cf);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 8px;
+      font-weight: 750;
+    }
+
+    #mini-term-orca-mockup .mt-agent-copy {
+      min-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    #mini-term-orca-mockup .mt-agent-age { flex: 0 0 auto; color: light-dark(#96989c, #6f7276); font-size: 9px; }
+
+    #mini-term-orca-mockup .mt-row-actions {
+      align-self: start;
+      width: 22px;
+      height: 22px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 4px;
+      opacity: 0;
+      background: transparent;
+      color: light-dark(#6b6d71, #8d8f93);
+      cursor: pointer;
+    }
+
+    #mini-term-orca-mockup .mt-worktree-row:hover .mt-row-actions,
+    #mini-term-orca-mockup .mt-worktree-row[aria-selected="true"] .mt-row-actions { opacity: 1; }
+
+    /* 断线卡的 Reconnect 常显（覆盖态需要可达动作） */
+    #mini-term-orca-mockup .mt-worktree-row.is-disconnected .mt-row-actions[data-reconnect] { opacity: 1; }
+    #mini-term-orca-mockup span.mt-row-actions { cursor: pointer; }
+
+    #mini-term-orca-mockup .mt-row-actions svg { width: 13px; height: 13px; }
+
+    /* pending worktree 行 */
+    #mini-term-orca-mockup .mt-worktree-row.is-pending { border-style: dashed; border-color: light-dark(#c7c9cb, #383a3e); }
+    #mini-term-orca-mockup .mt-worktree-row.is-pending .mt-worktree-name { color: light-dark(#6e7074, #9a9c9f); }
+
+    #mini-term-orca-mockup .mt-sidebar-foot {
+      height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 7px;
+      border-top: 1px solid light-dark(#d8d9db, #292b2e);
+    }
+
+    #mini-term-orca-mockup .mt-usage-entry {
+      min-width: 0;
+      height: 30px;
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 7px;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: light-dark(#66686c, #8f9195);
+      font-size: 10px;
+      cursor: pointer;
+    }
+
+    #mini-term-orca-mockup .mt-usage-entry:hover {
+      color: light-dark(#202124, #eeeeea);
+      background: light-dark(#e1e2e2, #26282a);
+    }
+
+    #mini-term-orca-mockup .mt-usage-value {
+      margin-left: auto;
+      color: light-dark(#77797d, #7f8286);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 9px;
+    }
+
+    /* ---------- workbench ---------- */
+
+    #mini-term-orca-mockup .mt-workbench {
+      min-width: 0;
+      display: grid;
+      grid-template-rows: 37px minmax(0, 1fr) 28px;
+      background: light-dark(#fafaf9, #121314);
+    }
+
+    #mini-term-orca-mockup .mt-tabbar {
+      min-width: 0;
+      display: flex;
+      align-items: stretch;
+      border-bottom: 1px solid light-dark(#d9dade, #292b2e);
+      background: light-dark(#f2f2f1, #18191a);
+    }
+
+    #mini-term-orca-mockup .mt-tabs { min-width: 0; flex: 1; display: flex; overflow: hidden; }
+
+    #mini-term-orca-mockup .mt-workbench-tab {
+      position: relative;
+      min-width: 0;
+      max-width: 180px;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 8px 0 10px;
+      border: 0;
+      border-right: 1px solid light-dark(#dedfe1, #292b2e);
+      background: transparent;
+      color: light-dark(#74767a, #8b8d91);
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    #mini-term-orca-mockup .mt-workbench-tab[aria-selected="true"] {
+      color: light-dark(#232428, #ecece8);
+      background: light-dark(#fafaf9, #121314);
+    }
+
+    #mini-term-orca-mockup .mt-workbench-tab[aria-selected="true"]::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -1px;
+      height: 2px;
+      background: light-dark(#4f8588, #79aeb0);
+    }
+
+    #mini-term-orca-mockup .mt-workbench-tab svg { flex: 0 0 auto; width: 13px; height: 13px; }
+
+    #mini-term-orca-mockup .mt-tab-label {
+      min-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    /* 未保存脏点（git 状态只出现在 Files 树徽章上，二者不混用） */
+    #mini-term-orca-mockup .mt-tab-dirty {
+      width: 6px;
+      height: 6px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: light-dark(#d6a64a, #d6a64a);
+    }
+
+    #mini-term-orca-mockup .mt-tab-close {
+      flex: 0 0 auto;
+      width: 16px;
+      height: 16px;
+      display: none;
+      place-items: center;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: light-dark(#7a7c80, #84868a);
+      cursor: pointer;
+    }
+
+    #mini-term-orca-mockup .mt-workbench-tab:hover .mt-tab-close { display: grid; }
+    #mini-term-orca-mockup .mt-tab-close:hover { background: light-dark(#dfe0e0, #2b2d30); color: light-dark(#232428, #ecece8); }
+    #mini-term-orca-mockup span.mt-tab-close { cursor: pointer; }
+    #mini-term-orca-mockup .mt-tab-close svg { width: 11px; height: 11px; }
+
+    #mini-term-orca-mockup .mt-tab-actions {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 1px;
+      padding: 0 6px;
+    }
+
+    #mini-term-orca-mockup .mt-tab-action { width: 25px; height: 25px; }
+
+    /* ---------- terminal surface / split panes ---------- */
+
+    #mini-term-orca-mockup .mt-terminal-surface {
+      position: relative;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      background: light-dark(#fbfbfa, #101112);
+    }
+
+    #mini-term-orca-mockup .mt-split {
+      height: 100%;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 5px minmax(0, 1fr);
+    }
+
+    #mini-term-orca-mockup .mt-pane {
+      min-width: 0;
+      min-height: 0;
+      overflow: auto;
+      padding: 14px 16px 24px;
+      color: light-dark(#303237, #cfd1cd);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.62;
+      scrollbar-width: thin;
+      border: 1px solid transparent;
+      border-radius: 4px;
+    }
+
+    #mini-term-orca-mockup .mt-pane.is-active { border-color: light-dark(rgba(79, 133, 136, 0.55), rgba(121, 174, 176, 0.5)); }
+    #mini-term-orca-mockup .mt-split .mt-pane:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+    #mini-term-orca-mockup .mt-split .mt-pane:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+
+    #mini-term-orca-mockup .mt-divider { cursor: col-resize; }
+    #mini-term-orca-mockup .mt-divider:hover { background: light-dark(rgba(79, 133, 136, 0.35), rgba(121, 174, 176, 0.3)); }
+
+    #mini-term-orca-mockup .mt-terminal-muted { color: light-dark(#8a8c90, #696c70); }
+    #mini-term-orca-mockup .mt-terminal-green { color: light-dark(#307b58, #65b98c); }
+    #mini-term-orca-mockup .mt-terminal-amber { color: light-dark(#966b16, #d6a64a); }
+    #mini-term-orca-mockup .mt-terminal-accent { color: light-dark(#3f777a, #7fb3b5); }
+    #mini-term-orca-mockup .mt-terminal-red { color: light-dark(#b05050, #d36d6d); }
+
+    #mini-term-orca-mockup .mt-terminal-cursor {
+      display: inline-block;
+      width: 6px;
+      height: 13px;
+      margin-left: 2px;
+      vertical-align: -2px;
+      background: light-dark(#36383c, #d7d8d4);
+      animation: mt-orca-blink 1.15s steps(1) infinite;
+    }
+
+    @keyframes mt-orca-blink { 50% { opacity: 0; } }
+
+    #mini-term-orca-mockup .mt-agent-prompt {
+      margin: 12px 0;
+      padding: 9px 10px;
+      border-left: 2px solid light-dark(#4f8588, #79aeb0);
+      background: light-dark(#f1f4f3, #181d1d);
+      color: light-dark(#3b3d41, #c9cbc7);
+    }
+
+    /* ---------- 合并后的 workbench 底条（原 context 条 + 状态栏） ---------- */
+
+    #mini-term-orca-mockup .mt-workbar {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 10px;
+      border-top: 1px solid light-dark(#dedfe1, #242629);
+      background: light-dark(#f2f2f1, #171819);
+      color: light-dark(#74767a, #777a7e);
+      font-size: 10px;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    #mini-term-orca-mockup .mt-workbar-group {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    #mini-term-orca-mockup .mt-workbar svg { width: 12px; height: 12px; flex: 0 0 auto; }
+    #mini-term-orca-mockup .mt-workbar-label { overflow: hidden; text-overflow: ellipsis; }
+    #mini-term-orca-mockup .mt-workbar-sep { color: light-dark(#b5b6b9, #44474a); }
+    #mini-term-orca-mockup .mt-workbar-spacer { flex: 1; }
+
+    #mini-term-orca-mockup .mt-workbar .mt-state-question,
+    #mini-term-orca-mockup .mt-workbar .mt-state-done,
+    #mini-term-orca-mockup .mt-workbar .mt-state-idle { flex: 0 0 auto; }
+
+    /* ---------- pending 创建面板 ---------- */
+
+    #mini-term-orca-mockup .mt-stage-panel {
+      height: 100%;
+      overflow: auto;
+      padding: 22px 24px;
+    }
+
+    #mini-term-orca-mockup .mt-stage-title { font-size: 13px; font-weight: 650; color: light-dark(#2b2c2f, #e2e2de); }
+    #mini-term-orca-mockup .mt-stage-sub { margin-top: 3px; font-size: 10px; color: light-dark(#838589, #777a7e); }
+
+    #mini-term-orca-mockup .mt-stage-list { margin-top: 16px; max-width: 420px; }
+
+    #mini-term-orca-mockup .mt-stage-row {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 4px;
+      border-bottom: 1px solid light-dark(#e4e5e6, #232527);
+      font-size: 11px;
+      color: light-dark(#55575b, #a9abae);
+    }
+
+    #mini-term-orca-mockup .mt-stage-row.is-done { color: light-dark(#3f7759, #65b98c); }
+    #mini-term-orca-mockup .mt-stage-row.is-current { color: light-dark(#2b2c2f, #e2e2de); font-weight: 620; }
+    #mini-term-orca-mockup .mt-stage-row.is-todo { color: light-dark(#96989c, #6f7276); }
+    #mini-term-orca-mockup .mt-stage-note { font-size: 9px; color: light-dark(#96989c, #6f7276); }
+
+    #mini-term-orca-mockup .mt-stage-dismiss {
+      margin-top: 18px;
+      padding: 5px 12px;
+      border: 1px solid light-dark(#c7c9cb, #3a3c40);
+      border-radius: 5px;
+      background: transparent;
+      color: light-dark(#55575b, #a9abae);
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    #mini-term-orca-mockup .mt-stage-dismiss:hover {
+      color: light-dark(#202124, #eeeeea);
+      background: light-dark(#e1e2e2, #26282a);
+    }
+
+    /* ---------- diff 视图 ---------- */
+
+    #mini-term-orca-mockup .mt-diff-view {
+      height: 100%;
+      overflow: auto;
+      padding: 14px 16px 24px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.6;
+      scrollbar-width: thin;
+    }
+
+    #mini-term-orca-mockup .mt-diff-hunk { margin: 10px 0 4px; color: light-dark(#7a7c80, #777a7e); }
+    #mini-term-orca-mockup .mt-diff-del { color: light-dark(#a74848, #d36d6d); background: light-dark(rgba(204, 98, 98, 0.08), rgba(211, 109, 109, 0.09)); }
+    #mini-term-orca-mockup .mt-diff-add { color: light-dark(#2f7a55, #65b98c); background: light-dark(rgba(74, 161, 118, 0.08), rgba(89, 184, 135, 0.09)); }
+
+    /* ---------- right context sidebar ---------- */
+
+    #mini-term-orca-mockup .mt-context-sidebar {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      border-left: 1px solid light-dark(#d8d9db, #292b2e);
+      background: light-dark(#f2f2f1, #18191a);
+    }
+
+    #mini-term-orca-mockup .mt-context-panel { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+    #mini-term-orca-mockup .mt-context-nav {
+      height: 39px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      align-items: stretch;
+      border-bottom: 1px solid light-dark(#d8d9db, #292b2e);
+      background: light-dark(#ebebea, #151617);
+    }
+
+    #mini-term-orca-mockup .mt-context-header {
+      height: 33px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0 6px 0 10px;
+      border-bottom: 1px solid light-dark(#d8d9db, #292b2e);
+    }
+
+    #mini-term-orca-mockup .mt-context-title {
+      min-width: 0;
+      margin-right: auto;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      color: light-dark(#343539, #d6d6d2);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    #mini-term-orca-mockup .mt-context-action { width: 24px; height: 24px; }
+
+    #mini-term-orca-mockup .mt-context-body {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 7px 5px;
+      scrollbar-width: thin;
+    }
+
+    #mini-term-orca-mockup .mt-context-tab {
+      position: relative;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: light-dark(#77797d, #85878b);
+      font-size: 9.5px;
+      line-height: 11px;
+      cursor: pointer;
+    }
+
+    #mini-term-orca-mockup .mt-context-tab:hover,
+    #mini-term-orca-mockup .mt-context-tab[aria-selected="true"] {
+      color: light-dark(#25262a, #ecece8);
+      background: light-dark(#e1e2e2, #222426);
+    }
+
+    #mini-term-orca-mockup .mt-context-tab[aria-selected="true"]::after {
+      content: "";
+      position: absolute;
+      left: 7px;
+      right: 7px;
+      bottom: 0;
+      height: 2px;
+      background: light-dark(#4f8588, #79aeb0);
+    }
+
+    #mini-term-orca-mockup .mt-context-tab svg { width: 14px; height: 14px; }
+
+    #mini-term-orca-mockup .mt-tree-row {
+      height: 25px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 6px;
+      border-radius: 4px;
+      color: light-dark(#56585c, #aaacaf);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    #mini-term-orca-mockup .mt-tree-row:hover,
+    #mini-term-orca-mockup .mt-tree-row.is-active {
+      color: light-dark(#25262a, #ecece8);
+      background: light-dark(#e2e3e2, #242628);
+    }
+
+    #mini-term-orca-mockup .mt-tree-row.indent-1 { padding-left: 18px; }
+    #mini-term-orca-mockup .mt-tree-row.indent-2 { padding-left: 31px; }
+    #mini-term-orca-mockup .mt-tree-row svg { flex: 0 0 auto; width: 13px; height: 13px; }
+
+    #mini-term-orca-mockup .mt-tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+    #mini-term-orca-mockup .mt-tree-change {
+      margin-left: auto;
+      color: light-dark(#966b16, #d6a64a);
+      font-size: 9px;
+      font-weight: 700;
+    }
+
+    #mini-term-orca-mockup .mt-context-section-label {
+      height: 25px;
+      display: flex;
+      align-items: center;
+      padding: 0 7px;
+      color: light-dark(#7c7e82, #74777b);
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    #mini-term-orca-mockup .mt-git-file {
+      height: 27px;
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 4px;
+      padding: 0 6px;
+      border-radius: 4px;
+      color: light-dark(#55575b, #a9abae);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 9.5px;
+      cursor: pointer;
+    }
+
+    #mini-term-orca-mockup .mt-git-file:hover { background: light-dark(#e2e3e2, #242628); }
+    #mini-term-orca-mockup .mt-git-code { color: light-dark(#966b16, #d6a64a); font-weight: 750; }
+
+    #mini-term-orca-mockup .mt-commit-row,
+    #mini-term-orca-mockup .mt-task-row,
+    #mini-term-orca-mockup .mt-session-row {
+      padding: 8px 7px;
+      border-bottom: 1px solid light-dark(#e0e1e2, #292b2e);
+      cursor: pointer;
+      border-radius: 4px;
+    }
+
+    #mini-term-orca-mockup .mt-commit-row:hover,
+    #mini-term-orca-mockup .mt-task-row:hover,
+    #mini-term-orca-mockup .mt-session-row:hover { background: light-dark(#e9eaea, #202224); }
+
+    #mini-term-orca-mockup .mt-commit-head,
+    #mini-term-orca-mockup .mt-task-head,
+    #mini-term-orca-mockup .mt-session-head {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: light-dark(#36383b, #d7d8d4);
+      font-size: 10px;
+      font-weight: 620;
+    }
+
+    #mini-term-orca-mockup .mt-commit-sha,
+    #mini-term-orca-mockup .mt-task-number,
+    #mini-term-orca-mockup .mt-session-time {
+      margin-left: auto;
+      color: light-dark(#8b8d91, #6f7276);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 8px;
+      font-weight: 500;
+    }
+
+    #mini-term-orca-mockup .mt-commit-copy,
+    #mini-term-orca-mockup .mt-task-copy,
+    #mini-term-orca-mockup .mt-session-copy {
+      margin-top: 4px;
+      color: light-dark(#6f7175, #898c90);
+      font-size: 9px;
+      line-height: 1.45;
+    }
+
+    #mini-term-orca-mockup .mt-task-kind {
+      flex: 0 0 auto;
+      width: 15px;
+      height: 15px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      border: 1px solid light-dark(#9b7c38, #b38b3e);
+      color: light-dark(#8a6313, #d6a64a);
+      font-size: 8px;
+      font-weight: 800;
+    }
+
+    #mini-term-orca-mockup .mt-session-provider {
+      flex: 0 0 auto;
+      width: 17px;
+      height: 17px;
+      display: grid;
+      place-items: center;
+      border-radius: 4px;
+      background: light-dark(#d8d9d9, #333538);
+      color: light-dark(#45474a, #d1d2cf);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 8px;
+      font-weight: 750;
+    }
+
+    /* 空态 */
+    #mini-term-orca-mockup .mt-empty-state {
+      padding: 18px 12px;
+      color: light-dark(#838589, #777a7e);
+      font-size: 10px;
+      line-height: 1.6;
+      text-align: center;
+    }
+
+    #mini-term-orca-mockup .mt-empty-state svg { width: 18px; height: 18px; margin-bottom: 6px; }
+
+    /* ---------- search panel ---------- */
+
+    #mini-term-orca-mockup .mt-search-panel {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      z-index: 6;
+      width: min(470px, calc(100% - 24px));
+      display: none;
+      transform: translateX(-50%);
+      overflow: hidden;
+      border: 1px solid light-dark(#c7c8ca, #3a3c40);
+      border-radius: 7px;
+      background: light-dark(#fafaf9, #1b1c1e);
+      box-shadow: 0 18px 45px light-dark(rgba(32, 33, 35, 0.18), rgba(0, 0, 0, 0.48));
+    }
+
+    #mini-term-orca-mockup .mt-search-panel.is-visible { display: block; }
+
+    #mini-term-orca-mockup .mt-search-input {
+      height: 39px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 11px;
+      border-bottom: 1px solid light-dark(#dcdddf, #303236);
+      color: light-dark(#696b6f, #a0a2a6);
+      font-size: 11px;
+    }
+
+    #mini-term-orca-mockup .mt-search-result {
+      height: 39px;
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 7px;
+      padding: 0 11px;
+      color: light-dark(#4d4f53, #b4b6b2);
+      font-size: 10px;
+      cursor: pointer;
+    }
+
+    #mini-term-orca-mockup .mt-search-result:hover,
+    #mini-term-orca-mockup .mt-search-result.is-active {
+      color: light-dark(#202124, #eeeeea);
+      background: light-dark(#e5e8e7, #24292a);
+    }
+
+    #mini-term-orca-mockup .mt-search-kind {
+      color: light-dark(#87898d, #74777b);
+      font-size: 8px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- 紧凑模式（桌面窗口收窄，而非手机断点） ---------- */
+
+    @media (max-width: 920px) {
+      #mini-term-orca-mockup .mt-shell { grid-template-columns: minmax(230px, 260px) minmax(0, 1fr); }
+      #mini-term-orca-mockup .mt-context-sidebar { display: none; }
+      #mini-term-orca-mockup .mt-workbench-tab:nth-child(n+3) { display: none; }
+    }
+  </style>
+
+  <div class="mt-window">
+    <div class="mt-titlebar">
+      <div class="mt-brand">
+        <span class="mt-brand-mark"><i data-lucide="terminal-square"></i></span>
+        <span>mini-term</span>
+      </div>
+      <div class="mt-title-current">
+        <span>mini-term</span>
+        <span>/</span>
+        <strong id="mt-title-worktree">main</strong>
+      </div>
+      <div class="mt-title-actions">
+        <button class="mt-icon-action" type="button" title="Quick Open" aria-label="Quick Open" data-open-search><i data-lucide="search"></i></button>
+        <button class="mt-icon-action" type="button" title="Toggle split" aria-label="Toggle split"><i data-lucide="columns-2"></i></button>
+        <button class="mt-icon-action" type="button" title="Toggle context panel" aria-label="Toggle context panel"><i data-lucide="panel-right"></i></button>
+      </div>
+    </div>
+
+    <div class="mt-shell">
+      <aside class="mt-sidebar">
+        <nav class="mt-global-nav" aria-label="Global navigation">
+          <button class="mt-nav-entry" type="button" data-open-search>
+            <i data-lucide="search"></i>
+            <span>Search</span>
+            <span class="mt-nav-kbd">Ctrl K</span>
+          </button>
+        </nav>
+
+        <div class="mt-projects-head">
+          <span class="mt-projects-title">Projects</span>
+          <button class="mt-header-action" type="button" title="Project options" aria-label="Project options"><i data-lucide="sliders-horizontal"></i></button>
+          <button class="mt-header-action" type="button" title="Add project" aria-label="Add project"><i data-lucide="plus"></i></button>
+        </div>
+
+        <div class="mt-worktree-scroll">
+          <section class="mt-worktree-group">
+            <div class="mt-group-heading"><i data-lucide="chevron-down"></i><span>mini-term</span></div>
+
+            <button class="mt-worktree-row" type="button" aria-selected="true"
+              data-worktree="main" data-repo="mini-term" data-branch="main" data-path="~/mini-term"
+              data-agent="Claude Code" data-provider="C" data-state="working" data-age="now">
+              <span class="mt-status-lane"><span class="mt-state-spinner"></span></span>
+              <span class="mt-worktree-copy">
+                <span class="mt-worktree-name"><span>main</span><span class="mt-primary-label">primary</span></span>
+                <span class="mt-worktree-meta">main / ~/mini-term</span>
+                <span class="mt-agent-line"><span class="mt-provider-mark">C</span><span class="mt-agent-copy">Claude Code / Refactor project shell</span><span class="mt-agent-age">· now</span></span>
+              </span>
+              <span class="mt-row-actions"><i data-lucide="ellipsis"></i></span>
+            </button>
+
+            <button class="mt-worktree-row" type="button" aria-selected="false" data-unread="true"
+              data-worktree="orca-ui" data-repo="mini-term" data-branch="feature/orca-ui" data-path="~/worktrees/orca-ui"
+              data-agent="Codex" data-provider="X" data-state="waiting" data-age="1m">
+              <span class="mt-status-lane"><span class="mt-state-question">?</span><span class="mt-unread-dot"></span></span>
+              <span class="mt-worktree-copy">
+                <span class="mt-worktree-name"><span>orca-ui</span></span>
+                <span class="mt-worktree-meta">feature/orca-ui / 8 changes</span>
+                <span class="mt-agent-line"><span class="mt-provider-mark">X</span><span class="mt-agent-copy">Codex / Permission required</span><span class="mt-agent-age">· 1m</span></span>
+              </span>
+              <span class="mt-row-actions"><i data-lucide="ellipsis"></i></span>
+            </button>
+
+            <button class="mt-worktree-row" type="button" aria-selected="false"
+              data-worktree="pty-daemon" data-repo="mini-term" data-branch="feature/pty-daemon" data-path="~/worktrees/pty-daemon"
+              data-agent="Codex" data-provider="X" data-state="done" data-age="8m">
+              <span class="mt-status-lane"><span class="mt-state-done">✓</span></span>
+              <span class="mt-worktree-copy">
+                <span class="mt-worktree-name"><span>pty-daemon</span></span>
+                <span class="mt-worktree-meta">feature/pty-daemon / clean</span>
+                <span class="mt-agent-line"><span class="mt-provider-mark">X</span><span class="mt-agent-copy">Codex / Tests passed</span><span class="mt-agent-age">· 8m</span></span>
+              </span>
+              <span class="mt-row-actions"><i data-lucide="ellipsis"></i></span>
+            </button>
+
+            <button class="mt-worktree-row is-pending" type="button" aria-selected="false"
+              data-worktree="relay-hardening" data-repo="mini-term" data-branch="feature/relay-hardening" data-path="~/worktrees/relay-hardening"
+              data-agent="" data-provider="" data-state="pending" data-age="">
+              <span class="mt-status-lane"><span class="mt-state-spinner"></span></span>
+              <span class="mt-worktree-copy">
+                <span class="mt-worktree-name"><span>relay-hardening</span></span>
+                <span class="mt-worktree-meta">Creating · step 2/4</span>
+                <span class="mt-agent-line"><span class="mt-agent-copy">Background setup in progress</span></span>
+              </span>
+              <span class="mt-row-actions"><i data-lucide="ellipsis"></i></span>
+            </button>
+          </section>
+
+          <section class="mt-worktree-group">
+            <div class="mt-group-heading"><i data-lucide="chevron-down"></i><span>edge-runtime / buildbox</span></div>
+
+            <button class="mt-worktree-row is-disconnected" type="button" aria-selected="false"
+              data-worktree="ssh-runtime" data-repo="edge-runtime" data-branch="dev/relay-v2" data-path="buildbox:/srv/edge-runtime"
+              data-agent="Grok" data-provider="G" data-state="disconnected" data-age="3m">
+              <span class="mt-status-lane"><span class="mt-state-disconnected"><i data-lucide="unplug"></i></span></span>
+              <span class="mt-worktree-copy">
+                <span class="mt-worktree-name"><span>ssh-runtime</span><span class="mt-remote-label">remote</span></span>
+                <span class="mt-worktree-meta">dev/relay-v2 / last seen 3m</span>
+                <span class="mt-agent-line"><span class="mt-provider-mark">G</span><span class="mt-agent-copy">Grok / was working</span><span class="mt-agent-age">· 3m</span></span>
+              </span>
+              <span class="mt-row-actions" data-reconnect title="Reconnect" role="button" aria-label="Reconnect"><i data-lucide="refresh-cw"></i></span>
+            </button>
+          </section>
+
+          <section class="mt-worktree-group">
+            <div class="mt-group-heading"><i data-lucide="chevron-down"></i><span>notes</span></div>
+
+            <button class="mt-worktree-row" type="button" aria-selected="false"
+              data-worktree="notes" data-repo="notes" data-branch="main" data-path="~/notes"
+              data-agent="" data-provider="" data-state="idle" data-age="">
+              <span class="mt-status-lane"><span class="mt-state-idle"></span></span>
+              <span class="mt-worktree-copy">
+                <span class="mt-worktree-name"><span>notes</span><span class="mt-primary-label">primary</span></span>
+                <span class="mt-worktree-meta">main / ~/notes</span>
+              </span>
+              <span class="mt-row-actions"><i data-lucide="ellipsis"></i></span>
+            </button>
+          </section>
+        </div>
+
+        <div class="mt-sidebar-foot">
+          <button class="mt-usage-entry" type="button" title="Usage statistics">
+            <i data-lucide="chart-no-axes-column-increasing"></i>
+            <span>Usage</span>
+            <span class="mt-usage-value">2.4M tokens</span>
+          </button>
+          <button class="mt-icon-action" type="button" title="Settings" aria-label="Settings"><i data-lucide="settings-2"></i></button>
+        </div>
+      </aside>
+
+      <main class="mt-workbench">
+        <div class="mt-tabbar">
+          <div class="mt-tabs" role="tablist" id="mt-tabs"></div>
+          <div class="mt-tab-actions">
+            <button class="mt-tab-action" type="button" title="New terminal" aria-label="New terminal"><i data-lucide="plus"></i></button>
+            <button class="mt-tab-action" type="button" title="Split terminal" aria-label="Split terminal"><i data-lucide="columns-2"></i></button>
+            <button class="mt-tab-action" type="button" title="More tab actions" aria-label="More tab actions"><i data-lucide="ellipsis"></i></button>
+          </div>
+        </div>
+
+        <div class="mt-terminal-surface" id="mt-surface">
+          <div class="mt-search-panel" id="mt-search-panel">
+            <div class="mt-search-input"><i data-lucide="search"></i><span>Search worktrees, agents, tabs, and files...</span></div>
+            <div class="mt-search-result is-active" data-search-jump="orca-ui"><i data-lucide="bot"></i><span>orca-ui / Codex needs permission</span><span class="mt-search-kind">Agent</span></div>
+            <div class="mt-search-result" data-search-jump="pty-daemon"><i data-lucide="git-branch"></i><span>pty-daemon</span><span class="mt-search-kind">Worktree</span></div>
+            <div class="mt-search-result" data-search-jump="file"><i data-lucide="file-code-2"></i><span>crates/mt-app/src/project_list.rs</span><span class="mt-search-kind">File</span></div>
+          </div>
+        </div>
+
+        <div class="mt-workbar">
+          <span class="mt-workbar-group"><i data-lucide="folder-git-2"></i><span class="mt-workbar-label" id="mt-wb-path">~/mini-term</span></span>
+          <span class="mt-workbar-sep">/</span>
+          <span class="mt-workbar-group"><i data-lucide="git-branch"></i><span class="mt-workbar-label" id="mt-wb-branch">main</span></span>
+          <span class="mt-workbar-spacer"></span>
+          <span class="mt-workbar-group" id="mt-wb-agent"></span>
+          <span class="mt-workbar-sep">·</span>
+          <span class="mt-workbar-group"><i data-lucide="radio"></i><span class="mt-workbar-label" id="mt-wb-attach">Attached</span></span>
+        </div>
+      </main>
+
+      <aside class="mt-context-sidebar">
+        <nav class="mt-context-nav" aria-label="Worktree context">
+          <button class="mt-context-tab" type="button" title="Worktree files" aria-label="Worktree files" aria-selected="true" data-context-view="files"><i data-lucide="files"></i><span>Files</span></button>
+          <button class="mt-context-tab" type="button" title="Git history and changes" aria-label="Git history and changes" aria-selected="false" data-context-view="git"><i data-lucide="git-branch"></i><span>Git</span></button>
+          <button class="mt-context-tab" type="button" title="GitHub issues and pull requests" aria-label="GitHub issues and pull requests" aria-selected="false" data-context-view="tasks"><i data-lucide="circle-dot"></i><span>Tasks</span></button>
+          <button class="mt-context-tab" type="button" title="Agent sessions in this worktree" aria-label="Agent sessions in this worktree" aria-selected="false" data-context-view="sessions"><i data-lucide="messages-square"></i><span>Sessions</span></button>
+        </nav>
+        <section class="mt-context-panel">
+          <div class="mt-context-header">
+            <span class="mt-context-title" id="mt-context-title">Files</span>
+            <button class="mt-context-action" type="button" title="Refresh" aria-label="Refresh"><i data-lucide="refresh-cw"></i></button>
+            <button class="mt-context-action" type="button" title="More actions" aria-label="More actions"><i data-lucide="ellipsis"></i></button>
+          </div>
+          <div class="mt-context-body" id="mt-context-body"></div>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script>
+    (() => {
+      const root = document.getElementById('mini-term-orca-mockup');
+      const titleWorktree = root.querySelector('#mt-title-worktree');
+      const tabsBox = root.querySelector('#mt-tabs');
+      const surface = root.querySelector('#mt-surface');
+      const searchPanel = root.querySelector('#mt-search-panel');
+      const wbPath = root.querySelector('#mt-wb-path');
+      const wbBranch = root.querySelector('#mt-wb-branch');
+      const wbAgent = root.querySelector('#mt-wb-agent');
+      const wbAttach = root.querySelector('#mt-wb-attach');
+      const contextTitle = root.querySelector('#mt-context-title');
+      const contextBody = root.querySelector('#mt-context-body');
+      let activeRow = root.querySelector('.mt-worktree-row[aria-selected="true"]');
+      let activeContextView = 'files';
+      let activeTabKind = 'terminal';
+
+      function refreshIcons() {
+        if (window.lucide) window.lucide.createIcons({ attrs: { 'aria-hidden': 'true' } });
+      }
+
+      /* ---------- 状态词汇（与文档同一套） ---------- */
+
+      function stateGlyph(state, extra) {
+        if (state === 'working') return '<span class="mt-state-spinner"></span>';
+        if (state === 'waiting') return '<span class="mt-state-question">?</span>';
+        if (state === 'done') return '<span class="mt-state-done">✓</span>';
+        if (state === 'disconnected') return '<span class="mt-state-disconnected"><i data-lucide="unplug"></i></span>';
+        if (state === 'reconnecting') return '<span class="mt-state-spinner"></span>';
+        return '<span class="mt-state-idle"></span>';
+      }
+
+      function stateText(state) {
+        if (state === 'working') return 'working';
+        if (state === 'waiting') return 'needs input';
+        if (state === 'done') return 'done';
+        if (state === 'disconnected') return 'last seen 3m';
+        if (state === 'reconnecting') return 'reconnecting…';
+        return 'idle';
+      }
+
+      function contextLabel(view) {
+        if (view === 'files') return 'Files';
+        if (view === 'git') return 'Git';
+        if (view === 'tasks') return 'Tasks';
+        return 'Agent Sessions';
+      }
+
+      /* ---------- terminal surface 内容（split pane 演示在 main） ---------- */
+
+      const paneMainLeft = '<div><span class="mt-terminal-green">leo@devbox</span>:<span class="mt-terminal-accent">~/mini-term</span>$ cargo test -p mt-app project_sidebar</div><div class="mt-terminal-muted">   Compiling mt-layout v0.6.0</div><div class="mt-terminal-muted">   Compiling mt-app v0.6.0</div><div><span class="mt-terminal-green">    Finished</span> test profile in 4.31s</div><div><span class="mt-terminal-green">     Running</span> unittests src/lib.rs</div><div>&nbsp;</div><div>running 12 tests</div><div>test sidebar::row_model::host_qualified_keys ... <span class="mt-terminal-green">ok</span></div><div>test sidebar::grouping::keeps_selection ... <span class="mt-terminal-green">ok</span></div><div>test workbench::tabs::preserves_worktree_scope ... <span class="mt-terminal-green">ok</span></div><div class="mt-agent-prompt"><span class="mt-terminal-accent">Claude Code</span>  Reworking the sidebar projection so worktree status updates do not rebuild unrelated rows.</div><div><span class="mt-terminal-green">leo@devbox</span>:<span class="mt-terminal-accent">~/mini-term</span>$ <span class="mt-terminal-cursor"></span></div>';
+      const paneMainRight = '<div><span class="mt-terminal-green">leo@devbox</span>:<span class="mt-terminal-accent">~/mini-term</span>$ cargo watch -x check</div><div class="mt-terminal-muted">[Running cargo check]</div><div class="mt-terminal-muted">   Compiling mt-ssh v0.6.0</div><div><span class="mt-terminal-green">    Finished</span> dev profile in 2.87s</div><div>&nbsp;</div><div class="mt-terminal-muted">[Watching for changes...] (shell, no agent)</div><div><span class="mt-terminal-green">leo@devbox</span>:<span class="mt-terminal-accent">~/mini-term</span>$ <span class="mt-terminal-cursor"></span></div>';
+
+      const terminalViews = {
+        main: { split: [paneMainLeft, paneMainRight] },
+        'orca-ui': { panes: ['<div><span class="mt-terminal-green">leo@devbox</span>:<span class="mt-terminal-accent">~/worktrees/orca-ui</span>$ cargo test -p mt-app ui_snapshot</div><div class="mt-terminal-muted">test ui::project_shell_desktop ... pending</div><div class="mt-terminal-muted">test ui::project_shell_compact ... pending</div><div class="mt-agent-prompt"><span class="mt-terminal-amber">Codex needs permission</span><br>Allow launching the local screenshot runner for desktop and narrow-window verification?</div><div><span class="mt-terminal-amber">[1] Allow once</span>&nbsp;&nbsp; [2] Deny</div><div>&gt; <span class="mt-terminal-cursor"></span></div>'] },
+        'pty-daemon': { panes: ['<div><span class="mt-terminal-green">leo@devbox</span>:<span class="mt-terminal-accent">~/worktrees/pty-daemon</span>$ cargo test -p mt-terminal-host</div><div>&nbsp;</div><div>running 38 tests</div><div>test attach::same_incarnation ... <span class="mt-terminal-green">ok</span></div><div>test replay::rejects_sequence_gap ... <span class="mt-terminal-green">ok</span></div><div>test lifecycle::detach_does_not_kill ... <span class="mt-terminal-green">ok</span></div><div>&nbsp;</div><div><span class="mt-terminal-green">test result: ok.</span> 38 passed; 0 failed</div><div class="mt-agent-prompt"><span class="mt-terminal-green">Codex</span>  Terminal host verification completed. The PTY remained alive across client detach and reattach.</div><div><span class="mt-terminal-green">leo@devbox</span>:<span class="mt-terminal-accent">~/worktrees/pty-daemon</span>$ <span class="mt-terminal-cursor"></span></div>'] },
+        notes: { panes: ['<div><span class="mt-terminal-green">leo@devbox</span>:<span class="mt-terminal-accent">~/notes</span>$ ls</div><div>todo.md&nbsp;&nbsp;ideas/&nbsp;&nbsp;scratch.md</div><div><span class="mt-terminal-green">leo@devbox</span>:<span class="mt-terminal-accent">~/notes</span>$ <span class="mt-terminal-cursor"></span></div>'] },
+        'ssh-runtime': { panes: ['<div><span class="mt-terminal-muted">Connection to buildbox interrupted.</span></div><div><span class="mt-terminal-muted">Last confirmed terminal snapshot: 3 minutes ago</span></div><div>&nbsp;</div><div><span class="mt-terminal-amber">Reconnecting remote runtime...</span></div><div>Attempt 4 / backoff 8s</div><div class="mt-agent-prompt"><span class="mt-terminal-amber">Grok / last known state: working</span><br>The Agent state is retained as stale. Disconnection does not mark the run complete.</div>'] }
+      };
+
+      const stagePanel = '<div class="mt-stage-panel"><div class="mt-stage-title">Creating worktree relay-hardening</div><div class="mt-stage-sub">mini-term / feature/relay-hardening · setup runs in background, this tab lives at its final position</div><div class="mt-stage-list"><div class="mt-stage-row is-done"><i data-lucide="check"></i><span>Fetching repository</span><span class="mt-stage-note">2.1s</span></div><div class="mt-stage-row is-current"><span class="mt-state-spinner"></span><span>Creating worktree</span><span class="mt-stage-note">in progress</span></div><div class="mt-stage-row is-todo"><span class="mt-state-idle"></span><span>Running setup</span><span class="mt-stage-note">queued</span></div><div class="mt-stage-row is-todo"><span class="mt-state-idle"></span><span>Starting agent</span><span class="mt-stage-note">queued</span></div></div><button class="mt-stage-dismiss" data-dismiss-pending>Dismiss</button></div>';
+
+      const diffViews = {
+        'project_list.rs': '<div class="mt-diff-hunk">@@ -132,7 +132,7 @@ pub fn row_key(host, repo, path)</div><div class="mt-diff-del">-    format!("{repo}/{path}")</div><div class="mt-diff-add">+    format!("{host}/{repo}/{path}")</div><div>&nbsp;</div><div class="mt-diff-hunk">@@ -248,4 +248,9 @@ impl RowModel</div><div class="mt-diff-add">+    pub fn is_primary(&self) -&gt; bool {</div><div class="mt-diff-add">+        self.kind == RowKind::MainWorktree</div><div class="mt-diff-add">+    }</div>',
+        'ssh_relay.rs': '<div class="mt-diff-hunk">@@ -41,6 +41,8 @@ fn replay_watermark</div><div class="mt-diff-del">-    let mark = store.latest();</div><div class="mt-diff-add">+    let mark = store.latest().fence(generation);</div><div class="mt-diff-add">+    trace!(?mark, "replaying after reconnect");</div>'
+      };
+
+      /* ---------- tabs ---------- */
+
+      const tabModel = {
+        main: {
+          terminal: { label: 'Claude Code', icon: 'terminal', glyph: stateGlyph('working') },
+          files: [
+            { label: 'project_list.rs', icon: 'file-code-2', dirty: true, file: 'project_list.rs' },
+            { label: 'design.md', icon: 'file-code-2', dirty: false, file: 'design.md' }
+          ]
+        },
+        'orca-ui': {
+          terminal: { label: 'Codex', icon: 'terminal', glyph: stateGlyph('waiting') },
+          files: [{ label: 'project_sidebar.rs', icon: 'file-code-2', dirty: true, file: 'project_sidebar.rs' }]
+        },
+        'pty-daemon': {
+          terminal: { label: 'Codex', icon: 'terminal', glyph: stateGlyph('done') },
+          files: [{ label: 'terminal_host.rs', icon: 'file-code-2', dirty: false, file: 'terminal_host.rs' }]
+        },
+        notes: {
+          terminal: { label: 'zsh · ~/notes', icon: 'terminal', glyph: stateGlyph('idle') },
+          files: [{ label: 'todo.md', icon: 'file-code-2', dirty: true, file: 'todo.md' }]
+        },
+        'ssh-runtime': {
+          terminal: { label: 'Grok', icon: 'terminal', glyph: stateGlyph('disconnected') },
+          files: [{ label: 'ssh_relay.rs', icon: 'file-code-2', dirty: true, file: 'ssh_relay.rs' }]
+        }
+      };
+
+      function renderTabs() {
+        const name = activeRow.dataset.worktree;
+        if (activeRow.dataset.state === 'pending') {
+          tabsBox.innerHTML = '<button class="mt-workbench-tab" role="tab" aria-selected="true"><span class="mt-state-spinner"></span><i data-lucide="git-branch"></i><span class="mt-tab-label">relay-hardening</span></button>';
+          refreshIcons();
+          return;
+        }
+        const model = tabModel[name] || tabModel.main;
+        const glyph = activeTabKind === 'terminal' ? model.terminal.glyph : '';
+        let html = '<button class="mt-workbench-tab" role="tab" data-tab="terminal" aria-selected="' + (activeTabKind === 'terminal') + '">' + model.terminal.glyph + '<i data-lucide="' + model.terminal.icon + '"></i><span class="mt-tab-label">' + model.terminal.label + '</span></button>';
+        model.files.forEach((f) => {
+          html += '<button class="mt-workbench-tab" role="tab" data-tab="file" aria-selected="' + (activeTabKind === 'file') + '"><i data-lucide="' + f.icon + '"></i><span class="mt-tab-label">' + f.label + '</span>' + (f.dirty ? '<span class="mt-tab-dirty"></span>' : '') + '<span class="mt-tab-close" data-close title="Close tab" role="button" aria-label="Close tab"><i data-lucide="x"></i></span></button>';
+        });
+        if (activeTabKind === 'diff') {
+          html += '<button class="mt-workbench-tab" role="tab" data-tab="diff" aria-selected="true"><span class="mt-git-code">M</span><i data-lucide="diff"></i><span class="mt-tab-label">' + activeDiffFile + '</span><span class="mt-tab-close" data-close title="Close tab" role="button" aria-label="Close tab"><i data-lucide="x"></i></span></button>';
+        }
+        tabsBox.innerHTML = html;
+        refreshIcons();
+        tabsBox.querySelectorAll('.mt-workbench-tab').forEach((tab) => {
+          tab.addEventListener('click', (e) => {
+            if (e.target.closest('.mt-tab-close')) return;
+            activeTabKind = tab.dataset.tab;
+            renderTabs();
+            renderSurface();
+          });
+        });
+        tabsBox.querySelectorAll('[data-close]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const label = btn.closest('.mt-workbench-tab').querySelector('.mt-tab-label').textContent;
+            const model2 = tabModel[activeRow.dataset.worktree] || tabModel.main;
+            const idx = model2.files.findIndex((f) => f.label === label);
+            if (idx >= 0) model2.files.splice(idx, 1);
+            activeTabKind = 'terminal';
+            renderTabs();
+            renderSurface();
+          });
+        });
+      }
+
+      function renderSurface() {
+        const name = activeRow.dataset.worktree;
+        if (activeRow.dataset.state === 'pending') {
+          surface.innerHTML = stagePanel;
+          surface.appendChild(searchPanel);
+          refreshIcons();
+          surface.querySelector('[data-dismiss-pending]').addEventListener('click', () => {
+            const pendingRow = root.querySelector('.mt-worktree-row.is-pending');
+            if (pendingRow) pendingRow.remove();
+            selectRow(root.querySelector('.mt-worktree-row[data-worktree="main"]'));
+          });
+          return;
+        }
+        if (activeTabKind === 'file') {
+          surface.innerHTML = '<div class="mt-pane is-active"><div class="mt-terminal-muted">// File preview (worktree-scoped)</div><div>&nbsp;</div><div>pub fn row_key(host: &amp;HostId, repo: &amp;RepoId, path: &amp;Path) -&gt; RowKey {</div><div>    RowKey(format!("{host}/{repo}/{}", path.display()))</div><div>}</div><div>&nbsp;</div><div><span class="mt-terminal-muted">— opens from right Files panel, persists per WorktreeId</span></div></div>';
+          surface.appendChild(searchPanel);
+          return;
+        }
+        if (activeTabKind === 'diff') {
+          surface.innerHTML = '<div class="mt-diff-view">' + (diffViews[activeDiffFile] || diffViews['project_list.rs']) + '</div>';
+          surface.appendChild(searchPanel);
+          refreshIcons();
+          return;
+        }
+        const view = terminalViews[name] || terminalViews.main;
+        if (view.split) {
+          surface.innerHTML = '<div class="mt-split"><div class="mt-pane is-active" data-pane>' + view.split[0] + '</div><div class="mt-divider"></div><div class="mt-pane" data-pane>' + view.split[1] + '</div></div>';
+        } else {
+          surface.innerHTML = '<div class="mt-pane is-active" data-pane>' + view.panes[0] + '</div>';
+        }
+        surface.appendChild(searchPanel);
+        refreshIcons();
+        surface.querySelectorAll('[data-pane]').forEach((pane) => {
+          pane.addEventListener('click', () => {
+            surface.querySelectorAll('[data-pane]').forEach((p) => p.classList.remove('is-active'));
+            pane.classList.add('is-active');
+          });
+        });
+      }
+
+      /* ---------- right context panel ---------- */
+
+      const worktreeUi = {
+        main: {
+          files: `<div class="mt-context-section-label">~/mini-term</div>
+            <div class="mt-tree-row" data-open-file="project_list.rs"><i data-lucide="chevron-down"></i><i data-lucide="folder-open"></i><span class="mt-tree-name">mini-term</span></div>
+            <div class="mt-tree-row indent-1"><i data-lucide="chevron-down"></i><i data-lucide="folder-open"></i><span class="mt-tree-name">crates</span></div>
+            <div class="mt-tree-row indent-2"><i data-lucide="folder"></i><span class="mt-tree-name">mt-ai</span></div>
+            <div class="mt-tree-row indent-2"><i data-lucide="folder"></i><span class="mt-tree-name">mt-layout</span></div>
+            <div class="mt-tree-row indent-2"><i data-lucide="chevron-down"></i><i data-lucide="folder-open"></i><span class="mt-tree-name">mt-app</span></div>
+            <div class="mt-tree-row indent-2 is-active" data-open-file="project_list.rs"><i data-lucide="file-code-2"></i><span class="mt-tree-name">project_list.rs</span><span class="mt-tree-change">M</span></div>
+            <div class="mt-tree-row indent-2"><i data-lucide="file-code-2"></i><span class="mt-tree-name">terminal_area.rs</span></div>
+            <div class="mt-tree-row indent-1"><i data-lucide="folder"></i><span class="mt-tree-name">docs</span></div>
+            <div class="mt-tree-row indent-1"><i data-lucide="file-code-2"></i><span class="mt-tree-name">Cargo.toml</span></div>`,
+          git: `<div class="mt-context-section-label">Current changes / 4</div>
+            <div class="mt-git-file" data-open-diff="project_list.rs"><span class="mt-git-code">M</span><span>project_list.rs</span><span>+84</span></div>
+            <div class="mt-git-file" data-open-diff="terminal_area.rs"><span class="mt-git-code">M</span><span>terminal_area.rs</span><span>+29</span></div>
+            <div class="mt-git-file" data-open-diff="design.md"><span class="mt-git-code">M</span><span>design.md</span><span>+41</span></div>
+            <div class="mt-context-section-label">Commits on main</div>
+            <div class="mt-commit-row"><div class="mt-commit-head"><i data-lucide="git-commit-horizontal"></i><span>Refine terminal session restore</span><span class="mt-commit-sha">8fe2c1a</span></div><div class="mt-commit-copy">leo / 24 minutes ago</div></div>
+            <div class="mt-commit-row"><div class="mt-commit-head"><i data-lucide="git-commit-horizontal"></i><span>Add worktree catalog fixtures</span><span class="mt-commit-sha">1ba9d72</span></div><div class="mt-commit-copy">leo / yesterday</div></div>`,
+          sessions: `<div class="mt-context-section-label">Scanned in ~/mini-term</div>
+            <div class="mt-session-row" data-jump-session="main"><div class="mt-session-head"><span class="mt-session-provider">C</span><span>Claude Code / project shell</span><span class="mt-session-time">live</span></div><div class="mt-session-copy">Refactoring project and worktree navigation</div></div>
+            <div class="mt-session-row" data-jump-session="main"><div class="mt-session-head"><span class="mt-session-provider">X</span><span>Codex / terminal restore research</span><span class="mt-session-time">2h</span></div><div class="mt-session-copy">Thread 019e... / resumable</div></div>
+            <div class="mt-session-row" data-jump-session="main"><div class="mt-session-head"><span class="mt-session-provider">G</span><span>Grok / SSH status protocol</span><span class="mt-session-time">Aug 31</span></div><div class="mt-session-copy">Detected from this worktree path</div></div>`
+        },
+        'orca-ui': {
+          files: `<div class="mt-context-section-label">~/worktrees/orca-ui</div>
+            <div class="mt-tree-row"><i data-lucide="chevron-down"></i><i data-lucide="folder-open"></i><span class="mt-tree-name">orca-ui</span></div>
+            <div class="mt-tree-row indent-1"><i data-lucide="chevron-down"></i><i data-lucide="folder-open"></i><span class="mt-tree-name">crates/mt-app/src</span></div>
+            <div class="mt-tree-row indent-2 is-active" data-open-file="project_sidebar.rs"><i data-lucide="file-code-2"></i><span class="mt-tree-name">project_sidebar.rs</span><span class="mt-tree-change">A</span></div>
+            <div class="mt-tree-row indent-2"><i data-lucide="file-code-2"></i><span class="mt-tree-name">worktree_row.rs</span><span class="mt-tree-change">M</span></div>
+            <div class="mt-tree-row indent-1"><i data-lucide="chevron-down"></i><i data-lucide="folder-open"></i><span class="mt-tree-name">research</span></div>
+            <div class="mt-tree-row indent-2" data-open-file="orca-ui-mockup-v2.html"><i data-lucide="file-code-2"></i><span class="mt-tree-name">orca-ui-mockup-v2.html</span><span class="mt-tree-change">M</span></div>`,
+          git: `<div class="mt-context-section-label">Current changes / 8</div>
+            <div class="mt-git-file" data-open-diff="project_sidebar.rs"><span class="mt-git-code">A</span><span>project_sidebar.rs</span><span>+312</span></div>
+            <div class="mt-git-file" data-open-diff="worktree_row.rs"><span class="mt-git-code">M</span><span>worktree_row.rs</span><span>+96</span></div>
+            <div class="mt-context-section-label">Commits on feature/orca-ui</div>
+            <div class="mt-commit-row"><div class="mt-commit-head"><i data-lucide="git-commit-horizontal"></i><span>Prototype project-first shell</span><span class="mt-commit-sha">d30c8f4</span></div><div class="mt-commit-copy">leo / 12 minutes ago</div></div>`,
+          sessions: `<div class="mt-context-section-label">Scanned in ~/worktrees/orca-ui</div>
+            <div class="mt-session-row" data-jump-session="orca-ui"><div class="mt-session-head"><span class="mt-session-provider">X</span><span>Codex / Orca UI prototype</span><span class="mt-session-time">live</span></div><div class="mt-session-copy">Waiting for screenshot-runner permission</div></div>
+            <div class="mt-session-row" data-jump-session="orca-ui"><div class="mt-session-head"><span class="mt-session-provider">C</span><span>Claude Code / sidebar states</span><span class="mt-session-time">47m</span></div><div class="mt-session-copy">Session matched by canonical cwd</div></div>`
+        },
+        'pty-daemon': {
+          files: `<div class="mt-context-section-label">~/worktrees/pty-daemon</div>
+            <div class="mt-tree-row"><i data-lucide="chevron-down"></i><i data-lucide="folder-open"></i><span class="mt-tree-name">pty-daemon</span></div>
+            <div class="mt-tree-row indent-1"><i data-lucide="chevron-down"></i><i data-lucide="folder-open"></i><span class="mt-tree-name">crates/mt-terminal-host</span></div>
+            <div class="mt-tree-row indent-2 is-active" data-open-file="terminal_host.rs"><i data-lucide="file-code-2"></i><span class="mt-tree-name">terminal_host.rs</span></div>
+            <div class="mt-tree-row indent-2"><i data-lucide="file-code-2"></i><span class="mt-tree-name">session.rs</span></div>
+            <div class="mt-tree-row indent-2"><i data-lucide="file-code-2"></i><span class="mt-tree-name">history.rs</span></div>`,
+          git: `<div class="mt-context-section-label">Current changes / clean</div>
+            <div class="mt-tree-row"><i data-lucide="circle-check"></i><span class="mt-tree-name">No uncommitted changes</span></div>
+            <div class="mt-context-section-label">Commits on feature/pty-daemon</div>
+            <div class="mt-commit-row"><div class="mt-commit-head"><i data-lucide="git-commit-horizontal"></i><span>Fence stale PTY incarnations</span><span class="mt-commit-sha">51bc04e</span></div><div class="mt-commit-copy">leo / 8 minutes ago</div></div>`,
+          sessions: `<div class="mt-context-section-label">Scanned in ~/worktrees/pty-daemon</div>
+            <div class="mt-session-row" data-jump-session="pty-daemon"><div class="mt-session-head"><span class="mt-session-provider">X</span><span>Codex / terminal host tests</span><span class="mt-session-time">8m</span></div><div class="mt-session-copy">Completed / resumable</div></div>`
+        },
+        notes: {
+          files: `<div class="mt-context-section-label">~/notes</div>
+            <div class="mt-tree-row" data-open-file="todo.md"><i data-lucide="file-code-2"></i><span class="mt-tree-name">todo.md</span><span class="mt-tree-change">M</span></div>
+            <div class="mt-tree-row"><i data-lucide="folder"></i><span class="mt-tree-name">ideas</span></div>
+            <div class="mt-tree-row"><i data-lucide="file-code-2"></i><span class="mt-tree-name">scratch.md</span></div>`,
+          git: gitEmptyState,
+          sessions: sessionsEmptyState
+        },
+        'ssh-runtime': {
+          files: `<div class="mt-context-section-label">buildbox:/srv/edge-runtime</div>
+            <div class="mt-tree-row"><i data-lucide="chevron-down"></i><i data-lucide="folder-open"></i><span class="mt-tree-name">edge-runtime</span></div>
+            <div class="mt-tree-row indent-1"><i data-lucide="folder"></i><span class="mt-tree-name">protocol</span></div>
+            <div class="mt-tree-row indent-1"><i data-lucide="chevron-down"></i><i data-lucide="folder-open"></i><span class="mt-tree-name">src</span></div>
+            <div class="mt-tree-row indent-2 is-active" data-open-file="ssh_relay.rs"><i data-lucide="file-code-2"></i><span class="mt-tree-name">ssh_relay.rs</span><span class="mt-tree-change">M</span></div>
+            <div class="mt-tree-row indent-2"><i data-lucide="file-code-2"></i><span class="mt-tree-name">agent_status.rs</span><span class="mt-tree-change">M</span></div>`,
+          git: `<div class="mt-context-section-label">Last synchronized changes / 2</div>
+            <div class="mt-git-file" data-open-diff="ssh_relay.rs"><span class="mt-git-code">M</span><span>ssh_relay.rs</span><span>+72</span></div>
+            <div class="mt-git-file" data-open-diff="agent_status.rs"><span class="mt-git-code">M</span><span>agent_status.rs</span><span>+51</span></div>
+            <div class="mt-context-section-label">Remote commits</div>
+            <div class="mt-commit-row"><div class="mt-commit-head"><i data-lucide="git-commit-horizontal"></i><span>Add relay replay watermark</span><span class="mt-commit-sha">a82cc7d</span></div><div class="mt-commit-copy">buildbox / 3 hours ago</div></div>`,
+          sessions: `<div class="mt-context-section-label">Last scan in /srv/edge-runtime</div>
+            <div class="mt-session-row"><div class="mt-session-head"><span class="mt-session-provider">G</span><span>Grok / relay protocol</span><span class="mt-session-time">stale</span></div><div class="mt-session-copy">Remote disconnected / last seen 3m</div></div>`
+        }
+      };
+
+      const projectTasks = {
+        'mini-term': `<div class="mt-context-section-label">github.com/leo/mini-term</div>
+          <div class="mt-task-row"><div class="mt-task-head"><span class="mt-task-kind">I</span><span>Persist worktree-specific open files</span><span class="mt-task-number">#184</span></div><div class="mt-task-copy">Issue / open / ui</div></div>
+          <div class="mt-task-row"><div class="mt-task-head"><span class="mt-task-kind">P</span><span>Project-first sidebar shell</span><span class="mt-task-number">#182</span></div><div class="mt-task-copy">Pull request / review requested</div></div>
+          <div class="mt-task-row"><div class="mt-task-head"><span class="mt-task-kind">I</span><span>Remote Agent session indexing</span><span class="mt-task-number">#177</span></div><div class="mt-task-copy">Issue / in progress / agent-runtime</div></div>`,
+        'edge-runtime': `<div class="mt-context-section-label">github.com/leo/edge-runtime</div>
+          <div class="mt-task-row"><div class="mt-task-head"><span class="mt-task-kind">I</span><span>Replay status after SSH reconnect</span><span class="mt-task-number">#91</span></div><div class="mt-task-copy">Issue / open / relay</div></div>
+          <div class="mt-task-row"><div class="mt-task-head"><span class="mt-task-kind">P</span><span>Fence stale connection epochs</span><span class="mt-task-number">#88</span></div><div class="mt-task-copy">Pull request / checks running</div></div>`
+      };
+
+      // 独立空态：Tasks 无 GitHub remote / Git 非仓库 / Sessions 无扫描结果
+      const taskEmptyState = `<div class="mt-empty-state"><i data-lucide="circle-dot"></i><div><strong>No GitHub remote configured</strong></div><div>Files / Git / Sessions 不受影响，仅本 tab 显示空态。</div></div>`;
+      const gitEmptyState = `<div class="mt-empty-state"><i data-lucide="git-branch"></i><div><strong>Not a git repository</strong></div><div>~/notes 不是 Git 仓库，Git tab 仅显示空态。</div></div>`;
+      const sessionsEmptyState = `<div class="mt-empty-state"><i data-lucide="messages-square"></i><div><strong>No agent sessions</strong></div><div>No supported agent session files found in ~/notes.</div></div>`;
+
+      function renderContext() {
+        const worktree = activeRow.dataset.worktree;
+        const project = activeRow.dataset.repo;
+        contextTitle.textContent = contextLabel(activeContextView);
+        if (activeContextView === 'tasks') {
+          contextBody.innerHTML = projectTasks[project] || taskEmptyState;
+        } else if (worktree === 'relay-hardening') {
+          contextBody.innerHTML = '<div class="mt-empty-state"><i data-lucide="loader-circle"></i><div>Worktree is being created…</div></div>';
+        } else {
+          contextBody.innerHTML = (worktreeUi[worktree] || worktreeUi.main)[activeContextView];
+        }
+        refreshIcons();
+        contextBody.querySelectorAll('[data-open-file]').forEach((rowEl) => {
+          rowEl.addEventListener('click', () => {
+            const file = rowEl.dataset.openFile;
+            const model = tabModel[activeRow.dataset.worktree] || tabModel.main;
+            const existing = model.files.find((f) => f.label === file);
+            if (!existing) model.files.unshift({ label: file, icon: 'file-code-2', dirty: false, file });
+            activeTabKind = 'file';
+            activeDiffFile = file;
+            renderTabs();
+            renderSurface();
+          });
+        });
+        contextBody.querySelectorAll('[data-open-diff]').forEach((rowEl) => {
+          rowEl.addEventListener('click', () => {
+            activeTabKind = 'diff';
+            activeDiffFile = rowEl.dataset.openDiff;
+            renderTabs();
+            renderSurface();
+          });
+        });
+        contextBody.querySelectorAll('[data-jump-session]').forEach((rowEl) => {
+          rowEl.addEventListener('click', () => {
+            const target = root.querySelector('.mt-worktree-row[data-worktree="' + rowEl.dataset.jumpSession + '"]');
+            if (target) selectRow(target);
+          });
+        });
+      }
+
+      /* ---------- workbar（合并底条） ---------- */
+
+      function renderWorkbar() {
+        const state = activeRow.dataset.state;
+        wbPath.textContent = activeRow.dataset.path;
+        wbBranch.textContent = activeRow.dataset.branch;
+        const agent = activeRow.dataset.agent;
+        wbAgent.innerHTML = stateGlyph(state) + '<span class="mt-workbar-label">' + (agent ? agent + ' · ' : '') + stateText(state) + '</span>';
+        wbAttach.textContent = state === 'disconnected' ? 'Detached' : state === 'reconnecting' ? 'Reconnecting…' : 'Attached';
+        refreshIcons();
+      }
+
+      /* ---------- row selection ---------- */
+
+      function selectRow(row) {
+        root.querySelectorAll('.mt-worktree-row').forEach((candidate) => {
+          candidate.setAttribute('aria-selected', candidate === row ? 'true' : 'false');
+        });
+        activeRow = row;
+        activeTabKind = 'terminal';
+        titleWorktree.textContent = row.dataset.worktree;
+        renderTabs();
+        renderSurface();
+        renderWorkbar();
+        renderContext();
+        searchPanel.classList.remove('is-visible');
+      }
+
+      let activeDiffFile = 'project_list.rs';
+
+      root.querySelectorAll('.mt-worktree-row').forEach((row) => {
+        row.addEventListener('click', (e) => {
+          if (e.target.closest('[data-reconnect]')) return;
+          selectRow(row);
+        });
+      });
+
+      root.querySelectorAll('[data-reconnect]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const row = btn.closest('.mt-worktree-row');
+          row.classList.remove('is-disconnected');
+          row.dataset.state = 'reconnecting';
+          row.querySelector('.mt-status-lane').innerHTML = '<span class="mt-state-spinner"></span>';
+          row.querySelector('.mt-worktree-meta').textContent = row.dataset.branch + ' / reconnecting…';
+          btn.innerHTML = '<i data-lucide="loader-circle"></i>';
+          refreshIcons();
+          if (activeRow === row) { renderTabs(); renderWorkbar(); }
+        });
+      });
+
+      root.querySelectorAll('[data-context-view]').forEach((button) => {
+        button.addEventListener('click', () => {
+          activeContextView = button.dataset.contextView;
+          root.querySelectorAll('[data-context-view]').forEach((candidate) => candidate.setAttribute('aria-selected', candidate === button ? 'true' : 'false'));
+          renderContext();
+        });
+      });
+
+      root.querySelectorAll('[data-open-search]').forEach((button) => {
+        button.addEventListener('click', () => searchPanel.classList.toggle('is-visible'));
+      });
+
+      root.querySelectorAll('[data-search-jump]').forEach((result) => {
+        result.addEventListener('click', () => {
+          const jump = result.dataset.searchJump;
+          if (jump === 'file') {
+            const mainRow = root.querySelector('.mt-worktree-row[data-worktree="main"]');
+            selectRow(mainRow);
+            activeTabKind = 'file';
+            renderTabs();
+            renderSurface();
+            return;
+          }
+          const target = root.querySelector('.mt-worktree-row[data-worktree="' + jump + '"]');
+          if (target) selectRow(target);
+        });
+      });
+
+      renderTabs();
+      renderSurface();
+      renderWorkbar();
+      renderContext();
+      refreshIcons();
+    })();
+  </script>
+</div>
+</body>
+</html>

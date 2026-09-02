@@ -1,0 +1,14 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Verify the end-to-end identity and data flow across catalog, host runtime, persistence, transport, and UI."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Check that existing daemon, SSH, Hook, terminal, and persistence infrastructure is reused without parallel implementations."}
+{"file":".trellis/spec/mt-project/backend/quality-guidelines.md","reason":"Verify authoritative worktree parsing, error behavior, mutation invalidation, and fixture coverage."}
+{"file":".trellis/spec/mt-layout/backend/quality-guidelines.md","reason":"Verify stable identity migration, schema salvage, atomic persistence, and layout binding correctness."}
+{"file":".trellis/spec/mt-pty/backend/quality-guidelines.md","reason":"Verify PTY lifecycle, ownership, cancellation, process cleanup, and platform behavior after daemonization."}
+{"file":".trellis/spec/mt-terminal/backend/quality-guidelines.md","reason":"Verify terminal snapshot fidelity, bounded history, replay ordering, and corruption handling."}
+{"file":".trellis/spec/mt-ai/backend/quality-guidelines.md","reason":"Verify provider normalization, status transitions, stale-event fencing, session attribution, and fallback confidence."}
+{"file":".trellis/spec/mt-ssh/backend/quality-guidelines.md","reason":"Verify authenticated host identity, heartbeat/reconnect behavior, timeout, cancellation, and failure isolation."}
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Verify async ownership, cross-host row identity, recovery labels, status projection, and UI state consistency."}
+{"file":".trellis/spec/mt-app/backend/file-workbench-contract.md","reason":"Verify that terminal and file tabs remain bound to the correct WorktreeId across selection, persistence, restore, and asynchronous file loads."}
+{"file":".trellis/spec/mt-usage/backend/quality-guidelines.md","reason":"Verify the sidebar Usage entry reuses the existing ledger, aggregation, background refresh, and error semantics without creating a duplicate source of truth."}
+{"file":".trellis/tasks/09-01-orca-worktree-terminal-research/research/orca-worktree-terminal-agent-architecture.md","reason":"Check implementation against the researched Orca mechanisms, explicit mini-term gaps, and warm/cold and remote-status semantics."}
+{"file":".trellis/tasks/09-01-orca-worktree-terminal-research/research/orca-ui-ux-mapping.md","reason":"Check that the UI migration follows the approved Project -> Worktree hierarchy, independent worktree workbench state, top Files/Git/Tasks/Sessions navigation, shared status vocabulary, and precise pane navigation."}
+{"file":".trellis/tasks/09-01-orca-worktree-terminal-research/research/operation-logic.md","reason":"Verify concrete actions preserve WorktreeId ownership, fence late async results, distinguish detach/kill/remove/delete, and keep global Agents separate from worktree-scoped Sessions."}
