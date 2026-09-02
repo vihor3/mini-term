@@ -63,6 +63,14 @@ scripts/docker-ci.sh fmt <base-sha>
 
 After validation, assert that `target/`, `~/.cargo`, and `~/.rustup` are absent on the host. Docker-only Cargo and target caches may remain under `~/.cache/mini-term/docker-ci` and can be removed with `scripts/docker-ci.sh clean`.
 
+## Validation Results (2026-09-02)
+
+- `scripts/docker-ci.sh worktree`: passed. `mt-project` 119/119, `git_worktree` 8/8, and `project_list` 22/22; `mt-app --tests` check and affected-package Clippy completed successfully.
+- `scripts/docker-ci.sh check`: `cargo check --workspace --all-targets` passed.
+- `scripts/docker-ci.sh fmt HEAD^`: 52 baseline formatting hunks ignored, 0 changed-line formatting hunks.
+- CI changed-line Clippy gate on commit `3f386f2`: 129 baseline warnings ignored, 0 changed-line warnings.
+- Host verification: repository `target/`, `~/.cargo`, `~/.rustup`, and shell Cargo/Rust commands are absent. Docker cache remains isolated under `~/.cache/mini-term/docker-ci`.
+
 ## Risk And Rollback
 
 - Parser strictness can hide all rows if the format contract is wrong; fixtures and real-Git smoke tests must land before caller migration.

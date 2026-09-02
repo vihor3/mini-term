@@ -52,15 +52,15 @@ This is the first implementation child of `09-02-orca-project-worktree-runtime`.
 
 ## Acceptance Criteria
 
-- [ ] NUL fixtures cover spaces, newline paths, detached, bare, sparse, locked/prunable with and without reasons, unknown fields, malformed UTF-8, malformed quoting, and conflicting records.
-- [ ] Text fixtures produce equivalent facts for representable paths/reasons and use C-quote decoding.
-- [ ] Unsupported `-z` falls back to text; unrelated exit failures do not. Both successful modes are authoritative.
-- [ ] Non-authoritative empty/failure results retain last-known rows and cannot authorize deletion.
-- [ ] Concurrent scans coalesce per repository, and mutation generation fences pre-mutation results.
-- [ ] Existing `mt_project::git` callers compile without signature changes and receive compatibility projections from the new catalog.
-- [ ] Prunable rows retain branch occupancy; bare/detached/locked rows are not silently omitted.
-- [ ] Worktree modal and project-list probes reject stale generations; legacy child-project cleanup only follows authoritative Git absence.
-- [ ] `scripts/docker-ci.sh worktree` and the Docker changed-line formatting gate pass without creating host Rust or repository-local build artifacts.
+- [x] NUL fixtures cover spaces, newline paths, detached, bare, sparse, locked/prunable with and without reasons, unknown fields, malformed UTF-8, malformed quoting, and conflicting records.
+- [x] Text fixtures produce equivalent facts for representable paths/reasons and use C-quote decoding.
+- [x] Unsupported `-z` falls back to text; unrelated exit failures do not. Both successful modes are authoritative.
+- [x] Non-authoritative empty/failure results retain last-known rows and cannot authorize deletion.
+- [x] Concurrent scans coalesce per repository, and mutation generation fences pre-mutation results.
+- [x] Existing `mt_project::git` callers compile without signature changes and receive compatibility projections from the new catalog.
+- [x] Prunable rows retain branch occupancy; bare/detached/locked rows are not silently omitted.
+- [x] Worktree modal and project-list probes reject stale generations; legacy child-project cleanup only follows authoritative Git absence.
+- [x] `scripts/docker-ci.sh worktree` and the Docker changed-line formatting gate pass without creating host Rust or repository-local build artifacts.
 
 ## Out Of Scope
 
