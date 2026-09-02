@@ -102,3 +102,39 @@ Delivered the Orca-aligned Project to Worktree shell, worktree-scoped workbench 
 ### Next Steps
 
 - Run the installer on a physical Windows host and confirm the visible Orca shell; Wine lacks bcryptprimitives.dll and icuuc.dll for this smoke test.
+
+
+## Session 6: Stable worktree workbench identity
+<!-- trellis-session: v=2 fp=c11768e54fedb76a -->
+
+**Date**: 2026-09-02
+**Task**: Stable worktree workbench identity
+**Branch**: `feat/remote-file-management`
+
+### Summary
+
+Added stable host, repository, worktree, tab, pane, terminal-session, and incarnation identities; migrated layouts additively; fenced workbench callbacks by WorktreeId; and produced the Docker-built Windows installer.
+
+### Main Changes
+
+- Added the mt-identity crate and authoritative/provisional worktree identity resolution.
+- Persisted and migrated worktree-scoped layouts, terminal bindings, documents, previews, searches, and focus restoration.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0386e6b` | feat: add stable worktree workbench identity |
+
+### Testing
+
+- [OK] Docker focused checks, workspace checks, changed-line rustfmt, and changed-line Clippy passed except the documented pre-existing DnD test.
+- [OK] Built and structurally verified Mini-Term_1.2.2-stable-identity-20260902_x64-setup.exe (SHA-256 a1a482d6fb51499cc212656230c9ee8a8c05894057c0fc5ea998f034ddc246c0).
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- Continue the parent runtime task with detached terminal ownership and warm reattachment.
