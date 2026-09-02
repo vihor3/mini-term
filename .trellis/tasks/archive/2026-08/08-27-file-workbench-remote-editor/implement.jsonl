@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/mt-app/backend/quality-guidelines.md", "reason": "Preserve async operation ownership, local/remote identity validation, file-operation reuse, and GitHub-Actions-only Rust verification."}
+{"file": ".trellis/spec/mt-ssh/backend/error-handling.md", "reason": "Preserve original/cleanup failures and safe retry boundaries while adding remote document read/write."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Coordinate workbench UI, document state, remote SFTP, i18n, hotkeys, and persistence boundaries."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse the existing FileViewer/editor and existing file-tree operation entry points instead of creating parallel implementations."}
+{"file": ".trellis/tasks/archive/2026-08/08-27-pr-review-fixes/research/terminal-editor-architecture.md", "reason": "Repository-backed architecture research for terminal tabs, FileViewer refactor, workbench hosting, and remote I/O."}
+{"file": ".trellis/tasks/archive/2026-08/08-27-pr-review-fixes/research/file-editor-existing-capabilities.md", "reason": "Inventory of existing syntax highlighting, indentation, Markdown, line-ending, dependency, and performance behavior."}
+{"file": ".trellis/tasks/archive/2026-08/08-27-pr-review-fixes/research/file-tree-header-actions.md", "reason": "Exact toolbar insertion point, capability rules, icon strategy, and existing operation functions to reuse."}

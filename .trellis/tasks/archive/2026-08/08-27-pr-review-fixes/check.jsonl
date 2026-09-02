@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/mt-app/backend/quality-guidelines.md", "reason": "Verify destination revalidation, async ownership, staging, and remote/local separation."}
+{"file": ".trellis/spec/mt-ssh/backend/error-handling.md", "reason": "Verify original and cleanup failures remain visible and no unsafe fallback is introduced."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Review app/pty/i18n/CI data flow and generated artifact consistency."}
+{"file": ".trellis/tasks/archive/2026-08/08-27-remote-file-management/research/remote-transfer-dnd-settings.md", "reason": "Check review fixes against the original transfer and download-directory decisions."}

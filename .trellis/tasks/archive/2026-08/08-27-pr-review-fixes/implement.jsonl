@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/mt-app/backend/quality-guidelines.md", "reason": "File-operation ownership, destination revalidation, staging, and GitHub Actions testing contracts."}
+{"file": ".trellis/spec/mt-ssh/backend/error-handling.md", "reason": "Preserve remote transfer and cleanup failures without unsafe retry or fallback."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Coordinate mt-app, mt-pty, mt-i18n, and CI changes through explicit contracts."}
+{"file": ".trellis/tasks/archive/2026-08/08-27-remote-file-management/research/remote-transfer-dnd-settings.md", "reason": "Existing transfer, drag/drop, download-directory, and conflict-flow research."}

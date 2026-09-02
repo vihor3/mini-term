@@ -1,0 +1,28 @@
+{
+  "id": "file-workbench-remote-editor",
+  "name": "file-workbench-remote-editor",
+  "title": "文件工作区与远程文件编辑",
+  "description": "在文件树工具栏增加快捷操作，并将本地/远程文件以终端区独立页签打开，复用现有代码编辑器与 Markdown 预览，支持安全远程保存。",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": "mt-app",
+  "priority": "P1",
+  "creator": "leo",
+  "assignee": "leo",
+  "createdAt": "2026-08-27",
+  "completedAt": "2026-08-28",
+  "branch": "feat/file-workbench-remote-editor",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "worktree_path": "/tmp/mini-term-file-workbench"
+  }
+}

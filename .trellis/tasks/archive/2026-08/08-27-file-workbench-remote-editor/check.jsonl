@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/mt-app/backend/quality-guidelines.md", "reason": "Verify document/entity lifecycle, async ownership, connection identity, busy state, and no unsafe UI-only validation."}
+{"file": ".trellis/spec/mt-ssh/backend/error-handling.md", "reason": "Verify staged remote saves preserve primary and cleanup/rollback failures without unsafe fallback."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Verify end-to-end data flow from file-tree click through workbench/document backend to local/remote persistence."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Check that FileViewer and existing upload/paste/create paths were reused rather than duplicated."}
+{"file": ".trellis/tasks/archive/2026-08/08-27-pr-review-fixes/research/terminal-editor-architecture.md", "reason": "Check implementation against the researched workbench boundary and terminal persistence risks."}
+{"file": ".trellis/tasks/archive/2026-08/08-27-pr-review-fixes/research/file-editor-existing-capabilities.md", "reason": "Check syntax highlighting, indentation, Markdown defaults, line endings, limits, and dependency reuse."}
+{"file": ".trellis/tasks/archive/2026-08/08-27-pr-review-fixes/research/file-tree-header-actions.md", "reason": "Check toolbar visibility, disabled state, click-time context, ordering, and operation reuse."}
