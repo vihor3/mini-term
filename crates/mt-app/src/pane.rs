@@ -122,8 +122,8 @@ pub struct TerminalPane {
     spawn_error: Option<String>,
     /// Stable incarnation returned by the terminal host or minted for legacy spawn.
     terminal_incarnation_id: TerminalIncarnationId,
-    /// True only when startup attached to the exact persisted live process.
-    warm_reattached: bool,
+    /// How this pane acquired its current terminal process and visual state.
+    recovery: TerminalRecovery,
     /// Non-fatal backend/recovery warning rendered over a usable terminal.
     backend_notice: Option<String>,
 
@@ -206,6 +206,25 @@ pub struct HostedLaunch {
     pub expected_incarnation_id: Option<TerminalIncarnationId>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalRecovery {
+    Fresh,
+    Reattached,
+    RestoredHistory,
+    Compatibility,
+    Unavailable,
+}
+
+impl TerminalRecovery {
+    pub fn is_warm_reattach(self) -> bool {
+        self == Self::Reattached
+    }
+
+    pub fn is_cold_restore(self) -> bool {
+        self == Self::RestoredHistory
+    }
+}
+
 enum TerminalTransport {
     Hosted(HostedTerminalSession),
     Legacy(PtySession),
@@ -264,7 +283,7 @@ impl TerminalTransport {
 struct LaunchOutcome {
     transport: TerminalTransport,
     terminal_incarnation_id: TerminalIncarnationId,
-    warm_reattached: bool,
+    recovery: TerminalRecovery,
     backend_notice: Option<String>,
 }
 
@@ -300,7 +319,11 @@ fn host_event_sink(
     }
 }
 
-fn host_spawn_spec(spec: &PtySpawn, user_env: &[(String, String)]) -> HostSpawnSpec {
+fn host_spawn_spec(
+    spec: &PtySpawn,
+    user_env: &[(String, String)],
+    scrollback: usize,
+) -> HostSpawnSpec {
     HostSpawnSpec {
         program: spec.program.clone(),
         args: spec.args.clone(),
@@ -309,6 +332,7 @@ fn host_spawn_spec(spec: &PtySpawn, user_env: &[(String, String)]) -> HostSpawnS
         user_env: user_env.to_vec(),
         rows: spec.rows,
         cols: spec.cols,
+        scrollback,
         ssh_autofill: None,
     }
 }
@@ -321,8 +345,9 @@ fn start_hosted(
     emulator: &Arc<TerminalEmulator>,
     ai: &AiBridge,
     tx: &mpsc::UnboundedSender<PaneSignal>,
+    scrollback: usize,
 ) -> Result<LaunchOutcome, HostClientError> {
-    let spawn = host_spawn_spec(spec, user_env);
+    let spawn = host_spawn_spec(spec, user_env, scrollback);
     let create_fresh = |notice: Option<String>| {
         launch
             .client
@@ -332,12 +357,70 @@ fn start_hosted(
                 spawn.clone(),
                 host_event_sink(pty_id, emulator.clone(), ai.clone(), tx.clone()),
             )
-            .map(|session| LaunchOutcome {
-                terminal_incarnation_id: session.descriptor().incarnation_id.clone(),
-                transport: TerminalTransport::Hosted(session),
-                warm_reattached: false,
-                backend_notice: notice,
+            .map(|session| {
+                let descriptor = session.descriptor();
+                let backend_notice = notice.or_else(|| {
+                    (!descriptor.recovery_available).then(|| {
+                        "Terminal history is unavailable; warm reattach still works.".into()
+                    })
+                });
+                LaunchOutcome {
+                    terminal_incarnation_id: descriptor.incarnation_id.clone(),
+                    transport: TerminalTransport::Hosted(session),
+                    recovery: TerminalRecovery::Fresh,
+                    backend_notice,
+                }
             })
+    };
+
+    let restore_history = |expected: TerminalIncarnationId| {
+        let (descriptor, snapshot) = launch.client.restore(
+            launch.terminal_session_id.clone(),
+            launch.worktree_id.clone(),
+            expected,
+            spawn.clone(),
+        )?;
+        if let Err(error) = emulator.restore_snapshot(&snapshot) {
+            let _ = launch.client.kill(
+                launch.terminal_session_id.clone(),
+                descriptor.incarnation_id.clone(),
+            );
+            return Err(HostClientError::recovery_unavailable(format!(
+                "apply terminal history snapshot: {error:#}"
+            )));
+        }
+        emulator.resize(TermSize::new(spec.cols as usize, spec.rows as usize));
+        let session = match launch.client.attach(
+            launch.terminal_session_id.clone(),
+            descriptor.incarnation_id.clone(),
+            0,
+            host_event_sink(pty_id, emulator.clone(), ai.clone(), tx.clone()),
+        ) {
+            Ok(session) => session,
+            Err(error) => {
+                let _ = launch.client.kill(
+                    launch.terminal_session_id.clone(),
+                    descriptor.incarnation_id.clone(),
+                );
+                return Err(error);
+            }
+        };
+        if session.descriptor() != &descriptor {
+            let _ = session.kill();
+            return Err(HostClientError::recovery_unavailable(
+                "restored terminal descriptor changed before attach",
+            ));
+        }
+        Ok(LaunchOutcome {
+            terminal_incarnation_id: descriptor.incarnation_id,
+            transport: TerminalTransport::Hosted(session),
+            recovery: TerminalRecovery::RestoredHistory,
+            backend_notice: Some(if descriptor.recovery_available {
+                "Restored from terminal history.".into()
+            } else {
+                "Restored from terminal history; future recovery is unavailable.".into()
+            }),
+        })
     };
 
     let Some(expected) = launch.expected_incarnation_id.clone() else {
@@ -352,24 +435,24 @@ fn start_hosted(
         Ok(session) => Ok(LaunchOutcome {
             terminal_incarnation_id: session.descriptor().incarnation_id.clone(),
             transport: TerminalTransport::Hosted(session),
-            warm_reattached: true,
+            recovery: TerminalRecovery::Reattached,
             backend_notice: None,
         }),
         Err(error)
             if error.is_code(HostErrorCode::SessionMissing)
-                || error.is_code(HostErrorCode::SessionExited) =>
+                || error.is_code(HostErrorCode::SessionExited)
+                || error.is_code(HostErrorCode::ReplayGap) =>
         {
-            create_fresh(Some(
-                "Previous terminal process was unavailable; started a fresh session.".into(),
-            ))
-        }
-        Err(error) if error.is_code(HostErrorCode::ReplayGap) => {
-            launch
-                .client
-                .kill(launch.terminal_session_id.clone(), expected)?;
-            create_fresh(Some(
-                "Terminal replay was incomplete; restarted this session.".into(),
-            ))
+            match restore_history(expected) {
+                Ok(outcome) => Ok(outcome),
+                Err(restore_error) if restore_error.is_code(HostErrorCode::RecoveryUnavailable) => {
+                    create_fresh(Some(format!(
+                        "Recovery unavailable; started a clean terminal: {}",
+                        restore_error.message()
+                    )))
+                }
+                Err(restore_error) => Err(restore_error),
+            }
         }
         Err(error) => Err(error),
     }
@@ -406,7 +489,7 @@ fn start_legacy(
     Ok(LaunchOutcome {
         transport: TerminalTransport::Legacy(pty),
         terminal_incarnation_id,
-        warm_reattached: false,
+        recovery: TerminalRecovery::Compatibility,
         backend_notice,
     })
 }
@@ -448,7 +531,9 @@ impl TerminalPane {
         let launch = if let Some(error) = remote.preflight_error.clone() {
             Err(anyhow::anyhow!(error))
         } else if let Some(hosted) = hosted {
-            match start_hosted(hosted, &spec, &user_env, pty_id, &emulator, &ai, &tx) {
+            match start_hosted(
+                hosted, &spec, &user_env, pty_id, &emulator, &ai, &tx, scrollback,
+            ) {
                 Ok(outcome) => Ok(outcome),
                 Err(error)
                     if error.is_code(HostErrorCode::IncarnationMismatch)
@@ -478,12 +563,12 @@ impl TerminalPane {
             start_legacy(spec, user_env, pty_id, &emulator, &ai, &tx, notice)
         };
 
-        let (transport, terminal_incarnation_id, warm_reattached, backend_notice, spawn_error) =
+        let (transport, terminal_incarnation_id, recovery, backend_notice, spawn_error) =
             match launch {
                 Ok(outcome) => (
                     Some(outcome.transport),
                     outcome.terminal_incarnation_id,
-                    outcome.warm_reattached,
+                    outcome.recovery,
                     outcome.backend_notice,
                     None,
                 ),
@@ -493,7 +578,7 @@ impl TerminalPane {
                     (
                         None,
                         persisted_incarnation.unwrap_or_default(),
-                        false,
+                        TerminalRecovery::Unavailable,
                         None,
                         Some(msg),
                     )
@@ -668,7 +753,7 @@ impl TerminalPane {
             exited: false,
             spawn_error,
             terminal_incarnation_id,
-            warm_reattached,
+            recovery,
             backend_notice,
             copied_tip: None,
             _tip_timer: None,
@@ -695,8 +780,15 @@ impl TerminalPane {
         &self.terminal_incarnation_id
     }
 
-    pub fn warm_reattached(&self) -> bool {
-        self.warm_reattached
+    pub fn recovery(&self) -> TerminalRecovery {
+        self.recovery
+    }
+
+    pub fn mark_agent_resumed(&mut self, cx: &mut Context<Self>) {
+        if self.recovery.is_cold_restore() {
+            self.backend_notice = Some("Agent resumed after restoring terminal history.".into());
+            cx.notify();
+        }
     }
 
     /// grid 的只读句柄。给悬停缩略图([`crate::pane_preview`])用 ——

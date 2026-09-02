@@ -10,7 +10,7 @@ use mt_identity::{PaneKey, TabId, TerminalIncarnationId, TerminalSessionId};
 use mt_pty::PtySpawn;
 use mt_ui::{DwellConfig, TerminalStyle};
 
-use crate::pane::{HostedLaunch, PaneEvent, TerminalPane};
+use crate::pane::{HostedLaunch, PaneEvent, TerminalPane, TerminalRecovery};
 use crate::tree::{
     AiSessionRef, DropZone, PaneState, PaneStatus, ProjectPanel, SplitDirection, SplitNode,
 };
@@ -712,7 +712,7 @@ impl AppStore {
             // pane 自己的 cwd 优先,会话 cwd 兜底
             let start_cwd = item.cwd.clone().or_else(|| resume_cwd.clone());
 
-            let (pty_id, incarnation_id, warm_reattached) = self.start_pty(
+            let (pty_id, incarnation_id, recovery) = self.start_pty(
                 &project,
                 &shell,
                 start_cwd.as_deref(),
@@ -728,7 +728,7 @@ impl AppStore {
             {
                 pane.pty_id = Some(pty_id);
                 pane.terminal_incarnation_id = Some(incarnation_id);
-                pane.resume_pending &= !warm_reattached;
+                pane.resume_pending &= !recovery.is_warm_reattach();
             }
 
             let Some(command) = resolve_auto_resume_command(
@@ -739,7 +739,7 @@ impl AppStore {
             ) else {
                 continue;
             };
-            if warm_reattached {
+            if recovery.is_warm_reattach() {
                 continue;
             }
 
@@ -762,6 +762,11 @@ impl AppStore {
             // 走 `write_to_pane` 而不是裸 PTY 写:AI 输入检测那一路要看得见这条命令,
             // pane 才会正常进入 AI 会话状态。
             self.write_to_pane(project_id, &item.pane_id, &format!("{command}\r"), cx);
+            if recovery.is_cold_restore()
+                && let Some(terminal) = self.terminals.get(&pty_id)
+            {
+                terminal.update(cx, |pane, cx| pane.mark_agent_resumed(cx));
+            }
             if session_patch.is_some() {
                 self.save_project_layout_soon(project_id, cx);
             }
@@ -817,7 +822,7 @@ impl AppStore {
         terminal_session_id: &TerminalSessionId,
         expected_incarnation_id: Option<&TerminalIncarnationId>,
         cx: &mut Context<Self>,
-    ) -> (u32, TerminalIncarnationId, bool) {
+    ) -> (u32, TerminalIncarnationId, TerminalRecovery) {
         let pty_id = self.next_pty_id;
         self.next_pty_id += 1;
 
@@ -961,7 +966,7 @@ impl AppStore {
             )
         });
         let terminal_incarnation_id = entity.read(cx).terminal_incarnation_id().clone();
-        let warm_reattached = entity.read(cx).warm_reattached();
+        let recovery = entity.read(cx).recovery();
         let terminal_route = route_identity.map(|(execution_host_id, worktree_id)| TerminalRoute {
             execution_host_id,
             worktree_id,
@@ -996,7 +1001,7 @@ impl AppStore {
         });
         self.pane_subs.insert(pty_id, sub);
         self.terminals.insert(pty_id, entity);
-        (pty_id, terminal_incarnation_id, warm_reattached)
+        (pty_id, terminal_incarnation_id, recovery)
     }
 
     /// 拖选停留自动复制的参数(`config.selectionAutoCopySecs`)。

@@ -1,11 +1,14 @@
 #![cfg(unix)]
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mt_identity::{TerminalIncarnationId, TerminalSessionId, WorktreeId};
+use mt_terminal::{TermSize, TerminalEmulator};
 use mt_terminal_host::{
-    ErrorCode, HostSpawnSpec, HostedEvent, ServeOutcome, TerminalHostClient, serve,
+    ErrorCode, HostSpawnSpec, HostedEvent, ServeOutcome, TerminalHostClient,
+    serve_with_history_root,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -31,19 +34,29 @@ fn spawn_spec() -> HostSpawnSpec {
         user_env: vec![],
         rows: 24,
         cols: 80,
+        scrollback: 1_000,
         ssh_autofill: None,
     }
 }
 
+fn history_root(endpoint: &str) -> PathBuf {
+    Path::new(endpoint).parent().unwrap().join("history")
+}
+
 fn start_server(endpoint: String) -> std::thread::JoinHandle<Result<ServeOutcome, String>> {
     std::thread::spawn(move || {
+        let history_root = history_root(&endpoint);
         mt_pty::conpty::initialize_default();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|error| error.to_string())?;
         runtime
-            .block_on(serve(&endpoint, Duration::from_secs(30)))
+            .block_on(serve_with_history_root(
+                &endpoint,
+                Duration::from_secs(30),
+                history_root,
+            ))
             .map_err(|error| error.message().to_string())
     })
 }
@@ -107,6 +120,22 @@ fn wait_for_marker(receiver: &mpsc::Receiver<HostedEvent>, marker: &str) -> (Str
                 panic!("attachment disconnected before marker {marker:?}: {error}")
             }
             Err(error) => panic!("output channel closed before marker {marker:?}: {error}"),
+        }
+    }
+}
+
+fn wait_for_exit(receiver: &mpsc::Receiver<HostedEvent>) -> Option<u32> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "timed out waiting for terminal exit");
+        match receiver.recv_timeout(remaining) {
+            Ok(HostedEvent::Output { .. }) => {}
+            Ok(HostedEvent::Exited { exit_code }) => return exit_code,
+            Ok(HostedEvent::Disconnected(error)) => {
+                panic!("attachment disconnected before terminal exit: {error}")
+            }
+            Err(error) => panic!("output channel closed before terminal exit: {error}"),
         }
     }
 }
@@ -221,6 +250,128 @@ fn detached_session_reattaches_to_same_process_and_replays_output() {
     assert!(client.list().unwrap().is_empty());
     client.shutdown_if_idle().unwrap();
     assert_eq!(server.join().unwrap().unwrap(), ServeOutcome::Shutdown);
+    cleanup_endpoint(&endpoint);
+}
+
+#[test]
+fn stopped_host_restores_history_into_a_new_fenced_incarnation() {
+    let endpoint = unique_endpoint();
+    let root = history_root(&endpoint);
+    let first_server = start_server(endpoint.clone());
+    let client = TerminalHostClient::for_endpoint(endpoint.clone()).unwrap();
+    wait_until_ready(&client);
+
+    let session_id = TerminalSessionId::new();
+    let worktree_id = worktree_id();
+    let mut initial_spawn = spawn_spec();
+    initial_spawn
+        .user_env
+        .push(("COLD_TEST_VALUE".into(), "never-persist-this".into()));
+    let created = client
+        .create(session_id.clone(), worktree_id.clone(), initial_spawn)
+        .unwrap();
+    assert!(created.recovery_available);
+    let old_incarnation = created.incarnation_id.clone();
+    let old_pid = created.process_id.unwrap();
+
+    let (old_tx, old_rx) = mpsc::channel();
+    let old_attachment = client
+        .attach(
+            session_id.clone(),
+            old_incarnation.clone(),
+            0,
+            move |event| {
+                let _ = old_tx.send(event);
+            },
+        )
+        .unwrap();
+    old_attachment
+        .write(b"stty -echo; printf '__COLD_HISTORY__\\n'; exit\r")
+        .unwrap();
+    let _ = wait_for_marker(&old_rx, "__COLD_HISTORY__");
+    let _ = wait_for_exit(&old_rx);
+    drop(old_attachment);
+    wait_until_process_exits(old_pid);
+
+    client.shutdown_if_idle().unwrap();
+    assert_eq!(
+        first_server.join().unwrap().unwrap(),
+        ServeOutcome::Shutdown
+    );
+
+    let second_server = start_server(endpoint.clone());
+    wait_until_ready(&client);
+    let (restored, snapshot) = client
+        .restore(
+            session_id.clone(),
+            worktree_id.clone(),
+            old_incarnation.clone(),
+            spawn_spec(),
+        )
+        .unwrap();
+    assert_ne!(restored.incarnation_id, old_incarnation);
+    assert!(restored.recovery_available);
+    let new_pid = restored.process_id.unwrap();
+    let emulator = TerminalEmulator::new(TermSize::new(1, 1));
+    emulator.restore_snapshot(&snapshot).unwrap();
+    assert!(
+        emulator
+            .visible_lines()
+            .join("\n")
+            .contains("__COLD_HISTORY__")
+    );
+
+    let (new_tx, new_rx) = mpsc::channel();
+    let new_attachment = client
+        .attach(
+            session_id.clone(),
+            restored.incarnation_id.clone(),
+            0,
+            move |event| {
+                let _ = new_tx.send(event);
+            },
+        )
+        .unwrap();
+    new_attachment
+        .write(b"printf '__AFTER_RESTORE__\\n'\r")
+        .unwrap();
+    let _ = wait_for_marker(&new_rx, "__AFTER_RESTORE__");
+
+    let stale = client
+        .write(session_id.clone(), old_incarnation.clone(), b"echo stale\r")
+        .unwrap_err();
+    assert!(stale.is_code(ErrorCode::IncarnationMismatch));
+    let stale_restore = client
+        .restore(
+            session_id.clone(),
+            worktree_id,
+            old_incarnation,
+            spawn_spec(),
+        )
+        .unwrap_err();
+    assert!(stale_restore.is_code(ErrorCode::IncarnationMismatch));
+
+    let history_text = std::fs::read_dir(&root)
+        .unwrap()
+        .flat_map(|entry| std::fs::read_dir(entry.unwrap().path()).unwrap())
+        .filter_map(|entry| std::fs::read(entry.ok()?.path()).ok())
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(
+        !history_text
+            .windows(18)
+            .any(|window| window == b"never-persist-this")
+    );
+
+    new_attachment.kill().unwrap();
+    drop(new_attachment);
+    wait_until_process_exits(new_pid);
+    assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+    client.shutdown_if_idle().unwrap();
+    assert_eq!(
+        second_server.join().unwrap().unwrap(),
+        ServeOutcome::Shutdown
+    );
     cleanup_endpoint(&endpoint);
 }
 

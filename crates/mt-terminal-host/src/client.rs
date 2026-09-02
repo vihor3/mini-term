@@ -9,6 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use mt_identity::{TerminalIncarnationId, TerminalSessionId, WorktreeId};
+use mt_terminal::TerminalSnapshot;
 
 use crate::ipc;
 use crate::protocol::{
@@ -41,6 +42,10 @@ impl ClientError {
             code: Some(code),
             message: message.into(),
         }
+    }
+
+    pub fn recovery_unavailable(message: impl Into<String>) -> Self {
+        Self::protocol(ErrorCode::RecoveryUnavailable, message)
     }
 
     pub fn code(&self) -> Option<ErrorCode> {
@@ -167,6 +172,39 @@ impl TerminalHostClient {
             ServerFrame::Created { descriptor } => Ok(descriptor),
             frame => Err(unexpected("created", frame)),
         }
+    }
+
+    pub fn restore(
+        &self,
+        session_id: TerminalSessionId,
+        worktree_id: WorktreeId,
+        expected_previous_incarnation_id: TerminalIncarnationId,
+        spawn: HostSpawnSpec,
+    ) -> Result<(SessionDescriptor, TerminalSnapshot), ClientError> {
+        let request = ClientRequest::Restore {
+            v: PROTOCOL_VERSION,
+            session_id,
+            worktree_id,
+            expected_previous_incarnation_id,
+            spawn,
+        };
+        let (descriptor, snapshot) = match self.request(request)? {
+            ServerFrame::Restored {
+                descriptor,
+                snapshot_b64,
+            } => {
+                let bytes = decode_bytes(&snapshot_b64).map_err(ClientError::transport)?;
+                let snapshot = TerminalSnapshot::from_bytes(bytes).map_err(|error| {
+                    ClientError::protocol(
+                        ErrorCode::RecoveryUnavailable,
+                        format!("invalid restored terminal snapshot: {error:#}"),
+                    )
+                })?;
+                (descriptor, snapshot)
+            }
+            frame => return Err(unexpected("restored", frame)),
+        };
+        Ok((descriptor, snapshot))
     }
 
     pub fn attach<F>(

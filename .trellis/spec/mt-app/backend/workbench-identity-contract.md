@@ -86,6 +86,12 @@ pub fn reactivate_active_page(
   rename, and worktree switches. A successful warm attach keeps both session
   and incarnation. A new PTY spawn or explicit reconnect keeps the session ID
   and mints a new `TerminalIncarnationId`.
+- Cold restore validates the persisted worktree and previous incarnation,
+  reconstructs the terminal at its recorded source size, applies the snapshot,
+  and then attaches the new process output. It preserves pane/session identity
+  but always mints a new incarnation.
+- `RestoredHistory` is not `Reattached`. Provider resume remains a separate
+  post-restore action; only a true warm reattach suppresses duplicate resume.
 - The process-local `u32 pty_id` is an attachment handle only. It is not a
   persisted logical terminal identity.
 - A terminal event is accepted only when project binding, pane key, logical
@@ -113,7 +119,9 @@ pub fn reactivate_active_page(
 | Pane is moved or reordered | Preserve pane key, session, incarnation, and current PTY attachment |
 | Remote/WSL identity is provisional | Route consistently but never present it as verified host authority |
 | Hosted session remains live after GUI restart | Attach-only and preserve its PID/incarnation |
-| Hosted session is missing or has a replay gap | Follow explicit cold recovery and rotate incarnation |
+| Hosted session is missing or has a replay gap with valid history | Explicitly restore, apply snapshot first, and rotate incarnation |
+| Recovery history is missing or corrupt | Start clean with a visible unavailable notice; never label it reattached |
+| Old incarnation attempts restore after recovery | Reject it before replacing or mutating the new session |
 
 ### 5. Good / Base / Bad Cases
 
@@ -139,6 +147,9 @@ pub fn reactivate_active_page(
 - Split/move/reorder tests assert stable identities and PTY attachment survive.
 - Reconnect tests assert session preservation and incarnation rotation.
 - Route tests assert the prior incarnation cannot match the current binding.
+- Cold-restore tests assert snapshot-before-attach ordering, source-size
+  restoration, new-incarnation fencing, corruption fallback, and provider
+  resume only after the snapshot is installed.
 - Workbench tests assert worktree-isolated previews and stale callback rejection.
 - Search/overlay tests assert same project/path with a different `WorktreeId`
   cannot receive deferred focus.

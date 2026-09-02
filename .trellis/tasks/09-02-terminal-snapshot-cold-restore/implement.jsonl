@@ -1,0 +1,4 @@
+{"file":".trellis/spec/mt-terminal-host/backend/terminal-host-contract.md","reason":"Existing host ownership, attach purity, replay, fencing, and packaging contract."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Stable terminal session/incarnation routing and hydration constraints."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Snapshot and restore payload crosses storage, protocol, client, and UI boundaries."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/design.md","reason":"Normative distinction between warm reattach, cold visual restore, and provider resume."}

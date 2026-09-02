@@ -1,0 +1,4 @@
+{"file":".trellis/spec/mt-terminal-host/backend/terminal-host-contract.md","reason":"Verify host lifecycle, attach purity, replay, endpoint, and packaging invariants."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Verify session/incarnation fencing and hydration behavior."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Audit typed decoding and source sequence continuity across layers."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/design.md","reason":"Check recovery semantics against the approved architecture."}

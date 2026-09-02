@@ -58,6 +58,8 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
+crc32fast = "1"
+zstd = "0.13"
 dirs = "6"
 regex = "1"
 uuid = { version = "1", features = ["v4"] }

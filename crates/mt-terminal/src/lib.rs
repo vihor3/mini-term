@@ -32,10 +32,12 @@
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::Processor;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+mod snapshot;
+pub use snapshot::{SNAPSHOT_MAX_COMPRESSED_BYTES, SnapshotMetadata, TerminalSnapshot};
 
 /// 把 alacritty 整个重新导出。渲染层(`mt-ui`)要用 `Cell` / `Flags` / `Color` /
 /// `TermMode` / `Selection` 这些类型,统一从这里取,避免各 crate 各自写一份
@@ -100,7 +102,7 @@ impl EventListener for EventQueue {
 /// 「有界 channel + 双水位背压 + 前端水位回调」那整条链路。
 pub struct TerminalEmulator {
     term: Arc<Mutex<Term<EventQueue>>>,
-    parser: Mutex<Processor>,
+    parser: Mutex<snapshot::ParserState>,
     events: EventQueue,
     /// 当前的回滚行数。**自己记一份**:`Term` 的 `config` 字段是私有的、
     /// alacritty 也没给读回口,而 [`Self::set_scrollback`] 要靠它做「值没变就不动」
@@ -153,7 +155,7 @@ impl TerminalEmulator {
         let term = Term::new(config, &size, events.clone());
         Self {
             term: Arc::new(Mutex::new(term)),
-            parser: Mutex::new(Processor::new()),
+            parser: Mutex::new(snapshot::ParserState::new()),
             events,
             scrollback: AtomicUsize::new(scrollback),
             cursor_floor: Mutex::new(None),
@@ -191,18 +193,36 @@ impl TerminalEmulator {
         let mut parser = self.parser.lock();
         let mut floor = self.cursor_floor.lock();
         let Some(floor) = floor.as_mut().filter(|f| f.budget > 0) else {
-            parser.advance(&mut *term, bytes);
+            parser.advance(&mut term, bytes);
             return;
         };
         let (sampled, rest) = bytes.split_at(bytes.len().min(floor.budget));
         for byte in sampled {
-            parser.advance(&mut *term, std::slice::from_ref(byte));
+            parser.advance(&mut term, std::slice::from_ref(byte));
             floor.min = floor.min.min(cursor_row(&term));
         }
         floor.budget -= sampled.len();
         if !rest.is_empty() {
-            parser.advance(&mut *term, rest);
+            parser.advance(&mut term, rest);
         }
+    }
+
+    /// Capture a bounded, compressed visual checkpoint for cold recovery.
+    pub fn snapshot(&self) -> anyhow::Result<TerminalSnapshot> {
+        snapshot::capture(self)
+    }
+
+    /// Install a visual checkpoint at its source dimensions.
+    pub fn restore_snapshot(
+        &self,
+        snapshot: &TerminalSnapshot,
+    ) -> anyhow::Result<SnapshotMetadata> {
+        snapshot::restore(self, snapshot)
+    }
+
+    /// Drop parser state inherited from a dead process before starting a new shell.
+    pub fn reset_parser_state(&self) {
+        *self.parser.lock() = snapshot::ParserState::new();
     }
 
     /// 开始追踪光标绝对行的**最低水位**,起点是此刻的光标位置。
@@ -273,7 +293,9 @@ impl TerminalEmulator {
     /// 历史区里存着的行数(不含可视区)。回滚行数的验收口。
     pub fn history_lines(&self) -> usize {
         let term = self.term.lock();
-        term.grid().total_lines().saturating_sub(term.grid().screen_lines())
+        term.grid()
+            .total_lines()
+            .saturating_sub(term.grid().screen_lines())
     }
 
     /// 可视区逐行文本(行尾空格已裁掉)。
@@ -568,7 +590,11 @@ mod tests {
     fn 按绝对行读回文本() {
         let e = TerminalEmulator::with_scrollback(TermSize::new(40, 10), 10_000);
         feed_lines(&e, 30); // history 21,视口是 line21..line29 + 光标那一空行
-        assert_eq!(e.line_text(0).as_deref(), Some("line0"), "scrollback 最顶上那行");
+        assert_eq!(
+            e.line_text(0).as_deref(),
+            Some("line0"),
+            "scrollback 最顶上那行"
+        );
         assert_eq!(e.line_text(24).as_deref(), Some("line24"), "视口里的行");
         assert_eq!(e.line_text(30).as_deref(), Some(""), "光标停的空行");
         assert_eq!(e.line_text(31), None, "越过视口底部");
@@ -595,20 +621,32 @@ mod tests {
         assert_eq!(e.line_text(24).as_deref(), Some("line24"));
 
         e.advance(&清屏);
-        assert_eq!(e.history_lines(), h0, "逐行 2K 不产生滚动,history 必须纹丝不动");
+        assert_eq!(
+            e.history_lines(),
+            h0,
+            "逐行 2K 不产生滚动,history 必须纹丝不动"
+        );
         assert_eq!(
             e.line_text(24).as_deref(),
             Some(""),
             "算术还指得到这一行,内容却被抹白了 —— 只有指纹测得到"
         );
-        assert_eq!(e.line_text(0).as_deref(), Some("line0"), "scrollback 不受影响");
+        assert_eq!(
+            e.line_text(0).as_deref(),
+            Some("line0"),
+            "scrollback 不受影响"
+        );
 
         // 对照组:ESC[2J 是滚上去,不是抹掉
         let e2 = TerminalEmulator::with_scrollback(TermSize::new(40, 10), 10_000);
         feed_lines(&e2, 30);
         e2.advance(b"\x1b[2J\x1b[0f");
         assert!(e2.history_lines() > h0, "2J 把整屏顶进了 scrollback");
-        assert_eq!(e2.line_text(24).as_deref(), Some("line24"), "内容跟着锚点走,完好");
+        assert_eq!(
+            e2.line_text(24).as_deref(),
+            Some("line24"),
+            "内容跟着锚点走,完好"
+        );
     }
 
     /// `ESC[3J` / RIS 把历史清零 → 锚点整体越界,读回口如实交回 `None`。

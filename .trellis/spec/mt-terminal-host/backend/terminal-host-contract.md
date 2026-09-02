@@ -29,7 +29,7 @@ connections then receive ordered output and exit frames.
 Required operations:
 
 ```text
-create, attach, write, resize, arm_autofill, kill, detach,
+create, attach, restore, write, resize, arm_autofill, kill, detach,
 list, status, shutdown_if_idle
 ```
 
@@ -40,6 +40,10 @@ list, status, shutdown_if_idle
 - Every mutation is fenced by session ID plus expected incarnation ID.
 - `attach` is attach-only. It cannot create a missing session or rotate an
   incarnation as a side effect.
+- `restore` is explicit. It validates the persisted `WorktreeId` and previous
+  incarnation, reconstructs history, and only then starts a new PTY with a new
+  host-generated incarnation while preserving the logical terminal session.
+- An old incarnation cannot attach or restore over the new incarnation.
 - A stale incarnation must fail before write, resize, autofill, or kill reaches
   the current PTY.
 - Host-returned identity is persisted and installed into `TerminalRoute` only
@@ -61,8 +65,23 @@ replay-to-live handoff has no gap or duplicate. If the requested prefix has
 already been evicted, return `ReplayGap`; never skip to the oldest retained
 chunk silently.
 
-The warm-reattach phase keeps at most 64 MiB of raw output per live session.
-Disk snapshots and dead-process recovery belong to the cold-restore contract.
+Warm reattach keeps at most 64 MiB of raw output per live session. Durable
+history is stored per logical session as:
+
+```text
+meta.json | checkpoint.json | output.log
+```
+
+`meta.json` binds session, worktree, and incarnation. `checkpoint.json` is an
+atomically replaced, checksummed zstd terminal snapshot. `output.log` is a
+binary framed stream with magic, version, kind, generation, monotonic sequence,
+payload length, payload, and CRC32. The log is capped at 8 MiB; rotation writes
+a checkpoint through the latest sequence before truncation.
+
+Recovery may truncate only a torn final frame. Checksum failures, sequence
+gaps, invalid versions, wrong generations, malformed complete frames, or
+oversized payloads fail with `RecoveryUnavailable`. Launch arguments, user
+environment values, autofill passwords, and other secrets are never persisted.
 
 ### 5. Lifecycle Contract
 
@@ -72,7 +91,7 @@ Disk snapshots and dead-process recovery belong to the cold-restore contract.
 | Explicit pane/tab close | Fenced kill | Kill legacy PTY |
 | Project registration removal | Detach only | Drop legacy PTY |
 | Worktree deletion | Explicitly kill first | Explicitly kill first |
-| Host crash | Host PTY drops; next start is cold recovery | Not applicable |
+| Host crash | Host PTY drops; explicit restore uses durable history | Not applicable |
 
 `shutdown_if_idle` succeeds only when no live sessions remain. The host may
 exit after its idle window only when it has no live sessions and no active
@@ -96,14 +115,19 @@ connections.
 | Attach result | Required application behavior |
 |---------------|-------------------------------|
 | Exact session and incarnation found | Quiet warm attach; preserve process and incarnation |
-| Session missing or exited | Create a new incarnation and show a cold recovery notice |
-| Replay gap | Explicitly end the unusable incarnation, create fresh, show replay notice |
+| Session missing or exited with valid history | Explicit restore; apply snapshot; rotate incarnation |
+| Replay gap with valid history | Seal and end the unusable incarnation, then explicitly restore |
+| History missing or corrupt | Start clean with a visible recovery-unavailable notice |
 | Incarnation mismatch | Fail closed; do not take over the host session |
 | Protocol mismatch or existing-session conflict | Fail closed; do not mutate either session |
 | Host unavailable for a fresh terminal | Use compatibility backend with visible notice |
 
 Warm attach is true only when the returned child PID and incarnation belong to
 the persisted live session. Merely reusing a session ID is not warm attach.
+The application recovery state is one of `Fresh`, `Reattached`,
+`RestoredHistory`, `Compatibility`, or `Unavailable`. Only `Reattached`
+suppresses provider resume. A restored snapshot is applied before the new
+incarnation is attached, and provider resume may run only after that restore.
 
 ### 8. Packaging Contract
 
@@ -124,6 +148,12 @@ matches the staged source.
 - Unix endpoint modes, stale socket recovery, and live-owner contention.
 - Windows MSVC target compilation of current-SID named-pipe security code.
 - Application routing keeps returned incarnation and fences old callbacks.
+- Snapshot round trips preserve grid, cursor, source size, scrollback, wide
+  cells, colors, and an incomplete parser sequence.
+- Host restart restores valid history into a new incarnation; stale restore,
+  wrong worktree, corruption, sequence gaps, and wrong generations fail closed.
+- Log rotation stays within the bound, explicit kill removes history, and
+  persisted bytes exclude launch secrets.
 - Extracted Windows installer contains `mt-terminal-host.exe`.
 
 ### 10. Forbidden Patterns
@@ -132,6 +162,29 @@ matches the staged source.
 - Do not create a fresh shell from inside `attach`.
 - Do not accept a mutation by session ID alone.
 - Do not present compatibility fallback or a new process as warm attach.
+- Do not apply new-incarnation replay before installing the restored snapshot;
+  that would overwrite newer output with older terminal state.
 - Do not perform host IPC round trips synchronously on the GPUI input/render
   path; enqueue ordered commands on the client runtime.
 - Do not merge terminal-host protocol state with the SSH CLI daemon.
+
+### 11. Wrong vs Correct
+
+#### Wrong
+
+```text
+attach missing session -> silently create shell -> label reattached
+```
+
+This conflates live-process continuity with visual recovery and bypasses the
+previous-incarnation/worktree validation boundary.
+
+#### Correct
+
+```text
+attach missing session -> explicit restore(old incarnation, worktree)
+                       -> validate history -> new incarnation + snapshot
+                       -> apply snapshot -> attach new output
+```
+
+Warm attach remains pure, while cold restore is observable and fully fenced.

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -9,7 +10,9 @@ use tokio::sync::{Notify, broadcast};
 
 use mt_identity::{TerminalIncarnationId, TerminalSessionId, WorktreeId};
 use mt_pty::{PtyOptions, PtySession, PtySpawn};
+use mt_terminal::TerminalSnapshot;
 
+use crate::history::{self, HistorySeed, SessionHistory};
 use crate::ipc;
 use crate::protocol::{
     ClientRequest, ErrorCode, HostSpawnSpec, PROTOCOL_VERSION, ServerFrame, SessionDescriptor,
@@ -130,6 +133,7 @@ struct HostedSession {
     size: Mutex<(u16, u16)>,
     wsl_override: Mutex<Option<WslOverrideDescriptor>>,
     stream: Mutex<SessionStream>,
+    history: Arc<SessionHistory>,
     exit: Mutex<Option<Option<u32>>>,
 }
 
@@ -144,8 +148,25 @@ impl HostedSession {
         session_id: TerminalSessionId,
         worktree_id: WorktreeId,
         mut spawn: HostSpawnSpec,
+        history_root: &Path,
+        initial_snapshot: Option<&TerminalSnapshot>,
     ) -> Result<Arc<Self>, HostFailure> {
         let incarnation_id = TerminalIncarnationId::new();
+        let history = Arc::new(
+            SessionHistory::pending(HistorySeed {
+                root: history_root,
+                session_id: session_id.clone(),
+                worktree_id: worktree_id.clone(),
+                generation: incarnation_id.clone(),
+                rows: spawn.rows,
+                cols: spawn.cols,
+                scrollback: spawn.scrollback,
+                initial_snapshot,
+            })
+            .map_err(|error| {
+                HostFailure::new(ErrorCode::RecoveryUnavailable, format!("{error:#}"))
+            })?,
+        );
         spawn
             .env
             .retain(|(key, _)| key != "MINITERM_TERMINAL_INCARNATION_ID");
@@ -163,6 +184,7 @@ impl HostedSession {
             size: Mutex::new((spawn.cols, spawn.rows)),
             wsl_override: Mutex::new(None),
             stream: Mutex::new(SessionStream::new()),
+            history,
             exit: Mutex::new(None),
         });
 
@@ -181,6 +203,7 @@ impl HostedSession {
         };
         let pty = PtySession::spawn_with_options(spec, options, move |bytes| {
             output_session.stream.lock().push(bytes);
+            output_session.history.record_output(bytes);
         })
         .map_err(|error| HostFailure::new(ErrorCode::SpawnFailed, format!("{error:#}")))?;
 
@@ -195,6 +218,7 @@ impl HostedSession {
             pty.arm_ssh_autofill(autofill.password, autofill.disarm_on_input);
         }
         *session.pty.lock() = Some(pty);
+        session.history.activate();
         Ok(session)
     }
 
@@ -204,6 +228,7 @@ impl HostedSession {
             return;
         }
         *exit = Some(exit_code);
+        self.history.flush_checkpoint();
         let stream = self.stream.lock();
         let _ = stream.events.send(StreamEvent::Exited(exit_code));
     }
@@ -229,6 +254,7 @@ impl HostedSession {
             first_sequence,
             latest_sequence,
             wsl_override: self.wsl_override.lock().clone(),
+            recovery_available: self.history.is_available(),
         }
     }
 
@@ -313,6 +339,7 @@ impl HostedSession {
             .resize(rows, cols)
             .map_err(|error| HostFailure::new(ErrorCode::IoFailed, format!("{error:#}")))?;
         *self.size.lock() = (cols, rows);
+        self.history.record_resize(rows, cols);
         Ok(())
     }
 
@@ -352,15 +379,17 @@ struct DaemonState {
     active_connections: AtomicUsize,
     last_activity_ms: AtomicU64,
     shutdown: Notify,
+    history_root: PathBuf,
 }
 
 impl DaemonState {
-    fn new() -> Self {
+    fn new(history_root: PathBuf) -> Self {
         Self {
             registry: Mutex::new(Registry::default()),
             active_connections: AtomicUsize::new(0),
             last_activity_ms: AtomicU64::new(now_millis()),
             shutdown: Notify::new(),
+            history_root,
         }
     }
 
@@ -431,7 +460,13 @@ impl DaemonState {
             }
         }
 
-        let result = HostedSession::spawn(session_id.clone(), worktree_id, spawn);
+        let result = HostedSession::spawn(
+            session_id.clone(),
+            worktree_id,
+            spawn,
+            &self.history_root,
+            None,
+        );
         let mut registry = self.registry.lock();
         registry.creating.remove(&session_id);
         let session = result?;
@@ -441,6 +476,104 @@ impl DaemonState {
         Ok(descriptor)
     }
 
+    fn restore(
+        &self,
+        session_id: TerminalSessionId,
+        worktree_id: WorktreeId,
+        expected_previous_incarnation_id: TerminalIncarnationId,
+        spawn: HostSpawnSpec,
+    ) -> Result<(SessionDescriptor, TerminalSnapshot), HostFailure> {
+        let existing = {
+            let mut registry = self.registry.lock();
+            if registry.creating.contains(&session_id) {
+                return Err(HostFailure::new(
+                    ErrorCode::SessionCreating,
+                    format!("terminal session {session_id} is already being restored"),
+                ));
+            }
+            let existing = registry.sessions.remove(&session_id);
+            if let Some(existing) = existing.as_ref()
+                && existing.is_live()
+            {
+                if existing.incarnation_id != expected_previous_incarnation_id {
+                    registry
+                        .sessions
+                        .insert(session_id.clone(), existing.clone());
+                    return Err(HostFailure::new(
+                        ErrorCode::IncarnationMismatch,
+                        format!("terminal session {session_id} has a newer live incarnation"),
+                    ));
+                }
+                if existing.worktree_id != worktree_id {
+                    registry
+                        .sessions
+                        .insert(session_id.clone(), existing.clone());
+                    return Err(HostFailure::new(
+                        ErrorCode::RecoveryUnavailable,
+                        format!("terminal session {session_id} belongs to another worktree"),
+                    ));
+                }
+            }
+            registry.creating.insert(session_id.clone());
+            existing
+        };
+
+        if let Some(existing) = existing.as_ref()
+            && existing.is_live()
+        {
+            if !existing.history.seal() {
+                let mut registry = self.registry.lock();
+                registry.creating.remove(&session_id);
+                registry
+                    .sessions
+                    .insert(session_id.clone(), existing.clone());
+                return Err(HostFailure::new(
+                    ErrorCode::RecoveryUnavailable,
+                    "terminal history could not be sealed before recovery",
+                ));
+            }
+            if let Err(error) = existing.kill(&expected_previous_incarnation_id) {
+                let mut registry = self.registry.lock();
+                registry.creating.remove(&session_id);
+                registry
+                    .sessions
+                    .insert(session_id.clone(), existing.clone());
+                return Err(error);
+            }
+        }
+
+        let recovered = history::recover(
+            &self.history_root,
+            &session_id,
+            &worktree_id,
+            &expected_previous_incarnation_id,
+        )
+        .map_err(|error| {
+            HostFailure::new(
+                ErrorCode::RecoveryUnavailable,
+                format!("terminal history recovery failed: {error:#}"),
+            )
+        });
+        let result = recovered.and_then(|recovered| {
+            HostedSession::spawn(
+                session_id.clone(),
+                worktree_id,
+                spawn,
+                &self.history_root,
+                Some(&recovered.snapshot),
+            )
+            .map(|session| (session, recovered.snapshot))
+        });
+
+        let mut registry = self.registry.lock();
+        registry.creating.remove(&session_id);
+        let (session, snapshot) = result?;
+        let descriptor = session.descriptor();
+        registry.sessions.insert(session_id, session);
+        self.touch();
+        Ok((descriptor, snapshot))
+    }
+
     fn remove_and_kill(
         &self,
         id: &TerminalSessionId,
@@ -448,7 +581,14 @@ impl DaemonState {
     ) -> Result<(), HostFailure> {
         let session = self.session(id)?;
         session.kill(expected)?;
+        session.history.discard();
         self.registry.lock().sessions.remove(id);
+        history::purge(&self.history_root, id).map_err(|error| {
+            HostFailure::new(
+                ErrorCode::IoFailed,
+                format!("remove terminal recovery history: {error:#}"),
+            )
+        })?;
         self.touch();
         Ok(())
     }
@@ -627,6 +767,23 @@ where
         } => state
             .create(session_id, worktree_id, expected_absent, spawn)
             .map(|descriptor| ServerFrame::Created { descriptor }),
+        ClientRequest::Restore {
+            session_id,
+            worktree_id,
+            expected_previous_incarnation_id,
+            spawn,
+            ..
+        } => state
+            .restore(
+                session_id,
+                worktree_id,
+                expected_previous_incarnation_id,
+                spawn,
+            )
+            .map(|(descriptor, snapshot)| ServerFrame::Restored {
+                descriptor,
+                snapshot_b64: encode_bytes(snapshot.as_bytes()),
+            }),
         ClientRequest::Write {
             session_id,
             expected_incarnation_id,
@@ -731,7 +888,15 @@ async fn endpoint_has_live_host(endpoint: &str) -> bool {
 }
 
 pub async fn serve(endpoint: &str, idle_exit: Duration) -> Result<ServeOutcome, ServeError> {
-    let state = Arc::new(DaemonState::new());
+    serve_with_history_root(endpoint, idle_exit, history::default_root()).await
+}
+
+pub async fn serve_with_history_root(
+    endpoint: &str,
+    idle_exit: Duration,
+    history_root: PathBuf,
+) -> Result<ServeOutcome, ServeError> {
+    let state = Arc::new(DaemonState::new(history_root));
     serve_until_exit(endpoint, idle_exit, &state).await
 }
 

@@ -2,7 +2,11 @@ use base64::Engine as _;
 use mt_identity::{TerminalIncarnationId, TerminalSessionId, WorktreeId};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
+
+fn default_scrollback() -> usize {
+    10_000
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +21,8 @@ pub struct HostSpawnSpec {
     pub user_env: Vec<(String, String)>,
     pub rows: u16,
     pub cols: u16,
+    #[serde(default = "default_scrollback")]
+    pub scrollback: usize,
     pub ssh_autofill: Option<SshAutofillSpec>,
 }
 
@@ -46,6 +52,7 @@ pub struct SessionDescriptor {
     pub first_sequence: u64,
     pub latest_sequence: u64,
     pub wsl_override: Option<WslOverrideDescriptor>,
+    pub recovery_available: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,6 +69,7 @@ pub enum ErrorCode {
     HostBusy,
     SpawnFailed,
     IoFailed,
+    RecoveryUnavailable,
     Internal,
 }
 
@@ -73,6 +81,13 @@ pub enum ClientRequest {
         session_id: TerminalSessionId,
         worktree_id: WorktreeId,
         expected_absent: bool,
+        spawn: HostSpawnSpec,
+    },
+    Restore {
+        v: u32,
+        session_id: TerminalSessionId,
+        worktree_id: WorktreeId,
+        expected_previous_incarnation_id: TerminalIncarnationId,
         spawn: HostSpawnSpec,
     },
     Attach {
@@ -126,6 +141,7 @@ impl ClientRequest {
     pub fn protocol_version(&self) -> u32 {
         match self {
             Self::Create { v, .. }
+            | Self::Restore { v, .. }
             | Self::Attach { v, .. }
             | Self::Write { v, .. }
             | Self::Resize { v, .. }
@@ -150,6 +166,10 @@ pub enum ServerFrame {
     },
     Created {
         descriptor: SessionDescriptor,
+    },
+    Restored {
+        descriptor: SessionDescriptor,
+        snapshot_b64: String,
     },
     Attached {
         descriptor: SessionDescriptor,
@@ -210,6 +230,30 @@ mod tests {
         let encoded = encode_frame(&request).unwrap();
         assert_eq!(encoded.matches('\n').count(), 1);
         assert!(encoded.contains("expected_incarnation_id"));
+        let decoded: ClientRequest = decode_frame(&encoded).unwrap();
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn restore_request_round_trip_keeps_previous_generation_and_spawn() {
+        let request = ClientRequest::Restore {
+            v: PROTOCOL_VERSION,
+            session_id: TerminalSessionId::new(),
+            worktree_id: format!("worktree-v1:{}", "0".repeat(64)).parse().unwrap(),
+            expected_previous_incarnation_id: TerminalIncarnationId::new(),
+            spawn: HostSpawnSpec {
+                program: "shell".into(),
+                args: vec!["--login".into()],
+                cwd: Some("/repo".into()),
+                env: vec![("INTERNAL".into(), "value".into())],
+                user_env: vec![("USER".into(), "value".into())],
+                rows: 24,
+                cols: 80,
+                scrollback: 50_000,
+                ssh_autofill: None,
+            },
+        };
+        let encoded = encode_frame(&request).unwrap();
         let decoded: ClientRequest = decode_frame(&encoded).unwrap();
         assert_eq!(decoded, request);
     }
