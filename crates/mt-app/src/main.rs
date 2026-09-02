@@ -132,6 +132,7 @@ use gpui::{
 use gpui::StyledImage as _;
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_component::{Root, WindowExt as _};
+use mt_identity::WorktreeId;
 use mt_ui::tooltip::Tooltip;
 
 use crate::ai::AiBridge;
@@ -329,8 +330,15 @@ fn agents_overlay_horizontal_geometry(viewport_width: f32) -> (f32, f32) {
 
 #[derive(Clone)]
 enum AgentsFocusReturn {
-    Terminal { project_id: String, pane_id: String },
-    Document { project_id: String },
+    Terminal {
+        project_id: String,
+        worktree_id: WorktreeId,
+        pane_id: String,
+    },
+    Document {
+        project_id: String,
+        worktree_id: WorktreeId,
+    },
 }
 
 /// 抽屉退场动画的驻留。原版 `useOverlayPresence` + `OVERLAY_EXIT_MS = 400`:
@@ -867,24 +875,30 @@ impl Workspace {
         {
             return;
         }
-        self.agents_focus_return =
-            self.store
-                .read(cx)
-                .active_project_id
-                .clone()
-                .and_then(|project_id| {
-                    if self.terminal_page_active(cx) {
-                        self.store
-                            .read(cx)
-                            .active_pane_id(&project_id)
-                            .map(|pane_id| AgentsFocusReturn::Terminal {
-                                project_id,
-                                pane_id,
-                            })
-                    } else {
-                        Some(AgentsFocusReturn::Document { project_id })
-                    }
-                });
+        let terminal_page_active = self.terminal_page_active(cx);
+        self.agents_focus_return = {
+            let store = self.store.read(cx);
+            store.active_project_id.clone().and_then(|project_id| {
+                let worktree_id = store.active_worktree_id()?.clone();
+                if store.worktree_id_for_project(&project_id) != Some(&worktree_id) {
+                    return None;
+                }
+                if terminal_page_active {
+                    store
+                        .active_pane_id(&project_id)
+                        .map(|pane_id| AgentsFocusReturn::Terminal {
+                            project_id,
+                            worktree_id,
+                            pane_id,
+                        })
+                } else {
+                    Some(AgentsFocusReturn::Document {
+                        project_id,
+                        worktree_id,
+                    })
+                }
+            })
+        };
         self.agents_open = true;
         window.focus(&self.agents_focus);
         cx.notify();
@@ -901,11 +915,14 @@ impl Workspace {
             let restored = match target {
                 Some(AgentsFocusReturn::Terminal {
                     project_id,
+                    worktree_id,
                     pane_id,
                 }) => {
                     let valid = {
                         let store = self.store.read(cx);
                         store.active_project_id.as_deref() == Some(project_id.as_str())
+                            && store.active_worktree_id() == Some(&worktree_id)
+                            && store.worktree_id_for_project(&project_id) == Some(&worktree_id)
                             && self.terminal_page_active(cx)
                             && store
                                 .project_state(&project_id)
@@ -918,18 +935,45 @@ impl Workspace {
                     }
                     valid
                 }
-                Some(AgentsFocusReturn::Document { project_id }) => {
-                    let valid = self.store.read(cx).active_project_id.as_deref()
-                        == Some(project_id.as_str());
+                Some(AgentsFocusReturn::Document {
+                    project_id,
+                    worktree_id,
+                }) => {
+                    let valid = {
+                        let store = self.store.read(cx);
+                        store.active_project_id.as_deref() == Some(project_id.as_str())
+                            && store.active_worktree_id() == Some(&worktree_id)
+                            && store.worktree_id_for_project(&project_id) == Some(&worktree_id)
+                    };
                     if valid {
-                        crate::workbench_area::reactivate_active_page(&project_id, window, cx);
+                        crate::workbench_area::reactivate_active_page(
+                            &project_id,
+                            &worktree_id,
+                            window,
+                            cx,
+                        );
                     }
                     valid
                 }
                 None => false,
             };
-            if !restored && let Some(project_id) = self.store.read(cx).active_project_id.clone() {
-                crate::workbench_area::reactivate_active_page(&project_id, window, cx);
+            if !restored {
+                let active_scope = {
+                    let store = self.store.read(cx);
+                    store.active_project_id.clone().and_then(|project_id| {
+                        let worktree_id = store.active_worktree_id()?.clone();
+                        (store.worktree_id_for_project(&project_id) == Some(&worktree_id))
+                            .then_some((project_id, worktree_id))
+                    })
+                };
+                if let Some((project_id, worktree_id)) = active_scope {
+                    crate::workbench_area::reactivate_active_page(
+                        &project_id,
+                        &worktree_id,
+                        window,
+                        cx,
+                    );
+                }
             }
         }
         cx.notify();
@@ -1161,9 +1205,20 @@ impl Workspace {
                     .on_click(cx.listener(move |this, _event, window, cx| {
                         let focused = this.focus_attention_target(Some(&project_id), window, cx);
                         if !focused && this.store.read(cx).project(&project_id).is_some() {
-                            this.store
-                                .update(cx, |store, cx| store.set_active_project(&project_id, cx));
-                            crate::workbench_area::reactivate_active_page(&project_id, window, cx);
+                            let worktree_id = this.store.update(cx, |store, cx| {
+                                store.set_active_project(&project_id, cx);
+                                let worktree_id = store.active_worktree_id()?.clone();
+                                (store.worktree_id_for_project(&project_id) == Some(&worktree_id))
+                                    .then_some(worktree_id)
+                            });
+                            if let Some(worktree_id) = worktree_id {
+                                crate::workbench_area::reactivate_active_page(
+                                    &project_id,
+                                    &worktree_id,
+                                    window,
+                                    cx,
+                                );
+                            }
                         }
                         this.close_agents(false, window, cx);
                     })),

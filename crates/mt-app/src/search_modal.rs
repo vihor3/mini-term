@@ -35,10 +35,11 @@ use gpui::{
     Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
-use mt_ui::tooltip::Tooltip;
+use mt_identity::WorktreeId;
 use mt_project::search::{
     SearchEvent, SearchHandle, SearchMode, SearchRequest, SearchResultItem, start_search,
 };
+use mt_ui::tooltip::Tooltip;
 
 use crate::i18n::{t, tr};
 use crate::menu;
@@ -83,12 +84,19 @@ enum Status {
     Done,
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct SearchProject {
+    project_id: String,
+    root: PathBuf,
+    worktree_id: WorktreeId,
+}
+
 pub struct SearchModal {
     store: Entity<AppStore>,
-    /// Identity of the local project that produced the currently displayed
-    /// results. A late result must never be reinterpreted against a newly
-    /// active project (especially an SSH project with the same textual path).
-    search_project: Option<(String, PathBuf)>,
+    /// Stable project/worktree identity that produced the displayed results.
+    /// A late result must never be reinterpreted against a rebound project or
+    /// a different worktree with the same textual path.
+    search_project: Option<SearchProject>,
     query: Entity<InputState>,
     mode: SearchMode,
     use_regex: bool,
@@ -227,19 +235,27 @@ impl SearchModal {
         }
     }
 
-    fn project_snapshot(&self, cx: &App) -> Option<(String, PathBuf)> {
+    fn project_snapshot(&self, cx: &App) -> Option<SearchProject> {
         let store = self.store.read(cx);
         let project = store.active_project()?;
         if store.is_remote_project(&project.id) {
             return None;
         }
-        Some((project.id.clone(), PathBuf::from(&project.path)))
+        let worktree_id = store.active_worktree_id()?.clone();
+        if store.worktree_id_for_project(&project.id) != Some(&worktree_id) {
+            return None;
+        }
+        Some(SearchProject {
+            project_id: project.id.clone(),
+            root: PathBuf::from(&project.path),
+            worktree_id,
+        })
     }
 
     fn current_search_root(&self, cx: &App) -> Option<PathBuf> {
         let expected = self.search_project.as_ref()?;
         if self.project_snapshot(cx).as_ref() == Some(expected) {
-            Some(expected.1.clone())
+            Some(expected.root.clone())
         } else {
             None
         }
@@ -278,7 +294,7 @@ impl SearchModal {
 
     fn schedule_overlay_close(
         &mut self,
-        expected_project: (String, PathBuf),
+        expected_project: SearchProject,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -301,7 +317,8 @@ impl SearchModal {
                 }
                 if close_guarded(kind::GLOBAL_SEARCH, window, cx) {
                     crate::workbench_area::reactivate_active_document(
-                        &expected_project.0,
+                        &expected_project.project_id,
+                        &expected_project.worktree_id,
                         window,
                         cx,
                     );
@@ -313,14 +330,15 @@ impl SearchModal {
     /// 发起一次搜索(Enter / 点「搜索」)。
     fn run(&mut self, cx: &mut Context<Self>) {
         let query = self.query.read(cx).value().trim().to_string();
-        let Some((project_id, root)) = self.project_snapshot(cx) else {
+        let Some(project) = self.project_snapshot(cx) else {
             return;
         };
         if query.is_empty() {
             return;
         }
+        let root = project.root.clone();
         self.reset(cx);
-        self.search_project = Some((project_id, root.clone()));
+        self.search_project = Some(project);
 
         let (tx, mut rx) = mpsc::unbounded::<SearchEvent>();
         let request = SearchRequest {
@@ -442,9 +460,9 @@ pub fn result_action(click_count: usize) -> ResultAction {
 fn preview_close_context_matches(
     current_generation: u64,
     expected_generation: u64,
-    search_project: Option<&(String, PathBuf)>,
-    active_project: Option<&(String, PathBuf)>,
-    expected_project: &(String, PathBuf),
+    search_project: Option<&SearchProject>,
+    active_project: Option<&SearchProject>,
+    expected_project: &SearchProject,
 ) -> bool {
     current_generation == expected_generation
         && search_project == Some(expected_project)
@@ -934,7 +952,14 @@ mod tests {
 
     #[test]
     fn 延迟关闭只在同一代搜索与同一活动项目中交还焦点() {
-        let expected = ("project-a".to_string(), PathBuf::from("/project-a"));
+        let expected = SearchProject {
+            project_id: "project-a".to_string(),
+            root: PathBuf::from("/project-a"),
+            worktree_id:
+                "worktree-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .parse()
+                    .unwrap(),
+        };
         assert!(preview_close_context_matches(
             7,
             7,
@@ -943,7 +968,19 @@ mod tests {
             &expected,
         ));
 
-        let other = ("project-b".to_string(), PathBuf::from("/project-b"));
+        let other = SearchProject {
+            project_id: "project-b".to_string(),
+            root: PathBuf::from("/project-b"),
+            worktree_id:
+                "worktree-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .parse()
+                    .unwrap(),
+        };
+        let rebound = SearchProject {
+            project_id: expected.project_id.clone(),
+            root: expected.root.clone(),
+            worktree_id: other.worktree_id.clone(),
+        };
         assert!(!preview_close_context_matches(
             8,
             7,
@@ -963,6 +1000,13 @@ mod tests {
             7,
             Some(&other),
             Some(&expected),
+            &expected,
+        ));
+        assert!(!preview_close_context_matches(
+            7,
+            7,
+            Some(&expected),
+            Some(&rebound),
             &expected,
         ));
     }

@@ -1,0 +1,8 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Identity ownership, dependency direction, persistence, async routing, and rollback cross-layer review."}
+{"file":".trellis/spec/mt-project/backend/worktree-catalog-contract.md","reason":"Authoritative local Git facts, canonical path behavior, generation fencing, and non-destructive absence rules."}
+{"file":".trellis/spec/mt-app/backend/file-workbench-contract.md","reason":"Current document identity, preview isolation, deferred focus fencing, and project compatibility behavior to migrate to WorktreeId."}
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"AppStore ownership, focused test expectations, and regression boundaries for the broad state migration."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/implement.md","reason":"Approved Phase 2 delivery boundary, acceptance criteria, validation commands, and rollback point."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/operation-logic.md","reason":"Approved WorktreeId ownership, exact target routing, terminal creation, and asynchronous fencing semantics."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/orca-worktree-terminal-agent-architecture.md","reason":"Execution-host authority boundaries and later remote-runtime/Agent dependencies that this child must preserve."}
+{"file":".trellis/tasks/09-02-stable-worktree-workbench-identity/design.md","reason":"Task-specific schema, migration, identity derivation, compatibility projection, and rollback design."}

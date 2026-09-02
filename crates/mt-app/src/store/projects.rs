@@ -51,7 +51,12 @@ impl AppStore {
     }
 
     /// 写缓存并通知(`setDirKind`)。识别不出也要写 —— 否则每帧重探。
-    pub fn set_dir_kind(&mut self, path: String, kind: Option<ProjectKind>, cx: &mut Context<Self>) {
+    pub fn set_dir_kind(
+        &mut self,
+        path: String,
+        kind: Option<ProjectKind>,
+        cx: &mut Context<Self>,
+    ) {
         self.dir_kinds.insert(path, kind);
         cx.notify();
     }
@@ -70,6 +75,7 @@ impl AppStore {
             return;
         }
         self.active_project_id = Some(id.to_string());
+        self.sync_active_worktree();
         if let Some(state) = self.project_states.get_mut(id) {
             state.needs_attention = false;
         }
@@ -140,6 +146,7 @@ impl AppStore {
         }
         self.project_states.insert(id.clone(), ProjectState::new());
         self.expanded_dirs.insert(id.clone(), HashSet::new());
+        self.register_project_identity(&id);
         self.save_config_soon(cx);
         cx.notify();
         id
@@ -204,8 +211,11 @@ impl AppStore {
 
         self.project_states.insert(id.clone(), ProjectState::new());
         self.expanded_dirs.insert(id.clone(), HashSet::new());
+        self.register_project_identity(&id);
         self.active_project_id = Some(id.clone());
-        self.config.last_active_project_id = Some(id);
+        self.config.last_active_project_id = Some(id.clone());
+        self.sync_active_worktree();
+        self.hydrate_project(&id, cx);
         self.save_config_soon(cx);
         cx.notify();
     }
@@ -315,6 +325,10 @@ impl AppStore {
             self.dispose_terminal(pty_id, cx);
         }
 
+        // Preserve the latest worktree layout before removing only the
+        // compatibility project registration.
+        self.save_project_layout_soon(id, cx);
+        self.flush_layout_now();
         self.project_states.remove(id);
         self.expanded_dirs.remove(id);
         self.done.retain_panes(&self.live_pane_ids());
@@ -329,10 +343,7 @@ impl AppStore {
             self.active_project_id = self.config.projects.first().map(|p| p.id.clone());
             self.config.last_active_project_id = self.active_project_id.clone();
         }
-        // 它在布局库里的那一行一并删掉。`flush_layout_now` 查不到项目时按删行
-        // 处理,所以这里只要把 id 标脏即可(项目 id 不复用,不怕标错)。
-        self.layout_dirty_projects.insert(id.to_string());
-        self.schedule_layout_flush(cx);
+        self.remove_project_identity(id);
         self.save_config_soon(cx);
         cx.notify();
     }

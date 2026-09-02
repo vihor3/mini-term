@@ -1,4 +1,4 @@
-//! 主内容工作区：常驻终端页 + 项目级文件页签。
+//! 主内容工作区：常驻终端页 + worktree 级文件页签。
 //!
 //! 文件页签是纯运行时状态，不进入 `SplitNode`、PTY 映射或布局数据库。切到文件页
 //! 只是不渲染 [`TerminalArea`]，终端实体及其全部后台会话仍由 `AppStore` 保活。
@@ -13,6 +13,7 @@ use gpui::{
     px,
 };
 use gpui_component::WindowExt as _;
+use mt_identity::WorktreeId;
 use mt_ui::icons::FileIcon;
 use mt_ui::tooltip::Tooltip;
 
@@ -32,15 +33,14 @@ enum DocumentBackendKey {
     },
 }
 
-/// 一个打开文件的稳定身份。项目、后端连接身份和路径共同参与去重。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct DocumentKey {
+struct DocumentSourceKey {
     project_id: String,
     backend: DocumentBackendKey,
     normalized_path: String,
 }
 
-impl DocumentKey {
+impl DocumentSourceKey {
     fn from_source(source: &DocumentSource) -> Self {
         let (backend, normalized_path) = match source {
             DocumentSource::Local { path, .. } => (
@@ -62,6 +62,29 @@ impl DocumentKey {
             backend,
             normalized_path,
         }
+    }
+}
+
+/// 一个打开文件的稳定身份。worktree、后端连接身份和路径共同参与去重。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DocumentKey {
+    worktree_id: WorktreeId,
+    backend: DocumentBackendKey,
+    normalized_path: String,
+}
+
+impl DocumentKey {
+    fn from_source(worktree_id: WorktreeId, source: &DocumentSource) -> Self {
+        let source_key = DocumentSourceKey::from_source(source);
+        Self {
+            worktree_id,
+            backend: source_key.backend,
+            normalized_path: source_key.normalized_path,
+        }
+    }
+
+    fn matches_source_key(&self, source_key: &DocumentSourceKey) -> bool {
+        self.backend == source_key.backend && self.normalized_path == source_key.normalized_path
     }
 }
 
@@ -98,20 +121,25 @@ impl DocumentTabState {
 
 struct DocumentTab {
     key: DocumentKey,
+    // Compatibility callbacks still carry DocumentSource rather than a
+    // WorktreeId. Keep the source project beside the stable key so those
+    // callbacks can recover their originating worktree without consulting the
+    // project's possibly changed current binding.
+    source_project_id: String,
     title: String,
     document: Entity<FileViewer>,
     state: DocumentTabState,
 }
 
 type RenderDocumentTab = (DocumentKey, String, Entity<FileViewer>, DocumentTabState);
-type ActiveWorkbenchSnapshot = (String, WorkbenchPage, Vec<RenderDocumentTab>);
+type ActiveWorkbenchSnapshot = (String, WorktreeId, WorkbenchPage, Vec<RenderDocumentTab>);
 
-struct ProjectDocuments {
+struct WorktreeDocuments {
     tabs: Vec<DocumentTab>,
     active: WorkbenchPage,
 }
 
-impl Default for ProjectDocuments {
+impl Default for WorktreeDocuments {
     fn default() -> Self {
         Self {
             tabs: Vec::new(),
@@ -120,7 +148,7 @@ impl Default for ProjectDocuments {
     }
 }
 
-impl ProjectDocuments {
+impl WorktreeDocuments {
     fn index_of(&self, key: &DocumentKey) -> Option<usize> {
         self.tabs.iter().position(|tab| &tab.key == key)
     }
@@ -200,6 +228,48 @@ fn next_document_after_close(
         .cloned()
 }
 
+fn project_binding_matches(
+    bound_worktree_id: Option<&WorktreeId>,
+    expected_worktree_id: &WorktreeId,
+) -> bool {
+    bound_worktree_id == Some(expected_worktree_id)
+}
+
+fn source_project_binding_matches(
+    project_bindings: &HashMap<String, WorktreeId>,
+    source_project_id: &str,
+    expected_worktree_id: &WorktreeId,
+) -> bool {
+    project_binding_matches(
+        project_bindings.get(source_project_id),
+        expected_worktree_id,
+    )
+}
+
+fn active_worktree_matches(
+    active_worktree_id: Option<&WorktreeId>,
+    active_project_worktree_id: Option<&WorktreeId>,
+    expected_worktree_id: &WorktreeId,
+) -> bool {
+    active_worktree_id == Some(expected_worktree_id)
+        && active_project_worktree_id == Some(expected_worktree_id)
+}
+
+fn active_scope_matches(
+    active_project_id: Option<&str>,
+    active_worktree_id: Option<&WorktreeId>,
+    expected_project_worktree_id: Option<&WorktreeId>,
+    expected_project_id: &str,
+    expected_worktree_id: &WorktreeId,
+) -> bool {
+    active_project_id == Some(expected_project_id)
+        && active_worktree_matches(
+            active_worktree_id,
+            expected_project_worktree_id,
+            expected_worktree_id,
+        )
+}
+
 struct GlobalWorkbench(Entity<WorkbenchArea>);
 impl Global for GlobalWorkbench {}
 
@@ -213,8 +283,8 @@ fn global(cx: &App) -> Option<Entity<WorkbenchArea>> {
         .map(|global| global.0.clone())
 }
 
-fn project_documents_are_dirty(project: &ProjectDocuments, cx: &App) -> bool {
-    project
+fn worktree_documents_are_dirty(worktree: &WorktreeDocuments, cx: &App) -> bool {
+    worktree
         .tabs
         .iter()
         .any(|tab| tab.document.read(cx).is_dirty())
@@ -223,10 +293,13 @@ fn project_documents_are_dirty(project: &ProjectDocuments, cx: &App) -> bool {
 /// 项目移除、worktree 清理等生命周期操作的统一防丢失闸。
 pub fn project_has_dirty_documents(project_id: &str, cx: &App) -> bool {
     global(cx).is_some_and(|area| {
-        area.read(cx)
-            .projects
-            .get(project_id)
-            .is_some_and(|project| project_documents_are_dirty(project, cx))
+        let area = area.read(cx);
+        area.worktrees.values().any(|documents| {
+            documents
+                .tabs
+                .iter()
+                .any(|tab| tab.source_project_id == project_id && tab.document.read(cx).is_dirty())
+        })
     })
 }
 
@@ -239,13 +312,13 @@ pub fn dirty_document_names(cx: &App) -> Vec<String> {
     let area = area.read(cx);
     let store = area.store.read(cx);
     let mut names = Vec::new();
-    for (project_id, documents) in &area.projects {
-        let project_name = store
-            .project(project_id)
-            .map(|project| project.name.as_str())
-            .unwrap_or(project_id);
+    for documents in area.worktrees.values() {
         for tab in &documents.tabs {
             if tab.document.read(cx).is_dirty() {
+                let project_name = store
+                    .project(&tab.source_project_id)
+                    .map(|project| project.name.as_str())
+                    .unwrap_or(&tab.source_project_id);
                 names.push(format!("{project_name}: {}", tab.title));
             }
         }
@@ -267,13 +340,20 @@ pub fn open_active_file(
         let Some(project) = store.active_project() else {
             return;
         };
+        let Some(worktree_id) = store.active_worktree_id().cloned() else {
+            return;
+        };
+        if !project_binding_matches(store.worktree_id_for_project(&project.id), &worktree_id) {
+            return;
+        }
         (
             project.clone(),
+            worktree_id,
             store.is_remote_project(&project.id),
             store.remote_connection_of(&project.id),
         )
     };
-    let (project, remote, connection) = snapshot;
+    let (project, worktree_id, remote, connection) = snapshot;
     let source = if remote {
         let Some(connection) = connection else {
             show_alert(
@@ -302,18 +382,28 @@ pub fn open_active_file(
         return;
     };
     area.update(cx, |area, cx| {
-        area.open_document(source, highlight_line, window, cx)
+        area.open_document(worktree_id, source, highlight_line, window, cx)
     });
 }
 
 /// 文件页内部的 Ctrl/Cmd+W 入口。延迟执行前先快照来源身份，避免用户在
 /// `window.defer` 落地前切换页签后误关新的活动页。
-pub fn close_document_source(source: DocumentSource, window: &mut Window, cx: &mut App) {
+pub fn close_document_source(
+    expected_worktree_id: WorktreeId,
+    source: DocumentSource,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let Some(area) = global(cx) else {
         return;
     };
     let project_id = source.project_id().to_string();
-    let key = DocumentKey::from_source(&source);
+    let Some(key) = area
+        .read(cx)
+        .document_key_for_source(&expected_worktree_id, &source)
+    else {
+        return;
+    };
     area.update(cx, |area, cx| {
         area.request_close_document(project_id, key, window, cx)
     });
@@ -332,44 +422,52 @@ pub fn activate_terminal_page(window: &mut Window, cx: &mut App) {
 
 /// 文档异步读盘完成时用来判断是否可以接管焦点。后台页签或其它项目的迟到结果
 /// 只能更新自身内容，不能把键盘焦点从当前终端/文档页抢走。
-pub fn is_document_active(source: &DocumentSource, cx: &App) -> bool {
+pub fn is_document_active(
+    expected_worktree_id: &WorktreeId,
+    source: &DocumentSource,
+    cx: &App,
+) -> bool {
     let Some(area) = global(cx) else {
         return false;
     };
-    let key = DocumentKey::from_source(source);
     let area = area.read(cx);
-    let Some(active_project_id) = area.store.read(cx).active_project_id.clone() else {
+    let Some(key) = area.document_key_for_source(expected_worktree_id, source) else {
         return false;
     };
-    active_project_id == key.project_id
-        && area
-            .projects
-            .get(&active_project_id)
-            .is_some_and(|project| project.active == WorkbenchPage::Document(key))
+    area.document_page_is_active(&key, cx)
 }
 
-/// Restore focus after a modal overlay closes without capturing the document
-/// that happened to be active before the close. The active project and page
-/// are resolved at handoff time, and `FileViewer::on_activated` performs the
-/// final identity/overlay checks again in the deferred callback.
-pub fn reactivate_active_document(expected_project_id: &str, window: &mut Window, cx: &mut App) {
+/// Restore focus after a modal overlay closes. Callers capture both the
+/// compatibility project and stable worktree before yielding; the workbench
+/// rejects the handoff if either binding changed.
+pub fn reactivate_active_document(
+    expected_project_id: &str,
+    expected_worktree_id: &WorktreeId,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let Some(area) = global(cx) else {
         return;
     };
     area.update(cx, |area, cx| {
-        area.reactivate_active_document(expected_project_id, window, cx)
+        area.reactivate_active_document(expected_project_id, expected_worktree_id, window, cx);
     });
 }
 
 /// Restore the active workbench page after switching project/worktree scope.
-/// Each compatibility project keeps its own terminal/document route, so the
+/// Each stable worktree keeps its own terminal/document route, so the
 /// handoff must focus that route instead of leaving focus in the hidden source.
-pub fn reactivate_active_page(expected_project_id: &str, window: &mut Window, cx: &mut App) {
+pub fn reactivate_active_page(
+    expected_project_id: &str,
+    expected_worktree_id: &WorktreeId,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let Some(area) = global(cx) else {
         return;
     };
     area.update(cx, |area, cx| {
-        area.reactivate_active_page(expected_project_id, window, cx)
+        area.reactivate_active_page(expected_project_id, expected_worktree_id, window, cx);
     });
 }
 
@@ -377,8 +475,9 @@ pub fn reactivate_active_page(expected_project_id: &str, window: &mut Window, cx
 pub struct WorkbenchArea {
     store: Entity<AppStore>,
     terminal_area: Entity<TerminalArea>,
-    projects: HashMap<String, ProjectDocuments>,
+    worktrees: HashMap<WorktreeId, WorktreeDocuments>,
     last_rendered_project: Option<String>,
+    last_rendered_worktree: Option<WorktreeId>,
     last_rendered_page: Option<WorkbenchPage>,
 }
 
@@ -389,19 +488,47 @@ impl WorkbenchArea {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&store, |this, store, cx| {
-            let project_ids = store
-                .read(cx)
-                .projects()
-                .iter()
-                .map(|project| project.id.clone())
+            let project_bindings = {
+                let store = store.read(cx);
+                store
+                    .projects()
+                    .iter()
+                    .filter_map(|project| {
+                        store
+                            .worktree_id_for_project(&project.id)
+                            .cloned()
+                            .map(|worktree_id| (project.id.clone(), worktree_id))
+                    })
+                    .collect::<HashMap<_, _>>()
+            };
+            for documents in this.worktrees.values_mut() {
+                let stale_clean_keys = documents
+                    .tabs
+                    .iter()
+                    .filter(|tab| {
+                        !source_project_binding_matches(
+                            &project_bindings,
+                            &tab.source_project_id,
+                            &tab.key.worktree_id,
+                        ) && !tab.document.read(cx).is_dirty()
+                    })
+                    .map(|tab| tab.key.clone())
+                    .collect::<Vec<_>>();
+                for key in stale_clean_keys {
+                    documents.close(&key);
+                }
+            }
+            let worktree_ids = project_bindings
+                .values()
+                .cloned()
                 .collect::<std::collections::HashSet<_>>();
             // 正常移除入口会在 AppStore 层拒绝丢弃脏页签；这里再留一道兜底，
             // 防止配置被其它路径直接改写时观察者静默销毁内存草稿。
-            this.projects.retain(|project_id, project| {
-                project_ids.contains(project_id) || project_documents_are_dirty(project, cx)
+            this.worktrees.retain(|worktree_id, documents| {
+                worktree_ids.contains(worktree_id) || worktree_documents_are_dirty(documents, cx)
             });
-            for project in this.projects.values() {
-                for tab in &project.tabs {
+            for documents in this.worktrees.values() {
+                for tab in &documents.tabs {
                     tab.document
                         .update(cx, |document, cx| document.validate_remote_source(cx));
                 }
@@ -412,45 +539,148 @@ impl WorkbenchArea {
         Self {
             store,
             terminal_area,
-            projects: HashMap::new(),
+            worktrees: HashMap::new(),
             last_rendered_project: None,
+            last_rendered_worktree: None,
             last_rendered_page: None,
         }
     }
 
     pub fn is_terminal_active(&self, cx: &App) -> bool {
-        let Some(project_id) = self.store.read(cx).active_project_id.clone() else {
-            return true;
+        let scope = {
+            let store = self.store.read(cx);
+            let Some(project_id) = store.active_project_id.clone() else {
+                return true;
+            };
+            let Some(worktree_id) = store.active_worktree_id().cloned() else {
+                return true;
+            };
+            (project_id, worktree_id)
         };
-        self.is_terminal_page_for_project(&project_id, cx)
+        self.is_terminal_page_for_scope(&scope.0, &scope.1, cx)
     }
 
-    fn is_terminal_page_for_project(&self, project_id: &str, cx: &App) -> bool {
-        if self.store.read(cx).active_project_id.as_deref() != Some(project_id) {
+    fn project_binding_is_current(
+        &self,
+        project_id: &str,
+        expected_worktree_id: &WorktreeId,
+        cx: &App,
+    ) -> bool {
+        let store = self.store.read(cx);
+        project_binding_matches(
+            store.worktree_id_for_project(project_id),
+            expected_worktree_id,
+        )
+    }
+
+    fn active_worktree_is_current(&self, expected_worktree_id: &WorktreeId, cx: &App) -> bool {
+        let store = self.store.read(cx);
+        let Some(active_project_id) = store.active_project_id.as_deref() else {
+            return false;
+        };
+        active_worktree_matches(
+            store.active_worktree_id(),
+            store.worktree_id_for_project(active_project_id),
+            expected_worktree_id,
+        )
+    }
+
+    fn active_scope_is_current(
+        &self,
+        expected_project_id: &str,
+        expected_worktree_id: &WorktreeId,
+        cx: &App,
+    ) -> bool {
+        let store = self.store.read(cx);
+        active_scope_matches(
+            store.active_project_id.as_deref(),
+            store.active_worktree_id(),
+            store.worktree_id_for_project(expected_project_id),
+            expected_project_id,
+            expected_worktree_id,
+        )
+    }
+
+    fn document_key_for_source(
+        &self,
+        expected_worktree_id: &WorktreeId,
+        source: &DocumentSource,
+    ) -> Option<DocumentKey> {
+        let source_key = DocumentSourceKey::from_source(source);
+        self.worktrees
+            .get(expected_worktree_id)?
+            .tabs
+            .iter()
+            .filter(|tab| {
+                tab.source_project_id == source_key.project_id
+                    && tab.key.matches_source_key(&source_key)
+            })
+            .map(|tab| tab.key.clone())
+            .next()
+    }
+
+    fn document_binding_is_current(&self, key: &DocumentKey, cx: &App) -> bool {
+        let Some(tab) = self
+            .worktrees
+            .get(&key.worktree_id)
+            .and_then(|documents| documents.index_of(key).map(|index| &documents.tabs[index]))
+        else {
+            return false;
+        };
+        self.project_binding_is_current(&tab.source_project_id, &key.worktree_id, cx)
+    }
+
+    fn document_page_is_active(&self, key: &DocumentKey, cx: &App) -> bool {
+        self.document_binding_is_current(key, cx)
+            && self.active_worktree_is_current(&key.worktree_id, cx)
+            && self
+                .worktrees
+                .get(&key.worktree_id)
+                .is_some_and(|documents| documents.active == WorkbenchPage::Document(key.clone()))
+    }
+
+    fn is_terminal_page_for_scope(
+        &self,
+        project_id: &str,
+        worktree_id: &WorktreeId,
+        cx: &App,
+    ) -> bool {
+        if !self.active_scope_is_current(project_id, worktree_id, cx) {
             return false;
         }
-        self.projects
-            .get(project_id)
-            .is_none_or(|project| project.active == WorkbenchPage::Terminal)
+        self.worktrees
+            .get(worktree_id)
+            .is_none_or(|documents| documents.active == WorkbenchPage::Terminal)
     }
 
     fn open_document(
         &mut self,
+        worktree_id: WorktreeId,
         source: DocumentSource,
         highlight_line: Option<u32>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let project_id = source.project_id().to_string();
-        let key = DocumentKey::from_source(&source);
-        let project = self.projects.entry(project_id.clone()).or_default();
-        if let Some(index) = project.index_of(&key) {
-            let document = project.tabs[index].document.clone();
-            project.active = WorkbenchPage::Document(key);
+        if !self.project_binding_is_current(&project_id, &worktree_id, cx)
+            || !self.active_worktree_is_current(&worktree_id, cx)
+        {
+            return;
+        }
+
+        let key = DocumentKey::from_source(worktree_id.clone(), &source);
+        let documents = self.worktrees.entry(worktree_id).or_default();
+        if let Some(index) = documents.index_of(&key) {
+            let document = documents.tabs[index].document.clone();
+            documents.active = WorkbenchPage::Document(key.clone());
+            let area = cx.entity();
             window.defer(cx, move |window, cx| {
+                let should_activate = area.read(cx).document_page_is_active(&key, cx);
                 document.update(cx, |document, cx| {
                     document.reveal_line(highlight_line, window, cx);
-                    document.on_activated(window, cx);
+                    if should_activate {
+                        document.on_activated(window, cx);
+                    }
                 });
             });
             cx.notify();
@@ -458,51 +688,79 @@ impl WorkbenchArea {
         }
 
         let title = source.file_name();
-        let document = cx.new(|cx| FileViewer::new_document(source, highlight_line, window, cx));
-        let observed_project_id = project_id.clone();
+        let document = cx.new(|cx| {
+            FileViewer::new_document(key.worktree_id.clone(), source, highlight_line, window, cx)
+        });
         let observed_key = key.clone();
         cx.observe(&document, move |this, document, cx| {
             if document.read(cx).is_dirty() {
-                this.promote_document(&observed_project_id, &observed_key);
+                this.promote_document(&observed_key);
             }
             cx.notify();
         })
         .detach();
-        project.insert_preview(
+        documents.insert_preview(
             DocumentTab {
                 key: key.clone(),
+                source_project_id: project_id,
                 title,
                 document: document.clone(),
                 state: DocumentTabState::Preview,
             },
             cx,
         );
-        project.active = WorkbenchPage::Document(key);
+        documents.active = WorkbenchPage::Document(key.clone());
+        let area = cx.entity();
         window.defer(cx, move |window, cx| {
-            document.update(cx, |document, cx| document.on_activated(window, cx));
+            if area.read(cx).document_page_is_active(&key, cx) {
+                document.update(cx, |document, cx| document.on_activated(window, cx));
+            }
         });
         cx.notify();
     }
 
     pub fn activate_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project_id) = self.store.read(cx).active_project_id.clone() else {
-            return;
+        let scope = {
+            let store = self.store.read(cx);
+            let Some(project_id) = store.active_project_id.clone() else {
+                return;
+            };
+            let Some(worktree_id) = store.active_worktree_id().cloned() else {
+                return;
+            };
+            (project_id, worktree_id)
         };
-        self.projects.entry(project_id.clone()).or_default().active = WorkbenchPage::Terminal;
-        let pane_id = self.store.read(cx).active_pane_id(&project_id);
+        self.activate_terminal_for_scope(&scope.0, &scope.1, window, cx);
+    }
+
+    fn activate_terminal_for_scope(
+        &mut self,
+        project_id: &str,
+        worktree_id: &WorktreeId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.active_scope_is_current(project_id, worktree_id, cx) {
+            return;
+        }
+        self.worktrees
+            .entry(worktree_id.clone())
+            .or_default()
+            .active = WorkbenchPage::Terminal;
+        let pane_id = self.store.read(cx).active_pane_id(project_id);
         if let Some(pane_id) = pane_id {
             self.store.update(cx, |store, cx| {
-                store.focus_pane(&project_id, &pane_id, window, cx)
+                store.focus_pane(project_id, &pane_id, window, cx)
             });
         }
         cx.notify();
     }
 
-    fn promote_document(&mut self, project_id: &str, key: &DocumentKey) -> bool {
-        let Some(project) = self.projects.get_mut(project_id) else {
+    fn promote_document(&mut self, key: &DocumentKey) -> bool {
+        let Some(documents) = self.worktrees.get_mut(&key.worktree_id) else {
             return false;
         };
-        project.promote(key)
+        documents.promote(key)
     }
 
     fn activate_document(
@@ -512,18 +770,27 @@ impl WorkbenchArea {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(project) = self.projects.get_mut(project_id) else {
+        if !self.active_scope_is_current(project_id, &key.worktree_id, cx)
+            || !self.document_binding_is_current(key, cx)
+        {
+            return;
+        }
+        let Some(documents) = self.worktrees.get_mut(&key.worktree_id) else {
             return;
         };
-        let Some(index) = project.index_of(key) else {
+        let Some(index) = documents.index_of(key) else {
             return;
         };
-        let document = project.tabs[index].document.clone();
-        project.active = WorkbenchPage::Document(key.clone());
+        let document = documents.tabs[index].document.clone();
+        documents.active = WorkbenchPage::Document(key.clone());
+        let area = cx.entity();
+        let key = key.clone();
         window.defer(cx, move |window, cx| {
-            document.update(cx, |document, cx| {
-                document.on_activated(window, cx);
-            });
+            if area.read(cx).document_page_is_active(&key, cx) {
+                document.update(cx, |document, cx| {
+                    document.on_activated(window, cx);
+                });
+            }
         });
         cx.notify();
     }
@@ -531,16 +798,17 @@ impl WorkbenchArea {
     fn reactivate_active_document(
         &mut self,
         expected_project_id: &str,
+        expected_worktree_id: &WorktreeId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.store.read(cx).active_project_id.as_deref() != Some(expected_project_id) {
+        if !self.active_scope_is_current(expected_project_id, expected_worktree_id, cx) {
             return;
         }
         let Some(WorkbenchPage::Document(key)) = self
-            .projects
-            .get(expected_project_id)
-            .map(|project| project.active.clone())
+            .worktrees
+            .get(expected_worktree_id)
+            .map(|documents| documents.active.clone())
         else {
             return;
         };
@@ -550,19 +818,25 @@ impl WorkbenchArea {
     fn reactivate_active_page(
         &mut self,
         expected_project_id: &str,
+        expected_worktree_id: &WorktreeId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.store.read(cx).active_project_id.as_deref() != Some(expected_project_id) {
+        if !self.active_scope_is_current(expected_project_id, expected_worktree_id, cx) {
             return;
         }
         let page = self
-            .projects
-            .get(expected_project_id)
-            .map(|project| project.active.clone())
+            .worktrees
+            .get(expected_worktree_id)
+            .map(|documents| documents.active.clone())
             .unwrap_or(WorkbenchPage::Terminal);
         match page {
-            WorkbenchPage::Terminal => self.activate_terminal(window, cx),
+            WorkbenchPage::Terminal => self.activate_terminal_for_scope(
+                expected_project_id,
+                expected_worktree_id,
+                window,
+                cx,
+            ),
             WorkbenchPage::Document(key) => {
                 self.activate_document(expected_project_id, &key, window, cx)
             }
@@ -570,20 +844,33 @@ impl WorkbenchArea {
     }
 
     pub fn search_active_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project_id) = self.store.read(cx).active_project_id.clone() else {
-            return;
+        let scope = {
+            let store = self.store.read(cx);
+            let Some(project_id) = store.active_project_id.clone() else {
+                return;
+            };
+            let Some(worktree_id) = store.active_worktree_id().cloned() else {
+                return;
+            };
+            (project_id, worktree_id)
         };
+        if !self.active_scope_is_current(&scope.0, &scope.1, cx) {
+            return;
+        }
         let Some(WorkbenchPage::Document(key)) = self
-            .projects
-            .get(&project_id)
-            .map(|project| project.active.clone())
+            .worktrees
+            .get(&scope.1)
+            .map(|documents| documents.active.clone())
         else {
             return;
         };
-        let Some(document) = self.projects.get(&project_id).and_then(|project| {
-            project
+        if !self.document_page_is_active(&key, cx) {
+            return;
+        }
+        let Some(document) = self.worktrees.get(&scope.1).and_then(|documents| {
+            documents
                 .index_of(&key)
-                .map(|index| project.tabs[index].document.clone())
+                .map(|index| documents.tabs[index].document.clone())
         }) else {
             return;
         };
@@ -597,10 +884,13 @@ impl WorkbenchArea {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.project_binding_is_current(&project_id, &key.worktree_id, cx) {
+            return;
+        }
         let dirty = self
-            .projects
-            .get(&project_id)
-            .and_then(|project| project.index_of(&key).map(|index| &project.tabs[index]))
+            .worktrees
+            .get(&key.worktree_id)
+            .and_then(|documents| documents.index_of(&key).map(|index| &documents.tabs[index]))
             .is_some_and(|tab| tab.document.read(cx).is_dirty());
         if !dirty {
             self.close_document(&project_id, &key, window, cx);
@@ -635,33 +925,75 @@ impl WorkbenchArea {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(project) = self.projects.get_mut(project_id) else {
+        if !self.project_binding_is_current(project_id, &key.worktree_id, cx) {
             return;
+        }
+        let (was_active, next_page) = {
+            let Some(documents) = self.worktrees.get_mut(&key.worktree_id) else {
+                return;
+            };
+            let was_active = documents.active == WorkbenchPage::Document(key.clone());
+            if documents.close(key).is_none() {
+                return;
+            }
+            (was_active, documents.active.clone())
         };
-        let was_active = project.active == WorkbenchPage::Document(key.clone());
-        let _ = project.close(key);
-        let project_is_visible =
-            self.store.read(cx).active_project_id.as_deref() == Some(project_id);
-        if !was_active || !project_is_visible {
+        let active_project_id = {
+            let store = self.store.read(cx);
+            store
+                .active_project_id
+                .as_deref()
+                .and_then(|active_project_id| {
+                    active_worktree_matches(
+                        store.active_worktree_id(),
+                        store.worktree_id_for_project(active_project_id),
+                        &key.worktree_id,
+                    )
+                    .then(|| active_project_id.to_string())
+                })
+        };
+        if !was_active {
             cx.notify();
             return;
         }
-        match project.active.clone() {
-            WorkbenchPage::Terminal => self.activate_terminal(window, cx),
-            WorkbenchPage::Document(next) => self.activate_document(project_id, &next, window, cx),
+        let Some(active_project_id) = active_project_id else {
+            cx.notify();
+            return;
+        };
+        match next_page {
+            WorkbenchPage::Terminal => {
+                self.activate_terminal_for_scope(&active_project_id, &key.worktree_id, window, cx)
+            }
+            WorkbenchPage::Document(next) => {
+                self.activate_document(&active_project_id, &next, window, cx)
+            }
         }
         cx.notify();
     }
 
     fn active_snapshot(&self, cx: &App) -> Option<ActiveWorkbenchSnapshot> {
-        let project_id = self.store.read(cx).active_project_id.clone()?;
-        let project = self.projects.get(&project_id);
-        let active = project
-            .map(|project| project.active.clone())
+        let (project_id, worktree_id) = {
+            let store = self.store.read(cx);
+            let project_id = store.active_project_id.clone()?;
+            let worktree_id = store.active_worktree_id().cloned()?;
+            if !active_scope_matches(
+                store.active_project_id.as_deref(),
+                store.active_worktree_id(),
+                store.worktree_id_for_project(&project_id),
+                &project_id,
+                &worktree_id,
+            ) {
+                return None;
+            }
+            (project_id, worktree_id)
+        };
+        let documents = self.worktrees.get(&worktree_id);
+        let active = documents
+            .map(|documents| documents.active.clone())
             .unwrap_or(WorkbenchPage::Terminal);
-        let tabs = project
-            .map(|project| {
-                project
+        let tabs = documents
+            .map(|documents| {
+                documents
                     .tabs
                     .iter()
                     .map(|tab| {
@@ -675,30 +1007,36 @@ impl WorkbenchArea {
                     .collect()
             })
             .unwrap_or_default();
-        Some((project_id, active, tabs))
+        Some((project_id, worktree_id, active, tabs))
     }
 }
 
 impl Render for WorkbenchArea {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some((project_id, active, tabs)) = self.active_snapshot(cx) else {
+        let Some((project_id, worktree_id, active, tabs)) = self.active_snapshot(cx) else {
             self.last_rendered_project = None;
+            self.last_rendered_worktree = None;
             self.last_rendered_page = None;
             return div().size_full().child(self.terminal_area.clone());
         };
 
         let page_changed = self.last_rendered_project.as_deref() != Some(project_id.as_str())
+            || self.last_rendered_worktree.as_ref() != Some(&worktree_id)
             || self.last_rendered_page.as_ref() != Some(&active);
         if page_changed {
             self.last_rendered_project = Some(project_id.clone());
+            self.last_rendered_worktree = Some(worktree_id.clone());
             self.last_rendered_page = Some(active.clone());
             match &active {
                 WorkbenchPage::Terminal => {
                     let area = cx.entity();
                     let store = self.store.clone();
                     let project_id = project_id.clone();
+                    let worktree_id = worktree_id.clone();
                     window.defer(cx, move |window, cx| {
-                        if !area.read(cx).is_terminal_page_for_project(&project_id, cx)
+                        if !area
+                            .read(cx)
+                            .is_terminal_page_for_scope(&project_id, &worktree_id, cx)
                             || window.has_active_dialog(cx)
                             || !crate::overlay::allows(crate::overlay::Yield::ToOverlay)
                         {
@@ -716,11 +1054,15 @@ impl Render for WorkbenchArea {
                     if let Some((_, _, document, _)) =
                         tabs.iter().find(|(candidate, _, _, _)| candidate == key)
                     {
+                        let area = cx.entity();
+                        let key = key.clone();
                         let document = document.clone();
                         window.defer(cx, move |window, cx| {
-                            document.update(cx, |document, cx| {
-                                document.on_activated(window, cx);
-                            });
+                            if area.read(cx).document_page_is_active(&key, cx) {
+                                document.update(cx, |document, cx| {
+                                    document.on_activated(window, cx);
+                                });
+                            }
                         });
                     }
                 }
@@ -868,7 +1210,7 @@ impl Render for WorkbenchArea {
                     .on_click(
                         cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                             if event.click_count() >= 2 {
-                                this.promote_document(&click_project, &tab_key);
+                                this.promote_document(&tab_key);
                             }
                             this.activate_document(&click_project, &tab_key, window, cx)
                         }),
@@ -940,18 +1282,68 @@ mod tests {
         )
     }
 
-    fn key(path: &str) -> DocumentKey {
+    fn worktree_id(seed: char) -> WorktreeId {
+        format!("worktree-v1:{}", seed.to_string().repeat(64))
+            .parse()
+            .expect("valid test worktree id")
+    }
+
+    fn key_in(worktree_id: WorktreeId, path: &str) -> DocumentKey {
         DocumentKey {
-            project_id: "p".into(),
+            worktree_id,
             backend: DocumentBackendKey::Local,
             normalized_path: path.into(),
         }
     }
 
+    fn key(path: &str) -> DocumentKey {
+        key_in(worktree_id('a'), path)
+    }
+
+    #[test]
+    fn document_key_separates_worktree_identity() {
+        assert_ne!(
+            key_in(worktree_id('a'), "/work/a.rs"),
+            key_in(worktree_id('b'), "/work/a.rs")
+        );
+    }
+
+    #[test]
+    fn compatibility_project_aliases_share_one_worktree_document_key() {
+        let source = |project_id: &str| DocumentSource::Local {
+            project_id: project_id.to_string(),
+            project_root: PathBuf::from("/work"),
+            path: PathBuf::from("/work/a.rs"),
+        };
+        let worktree_id = worktree_id('a');
+
+        assert_eq!(
+            DocumentKey::from_source(worktree_id.clone(), &source("project-a")),
+            DocumentKey::from_source(worktree_id, &source("project-b")),
+        );
+    }
+
+    #[test]
+    fn remaining_alias_does_not_validate_removed_document_source_project() {
+        let worktree_id = worktree_id('a');
+        let project_bindings = HashMap::from([("project-b".to_string(), worktree_id.clone())]);
+
+        assert!(!source_project_binding_matches(
+            &project_bindings,
+            "project-a",
+            &worktree_id,
+        ));
+        assert!(source_project_binding_matches(
+            &project_bindings,
+            "project-b",
+            &worktree_id,
+        ));
+    }
+
     #[test]
     fn document_key_separates_remote_connection_identity() {
         let a = DocumentKey {
-            project_id: "p".into(),
+            worktree_id: worktree_id('a'),
             backend: DocumentBackendKey::Remote {
                 connection_id: "ssh".into(),
                 connection_fingerprint: 1,
@@ -964,6 +1356,52 @@ mod tests {
             connection_fingerprint: 2,
         };
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn stale_callback_rejects_same_project_rebound_to_another_worktree() {
+        let original = worktree_id('a');
+        let rebound = worktree_id('b');
+
+        assert!(active_scope_matches(
+            Some("p"),
+            Some(&original),
+            Some(&original),
+            "p",
+            &original,
+        ));
+        assert!(!active_scope_matches(
+            Some("p"),
+            Some(&rebound),
+            Some(&rebound),
+            "p",
+            &original,
+        ));
+        assert!(!active_scope_matches(
+            Some("other-project"),
+            Some(&original),
+            Some(&original),
+            "p",
+            &original,
+        ));
+        assert!(!project_binding_matches(Some(&rebound), &original));
+    }
+
+    #[test]
+    fn active_worktree_requires_active_project_binding_to_match() {
+        let expected = worktree_id('a');
+        let other = worktree_id('b');
+
+        assert!(active_worktree_matches(
+            Some(&expected),
+            Some(&expected),
+            &expected,
+        ));
+        assert!(!active_worktree_matches(
+            Some(&expected),
+            Some(&other),
+            &expected,
+        ));
     }
 
     #[cfg(windows)]
@@ -1021,6 +1459,24 @@ mod tests {
         assert_eq!(inserted_at, 2);
         assert_eq!(tabs[1].state, DocumentTabState::Permanent);
         assert_eq!(tabs[2].state, DocumentTabState::Preview);
+    }
+
+    #[test]
+    fn preview_replacement_is_isolated_by_worktree_bucket() {
+        let first = worktree_id('a');
+        let second = worktree_id('b');
+        let mut worktrees = HashMap::from([
+            (first.clone(), vec![TestTab::preview("first", false)]),
+            (second.clone(), vec![TestTab::preview("second", false)]),
+        ]);
+
+        insert_test_preview(
+            worktrees.get_mut(&first).unwrap(),
+            TestTab::preview("next", false),
+        );
+
+        assert_eq!(worktrees[&first][0].name, "next");
+        assert_eq!(worktrees[&second][0].name, "second");
     }
 
     #[test]

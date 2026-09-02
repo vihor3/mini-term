@@ -346,7 +346,7 @@ fn repository_key(repo_path: &Path) -> PathBuf {
     std::fs::canonicalize(&candidate).unwrap_or(candidate)
 }
 
-fn common_git_dir(repo: &Repository) -> PathBuf {
+pub(super) fn common_git_dir(repo: &Repository) -> PathBuf {
     let git_dir = repo.path();
     let Ok(raw) = std::fs::read_to_string(git_dir.join("commondir")) else {
         return git_dir.to_path_buf();

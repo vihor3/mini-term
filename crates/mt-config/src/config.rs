@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
+use mt_identity::{PaneKey, TabId, TerminalIncarnationId, TerminalSessionId, WorktreeId};
 use serde::{Deserialize, Serialize};
 
 /// SSH 连接(`config.json` 的 `sshConnections` 数组元素)。
@@ -326,6 +327,12 @@ fn default_launchers() -> Vec<AiLauncher> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedPane {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_key: Option<PaneKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_session_id: Option<TerminalSessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_incarnation_id: Option<TerminalIncarnationId>,
     pub shell_name: String,
     /// 工作目录覆盖(worktree 终端):有值则替代项目根作为 PTY cwd
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -353,9 +360,15 @@ pub struct SavedAiSession {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
 pub enum SavedSplitNode {
     Leaf {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_pane_key: Option<PaneKey>,
         /// 旧格式（单个 pane），仅用于反序列化兼容，序列化时跳过
         #[serde(default, skip_serializing)]
         pane: Option<SavedPane>,
@@ -374,6 +387,8 @@ pub enum SavedSplitNode {
 #[serde(rename_all = "camelCase")]
 pub struct SavedTab {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<TabId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_title: Option<String>,
     pub split_layout: SavedSplitNode,
 }
@@ -381,8 +396,12 @@ pub struct SavedTab {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedProjectLayout {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_id: Option<WorktreeId>,
     pub tabs: Vec<SavedTab>,
     pub active_tab_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tab_id: Option<TabId>,
 }
 
 /// 项目级环境变量。注入到该项目新建终端 PTY 的子进程,与 portable-pty 默认继承的
@@ -732,7 +751,7 @@ pub fn normalize_saved_layout(layout: &mut SavedProjectLayout) {
 /// 将旧格式 `pane`（单个）迁移到新格式 `panes`（数组）
 fn normalize_split_node(node: &mut SavedSplitNode) {
     match node {
-        SavedSplitNode::Leaf { pane, panes } => {
+        SavedSplitNode::Leaf { pane, panes, .. } => {
             // take() 无论如何都要执行:旧字段读完即清,序列化时才不会又写回去
             if let Some(p) = pane.take()
                 && panes.is_empty()
@@ -1476,11 +1495,17 @@ mod tests {
                 path: "/tmp".into(),
                 description: None,
                 saved_layout: Some(SavedProjectLayout {
+                    worktree_id: None,
                     tabs: vec![SavedTab {
+                        tab_id: None,
                         custom_title: None,
                         split_layout: SavedSplitNode::Leaf {
+                            active_pane_key: None,
                             pane: None,
                             panes: vec![SavedPane {
+                                pane_key: None,
+                                terminal_session_id: None,
+                                terminal_incarnation_id: None,
                                 shell_name: "cmd".into(),
                                 cwd: None,
                                 ai_session: None,
@@ -1488,6 +1513,7 @@ mod tests {
                         },
                     }],
                     active_tab_index: 0,
+                    active_tab_id: None,
                 }),
                 expanded_dirs: vec![],
                 ssh_mcp_enabled: false,
@@ -1540,27 +1566,67 @@ mod tests {
         assert_eq!(config.right_drawer_width, Some(400.0));
         let layout = config.projects[0].saved_layout.as_ref().unwrap();
         assert_eq!(layout.tabs.len(), 1);
+        assert!(layout.worktree_id.is_none());
+        assert!(layout.active_tab_id.is_none());
+        assert!(layout.tabs[0].tab_id.is_none());
+        let SavedSplitNode::Leaf {
+            active_pane_key,
+            panes,
+            ..
+        } = &layout.tabs[0].split_layout
+        else {
+            panic!("legacy layout should contain a leaf");
+        };
+        assert!(active_pane_key.is_none());
+        assert!(panes[0].pane_key.is_none());
+        assert!(panes[0].terminal_session_id.is_none());
+        assert!(panes[0].terminal_incarnation_id.is_none());
     }
 
     #[test]
     fn layout_round_trip() {
+        let worktree_id: WorktreeId = format!("worktree-v1:{}", "1".repeat(64)).parse().unwrap();
+        let tab_id: TabId = "tab-v1:123e4567-e89b-42d3-a456-426614174000"
+            .parse()
+            .unwrap();
+        let first_pane_key: PaneKey = "pane-v1:223e4567-e89b-42d3-a456-426614174000"
+            .parse()
+            .unwrap();
+        let first_session_id: TerminalSessionId =
+            "terminal-v1:323e4567-e89b-42d3-a456-426614174000"
+                .parse()
+                .unwrap();
+        let first_incarnation_id: TerminalIncarnationId =
+            "incarnation-v1:423e4567-e89b-42d3-a456-426614174000"
+                .parse()
+                .unwrap();
         let layout = SavedProjectLayout {
+            worktree_id: Some(worktree_id.clone()),
             tabs: vec![SavedTab {
+                tab_id: Some(tab_id.clone()),
                 custom_title: Some("test".into()),
                 split_layout: SavedSplitNode::Split {
                     direction: "horizontal".into(),
                     children: vec![
                         SavedSplitNode::Leaf {
+                            active_pane_key: Some(first_pane_key.clone()),
                             pane: None,
                             panes: vec![SavedPane {
+                                pane_key: Some(first_pane_key.clone()),
+                                terminal_session_id: Some(first_session_id.clone()),
+                                terminal_incarnation_id: Some(first_incarnation_id.clone()),
                                 shell_name: "cmd".into(),
                                 cwd: None,
                                 ai_session: None,
                             }],
                         },
                         SavedSplitNode::Leaf {
+                            active_pane_key: None,
                             pane: None,
                             panes: vec![SavedPane {
+                                pane_key: None,
+                                terminal_session_id: None,
+                                terminal_incarnation_id: None,
                                 shell_name: "powershell".into(),
                                 cwd: None,
                                 ai_session: None,
@@ -1571,11 +1637,47 @@ mod tests {
                 },
             }],
             active_tab_index: 0,
+            active_tab_id: Some(tab_id.clone()),
         };
         let json = serde_json::to_string(&layout).unwrap();
+        for key in [
+            "worktreeId",
+            "activeTabId",
+            "tabId",
+            "activePaneKey",
+            "paneKey",
+            "terminalSessionId",
+            "terminalIncarnationId",
+        ] {
+            assert!(json.contains(key), "missing {key} in {json}");
+        }
         let parsed: SavedProjectLayout = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tabs.len(), 1);
         assert_eq!(parsed.active_tab_index, 0);
+        assert_eq!(parsed.worktree_id, Some(worktree_id));
+        assert_eq!(parsed.active_tab_id, Some(tab_id.clone()));
+        assert_eq!(parsed.tabs[0].tab_id, Some(tab_id));
+        let SavedSplitNode::Split { children, .. } = &parsed.tabs[0].split_layout else {
+            panic!("round-tripped layout should contain a split");
+        };
+        let SavedSplitNode::Leaf {
+            active_pane_key,
+            panes,
+            ..
+        } = &children[0]
+        else {
+            panic!("round-tripped split should contain a leaf");
+        };
+        assert_eq!(active_pane_key.as_ref(), Some(&first_pane_key));
+        assert_eq!(panes[0].pane_key.as_ref(), Some(&first_pane_key));
+        assert_eq!(
+            panes[0].terminal_session_id.as_ref(),
+            Some(&first_session_id)
+        );
+        assert_eq!(
+            panes[0].terminal_incarnation_id.as_ref(),
+            Some(&first_incarnation_id)
+        );
     }
 
     #[test]

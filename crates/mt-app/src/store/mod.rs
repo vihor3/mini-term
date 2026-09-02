@@ -40,10 +40,12 @@ use std::sync::Arc;
 
 use gpui::{App, Context, Entity, Global, Subscription, Task};
 use mt_config::{AppConfig, ConfigStore, ProjectConfig};
+use mt_identity::{HostInstallId, WorktreeId};
+use mt_layout::ProjectWorktreeBinding;
 use mt_relay::MobileRelayStatusPayload;
+use mt_ui::TerminalTheme;
 use mt_ui::icons::ProjectKind;
 use mt_ui::theme_bridge::BackgroundArt;
-use mt_ui::TerminalTheme;
 
 use crate::ai::AiBridge;
 use crate::markers::AiMarker;
@@ -54,6 +56,7 @@ use crate::tree::{PaneState, PaneStatus, ProjectPanel, SplitNode};
 
 mod ai;
 mod config_writer;
+mod identity;
 mod layout;
 mod panes;
 mod prefs;
@@ -195,7 +198,11 @@ impl ProjectState {
     pub fn highest_status(&self) -> PaneStatus {
         self.layouts().fold(PaneStatus::Idle, |acc, l| {
             let s = l.highest_status();
-            if s.priority() > acc.priority() { s } else { acc }
+            if s.priority() > acc.priority() {
+                s
+            } else {
+                acc
+            }
         })
     }
 
@@ -227,6 +234,7 @@ impl ProjectState {
         };
         let ProjectPanel {
             id,
+            tab_id,
             custom_title,
             layout,
         } = self.panels.remove(idx);
@@ -235,6 +243,7 @@ impl ProjectState {
                 idx,
                 ProjectPanel {
                     id,
+                    tab_id,
                     custom_title,
                     layout,
                 },
@@ -318,6 +327,12 @@ pub struct AppStore {
     /// 此时布局**只在内存里活着**:界面照常用,退出即忘 —— 与配置加载失败时
     /// 「只读模式」同一条红线,绝不因为存不下就不让用。
     layout_store: Option<Arc<mt_layout::LayoutStore>>,
+    /// 安装级身份来自 layout.db；库不可用时仅在本进程生成临时值。
+    host_install_id: HostInstallId,
+    /// 兼容 project ID 到稳定 worktree 身份的唯一注册表。
+    project_worktree_bindings: HashMap<String, ProjectWorktreeBinding>,
+    /// 与 `active_project_id` 同步的稳定路由身份。
+    active_worktree_id: Option<WorktreeId>,
     /// 窗口几何(退出时的大小/位置/最大化态)。config 里没有对应字段 ——
     /// 这是 GPUI 版新补的能力,只住在 `layout.db` 与这里。
     window_geometry: Option<mt_layout::WindowGeometry>,
@@ -337,6 +352,8 @@ pub struct AppStore {
     project_states: HashMap<String, ProjectState>,
     /// ptyId → 终端视图。pane 只在树里存 id,视图挂这里(旧版 terminalCache)。
     terminals: HashMap<u32, Entity<TerminalPane>>,
+    /// Process-local PTY attachments fenced by their stable route.
+    terminal_routes: HashMap<u32, identity::TerminalRoute>,
     /// 每个 pane 的退出订阅,与 terminals 同生命周期。
     pane_subs: HashMap<u32, Subscription>,
     /// 当前拿着键盘焦点的 pane(旧版靠 DOM `activeElement` 推,这里显式维护)。
@@ -471,7 +488,13 @@ fn layout_migration_fallback(config: &AppConfig, dir: &Path) -> Option<AppConfig
 fn apply_layout_db(
     store: &mt_layout::LayoutStore,
     config: &mut AppConfig,
-) -> (Option<mt_layout::WindowGeometry>, Option<bool>) {
+    may_reconcile: bool,
+) -> (
+    Option<mt_layout::WindowGeometry>,
+    Option<bool>,
+    HostInstallId,
+    HashMap<String, ProjectWorktreeBinding>,
+) {
     let globals = store.load_globals();
     if globals.layout_sizes.is_some() {
         config.layout_sizes = globals.layout_sizes;
@@ -486,21 +509,51 @@ fn apply_layout_db(
         config.right_drawer_width = globals.right_drawer_width;
     }
 
-    let mut layouts = store.load_project_layouts();
+    let host_install_id = store.local_host_install_id().unwrap_or_else(|error| {
+        eprintln!("[identity] 读取安装身份失败({error:#}),本次使用临时身份");
+        HostInstallId::new()
+    });
+    let existing_bindings = store.load_project_bindings().unwrap_or_else(|error| {
+        eprintln!("[identity] 读取持久化项目绑定失败: {error:#}");
+        HashMap::new()
+    });
+    let desired_bindings =
+        identity::resolve_project_bindings(&config.projects, &host_install_id, &existing_bindings);
+
+    let (mut layouts, bindings) = if may_reconcile {
+        let now_ms = layout::unix_time_ms();
+        match store.reconcile_worktree_layouts(&desired_bindings, now_ms) {
+            Ok(reconciled) => (reconciled.layouts, reconciled.bindings),
+            Err(error) => {
+                eprintln!("[identity] worktree 布局协调失败({error:#}),本次退回兼容读取");
+                (
+                    store.load_project_layouts(),
+                    desired_bindings
+                        .into_iter()
+                        .map(|binding| (binding.project_id.clone(), binding))
+                        .collect(),
+                )
+            }
+        }
+    } else {
+        (store.load_project_layouts(), existing_bindings)
+    };
+
     for project in config.projects.iter_mut() {
         project.saved_layout = layouts.remove(&project.id);
     }
-    // 对一次账:删项目那条路径漏调也不会攒出无主行(项目 id 不复用)。
-    let live: HashSet<String> = config.projects.iter().map(|p| p.id.clone()).collect();
-    if let Err(err) = store.retain_projects(&live) {
-        eprintln!("[layout] 清理无主项目行失败: {err:#}");
+    if may_reconcile {
+        let live: HashSet<String> = config.projects.iter().map(|p| p.id.clone()).collect();
+        if let Err(error) = store.retain_project_bindings(&live) {
+            eprintln!("[layout] 清理无主项目绑定失败: {error:#}");
+        }
     }
 
-    // 明显不可用的几何(尺寸为 0、NaN、小得放不下内容)当没存过 —— 让开窗
-    // 那一步回落默认居中窗口,而不是开出一条缝。
     (
         globals.window.filter(|geo| geo.is_sane()),
         globals.terminals_panel_visible,
+        host_install_id,
+        bindings,
     )
 }
 
@@ -523,10 +576,21 @@ impl AppStore {
         // 配置加载失败(token=0)时不迁移:那份 config 是空默认值,灌进去等于
         // 拿一份伪造的空布局把用户真实的布局盖掉。
         let layout_store = open_layout_store(&config, token != 0);
-        let (window_geometry, terminals_panel_visible) = layout_store
-            .as_ref()
-            .map(|store| apply_layout_db(store, &mut config))
-            .unwrap_or_default();
+        let (window_geometry, terminals_panel_visible, host_install_id, project_worktree_bindings) =
+            if let Some(store) = layout_store.as_ref() {
+                apply_layout_db(store, &mut config, token != 0)
+            } else {
+                let host_install_id = HostInstallId::new();
+                let bindings = identity::resolve_project_bindings(
+                    &config.projects,
+                    &host_install_id,
+                    &HashMap::new(),
+                )
+                .into_iter()
+                .map(|binding| (binding.project_id.clone(), binding))
+                .collect();
+                (None, None, host_install_id, bindings)
+            };
 
         let mut project_states = HashMap::new();
         let mut expanded_dirs = HashMap::new();
@@ -550,6 +614,10 @@ impl AppStore {
             .clone()
             .filter(|id| project_states.contains_key(id))
             .or_else(|| config.projects.first().map(|p| p.id.clone()));
+        let active_worktree_id = active_project_id
+            .as_deref()
+            .and_then(|project_id| project_worktree_bindings.get(project_id))
+            .map(|binding| binding.worktree_id.clone());
 
         // 配置落盘搬去后台线程之后,退出前必须有人把队列排干。挂在这里而不是
         // `main.rs`:`AppStore` 是配置写入的唯一入口,排干义务跟着它走才不会
@@ -578,6 +646,9 @@ impl AppStore {
             config_store,
             config_writer,
             layout_store,
+            host_install_id,
+            project_worktree_bindings,
+            active_worktree_id,
             window_geometry,
             // 缺省展开:面板是发现型入口,收着的话没人知道它存在
             terminals_panel_visible: terminals_panel_visible.unwrap_or(true),
@@ -588,6 +659,7 @@ impl AppStore {
             active_project_id,
             project_states,
             terminals: HashMap::new(),
+            terminal_routes: HashMap::new(),
             pane_subs: HashMap::new(),
             focused_pane_id: None,
             mobile_relay_status: None,
@@ -640,7 +712,9 @@ impl AppStore {
     }
 
     pub fn active_project(&self) -> Option<&ProjectConfig> {
-        self.active_project_id.as_deref().and_then(|id| self.project(id))
+        self.active_project_id
+            .as_deref()
+            .and_then(|id| self.project(id))
     }
 
     pub fn active_layout(&self) -> Option<&SplitNode> {

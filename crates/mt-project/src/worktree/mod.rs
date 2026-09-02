@@ -9,9 +9,15 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 mod catalog;
+pub mod identity;
 mod porcelain;
 
 pub use catalog::{current_generation, invalidate, scan};
+pub use identity::{
+    LOCAL_HOST_FINGERPRINT, ResolvedWorktreeIdentity, WorktreeIdentitySource,
+    local_execution_host_id, resolve_local, resolve_provisional_local, resolve_provisional_ssh,
+    resolve_provisional_wsl,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

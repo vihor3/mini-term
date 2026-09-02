@@ -16,8 +16,8 @@
 //! `SavedProjectLayout` 那棵分屏树**永远整读整写**,没有任何按节点查询的需求。
 //! 拆成 `nodes(id, parent_id, ...)` 递归表只会把一次 upsert 变成 N 行事务,外加
 //! 自己维护递归完整性与孤儿清理。SQLite 在这里的价值是「更好的写入信封」,
-//! 不是「换数据模型」—— 磁盘上那段 JSON 与旧 config.json 里的 `savedLayout`
-//! **逐字段一致**(同一个 serde 定义),`mt-app` 的 `persist.rs` 一行没动。
+//! 不是「把树拆成关系模型」—— 磁盘上仍是同一个 serde 树定义；新增稳定身份字段
+//! 都是可选字段，因此旧 config.json 里的 `savedLayout` 仍可迁移读取。
 //!
 //! # 与 usage.db 的两处刻意不同
 //!
@@ -28,15 +28,22 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
-use mt_config::{AppConfig, SavedProjectLayout};
+use mt_config::{AppConfig, SavedPane, SavedProjectLayout, SavedSplitNode, SavedTab};
+use mt_identity::{
+    ExecutionHostId, HostInstallId, PaneKey, RepoId, TabId, TerminalIncarnationId,
+    TerminalSessionId, WorktreeId,
+};
 
 /// 布局库 schema 版本。
 ///
@@ -45,7 +52,7 @@ use mt_config::{AppConfig, SavedProjectLayout};
 /// 加字段一律走 `CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ADD COLUMN` 的加法路线,
 /// 读到**更高**的版本号(用户装过新版又降级回来)也照常读写 —— kv 表天生向前兼容,
 /// 不认识的 key 原样留着,新版装回去还在。
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (
@@ -61,12 +68,36 @@ CREATE TABLE IF NOT EXISTS project_layout (
   layout_json   TEXT NOT NULL,
   updated_at_ms INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS project_worktree_binding (
+  project_id              TEXT PRIMARY KEY,
+  execution_host_id       TEXT NOT NULL,
+  repo_id                 TEXT NOT NULL,
+  worktree_id             TEXT NOT NULL,
+  identity_source         TEXT NOT NULL,
+  canonical_worktree_path TEXT,
+  updated_at_ms           INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_worktree_binding_worktree
+  ON project_worktree_binding(worktree_id);
+CREATE TABLE IF NOT EXISTS worktree_layout (
+  worktree_id    TEXT PRIMARY KEY,
+  layout_json   TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
 ";
 
 /// `meta` 表里记「已从 config.json 灌过一次」的键。存在即不再迁移 ——
 /// 否则用户清空布局后重启,又会被旧 config.json 里的残留复活。
 const META_MIGRATED: &str = "config_migrated";
 const META_SCHEMA_VERSION: &str = "schema_version";
+const META_LOCAL_HOST_INSTALL_ID: &str = "local_host_install_id";
+
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+const MAX_SALVAGE_JSON_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SALVAGE_TABS: usize = 512;
+const MAX_SALVAGE_DEPTH: usize = 64;
+const MAX_SALVAGE_CHILDREN: usize = 256;
+const MAX_SALVAGE_PANES_PER_LEAF: usize = 256;
 
 // `app_layout` 的键名。与 config.json 里的 camelCase 键同名,便于对着旧文件排查。
 const KEY_LAYOUT_SIZES: &str = "layoutSizes";
@@ -130,6 +161,30 @@ pub struct GlobalLayout {
     pub window: Option<WindowGeometry>,
 }
 
+/// Compatibility project registration projected onto stable worktree identity.
+///
+/// `identity_source` is deliberately persisted as an opaque string. Resolution
+/// authority belongs to `mt-project`; this crate only stores and returns the
+/// source marker without depending on the resolver layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectWorktreeBinding {
+    pub project_id: String,
+    pub execution_host_id: ExecutionHostId,
+    pub repo_id: RepoId,
+    pub worktree_id: WorktreeId,
+    pub identity_source: String,
+    pub canonical_worktree_path: Option<String>,
+}
+
+/// Startup projection returned after bindings and layouts have been reconciled
+/// in one transaction. Layouts remain keyed by compatibility project ID while
+/// callers migrate their in-memory ownership to `WorktreeId`.
+#[derive(Debug, Clone, Default)]
+pub struct ReconciledProjectLayouts {
+    pub layouts: HashMap<String, SavedProjectLayout>,
+    pub bindings: HashMap<String, ProjectWorktreeBinding>,
+}
+
 impl GlobalLayout {
     fn is_empty(&self) -> bool {
         *self == Self::default()
@@ -148,33 +203,36 @@ pub struct LayoutStore {
 impl LayoutStore {
     /// `{dir}/layout.db`。目录不存在就建出来。
     ///
-    /// 打不开(损坏 / 版本过旧的 SQLite 格式)时把旧文件挪成 `layout.db.corrupt`
-    /// 留证再建一个空的:布局丢了只是回到默认分屏,而让持久化整个停摆意味着
-    /// 用户此后每次退出的调整都白做。挪不动(权限 / 被占用)才向上抛。
+    /// 明确不是 SQLite 的文件会挪成 `layout.db.corrupt` 留证并重建空库。
+    ///
+    /// 一个可读 SQLite 库若只是带有本程序不认识或不兼容的更新 schema,错误会
+    /// 原样上抛且文件保持不动。schema mismatch 不能被误判成 corruption,否则
+    /// 降级启动一次就会把新版仍可恢复的数据整体隔离掉。
     pub fn open_at(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir)
             .with_context(|| format!("创建应用数据目录失败: {}", dir.display()))?;
         let path = dir.join("layout.db");
-        match Self::try_open(&path) {
-            Ok(store) => Ok(store),
-            Err(first) => {
-                let corrupt = path.with_extension("db.corrupt");
-                let _ = fs::remove_file(&corrupt);
-                if fs::rename(&path, &corrupt).is_err() {
-                    return Err(first);
-                }
-                eprintln!(
-                    "[layout] {} 打不开({first:#}),已挪至 {} 并重建空库",
+        if definitely_not_sqlite(&path)? {
+            let corrupt = path.with_extension("db.corrupt");
+            let _ = fs::remove_file(&corrupt);
+            fs::rename(&path, &corrupt).with_context(|| {
+                format!(
+                    "布局库不是 SQLite,但无法挪至留证文件: {} -> {}",
                     path.display(),
                     corrupt.display()
-                );
-                Self::try_open(&path)
-            }
+                )
+            })?;
+            eprintln!(
+                "[layout] {} 不是有效 SQLite 文件,已挪至 {} 并重建空库",
+                path.display(),
+                corrupt.display()
+            );
         }
+        Self::try_open(&path)
     }
 
     fn try_open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)
+        let mut conn = Connection::open(path)
             .with_context(|| format!("打开布局库失败: {}", path.display()))?;
         conn.busy_timeout(Duration::from_millis(5000))?;
         // journal_mode 是有返回行的语句,得走 query_row。转不过去(比如另一实例
@@ -186,8 +244,10 @@ impl LayoutStore {
         // 450 KB 而主库 4 KB;进程被强杀时这个 WAL 会一直躺在数据目录里。
         // 32 页(约 128 KB)对布局这种小步快写的负载足够摊薄 fsync。
         let _ = conn.execute_batch("PRAGMA wal_autocheckpoint=32");
-        conn.execute_batch(SCHEMA)
-            .with_context(|| format!("建表失败: {}", path.display()))?;
+        let tx = conn.transaction()?;
+        tx.execute_batch(SCHEMA)
+            .with_context(|| format!("增量升级布局库 schema 失败: {}", path.display()))?;
+        tx.commit()?;
 
         let store = Self {
             conn: Mutex::new(conn),
@@ -245,6 +305,43 @@ impl LayoutStore {
         self.meta_get(META_MIGRATED).is_none()
     }
 
+    /// Return the installation-scoped host ID, creating it exactly once.
+    ///
+    /// An immediate transaction serializes the read/create sequence across two
+    /// application processes that happen to start against the same data dir.
+    pub fn local_host_install_id(&self) -> Result<HostInstallId> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_LOCAL_HOST_INSTALL_ID],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        match stored.as_deref().map(HostInstallId::from_str) {
+            Some(Ok(id)) => {
+                tx.commit()?;
+                return Ok(id);
+            }
+            Some(Err(_)) => eprintln!("[layout] 本地安装 ID 无效,已重新生成"),
+            None => {}
+        }
+
+        let id = HostInstallId::new();
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES(?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![META_LOCAL_HOST_INSTALL_ID, id.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
     // ─── 全局布局项 ──────────────────────────────────────────────────────
 
     /// 读全部全局项。库里没有 / 值解析不出来的键一律当 `None`
@@ -276,7 +373,10 @@ impl LayoutStore {
     /// 整体写回全局项。`None` 的字段**保持库里原样**(不删除)——
     /// 调用方通常只改了其中一项,不该因为没填其余字段就把它们抹掉。
     pub fn save_globals(&self, globals: &GlobalLayout) -> Result<()> {
-        let mut conn = self.conn.lock().map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare(
@@ -290,7 +390,10 @@ impl LayoutStore {
                 Ok(())
             };
             put(KEY_LAYOUT_SIZES, to_json(&globals.layout_sizes))?;
-            put(KEY_MIDDLE_COLUMN_SIZES, to_json(&globals.middle_column_sizes))?;
+            put(
+                KEY_MIDDLE_COLUMN_SIZES,
+                to_json(&globals.middle_column_sizes),
+            )?;
             put(
                 KEY_MIDDLE_COLUMN_VISIBLE,
                 to_json(&globals.middle_column_visible),
@@ -306,80 +409,295 @@ impl LayoutStore {
         Ok(())
     }
 
-    // ─── 项目级分屏树 ────────────────────────────────────────────────────
+    // ─── Worktree identity and project layout compatibility ──────────────
 
-    /// 读全部项目布局。某一行的 JSON 解析失败只丢那一个项目,其余照常返回。
+    /// Read all valid persisted project bindings. A malformed row is isolated
+    /// to that project so startup can still reuse every other known binding.
+    pub fn load_project_bindings(&self) -> Result<HashMap<String, ProjectWorktreeBinding>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
+        load_project_bindings_from(&conn)
+    }
+
+    /// Reconcile the caller's desired project bindings and migrate layouts in
+    /// one transaction.
+    ///
+    /// An existing destination worktree row always wins. If it is absent, a
+    /// prior bound worktree row is copied before falling back to the project's
+    /// legacy mirror. Source rows are never deleted by reconciliation.
+    pub fn reconcile_worktree_layouts(
+        &self,
+        desired_bindings: &[ProjectWorktreeBinding],
+        now_ms: i64,
+    ) -> Result<ReconciledProjectLayouts> {
+        let mut seen_projects = HashSet::new();
+        let mut worktree_binding_counts = HashMap::new();
+        for binding in desired_bindings {
+            if !seen_projects.insert(binding.project_id.as_str()) {
+                anyhow::bail!("重复的项目 worktree 绑定: {}", binding.project_id);
+            }
+            *worktree_binding_counts
+                .entry(binding.worktree_id.clone())
+                .or_insert(0usize) += 1;
+        }
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
+        let tx = conn.transaction()?;
+        let mut reconciled = ReconciledProjectLayouts::default();
+
+        for binding in desired_bindings {
+            let previous = load_project_binding_from(&tx, &binding.project_id)?;
+            let destination = load_worktree_layout_row(&tx, &binding.worktree_id)?;
+            let candidate = if let Some(row) = destination {
+                Some((LayoutRowSource::Destination, row))
+            } else {
+                let previous_row = if let Some(previous) = previous.as_ref().filter(|previous| {
+                    previous.worktree_id.as_str() != binding.worktree_id.as_str()
+                }) {
+                    load_worktree_layout_row(&tx, &previous.worktree_id)?
+                } else {
+                    None
+                };
+                if let Some(row) = previous_row {
+                    Some((LayoutRowSource::PreviousBinding, row))
+                } else {
+                    load_legacy_layout_row(&tx, &binding.project_id)?
+                        .map(|row| (LayoutRowSource::LegacyProject, row))
+                }
+            };
+
+            if let Some((source, row)) = candidate {
+                match decode_saved_layout(&row.layout_json, Some(&binding.worktree_id)) {
+                    Ok(decoded) => {
+                        if decoded.repaired {
+                            eprintln!(
+                                "[layout] 项目 {} 从 {} 修复布局: {}",
+                                binding.project_id,
+                                source.label(),
+                                decoded.stats.summary()
+                            );
+                        }
+                        upsert_worktree_layout_if_changed(
+                            &tx,
+                            &binding.worktree_id,
+                            &decoded.normalized_json,
+                            now_ms,
+                        )?;
+                        let preserve_conflicting_legacy =
+                            matches!(source, LayoutRowSource::Destination)
+                                && worktree_binding_counts
+                                    .get(&binding.worktree_id)
+                                    .is_some_and(|count| *count > 1)
+                                && load_legacy_layout_row(&tx, &binding.project_id)?.is_some_and(
+                                    |legacy| legacy.layout_json != decoded.normalized_json,
+                                );
+                        if preserve_conflicting_legacy {
+                            eprintln!(
+                                "[layout] 项目 {} 与共享 worktree {} 的 legacy 布局冲突; 保留 legacy 行并使用目标 worktree 布局",
+                                binding.project_id, binding.worktree_id
+                            );
+                        } else {
+                            upsert_legacy_layout_if_changed(
+                                &tx,
+                                &binding.project_id,
+                                &decoded.normalized_json,
+                                now_ms,
+                            )?;
+                        }
+                        reconciled
+                            .layouts
+                            .insert(binding.project_id.clone(), decoded.layout);
+                    }
+                    Err(error) => eprintln!(
+                        "[layout] 项目 {} 的 {} 布局无法恢复,该行保持原样: {}",
+                        binding.project_id,
+                        source.label(),
+                        error
+                    ),
+                }
+            }
+
+            upsert_project_binding(&tx, binding, now_ms)?;
+            reconciled
+                .bindings
+                .insert(binding.project_id.clone(), binding.clone());
+        }
+
+        tx.commit()?;
+        Ok(reconciled)
+    }
+
+    /// Atomically persist the stable worktree layout and the rollback mirror.
+    /// An empty layout explicitly removes both rows but keeps the binding.
+    pub fn save_worktree_layout(
+        &self,
+        binding: &ProjectWorktreeBinding,
+        layout: &SavedProjectLayout,
+        now_ms: i64,
+    ) -> Result<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
+        let tx = conn.transaction()?;
+        save_bound_layout_in(&tx, binding, layout, now_ms)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Compatibility reader. Bound projects prefer `worktree_layout`; unbound
+    /// projects continue to load their legacy rows. A malformed row remains
+    /// isolated and does not force fallback from an existing destination row.
     pub fn load_project_layouts(&self) -> HashMap<String, SavedProjectLayout> {
         let mut out = HashMap::new();
         let Ok(conn) = self.conn.lock() else {
             return out;
         };
-        let Ok(mut stmt) = conn.prepare("SELECT project_id, layout_json FROM project_layout")
-        else {
-            return out;
-        };
-        let Ok(rows) = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        }) else {
-            return out;
-        };
-        for (project_id, json) in rows.flatten() {
-            match serde_json::from_str::<SavedProjectLayout>(&json) {
-                Ok(mut layout) => {
-                    mt_config::normalize_saved_layout(&mut layout);
-                    out.insert(project_id, layout);
-                }
-                Err(e) => eprintln!("[layout] 项目 {project_id} 的布局解析失败,已跳过: {e}"),
+        let bindings = match load_project_bindings_from(&conn) {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                eprintln!("[layout] 读取项目 worktree 绑定失败: {error:#}");
+                HashMap::new()
             }
+        };
+        let bound_projects: HashSet<String> = bindings.keys().cloned().collect();
+
+        for (project_id, binding) in bindings {
+            let row = match load_worktree_layout_row(&conn, &binding.worktree_id) {
+                Ok(Some(row)) => Some(row),
+                Ok(None) => match load_legacy_layout_row(&conn, &project_id) {
+                    Ok(row) => row,
+                    Err(error) => {
+                        eprintln!("[layout] 项目 {project_id} 的 legacy 布局读取失败: {error:#}");
+                        None
+                    }
+                },
+                Err(error) => {
+                    eprintln!("[layout] 项目 {project_id} 的 worktree 布局读取失败: {error:#}");
+                    None
+                }
+            };
+            let Some(row) = row else {
+                continue;
+            };
+            match decode_saved_layout(&row.layout_json, Some(&binding.worktree_id)) {
+                Ok(decoded) => {
+                    out.insert(project_id, decoded.layout);
+                }
+                Err(error) => {
+                    eprintln!("[layout] 项目 {project_id} 的布局解析失败,已跳过: {error}")
+                }
+            }
+        }
+
+        match load_all_legacy_layout_rows(&conn) {
+            Ok(rows) => {
+                for (project_id, row) in rows {
+                    if bound_projects.contains(&project_id) {
+                        continue;
+                    }
+                    match decode_saved_layout(&row.layout_json, None) {
+                        Ok(decoded) => {
+                            out.insert(project_id, decoded.layout);
+                        }
+                        Err(error) => eprintln!(
+                            "[layout] 未绑定项目 {project_id} 的布局解析失败,已跳过: {error}"
+                        ),
+                    }
+                }
+            }
+            Err(error) => eprintln!("[layout] 读取 legacy 项目布局失败: {error:#}"),
         }
         out
     }
 
-    /// 写一个项目的布局。空布局(一个 pane 都没有)按**删行**处理 ——
-    /// 项目关光终端后重启不该又冒出一个空壳。
+    /// Compatibility writer. Once a binding exists it uses the stable
+    /// dual-write path; otherwise it retains the legacy-only behavior.
     pub fn save_project_layout(
         &self,
         project_id: &str,
         layout: &SavedProjectLayout,
         now_ms: i64,
     ) -> Result<()> {
-        if layout.tabs.is_empty() {
-            return self.delete_project_layout(project_id);
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
+        let tx = conn.transaction()?;
+        if let Some(binding) = load_project_binding_from(&tx, project_id)? {
+            save_bound_layout_in(&tx, &binding, layout, now_ms)?;
+        } else if layout.tabs.is_empty() {
+            delete_legacy_layout(&tx, project_id)?;
+        } else {
+            let mut normalized = layout.clone();
+            let mut stats = SalvageStats::default();
+            normalize_saved_layout_stable_ids(&mut normalized, None, &mut stats);
+            if normalized.tabs.is_empty() {
+                anyhow::bail!("项目 {project_id} 的非空布局没有可持久化 pane");
+            }
+            let json = serde_json::to_string(&normalized)?;
+            upsert_legacy_layout(&tx, project_id, &json, now_ms)?;
         }
-        let json = serde_json::to_string(layout)?;
-        let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
-        conn.execute(
-            "INSERT INTO project_layout(project_id, layout_json, updated_at_ms) VALUES(?1, ?2, ?3)
-             ON CONFLICT(project_id) DO UPDATE SET
-               layout_json = excluded.layout_json,
-               updated_at_ms = excluded.updated_at_ms",
-            params![project_id, json, now_ms],
-        )?;
+        tx.commit()?;
         Ok(())
     }
 
+    /// Delete layout contents while retaining any project binding. If a valid
+    /// binding exists, both the worktree row and this project's mirror go away.
     pub fn delete_project_layout(&self, project_id: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
-        conn.execute(
-            "DELETE FROM project_layout WHERE project_id = ?1",
-            params![project_id],
-        )?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
+        let tx = conn.transaction()?;
+        if let Some(binding) = load_project_binding_from(&tx, project_id)? {
+            delete_worktree_layout(&tx, &binding.worktree_id)?;
+        }
+        delete_legacy_layout(&tx, project_id)?;
+        tx.commit()?;
         Ok(())
     }
 
-    /// 清掉不在 `live` 里的项目行。项目删除走的是配置那条路径,布局库这边靠
-    /// 启动时对一次账收口 —— 单个删除漏调也不会攒出无主行。
-    pub fn retain_projects(&self, live: &HashSet<String>) -> Result<()> {
-        let stale: Vec<String> = {
-            let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
-            let mut stmt = conn.prepare("SELECT project_id FROM project_layout")?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            rows.flatten().filter(|id| !live.contains(id)).collect()
-        };
-        for id in stale {
-            self.delete_project_layout(&id)?;
-        }
+    /// Remove a compatibility project registration and its rollback mirror.
+    /// The worktree row is intentionally retained for later re-registration.
+    pub fn delete_project_binding(&self, project_id: &str) -> Result<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
+        let tx = conn.transaction()?;
+        delete_project_binding_in(&tx, project_id)?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Retain only live project registrations and mirrors. Orphan worktree
+    /// layouts are recoverable data and are never collected here.
+    pub fn retain_project_bindings(&self, live_project_ids: &HashSet<String>) -> Result<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("布局库锁中毒"))?;
+        let tx = conn.transaction()?;
+        let stale = load_registered_project_ids(&tx)?
+            .into_iter()
+            .filter(|project_id| !live_project_ids.contains(project_id))
+            .collect::<Vec<_>>();
+        for project_id in stale {
+            delete_project_binding_in(&tx, &project_id)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Backward-compatible name retained for current callers.
+    pub fn retain_projects(&self, live: &HashSet<String>) -> Result<()> {
+        self.retain_project_bindings(live)
     }
 
     // ─── 从 config.json 一次性迁移 ───────────────────────────────────────
@@ -425,6 +743,903 @@ impl LayoutStore {
     }
 }
 
+#[derive(Debug)]
+struct RawProjectWorktreeBinding {
+    project_id: String,
+    execution_host_id: String,
+    repo_id: String,
+    worktree_id: String,
+    identity_source: String,
+    canonical_worktree_path: Option<String>,
+}
+
+impl RawProjectWorktreeBinding {
+    fn parse(self) -> std::result::Result<ProjectWorktreeBinding, &'static str> {
+        if self.project_id.is_empty() {
+            return Err("project_id");
+        }
+        if self.identity_source.trim().is_empty() {
+            return Err("identity_source");
+        }
+        let execution_host_id =
+            ExecutionHostId::from_str(&self.execution_host_id).map_err(|_| "execution_host_id")?;
+        let repo_id = RepoId::from_str(&self.repo_id).map_err(|_| "repo_id")?;
+        let worktree_id = WorktreeId::from_str(&self.worktree_id).map_err(|_| "worktree_id")?;
+        Ok(ProjectWorktreeBinding {
+            project_id: self.project_id,
+            execution_host_id,
+            repo_id,
+            worktree_id,
+            identity_source: self.identity_source,
+            canonical_worktree_path: self.canonical_worktree_path,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct StoredLayoutRow {
+    layout_json: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LayoutRowSource {
+    Destination,
+    PreviousBinding,
+    LegacyProject,
+}
+
+impl LayoutRowSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Destination => "目标 worktree",
+            Self::PreviousBinding => "旧绑定 worktree",
+            Self::LegacyProject => "legacy project",
+        }
+    }
+}
+
+fn definitely_not_sqlite(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("读取布局库文件头失败: {}", path.display()))?;
+    if file.metadata()?.len() == 0 {
+        return Ok(false);
+    }
+    let mut header = [0u8; SQLITE_HEADER.len()];
+    let read = file.read(&mut header)?;
+    Ok(read != SQLITE_HEADER.len() || header.as_slice() != SQLITE_HEADER)
+}
+
+fn raw_binding_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawProjectWorktreeBinding> {
+    Ok(RawProjectWorktreeBinding {
+        project_id: row.get(0)?,
+        execution_host_id: row.get(1)?,
+        repo_id: row.get(2)?,
+        worktree_id: row.get(3)?,
+        identity_source: row.get(4)?,
+        canonical_worktree_path: row.get(5)?,
+    })
+}
+
+fn load_project_bindings_from(
+    conn: &Connection,
+) -> Result<HashMap<String, ProjectWorktreeBinding>> {
+    let mut stmt = conn.prepare(
+        "SELECT project_id, execution_host_id, repo_id, worktree_id,
+                identity_source, canonical_worktree_path
+         FROM project_worktree_binding",
+    )?;
+    let rows = stmt.query_map([], raw_binding_from_row)?;
+    let mut bindings = HashMap::new();
+    for raw in rows {
+        let raw = raw?;
+        let project_id = raw.project_id.clone();
+        match raw.parse() {
+            Ok(binding) => {
+                bindings.insert(project_id, binding);
+            }
+            Err(field) => {
+                eprintln!("[layout] 项目 {project_id} 的持久化绑定字段 {field} 无效,已跳过该绑定")
+            }
+        }
+    }
+    Ok(bindings)
+}
+
+fn load_project_binding_from(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<Option<ProjectWorktreeBinding>> {
+    let raw = conn
+        .query_row(
+            "SELECT project_id, execution_host_id, repo_id, worktree_id,
+                    identity_source, canonical_worktree_path
+             FROM project_worktree_binding WHERE project_id = ?1",
+            params![project_id],
+            raw_binding_from_row,
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match raw.parse() {
+        Ok(binding) => Ok(Some(binding)),
+        Err(field) => {
+            eprintln!("[layout] 项目 {project_id} 的持久化绑定字段 {field} 无效,按未绑定处理");
+            Ok(None)
+        }
+    }
+}
+
+fn upsert_project_binding(
+    conn: &Connection,
+    binding: &ProjectWorktreeBinding,
+    now_ms: i64,
+) -> Result<()> {
+    if binding.project_id.is_empty() {
+        anyhow::bail!("project_worktree_binding.project_id 不能为空");
+    }
+    if binding.identity_source.trim().is_empty() {
+        anyhow::bail!(
+            "项目 {} 的 project_worktree_binding.identity_source 不能为空",
+            binding.project_id
+        );
+    }
+    conn.execute(
+        "INSERT INTO project_worktree_binding(
+           project_id, execution_host_id, repo_id, worktree_id, identity_source,
+           canonical_worktree_path, updated_at_ms
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(project_id) DO UPDATE SET
+           execution_host_id = excluded.execution_host_id,
+           repo_id = excluded.repo_id,
+           worktree_id = excluded.worktree_id,
+           identity_source = excluded.identity_source,
+           canonical_worktree_path = excluded.canonical_worktree_path,
+           updated_at_ms = excluded.updated_at_ms
+         WHERE project_worktree_binding.execution_host_id IS NOT excluded.execution_host_id
+            OR project_worktree_binding.repo_id IS NOT excluded.repo_id
+            OR project_worktree_binding.worktree_id IS NOT excluded.worktree_id
+            OR project_worktree_binding.identity_source IS NOT excluded.identity_source
+            OR project_worktree_binding.canonical_worktree_path
+               IS NOT excluded.canonical_worktree_path",
+        params![
+            binding.project_id.as_str(),
+            binding.execution_host_id.as_str(),
+            binding.repo_id.as_str(),
+            binding.worktree_id.as_str(),
+            binding.identity_source.as_str(),
+            binding.canonical_worktree_path.as_deref(),
+            now_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_worktree_layout_row(
+    conn: &Connection,
+    worktree_id: &WorktreeId,
+) -> Result<Option<StoredLayoutRow>> {
+    conn.query_row(
+        "SELECT layout_json FROM worktree_layout WHERE worktree_id = ?1",
+        params![worktree_id.as_str()],
+        |row| {
+            Ok(StoredLayoutRow {
+                layout_json: row.get(0)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn load_legacy_layout_row(conn: &Connection, project_id: &str) -> Result<Option<StoredLayoutRow>> {
+    conn.query_row(
+        "SELECT layout_json FROM project_layout WHERE project_id = ?1",
+        params![project_id],
+        |row| {
+            Ok(StoredLayoutRow {
+                layout_json: row.get(0)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn load_all_legacy_layout_rows(conn: &Connection) -> Result<Vec<(String, StoredLayoutRow)>> {
+    let mut stmt = conn.prepare("SELECT project_id, layout_json FROM project_layout")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            StoredLayoutRow {
+                layout_json: row.get(1)?,
+            },
+        ))
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn upsert_worktree_layout(
+    conn: &Connection,
+    worktree_id: &WorktreeId,
+    layout_json: &str,
+    now_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO worktree_layout(worktree_id, layout_json, updated_at_ms)
+         VALUES(?1, ?2, ?3)
+         ON CONFLICT(worktree_id) DO UPDATE SET
+           layout_json = excluded.layout_json,
+           updated_at_ms = excluded.updated_at_ms",
+        params![worktree_id.as_str(), layout_json, now_ms],
+    )?;
+    Ok(())
+}
+
+fn upsert_worktree_layout_if_changed(
+    conn: &Connection,
+    worktree_id: &WorktreeId,
+    layout_json: &str,
+    now_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO worktree_layout(worktree_id, layout_json, updated_at_ms)
+         VALUES(?1, ?2, ?3)
+         ON CONFLICT(worktree_id) DO UPDATE SET
+           layout_json = excluded.layout_json,
+           updated_at_ms = excluded.updated_at_ms
+         WHERE worktree_layout.layout_json IS NOT excluded.layout_json",
+        params![worktree_id.as_str(), layout_json, now_ms],
+    )?;
+    Ok(())
+}
+
+fn upsert_legacy_layout(
+    conn: &Connection,
+    project_id: &str,
+    layout_json: &str,
+    now_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO project_layout(project_id, layout_json, updated_at_ms)
+         VALUES(?1, ?2, ?3)
+         ON CONFLICT(project_id) DO UPDATE SET
+           layout_json = excluded.layout_json,
+           updated_at_ms = excluded.updated_at_ms",
+        params![project_id, layout_json, now_ms],
+    )?;
+    Ok(())
+}
+
+fn upsert_legacy_layout_if_changed(
+    conn: &Connection,
+    project_id: &str,
+    layout_json: &str,
+    now_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO project_layout(project_id, layout_json, updated_at_ms)
+         VALUES(?1, ?2, ?3)
+         ON CONFLICT(project_id) DO UPDATE SET
+           layout_json = excluded.layout_json,
+           updated_at_ms = excluded.updated_at_ms
+         WHERE project_layout.layout_json IS NOT excluded.layout_json",
+        params![project_id, layout_json, now_ms],
+    )?;
+    Ok(())
+}
+
+fn delete_worktree_layout(conn: &Connection, worktree_id: &WorktreeId) -> Result<()> {
+    conn.execute(
+        "DELETE FROM worktree_layout WHERE worktree_id = ?1",
+        params![worktree_id.as_str()],
+    )?;
+    Ok(())
+}
+
+fn delete_legacy_layout(conn: &Connection, project_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM project_layout WHERE project_id = ?1",
+        params![project_id],
+    )?;
+    Ok(())
+}
+
+fn delete_project_binding_in(conn: &Connection, project_id: &str) -> Result<()> {
+    delete_legacy_layout(conn, project_id)?;
+    conn.execute(
+        "DELETE FROM project_worktree_binding WHERE project_id = ?1",
+        params![project_id],
+    )?;
+    Ok(())
+}
+
+fn load_registered_project_ids(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT project_id FROM project_worktree_binding
+         UNION
+         SELECT project_id FROM project_layout",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect::<rusqlite::Result<HashSet<_>>>()
+        .map_err(Into::into)
+}
+
+fn save_bound_layout_in(
+    conn: &Connection,
+    binding: &ProjectWorktreeBinding,
+    layout: &SavedProjectLayout,
+    now_ms: i64,
+) -> Result<()> {
+    let explicitly_empty = layout.tabs.is_empty();
+    let mut normalized = layout.clone();
+    let mut stats = SalvageStats::default();
+    normalize_saved_layout_stable_ids(&mut normalized, Some(&binding.worktree_id), &mut stats);
+
+    if normalized.tabs.is_empty() {
+        if !explicitly_empty {
+            anyhow::bail!("项目 {} 的非空布局没有可持久化 pane", binding.project_id);
+        }
+        delete_worktree_layout(conn, &binding.worktree_id)?;
+        delete_legacy_layout(conn, &binding.project_id)?;
+        upsert_project_binding(conn, binding, now_ms)?;
+        return Ok(());
+    }
+
+    let json = serde_json::to_string(&normalized)?;
+    upsert_worktree_layout(conn, &binding.worktree_id, &json, now_ms)?;
+    upsert_legacy_layout(conn, &binding.project_id, &json, now_ms)?;
+    upsert_project_binding(conn, binding, now_ms)?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct DecodedLayout {
+    layout: SavedProjectLayout,
+    normalized_json: String,
+    repaired: bool,
+    stats: SalvageStats,
+}
+
+#[derive(Debug, Default)]
+struct SalvageStats {
+    skipped_tabs: usize,
+    skipped_panes: usize,
+    dropped_nodes: usize,
+    collapsed_splits: usize,
+    rebuilt_sizes: usize,
+    normalized_ids: usize,
+}
+
+impl SalvageStats {
+    fn summary(&self) -> String {
+        format!(
+            "跳过 tab {}, pane {}, node {}; 折叠 split {}, 重建 sizes {}, 归一化 ID {}",
+            self.skipped_tabs,
+            self.skipped_panes,
+            self.dropped_nodes,
+            self.collapsed_splits,
+            self.rebuilt_sizes,
+            self.normalized_ids
+        )
+    }
+}
+
+fn decode_saved_layout(
+    raw: &str,
+    expected_worktree_id: Option<&WorktreeId>,
+) -> std::result::Result<DecodedLayout, String> {
+    let (mut layout, salvaged, mut stats) = match serde_json::from_str::<SavedProjectLayout>(raw) {
+        Ok(layout) => (layout, false, SalvageStats::default()),
+        Err(fast_error) => {
+            if raw.len() > MAX_SALVAGE_JSON_BYTES {
+                return Err(format!(
+                    "typed parse 失败且 JSON 超过 salvage 上限({MAX_SALVAGE_JSON_BYTES} bytes)"
+                ));
+            }
+            let value = serde_json::from_str::<Value>(raw).map_err(|syntax_error| {
+                format!(
+                    "JSON 语法无效(line {}, column {}); typed parse: {}",
+                    syntax_error.line(),
+                    syntax_error.column(),
+                    fast_error
+                )
+            })?;
+            validate_salvage_bounds(&value).map_err(str::to_string)?;
+            let mut salvage_stats = SalvageStats::default();
+            let layout = salvage_project_layout(&value, &mut salvage_stats)
+                .ok_or_else(|| "有效 JSON 中没有可恢复的 layout 结构".to_string())?;
+            (layout, true, salvage_stats)
+        }
+    };
+
+    let had_tabs = !layout.tabs.is_empty();
+    let before = serde_json::to_string(&layout).ok();
+    normalize_saved_layout_stable_ids(&mut layout, expected_worktree_id, &mut stats);
+    if had_tabs && layout.tabs.is_empty() {
+        return Err("布局包含 tab,但没有任何可恢复 pane".to_string());
+    }
+    let normalized_json =
+        serde_json::to_string(&layout).map_err(|error| format!("归一化布局无法序列化: {error}"))?;
+    let repaired = salvaged || before.as_deref() != Some(normalized_json.as_str());
+    Ok(DecodedLayout {
+        layout,
+        normalized_json,
+        repaired,
+        stats,
+    })
+}
+
+fn salvage_project_layout(value: &Value, stats: &mut SalvageStats) -> Option<SavedProjectLayout> {
+    let object = value.as_object()?;
+    let tabs_value = object.get("tabs")?.as_array()?;
+
+    let mut tabs = Vec::new();
+    for value in tabs_value {
+        match salvage_tab(value, stats) {
+            Some(tab) => tabs.push(tab),
+            None => stats.skipped_tabs += 1,
+        }
+    }
+    if !tabs_value.is_empty() && tabs.is_empty() {
+        return None;
+    }
+
+    let active_tab_index = object
+        .get("activeTabIndex")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or_default();
+    Some(SavedProjectLayout {
+        worktree_id: salvage_optional_id(object.get("worktreeId"), stats),
+        active_tab_id: salvage_optional_id(object.get("activeTabId"), stats),
+        tabs,
+        active_tab_index,
+    })
+}
+
+fn salvage_tab(value: &Value, stats: &mut SalvageStats) -> Option<SavedTab> {
+    let object = value.as_object()?;
+    let split_layout = salvage_split_node(object.get("splitLayout")?, 0, stats)?;
+    let custom_title = match object.get("customTitle") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(title)) => Some(title.clone()),
+        Some(_) => None,
+    };
+    Some(SavedTab {
+        tab_id: salvage_optional_id(object.get("tabId"), stats),
+        custom_title,
+        split_layout,
+    })
+}
+
+fn salvage_split_node(
+    value: &Value,
+    depth: usize,
+    stats: &mut SalvageStats,
+) -> Option<SavedSplitNode> {
+    if depth >= MAX_SALVAGE_DEPTH {
+        stats.dropped_nodes += 1;
+        return None;
+    }
+    let object = value.as_object()?;
+    match object.get("type").and_then(Value::as_str)? {
+        "leaf" => salvage_leaf(object, stats),
+        "split" => salvage_split(object, depth, stats),
+        _ => {
+            stats.dropped_nodes += 1;
+            None
+        }
+    }
+}
+
+fn salvage_leaf(object: &Map<String, Value>, stats: &mut SalvageStats) -> Option<SavedSplitNode> {
+    let mut panes = Vec::new();
+    if let Some(values) = object.get("panes").and_then(Value::as_array) {
+        for value in values {
+            match salvage_pane(value, stats) {
+                Some(pane) => panes.push(pane),
+                None => stats.skipped_panes += 1,
+            }
+        }
+    }
+    if panes.is_empty()
+        && let Some(value) = object.get("pane")
+    {
+        match salvage_pane(value, stats) {
+            Some(pane) => panes.push(pane),
+            None => stats.skipped_panes += 1,
+        }
+    }
+    if panes.is_empty() {
+        stats.dropped_nodes += 1;
+        return None;
+    }
+    Some(SavedSplitNode::Leaf {
+        pane: None,
+        panes,
+        active_pane_key: salvage_optional_id(object.get("activePaneKey"), stats),
+    })
+}
+
+fn salvage_pane(value: &Value, stats: &mut SalvageStats) -> Option<SavedPane> {
+    let object = value.as_object()?;
+    let mut compatible = object.clone();
+    compatible.remove("paneKey");
+    compatible.remove("terminalSessionId");
+    compatible.remove("terminalIncarnationId");
+    let mut pane = serde_json::from_value::<SavedPane>(Value::Object(compatible)).ok()?;
+    pane.pane_key = salvage_optional_id(object.get("paneKey"), stats);
+    pane.terminal_session_id = salvage_optional_id(object.get("terminalSessionId"), stats);
+    pane.terminal_incarnation_id = salvage_optional_id(object.get("terminalIncarnationId"), stats);
+    Some(pane)
+}
+
+fn salvage_split(
+    object: &Map<String, Value>,
+    depth: usize,
+    stats: &mut SalvageStats,
+) -> Option<SavedSplitNode> {
+    let child_values = object.get("children")?.as_array()?;
+    let considered = child_values.len();
+    let mut children = Vec::new();
+    for child in child_values {
+        if let Some(child) = salvage_split_node(child, depth + 1, stats) {
+            children.push(child);
+        }
+    }
+    match children.len() {
+        0 => {
+            stats.dropped_nodes += 1;
+            None
+        }
+        1 => {
+            stats.collapsed_splits += 1;
+            children.pop()
+        }
+        count => {
+            let sizes = if children.len() == considered {
+                salvage_sizes(object.get("sizes"), count)
+            } else {
+                None
+            }
+            .unwrap_or_else(|| {
+                stats.rebuilt_sizes += 1;
+                equal_sizes(count)
+            });
+            Some(SavedSplitNode::Split {
+                direction: object
+                    .get("direction")
+                    .and_then(Value::as_str)
+                    .filter(|direction| !direction.is_empty())
+                    .unwrap_or("horizontal")
+                    .to_string(),
+                children,
+                sizes,
+            })
+        }
+    }
+}
+
+fn validate_salvage_bounds(value: &Value) -> std::result::Result<(), &'static str> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    let Some(tabs) = object.get("tabs").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    if tabs.len() > MAX_SALVAGE_TABS {
+        return Err("layout 超过 salvage tab 数量上限");
+    }
+    for tab in tabs {
+        if let Some(split_layout) = tab.as_object().and_then(|object| object.get("splitLayout")) {
+            validate_salvage_node_bounds(split_layout, 0)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_salvage_node_bounds(
+    value: &Value,
+    depth: usize,
+) -> std::result::Result<(), &'static str> {
+    if depth >= MAX_SALVAGE_DEPTH {
+        return Err("layout 超过 salvage split 深度上限");
+    }
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    match object.get("type").and_then(Value::as_str) {
+        Some("leaf")
+            if object
+                .get("panes")
+                .and_then(Value::as_array)
+                .is_some_and(|panes| panes.len() > MAX_SALVAGE_PANES_PER_LEAF) =>
+        {
+            return Err("layout 超过 salvage leaf pane 数量上限");
+        }
+        Some("leaf") => {}
+        Some("split") => {
+            if let Some(children) = object.get("children").and_then(Value::as_array) {
+                if children.len() > MAX_SALVAGE_CHILDREN {
+                    return Err("layout 超过 salvage split child 数量上限");
+                }
+                for child in children {
+                    validate_salvage_node_bounds(child, depth + 1)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn salvage_sizes(value: Option<&Value>, expected_len: usize) -> Option<Vec<f64>> {
+    let values = value?.as_array()?;
+    if values.len() != expected_len {
+        return None;
+    }
+    values
+        .iter()
+        .map(Value::as_f64)
+        .collect::<Option<Vec<_>>>()
+        .filter(|sizes| sizes.iter().all(|size| size.is_finite() && *size > 0.0))
+}
+
+fn salvage_optional_id<T>(value: Option<&Value>, stats: &mut SalvageStats) -> Option<T>
+where
+    T: FromStr,
+{
+    match value {
+        None | Some(Value::Null) => None,
+        Some(Value::String(raw)) => match T::from_str(raw) {
+            Ok(id) => Some(id),
+            Err(_) => {
+                stats.normalized_ids += 1;
+                None
+            }
+        },
+        Some(_) => {
+            stats.normalized_ids += 1;
+            None
+        }
+    }
+}
+
+fn normalize_saved_layout_stable_ids(
+    layout: &mut SavedProjectLayout,
+    expected_worktree_id: Option<&WorktreeId>,
+    stats: &mut SalvageStats,
+) {
+    mt_config::normalize_saved_layout(layout);
+
+    let mut normalized_tabs = Vec::with_capacity(layout.tabs.len());
+    for mut tab in std::mem::take(&mut layout.tabs) {
+        match normalize_split_structure(tab.split_layout.clone(), stats) {
+            Some(split_layout) => {
+                tab.split_layout = split_layout;
+                normalized_tabs.push(tab);
+            }
+            None => stats.skipped_tabs += 1,
+        }
+    }
+    layout.tabs = normalized_tabs;
+
+    match expected_worktree_id {
+        Some(expected)
+            if layout.worktree_id.as_ref().map(|id| id.as_str()) != Some(expected.as_str()) =>
+        {
+            layout.worktree_id = Some(expected.clone());
+            stats.normalized_ids += 1;
+        }
+        None if layout
+            .worktree_id
+            .as_ref()
+            .is_some_and(|id| WorktreeId::from_str(id.as_str()).is_err()) =>
+        {
+            layout.worktree_id = None;
+            stats.normalized_ids += 1;
+        }
+        _ => {}
+    }
+
+    let mut seen_tabs = HashSet::new();
+    let mut seen_panes = HashSet::new();
+    let mut seen_sessions = HashSet::new();
+    let mut seen_incarnations = HashSet::new();
+    for tab in &mut layout.tabs {
+        let keep_tab_id = tab.tab_id.as_ref().is_some_and(|id| {
+            TabId::from_str(id.as_str()).is_ok() && seen_tabs.insert(id.as_str().to_string())
+        });
+        if !keep_tab_id {
+            let tab_id = TabId::new();
+            seen_tabs.insert(tab_id.as_str().to_string());
+            tab.tab_id = Some(tab_id);
+            stats.normalized_ids += 1;
+        }
+        normalize_pane_ids(
+            &mut tab.split_layout,
+            &mut seen_panes,
+            &mut seen_sessions,
+            &mut seen_incarnations,
+            stats,
+        );
+    }
+
+    if layout.tabs.is_empty() {
+        if layout.active_tab_index != 0 {
+            layout.active_tab_index = 0;
+        }
+        if layout.active_tab_id.take().is_some() {
+            stats.normalized_ids += 1;
+        }
+        return;
+    }
+
+    let fallback_index = layout.active_tab_index.min(layout.tabs.len() - 1);
+    let selected_index = layout
+        .active_tab_id
+        .as_ref()
+        .and_then(|active| {
+            layout
+                .tabs
+                .iter()
+                .position(|tab| tab.tab_id.as_ref().map(|id| id.as_str()) == Some(active.as_str()))
+        })
+        .unwrap_or(fallback_index);
+    let selected_id = layout.tabs[selected_index].tab_id.clone();
+    if layout.active_tab_index != selected_index {
+        layout.active_tab_index = selected_index;
+    }
+    if layout.active_tab_id != selected_id {
+        layout.active_tab_id = selected_id;
+        stats.normalized_ids += 1;
+    }
+}
+
+fn normalize_split_structure(
+    node: SavedSplitNode,
+    stats: &mut SalvageStats,
+) -> Option<SavedSplitNode> {
+    match node {
+        SavedSplitNode::Leaf {
+            pane,
+            mut panes,
+            active_pane_key,
+        } => {
+            if let Some(pane) = pane
+                && panes.is_empty()
+            {
+                panes.push(pane);
+            }
+            if panes.is_empty() {
+                stats.dropped_nodes += 1;
+                None
+            } else {
+                Some(SavedSplitNode::Leaf {
+                    pane: None,
+                    panes,
+                    active_pane_key,
+                })
+            }
+        }
+        SavedSplitNode::Split {
+            direction,
+            children,
+            sizes,
+        } => {
+            let original_len = children.len();
+            let children = children
+                .into_iter()
+                .filter_map(|child| normalize_split_structure(child, stats))
+                .collect::<Vec<_>>();
+            match children.len() {
+                0 => {
+                    stats.dropped_nodes += 1;
+                    None
+                }
+                1 => {
+                    stats.collapsed_splits += 1;
+                    children.into_iter().next()
+                }
+                count => {
+                    let sizes_are_valid = original_len == count
+                        && sizes.len() == count
+                        && sizes.iter().all(|size| size.is_finite() && *size > 0.0);
+                    let sizes = if sizes_are_valid {
+                        sizes
+                    } else {
+                        stats.rebuilt_sizes += 1;
+                        equal_sizes(count)
+                    };
+                    Some(SavedSplitNode::Split {
+                        direction,
+                        children,
+                        sizes,
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn normalize_pane_ids(
+    node: &mut SavedSplitNode,
+    seen_panes: &mut HashSet<String>,
+    seen_sessions: &mut HashSet<String>,
+    seen_incarnations: &mut HashSet<String>,
+    stats: &mut SalvageStats,
+) {
+    match node {
+        SavedSplitNode::Leaf {
+            panes,
+            active_pane_key,
+            ..
+        } => {
+            for pane in panes.iter_mut() {
+                let keep_pane_key = pane.pane_key.as_ref().is_some_and(|id| {
+                    PaneKey::from_str(id.as_str()).is_ok()
+                        && seen_panes.insert(id.as_str().to_string())
+                });
+                if !keep_pane_key {
+                    let pane_key = PaneKey::new();
+                    seen_panes.insert(pane_key.as_str().to_string());
+                    pane.pane_key = Some(pane_key);
+                    stats.normalized_ids += 1;
+                }
+
+                let keep_session_id = pane.terminal_session_id.as_ref().is_some_and(|id| {
+                    TerminalSessionId::from_str(id.as_str()).is_ok()
+                        && seen_sessions.insert(id.as_str().to_string())
+                });
+                if !keep_session_id {
+                    let terminal_session_id = TerminalSessionId::new();
+                    seen_sessions.insert(terminal_session_id.as_str().to_string());
+                    pane.terminal_session_id = Some(terminal_session_id);
+                    stats.normalized_ids += 1;
+                }
+
+                let keep_incarnation = pane.terminal_incarnation_id.as_ref().is_none_or(|id| {
+                    TerminalIncarnationId::from_str(id.as_str()).is_ok()
+                        && seen_incarnations.insert(id.as_str().to_string())
+                });
+                if !keep_incarnation {
+                    pane.terminal_incarnation_id = None;
+                    stats.normalized_ids += 1;
+                }
+            }
+
+            let selected = active_pane_key.as_ref().and_then(|active| {
+                panes.iter().find_map(|pane| {
+                    pane.pane_key
+                        .as_ref()
+                        .filter(|pane_key| pane_key.as_str() == active.as_str())
+                        .cloned()
+                })
+            });
+            let fallback = panes.first().and_then(|pane| pane.pane_key.clone());
+            let selected = selected.or(fallback);
+            if *active_pane_key != selected {
+                *active_pane_key = selected;
+                stats.normalized_ids += 1;
+            }
+        }
+        SavedSplitNode::Split { children, .. } => {
+            for child in children {
+                normalize_pane_ids(child, seen_panes, seen_sessions, seen_incarnations, stats);
+            }
+        }
+    }
+}
+
+fn equal_sizes(count: usize) -> Vec<f64> {
+    vec![100.0 / count as f64; count]
+}
+
 fn to_json<T: Serialize>(value: &Option<T>) -> Option<String> {
     value.as_ref().and_then(|v| serde_json::to_string(v).ok())
 }
@@ -450,35 +1665,114 @@ mod tests {
         dir
     }
 
+    fn saved_pane(shell: &str, cwd: Option<&str>) -> SavedPane {
+        SavedPane {
+            pane_key: None,
+            terminal_session_id: None,
+            terminal_incarnation_id: None,
+            shell_name: shell.into(),
+            cwd: cwd.map(str::to_string),
+            ai_session: None,
+        }
+    }
+
     fn layout(shell: &str) -> SavedProjectLayout {
         SavedProjectLayout {
+            worktree_id: None,
             tabs: vec![SavedTab {
+                tab_id: None,
                 custom_title: None,
                 split_layout: SavedSplitNode::Split {
                     direction: "vertical".into(),
                     sizes: vec![30.0, 70.0],
                     children: vec![
                         SavedSplitNode::Leaf {
+                            active_pane_key: None,
                             pane: None,
-                            panes: vec![SavedPane {
-                                shell_name: shell.into(),
-                                cwd: None,
-                                ai_session: None,
-                            }],
+                            panes: vec![saved_pane(shell, None)],
                         },
                         SavedSplitNode::Leaf {
+                            active_pane_key: None,
                             pane: None,
-                            panes: vec![SavedPane {
-                                shell_name: shell.into(),
-                                cwd: Some("D:/x".into()),
-                                ai_session: None,
-                            }],
+                            panes: vec![saved_pane(shell, Some("D:/x"))],
                         },
                     ],
                 },
             }],
             active_tab_index: 0,
+            active_tab_id: None,
         }
+    }
+
+    fn empty_layout() -> SavedProjectLayout {
+        SavedProjectLayout {
+            worktree_id: None,
+            tabs: vec![],
+            active_tab_index: 0,
+            active_tab_id: None,
+        }
+    }
+
+    fn binding(project_id: &str, worktree_path: &str) -> ProjectWorktreeBinding {
+        let install: HostInstallId = "install-v1:123e4567-e89b-42d3-a456-426614174000"
+            .parse()
+            .unwrap();
+        let execution_host_id = ExecutionHostId::derive("local", &install);
+        let repo_id = RepoId::derive(&execution_host_id, "/repo/.git");
+        let worktree_id = WorktreeId::derive(&repo_id, worktree_path, None);
+        ProjectWorktreeBinding {
+            project_id: project_id.into(),
+            execution_host_id,
+            repo_id,
+            worktree_id,
+            identity_source: "authoritative-local-git".into(),
+            canonical_worktree_path: Some(worktree_path.into()),
+        }
+    }
+
+    fn worktree_json(store: &LayoutStore, worktree_id: &WorktreeId) -> Option<String> {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT layout_json FROM worktree_layout WHERE worktree_id = ?1",
+            params![worktree_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    fn worktree_updated_at(store: &LayoutStore, worktree_id: &WorktreeId) -> Option<i64> {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT updated_at_ms FROM worktree_layout WHERE worktree_id = ?1",
+            params![worktree_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    fn legacy_json(store: &LayoutStore, project_id: &str) -> Option<String> {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT layout_json FROM project_layout WHERE project_id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    fn first_shell(layout: &SavedProjectLayout) -> &str {
+        fn from_node(node: &SavedSplitNode) -> Option<&str> {
+            match node {
+                SavedSplitNode::Leaf { panes, .. } => {
+                    panes.first().map(|pane| pane.shell_name.as_str())
+                }
+                SavedSplitNode::Split { children, .. } => children.iter().find_map(from_node),
+            }
+        }
+        from_node(&layout.tabs[0].split_layout).unwrap()
     }
 
     #[test]
@@ -490,10 +1784,13 @@ mod tests {
         let back = store.load_project_layouts();
         let got = back.get("p1").unwrap();
         assert_eq!(got.tabs.len(), 1);
-        let SavedSplitNode::Split { sizes, children, .. } = &got.tabs[0].split_layout else {
+        let SavedSplitNode::Split {
+            sizes, children, ..
+        } = &got.tabs[0].split_layout
+        else {
             panic!("应还原成 split");
         };
-        assert_eq!(sizes, &vec![30.0, 70.0]);
+        assert_eq!(sizes.as_slice(), &[30.0, 70.0]);
         assert_eq!(children.len(), 2);
 
         fs::remove_dir_all(&dir).ok();
@@ -570,7 +1867,10 @@ mod tests {
         assert!(!WindowGeometry { width: 0.0, ..ok }.is_sane());
         assert!(!WindowGeometry { height: -5.0, ..ok }.is_sane());
         assert!(!WindowGeometry { x: f64::NAN, ..ok }.is_sane());
-        assert!(!WindowGeometry { width: 10.0, ..ok }.is_sane(), "小得放不下内容");
+        assert!(
+            !WindowGeometry { width: 10.0, ..ok }.is_sane(),
+            "小得放不下内容"
+        );
     }
 
     #[test]
@@ -578,16 +1878,7 @@ mod tests {
         let dir = temp_dir("empty");
         let store = LayoutStore::open_at(&dir).unwrap();
         store.save_project_layout("p1", &layout("cmd"), 1).unwrap();
-        store
-            .save_project_layout(
-                "p1",
-                &SavedProjectLayout {
-                    tabs: vec![],
-                    active_tab_index: 0,
-                },
-                2,
-            )
-            .unwrap();
+        store.save_project_layout("p1", &empty_layout(), 2).unwrap();
         assert!(!store.load_project_layouts().contains_key("p1"));
         fs::remove_dir_all(&dir).ok();
     }
@@ -630,7 +1921,10 @@ mod tests {
         let n = store.migrate_from_config(&config).unwrap();
         assert_eq!(n, 1);
         assert!(!store.needs_config_migration(), "迁移后不该再迁");
-        assert_eq!(store.load_globals().layout_sizes, Some(vec![20.0, 60.0, 20.0]));
+        assert_eq!(
+            store.load_globals().layout_sizes,
+            Some(vec![20.0, 60.0, 20.0])
+        );
         assert_eq!(store.load_globals().right_drawer_width, Some(400.0));
         assert!(store.load_project_layouts().contains_key("p1"));
 
@@ -664,7 +1958,7 @@ mod tests {
 
         let back = store.load_project_layouts();
         let got = back.get("p1").unwrap();
-        let SavedSplitNode::Leaf { pane, panes } = &got.tabs[0].split_layout else {
+        let SavedSplitNode::Leaf { pane, panes, .. } = &got.tabs[0].split_layout else {
             panic!("应是 leaf");
         };
         assert!(pane.is_none(), "旧字段读完即清");
@@ -674,11 +1968,398 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn 本地安装_id_跨重开稳定() {
+        let dir = temp_dir("install-id");
+        let first = {
+            let store = LayoutStore::open_at(&dir).unwrap();
+            let first = store.local_host_install_id().unwrap();
+            assert_eq!(store.local_host_install_id().unwrap(), first);
+            first
+        };
+        let store = LayoutStore::open_at(&dir).unwrap();
+        assert_eq!(store.local_host_install_id().unwrap(), first);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn worktree_保存会归一化并双写且绑定可只读加载() {
+        let dir = temp_dir("dual-write");
+        let store = LayoutStore::open_at(&dir).unwrap();
+        let binding = binding("p1", "/repo/main");
+        store
+            .save_worktree_layout(&binding, &layout("cmd"), 10)
+            .unwrap();
+
+        let worktree_json = worktree_json(&store, &binding.worktree_id).unwrap();
+        assert_eq!(
+            legacy_json(&store, "p1").as_deref(),
+            Some(worktree_json.as_str())
+        );
+        let persisted: SavedProjectLayout = serde_json::from_str(&worktree_json).unwrap();
+        assert_eq!(persisted.worktree_id.as_ref(), Some(&binding.worktree_id));
+        assert!(persisted.active_tab_id.is_some());
+        assert!(persisted.tabs[0].tab_id.is_some());
+        let SavedSplitNode::Split { children, .. } = &persisted.tabs[0].split_layout else {
+            panic!("应保留 split");
+        };
+        let SavedSplitNode::Leaf {
+            active_pane_key,
+            panes,
+            ..
+        } = &children[0]
+        else {
+            panic!("应保留 leaf");
+        };
+        assert_eq!(active_pane_key.as_ref(), panes[0].pane_key.as_ref());
+        assert!(panes[0].terminal_session_id.is_some());
+        assert!(panes[0].terminal_incarnation_id.is_none());
+
+        let bindings = store.load_project_bindings().unwrap();
+        assert_eq!(bindings.get("p1"), Some(&binding));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn legacy_迁移归一化只发生一次() {
+        let dir = temp_dir("identity-migrate-idempotent");
+        let store = LayoutStore::open_at(&dir).unwrap();
+        let binding = binding("p1", "/repo/main");
+        let old_json = serde_json::to_string(&layout("cmd")).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            upsert_legacy_layout(&conn, "p1", &old_json, 1).unwrap();
+        }
+
+        let first = store
+            .reconcile_worktree_layouts(std::slice::from_ref(&binding), 10)
+            .unwrap();
+        let first_layout = first.layouts.get("p1").unwrap();
+        assert_eq!(
+            first_layout.worktree_id.as_ref(),
+            Some(&binding.worktree_id)
+        );
+        assert!(first_layout.active_tab_id.is_some());
+        let first_json = worktree_json(&store, &binding.worktree_id).unwrap();
+        let first_updated_at = worktree_updated_at(&store, &binding.worktree_id).unwrap();
+
+        let second = store
+            .reconcile_worktree_layouts(std::slice::from_ref(&binding), 20)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(second.layouts.get("p1").unwrap()).unwrap(),
+            first_json
+        );
+        assert_eq!(
+            worktree_json(&store, &binding.worktree_id).unwrap(),
+            first_json
+        );
+        assert_eq!(
+            worktree_updated_at(&store, &binding.worktree_id),
+            Some(first_updated_at),
+            "内容未变时不该重复写回"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 多项目共享_worktree_时目标优先且冲突_legacy_原样保留() {
+        let dir = temp_dir("shared-worktree-legacy-conflict");
+        let store = LayoutStore::open_at(&dir).unwrap();
+        let first = binding("p1", "/repo/shared");
+        let second = binding("p2", "/repo/shared");
+        assert_eq!(first.worktree_id, second.worktree_id);
+
+        let first_legacy = serde_json::to_string(&layout("first-shell")).unwrap();
+        let second_legacy = serde_json::to_string(&layout("second-shell")).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            upsert_legacy_layout(&conn, "p1", &first_legacy, 1).unwrap();
+            upsert_legacy_layout(&conn, "p2", &second_legacy, 1).unwrap();
+        }
+
+        let reconciled = store
+            .reconcile_worktree_layouts(&[first.clone(), second.clone()], 2)
+            .unwrap();
+        assert_eq!(
+            first_shell(reconciled.layouts.get("p1").unwrap()),
+            "first-shell"
+        );
+        assert_eq!(
+            first_shell(reconciled.layouts.get("p2").unwrap()),
+            "first-shell"
+        );
+
+        let destination: SavedProjectLayout =
+            serde_json::from_str(&worktree_json(&store, &first.worktree_id).unwrap()).unwrap();
+        assert_eq!(first_shell(&destination), "first-shell");
+        let first_mirror: SavedProjectLayout =
+            serde_json::from_str(&legacy_json(&store, "p1").unwrap()).unwrap();
+        assert_eq!(first_shell(&first_mirror), "first-shell");
+        let second_mirror: SavedProjectLayout =
+            serde_json::from_str(&legacy_json(&store, "p2").unwrap()).unwrap();
+        assert_eq!(first_shell(&second_mirror), "second-shell");
+        assert_eq!(
+            store.load_project_bindings().unwrap(),
+            HashMap::from([("p1".to_string(), first), ("p2".to_string(), second)])
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rebind_时目标_worktree_布局优先且旧源保留() {
+        let dir = temp_dir("rebind-destination-wins");
+        let store = LayoutStore::open_at(&dir).unwrap();
+        let old_binding = binding("p1", "/repo/old");
+        store
+            .save_worktree_layout(&old_binding, &layout("old-shell"), 1)
+            .unwrap();
+
+        let new_binding = binding("p1", "/repo/new");
+        let mut destination = layout("destination-shell");
+        let mut stats = SalvageStats::default();
+        normalize_saved_layout_stable_ids(
+            &mut destination,
+            Some(&new_binding.worktree_id),
+            &mut stats,
+        );
+        let destination_json = serde_json::to_string(&destination).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            upsert_worktree_layout(&conn, &new_binding.worktree_id, &destination_json, 2).unwrap();
+        }
+
+        let reconciled = store
+            .reconcile_worktree_layouts(std::slice::from_ref(&new_binding), 3)
+            .unwrap();
+        assert_eq!(
+            first_shell(reconciled.layouts.get("p1").unwrap()),
+            "destination-shell"
+        );
+        let old: SavedProjectLayout =
+            serde_json::from_str(&worktree_json(&store, &old_binding.worktree_id).unwrap())
+                .unwrap();
+        assert_eq!(
+            first_shell(&old),
+            "old-shell",
+            "旧 worktree 行不得删除或覆盖"
+        );
+        let mirror: SavedProjectLayout =
+            serde_json::from_str(&legacy_json(&store, "p1").unwrap()).unwrap();
+        assert_eq!(first_shell(&mirror), "destination-shell");
+        assert_eq!(
+            store.load_project_bindings().unwrap().get("p1"),
+            Some(&new_binding)
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn valid_json_salvage_只丢坏_pane_并修复指针与_sizes() {
+        let dir = temp_dir("salvage");
+        let store = LayoutStore::open_at(&dir).unwrap();
+        let binding = binding("p1", "/repo/main");
+        let malformed = r#"{
+          "worktreeId":"invalid",
+          "tabs":[
+            {
+              "tabId":"invalid",
+              "splitLayout":{
+                "type":"split",
+                "direction":"vertical",
+                "sizes":[100],
+                "children":[
+                  {"type":"leaf","activePaneKey":"invalid","panes":[
+                    {"shellName":"cmd"},
+                    {"shellName":42},
+                    {"shellName":"powershell","paneKey":"invalid","terminalSessionId":"invalid"}
+                  ]},
+                  {"type":"leaf","panes":[{"shellName":"bash"}]}
+                ]
+              }
+            },
+            {"splitLayout":{"type":"leaf","panes":[{"shellName":false}]}}
+          ],
+          "activeTabIndex":9,
+          "activeTabId":"invalid"
+        }"#;
+        {
+            let conn = store.conn.lock().unwrap();
+            upsert_legacy_layout(&conn, "p1", malformed, 1).unwrap();
+        }
+
+        let reconciled = store
+            .reconcile_worktree_layouts(std::slice::from_ref(&binding), 2)
+            .unwrap();
+        let got = reconciled.layouts.get("p1").unwrap();
+        assert_eq!(got.worktree_id.as_ref(), Some(&binding.worktree_id));
+        assert_eq!(got.tabs.len(), 1);
+        assert_eq!(got.active_tab_index, 0);
+        assert_eq!(got.active_tab_id.as_ref(), got.tabs[0].tab_id.as_ref());
+        let SavedSplitNode::Split {
+            sizes, children, ..
+        } = &got.tabs[0].split_layout
+        else {
+            panic!("两个有效 child 应保留 split");
+        };
+        assert_eq!(sizes.as_slice(), &[50.0, 50.0]);
+        let SavedSplitNode::Leaf {
+            active_pane_key,
+            panes,
+            ..
+        } = &children[0]
+        else {
+            panic!("第一个 child 应为 leaf");
+        };
+        assert_eq!(panes.len(), 2, "坏 pane 不应带走两个有效 sibling");
+        assert_eq!(panes[0].shell_name, "cmd");
+        assert_eq!(panes[1].shell_name, "powershell");
+        assert_eq!(active_pane_key.as_ref(), panes[0].pane_key.as_ref());
+        assert!(panes.iter().all(|pane| pane.pane_key.is_some()));
+        assert!(panes.iter().all(|pane| pane.terminal_session_id.is_some()));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn syntactically_invalid_json_只隔离本项目() {
+        let dir = temp_dir("invalid-row-isolated");
+        let store = LayoutStore::open_at(&dir).unwrap();
+        let broken = binding("broken", "/repo/broken");
+        let healthy = binding("healthy", "/repo/healthy");
+        let healthy_json = serde_json::to_string(&layout("bash")).unwrap();
+        let broken_legacy_json = serde_json::to_string(&layout("legacy-shell")).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            upsert_worktree_layout(&conn, &broken.worktree_id, "{not-json", 1).unwrap();
+            upsert_legacy_layout(&conn, "broken", &broken_legacy_json, 1).unwrap();
+            upsert_legacy_layout(&conn, "healthy", &healthy_json, 1).unwrap();
+        }
+
+        let reconciled = store
+            .reconcile_worktree_layouts(&[broken.clone(), healthy.clone()], 2)
+            .unwrap();
+        assert!(!reconciled.layouts.contains_key("broken"));
+        assert!(reconciled.layouts.contains_key("healthy"));
+        assert_eq!(
+            worktree_json(&store, &broken.worktree_id).as_deref(),
+            Some("{not-json")
+        );
+        assert_eq!(
+            legacy_json(&store, "broken").as_deref(),
+            Some(broken_legacy_json.as_str()),
+            "已有但损坏的目标行不能被 legacy 静默覆盖"
+        );
+        assert_eq!(reconciled.bindings.len(), 2);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 删除绑定保留_worktree_且空保存删除两份布局() {
+        let dir = temp_dir("binding-delete-and-empty-save");
+        let store = LayoutStore::open_at(&dir).unwrap();
+        let binding = binding("p1", "/repo/main");
+        store
+            .save_worktree_layout(&binding, &layout("cmd"), 1)
+            .unwrap();
+
+        store.delete_project_binding("p1").unwrap();
+        assert!(!store.load_project_bindings().unwrap().contains_key("p1"));
+        assert!(legacy_json(&store, "p1").is_none());
+        assert!(worktree_json(&store, &binding.worktree_id).is_some());
+
+        let restored = store
+            .reconcile_worktree_layouts(std::slice::from_ref(&binding), 2)
+            .unwrap();
+        assert!(restored.layouts.contains_key("p1"));
+        assert!(legacy_json(&store, "p1").is_some());
+
+        store
+            .save_worktree_layout(&binding, &empty_layout(), 3)
+            .unwrap();
+        assert!(worktree_json(&store, &binding.worktree_id).is_none());
+        assert!(legacy_json(&store, "p1").is_none());
+        assert_eq!(
+            store.load_project_bindings().unwrap().get("p1"),
+            Some(&binding),
+            "空布局只清内容,不清绑定"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retain_只删项目绑定与镜像并保留孤儿_worktree() {
+        let dir = temp_dir("retain-bindings");
+        let store = LayoutStore::open_at(&dir).unwrap();
+        let keep = binding("keep", "/repo/keep");
+        let stale = binding("stale", "/repo/stale");
+        store
+            .save_worktree_layout(&keep, &layout("keep-shell"), 1)
+            .unwrap();
+        store
+            .save_worktree_layout(&stale, &layout("stale-shell"), 1)
+            .unwrap();
+
+        let live = HashSet::from(["keep".to_string()]);
+        store.retain_project_bindings(&live).unwrap();
+        let bindings = store.load_project_bindings().unwrap();
+        assert!(bindings.contains_key("keep"));
+        assert!(!bindings.contains_key("stale"));
+        assert!(legacy_json(&store, "stale").is_none());
+        assert!(worktree_json(&store, &stale.worktree_id).is_some());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 不兼容的新_schema_不会被当损坏库搬走() {
+        let dir = temp_dir("future-schema");
+        let path = dir.join("layout.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO meta(key, value) VALUES('schema_version', '99');
+                 CREATE TABLE project_worktree_binding (
+                   project_id TEXT PRIMARY KEY,
+                   future_payload TEXT NOT NULL
+                 );
+                 INSERT INTO project_worktree_binding(project_id, future_payload)
+                 VALUES('future-project', 'keep-me');",
+            )
+            .unwrap();
+        }
+
+        assert!(LayoutStore::open_at(&dir).is_err());
+        assert!(!dir.join("layout.db.corrupt").exists());
+        let conn = Connection::open(&path).unwrap();
+        let payload: String = conn
+            .query_row(
+                "SELECT future_payload FROM project_worktree_binding
+                 WHERE project_id = 'future-project'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload, "keep-me");
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "99");
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// 损坏的库不该让持久化整个停摆:挪走留证 + 重建空库,程序照常起来。
     #[test]
     fn 损坏的库挪走并重建() {
         let dir = temp_dir("corrupt");
-        fs::write(dir.join("layout.db"), b"this is definitely not a sqlite file").unwrap();
+        fs::write(
+            dir.join("layout.db"),
+            b"this is definitely not a sqlite file",
+        )
+        .unwrap();
         let store = LayoutStore::open_at(&dir).unwrap();
         store.save_project_layout("p1", &layout("cmd"), 1).unwrap();
         assert!(store.load_project_layouts().contains_key("p1"));

@@ -19,11 +19,13 @@
 //!
 //! 1. **节点带 id**。TS 侧靠对象引用相等来定位节点(`replaceNode`),Rust 里没有
 //!    这条路;而 gpui 的元素、`ResizableState` 也都需要跨帧稳定的 id。于是每个
-//!    节点自带一个 id,`SavedSplitNode` 里不落这个字段(磁盘格式一个字不改)。
+//!    节点自带一个 id,`SavedSplitNode` 里不落这个运行时节点字段。
 //! 2. **就地改而不是整棵重建**。TS 用不可变更新是为了让 zustand 的引用比较能
 //!    短路重渲染;gpui 靠 `cx.notify()` 显式触发,没有这个约束。
 
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use mt_identity::{PaneKey, TabId, TerminalIncarnationId, TerminalSessionId};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -94,6 +96,13 @@ pub struct AiSessionRef {
 /// 能落盘/能比较的纯数据。
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneState {
+    /// 跨进程稳定 pane 身份。`id` 是它的兼容字符串投影。
+    pub pane_key: PaneKey,
+    /// 逻辑终端会话；重启和显式重连都保持不变。
+    pub terminal_session_id: TerminalSessionId,
+    /// 当前实际 PTY 的 incarnation；每次真正创建 PTY 时轮换。
+    pub terminal_incarnation_id: Option<TerminalIncarnationId>,
+    /// UI 兼容投影，恒等于 `pane_key.as_str()`。
     pub id: String,
     pub shell_name: String,
     pub custom_title: Option<String>,
@@ -120,8 +129,20 @@ pub struct PaneState {
 
 impl PaneState {
     pub fn new(shell_name: impl Into<String>) -> Self {
+        Self::from_identity(shell_name, PaneKey::new(), TerminalSessionId::new(), None)
+    }
+
+    pub fn from_identity(
+        shell_name: impl Into<String>,
+        pane_key: PaneKey,
+        terminal_session_id: TerminalSessionId,
+        terminal_incarnation_id: Option<TerminalIncarnationId>,
+    ) -> Self {
         Self {
-            id: gen_id("pane"),
+            id: pane_key.as_str().to_string(),
+            pane_key,
+            terminal_session_id,
+            terminal_incarnation_id,
             shell_name: shell_name.into(),
             custom_title: None,
             status: PaneStatus::Idle,
@@ -132,6 +153,11 @@ impl PaneState {
             detected_agent: None,
             attention: false,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn accepts_terminal_incarnation(&self, incarnation: &TerminalIncarnationId) -> bool {
+        self.terminal_incarnation_id.as_ref() == Some(incarnation)
     }
 
     /// tab 上显示的名字:自定义名 > shell 名。
@@ -178,20 +204,28 @@ impl PaneState {
 ///
 /// 对应磁盘格式的 `SavedTab` —— GPUI 迁移期这一层曾被收成单元素数组
 /// (persist.rs 旧注释「项目级 tab 层早已删除」),现按原语义复活;
-/// 磁盘格式本来就是 `tabs[]` + `activeTabIndex`,一个字都不用改。
+/// 磁盘格式本来就是 `tabs[]` + `activeTabIndex`,稳定 id 以可选字段增量落盘。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectPanel {
-    /// 运行时 id(`panel-N`),与叶子/split 的 id 同理**不落盘**。
+    /// UI 兼容投影，恒等于 `tab_id.as_str()`。
     pub id: String,
+    /// 跨进程稳定 tab 身份。`id` 是它的兼容字符串投影。
+    pub tab_id: TabId,
     /// 自定义名。`None` = 界面按序号显示。随布局落盘(`SavedTab.customTitle`)。
     pub custom_title: Option<String>,
     pub layout: SplitNode,
 }
 
 impl ProjectPanel {
+    #[cfg(test)]
     pub fn new(layout: SplitNode) -> Self {
+        Self::with_tab_id(TabId::new(), layout)
+    }
+
+    pub fn with_tab_id(tab_id: TabId, layout: SplitNode) -> Self {
         Self {
-            id: gen_id("panel"),
+            id: tab_id.as_str().to_string(),
+            tab_id,
             custom_title: None,
             layout,
         }
@@ -283,7 +317,11 @@ impl SplitNode {
             }),
             Self::Split { children, .. } => children.iter().fold(PaneStatus::Idle, |acc, c| {
                 let s = c.highest_status();
-                if s.priority() > acc.priority() { s } else { acc }
+                if s.priority() > acc.priority() {
+                    s
+                } else {
+                    acc
+                }
             }),
         }
     }
@@ -372,9 +410,7 @@ impl SplitNode {
     pub fn pane_mut(&mut self, pane_id: &str) -> Option<&mut PaneState> {
         match self {
             Self::Leaf { panes, .. } => panes.iter_mut().find(|p| p.id == pane_id),
-            Self::Split { children, .. } => {
-                children.iter_mut().find_map(|c| c.pane_mut(pane_id))
-            }
+            Self::Split { children, .. } => children.iter_mut().find_map(|c| c.pane_mut(pane_id)),
         }
     }
 
@@ -917,7 +953,10 @@ mod tests {
         let SplitNode::Split { children, .. } = &root else {
             panic!()
         };
-        assert!(matches!(children[0], SplitNode::Leaf { .. }), "兄弟没被动过");
+        assert!(
+            matches!(children[0], SplitNode::Leaf { .. }),
+            "兄弟没被动过"
+        );
         let SplitNode::Split {
             direction,
             children: inner,
@@ -1010,7 +1049,10 @@ mod tests {
 
         let b = root.pane_by_pty(2).unwrap().id.clone();
         let root = root.remove_pane(&b).unwrap();
-        let SplitNode::Split { sizes, children, .. } = &root else {
+        let SplitNode::Split {
+            sizes, children, ..
+        } = &root
+        else {
             panic!("还有两格,不该塌陷")
         };
         assert_eq!(children.len(), 2);
@@ -1129,8 +1171,16 @@ mod tests {
         let ids: Vec<String> = root.panes().iter().map(|p| p.id.clone()).collect();
 
         assert_eq!(root.cycle_target(&ids[0], 1).as_ref(), Some(&ids[1]));
-        assert_eq!(root.cycle_target(&ids[2], 1).as_ref(), Some(&ids[0]), "环形回头");
-        assert_eq!(root.cycle_target(&ids[0], -1).as_ref(), Some(&ids[2]), "环形往前");
+        assert_eq!(
+            root.cycle_target(&ids[2], 1).as_ref(),
+            Some(&ids[0]),
+            "环形回头"
+        );
+        assert_eq!(
+            root.cycle_target(&ids[0], -1).as_ref(),
+            Some(&ids[2]),
+            "环形往前"
+        );
         assert_eq!(root.cycle_target(&ids[1], -1).as_ref(), Some(&ids[0]));
         assert_eq!(root.cycle_target("不存在的 pane", 1), None);
     }
@@ -1242,13 +1292,15 @@ mod tests {
         assert_eq!(visible, ["a2", "b"], "后台 tab a1 不该出现");
     }
 
-    /// `ProjectPanel::new`:运行时 id 逐个唯一、初始无自定义名。
+    /// `ProjectPanel::new`:稳定 id 逐个唯一、初始无自定义名。
     #[test]
     fn 面板构造带唯一id且无自定义名() {
         let a = ProjectPanel::new(leaf("a", 1));
         let b = ProjectPanel::new(leaf("b", 2));
         assert_ne!(a.id, b.id);
-        assert!(a.id.starts_with("panel-"));
+        assert!(a.id.starts_with("tab-v1:"));
+        assert_eq!(a.id, a.tab_id.as_str());
+        assert_ne!(a.tab_id, b.tab_id);
         assert_eq!(a.custom_title, None);
     }
 
@@ -1328,7 +1380,9 @@ mod tests {
         assert_eq!(child_names(&root), vec![vec!["a"], vec!["b"]]);
         match &root {
             SplitNode::Split {
-                direction, children, ..
+                direction,
+                children,
+                ..
             } => {
                 assert_eq!(*direction, SplitDirection::Vertical);
                 assert_eq!(children[0].id(), leaf_id, "原叶子 id 不变");
@@ -1526,25 +1580,42 @@ mod tests {
         }
     }
 
-    /// 移动/重排只换布局树的位置,**pane 自身(含 pty_id)原样搬过去** ——
+    /// 移动/重排只换布局树的位置,**pane 自身身份与 pty_id 原样搬过去** ——
     /// GPUI 侧终端实体按 `pty_id` 挂在 store 的 `terminals` 表里,pty_id 不变
     /// 就意味着 PTY 不断、终端内容不重建(原版 `getNodeKey` 修复的等价保证)。
     #[test]
-    fn 移动保留_pty_id() {
+    fn 移动保留_pane_会话与_pty_身份() {
         let mut root = split_of(
             SplitDirection::Horizontal,
             vec![leaf_of(&["a"]), leaf_of(&["b"])],
         );
         let (a, b) = (id_of(&root, "a"), id_of(&root, "b"));
         root.pane_mut(&a).unwrap().pty_id = Some(7);
+        root.pane_mut(&a).unwrap().terminal_incarnation_id = Some(TerminalIncarnationId::new());
         root.pane_mut(&b).unwrap().pty_id = Some(9);
+        let a_identity = {
+            let pane = root.pane(&a).unwrap();
+            (
+                pane.pane_key.clone(),
+                pane.terminal_session_id.clone(),
+                pane.terminal_incarnation_id.clone(),
+            )
+        };
 
         let moved = root.move_pane_in_layout(&a, &b, DropZone::Bottom).unwrap();
-        assert_eq!(moved.pane(&a).unwrap().pty_id, Some(7));
+        let moved_a = moved.pane(&a).unwrap();
+        assert_eq!(moved_a.pty_id, Some(7));
+        assert_eq!(moved_a.pane_key, a_identity.0);
+        assert_eq!(moved_a.terminal_session_id, a_identity.1);
+        assert_eq!(moved_a.terminal_incarnation_id, a_identity.2);
         assert_eq!(moved.pane(&b).unwrap().pty_id, Some(9));
 
         let reordered = root.move_pane_to_tab_index(&a, &b, 0).unwrap();
-        assert_eq!(reordered.pane(&a).unwrap().pty_id, Some(7));
+        let reordered_a = reordered.pane(&a).unwrap();
+        assert_eq!(reordered_a.pty_id, Some(7));
+        assert_eq!(reordered_a.pane_key, a_identity.0);
+        assert_eq!(reordered_a.terminal_session_id, a_identity.1);
+        assert_eq!(reordered_a.terminal_incarnation_id, a_identity.2);
     }
 
     #[test]

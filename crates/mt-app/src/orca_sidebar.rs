@@ -604,7 +604,9 @@ impl OrcaProjectSidebar {
                     .or_else(|| store.project(&parent_id).map(|_| parent_id.clone()));
                 let target = target?;
                 store.set_active_project(&target, cx);
-                return Some(target);
+                let worktree_id = store.active_worktree_id()?.clone();
+                return (store.worktree_id_for_project(&target) == Some(&worktree_id))
+                    .then_some((target, worktree_id));
             }
 
             // Resolve again inside the store update. A previous click or a
@@ -622,10 +624,11 @@ impl OrcaProjectSidebar {
             let id = existing
                 .unwrap_or_else(|| store.add_project_at(&path, Some(parent_id.as_str()), cx));
             store.set_active_project(&id, cx);
-            Some(id)
+            let worktree_id = store.active_worktree_id()?.clone();
+            (store.worktree_id_for_project(&id) == Some(&worktree_id)).then_some((id, worktree_id))
         });
-        if let Some(project_id) = activated {
-            crate::workbench_area::reactivate_active_page(&project_id, window, cx);
+        if let Some((project_id, worktree_id)) = activated {
+            crate::workbench_area::reactivate_active_page(&project_id, &worktree_id, window, cx);
         }
     }
 

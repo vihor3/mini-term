@@ -64,6 +64,7 @@ use gpui_component::input::{Input, InputEvent, InputState, Position, Search};
 use gpui_component::scroll::Scrollbar;
 use gpui_component::text::{TextView, TextViewStyle};
 use markdown::{ParseOptions, mdast::Node as MarkdownNode};
+use mt_identity::WorktreeId;
 use mt_project::fs::FileContentResult;
 use mt_project::watch::FsWatcher;
 use mt_ui::icons::FileIcon;
@@ -1917,6 +1918,7 @@ fn md_image_placeholder(
 // ─── 视图 ─────────────────────────────────────────────────────
 
 pub struct FileViewer {
+    worktree_id: WorktreeId,
     source: DocumentSource,
     project_root: PathBuf,
     current_path: PathBuf,
@@ -1983,15 +1985,17 @@ pub struct FileViewer {
 
 impl FileViewer {
     pub fn new_document(
+        worktree_id: WorktreeId,
         source: DocumentSource,
         highlight_line: Option<u32>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new(source, highlight_line, window, cx)
+        Self::new(worktree_id, source, highlight_line, window, cx)
     }
 
     fn new(
+        worktree_id: WorktreeId,
         source: DocumentSource,
         highlight_line: Option<u32>,
         window: &mut Window,
@@ -2019,6 +2023,7 @@ impl FileViewer {
         let project_root = source.project_root_path();
         let path = source.path().to_path_buf();
         let mut this = Self {
+            worktree_id,
             source,
             project_root,
             current_path: path,
@@ -2675,8 +2680,9 @@ impl FileViewer {
         // Workbench 的关闭检查会回读当前 FileViewer 的 dirty 状态。当前按键
         // listener 仍持有本实体的 update 租约，直接回调会 double-lease。
         let source = self.source.clone();
+        let worktree_id = self.worktree_id.clone();
         window.defer(cx, move |window, cx| {
-            crate::workbench_area::close_document_source(source, window, cx);
+            crate::workbench_area::close_document_source(worktree_id, source, window, cx);
         });
     }
 
@@ -2684,7 +2690,7 @@ impl FileViewer {
     /// 否则留在容器上(Ctrl+S / Esc 挂在容器的 `on_key_down` 上,
     /// 焦点不在这条链上就收不到键)。
     fn can_take_async_focus(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        crate::workbench_area::is_document_active(&self.source, cx)
+        crate::workbench_area::is_document_active(&self.worktree_id, &self.source, cx)
             && !window.has_active_dialog(cx)
             && crate::overlay::allows(crate::overlay::Yield::ToOverlay)
     }
@@ -2717,8 +2723,9 @@ impl FileViewer {
         let focus = editor.read(cx).focus_handle(cx);
         if was_preview {
             let source = self.source.clone();
+            let worktree_id = self.worktree_id.clone();
             window.on_next_frame(move |window, cx| {
-                if crate::workbench_area::is_document_active(&source, cx)
+                if crate::workbench_area::is_document_active(&worktree_id, &source, cx)
                     && !window.has_active_dialog(cx)
                     && crate::overlay::allows(crate::overlay::Yield::ToOverlay)
                 {

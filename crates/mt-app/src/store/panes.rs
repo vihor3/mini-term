@@ -6,6 +6,7 @@
 
 use gpui::{AppContext, Context, Window};
 use mt_config::{AiLauncher, ProjectConfig, ShellConfig};
+use mt_identity::{PaneKey, TabId, TerminalIncarnationId, TerminalSessionId};
 use mt_pty::PtySpawn;
 use mt_ui::{DwellConfig, TerminalStyle};
 
@@ -14,11 +15,12 @@ use crate::tree::{
     AiSessionRef, DropZone, PaneState, PaneStatus, ProjectPanel, SplitDirection, SplitNode,
 };
 
+use super::AppStore;
+use super::identity::TerminalRoute;
 use super::pure::{
     next_maximized, resolve_auto_resume_command, resolve_resume_cwd, resolve_scrollback,
     terminal_style_from,
 };
-use super::AppStore;
 
 impl AppStore {
     // === 终端 ===
@@ -123,24 +125,36 @@ impl AppStore {
     ) -> Option<String> {
         let project = self.project(project_id)?.clone();
         let shell = shell.or_else(|| self.resolve_shell(None))?;
-        let pane = self.spawn_pane(&project, &shell, cwd, window, cx)?;
+        let anchor = anchor_pane_id.or_else(|| self.focused_pane_id.clone());
+        let (target_panel_id, tab_id) = {
+            let state = self.project_states.get(project_id)?;
+            if state.panels.is_empty() {
+                (None, TabId::new())
+            } else {
+                let valid_anchor = anchor.as_deref().filter(|id| state.pane(id).is_some());
+                let target = valid_anchor
+                    .and_then(|id| state.panel_id_of_pane(id))
+                    .map(str::to_string)
+                    .or_else(|| state.active_panel().map(|panel| panel.id.clone()))?;
+                let tab_id = state
+                    .panels
+                    .iter()
+                    .find(|panel| panel.id == target)
+                    .map(|panel| panel.tab_id.clone())?;
+                (Some(target), tab_id)
+            }
+        };
+        let pane = self.spawn_pane(&project, &shell, cwd, &tab_id, window, cx)?;
         let pane_id = pane.id.clone();
 
-        let anchor = anchor_pane_id.or_else(|| self.focused_pane_id.clone());
         let state = self.project_states.get_mut(project_id)?;
         if state.panels.is_empty() {
-            let panel = ProjectPanel::new(SplitNode::leaf(pane));
+            let panel = ProjectPanel::with_tab_id(tab_id, SplitNode::leaf(pane));
             state.active_panel_id = Some(panel.id.clone());
             state.panels.push(panel);
         } else {
-            // 锚点在哪个面板就落哪个面板(缺省的焦点 pane 就在活动面板上),
-            // 锚点失效则回落活动面板
+            let target = target_panel_id?;
             let anchor = anchor.filter(|id| state.pane(id).is_some());
-            let target = anchor
-                .as_deref()
-                .and_then(|id| state.panel_id_of_pane(id))
-                .map(str::to_string)
-                .or_else(|| state.active_panel().map(|p| p.id.clone()))?;
             let layout = &mut state.panel_mut(&target)?.layout;
             layout.append_pane(anchor.as_deref(), pane);
         }
@@ -191,8 +205,18 @@ impl AppStore {
             .and_then(|s| s.pane(pane_id))
             .map(|p| p.shell_name.clone());
         let shell = self.resolve_shell(shell_name.as_deref())?;
+        let tab_id = self
+            .project_states
+            .get(project_id)
+            .and_then(|state| {
+                state
+                    .panels
+                    .iter()
+                    .find(|panel| panel.layout.pane(pane_id).is_some())
+            })
+            .map(|panel| panel.tab_id.clone())?;
 
-        let pane = self.spawn_pane(&project, &shell, source_cwd, window, cx)?;
+        let pane = self.spawn_pane(&project, &shell, source_cwd, &tab_id, window, cx)?;
         let new_pane_id = pane.id.clone();
         let new_leaf = SplitNode::leaf(pane);
 
@@ -322,7 +346,9 @@ impl AppStore {
         let Some(layout) = state.active_layout() else {
             return;
         };
-        let anchor_leaf = layout.leaf_of_pane(anchor_pane_id).map(|l| l.id().to_string());
+        let anchor_leaf = layout
+            .leaf_of_pane(anchor_pane_id)
+            .map(|l| l.id().to_string());
         let current_leaf = state
             .maximized_pane_id
             .as_deref()
@@ -624,6 +650,9 @@ impl AppStore {
 
         struct Pending {
             pane_id: String,
+            tab_id: TabId,
+            pane_key: PaneKey,
+            terminal_session_id: TerminalSessionId,
             shell_name: String,
             cwd: Option<String>,
             ai_session: Option<AiSessionRef>,
@@ -634,15 +663,21 @@ impl AppStore {
         let pending: Vec<Pending> = self
             .project_states
             .get(project_id)
-            .and_then(|s| s.active_layout())
-            .map(|l| {
-                l.panes()
+            .and_then(|state| state.active_panel())
+            .map(|panel| {
+                let tab_id = panel.tab_id.clone();
+                panel
+                    .layout
+                    .panes()
                     .into_iter()
                     // status == error 的 pane 不重开(旧版 effect 的同一条守卫):
                     // 它上次就是起不来 / 已退出,自动重来只会刷屏
                     .filter(|p| p.pty_id.is_none() && p.status != PaneStatus::Error)
                     .map(|p| Pending {
                         pane_id: p.id.clone(),
+                        tab_id: tab_id.clone(),
+                        pane_key: p.pane_key.clone(),
+                        terminal_session_id: p.terminal_session_id.clone(),
                         shell_name: p.shell_name.clone(),
                         cwd: p.cwd.clone(),
                         ai_session: p.ai_session.clone(),
@@ -655,6 +690,7 @@ impl AppStore {
             return;
         }
 
+        let mut spawned_any = false;
         for item in pending {
             let Some(shell) = self.resolve_shell(Some(&item.shell_name)) else {
                 // 一个 shell 都没有 —— 旧版把 pane 标成 error 而不是静默跳过
@@ -674,11 +710,21 @@ impl AppStore {
             // pane 自己的 cwd 优先,会话 cwd 兜底
             let start_cwd = item.cwd.clone().or_else(|| resume_cwd.clone());
 
-            let pty_id = self.start_pty(&project, &shell, start_cwd.as_deref(), cx);
+            let (pty_id, incarnation_id) = self.start_pty(
+                &project,
+                &shell,
+                start_cwd.as_deref(),
+                &item.tab_id,
+                &item.pane_key,
+                &item.terminal_session_id,
+                cx,
+            );
+            spawned_any = true;
             if let Some(state) = self.project_states.get_mut(project_id)
                 && let Some(pane) = state.pane_mut(&item.pane_id)
             {
                 pane.pty_id = Some(pty_id);
+                pane.terminal_incarnation_id = Some(incarnation_id);
             }
 
             let Some(command) = resolve_auto_resume_command(
@@ -713,22 +759,35 @@ impl AppStore {
                 self.save_project_layout_soon(project_id, cx);
             }
         }
+        if spawned_any {
+            self.save_project_layout_soon(project_id, cx);
+        }
         cx.notify();
     }
 
-    /// 起 PTY 并拼出 `PaneState`。
+    /// 起 PTY 并拼出 `PaneState`.
     // 拆分前是私有方法;调用点在 `store::layout`(挂后台 pane / 新建面板),升到 `pub(super)`。
     pub(super) fn spawn_pane(
         &mut self,
         project: &ProjectConfig,
         shell: &ShellConfig,
         cwd_override: Option<String>,
+        tab_id: &TabId,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<PaneState> {
-        let pty_id = self.start_pty(project, shell, cwd_override.as_deref(), cx);
         let mut pane = PaneState::new(shell.name.clone());
+        let (pty_id, incarnation_id) = self.start_pty(
+            project,
+            shell,
+            cwd_override.as_deref(),
+            tab_id,
+            &pane.pane_key,
+            &pane.terminal_session_id,
+            cx,
+        );
         pane.pty_id = Some(pty_id);
+        pane.terminal_incarnation_id = Some(incarnation_id);
         pane.cwd = cwd_override;
         Some(pane)
     }
@@ -738,15 +797,21 @@ impl AppStore {
     /// PTY 起不到(shell 路径没了 / 目录不存在)时不 panic 也不静默:视图里显示
     /// 错误文本,pane 照样存在,用户看得见是哪个 tab 出的问题。
     // 拆分前是私有方法;调用点在 `store::ssh::reset_pane_for_reconnect`,升到 `pub(super)`。
+    // Stable routing fields stay explicit at the spawn boundary.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_pty(
         &mut self,
         project: &ProjectConfig,
         shell: &ShellConfig,
         cwd_override: Option<&str>,
+        tab_id: &TabId,
+        pane_key: &PaneKey,
+        terminal_session_id: &TerminalSessionId,
         cx: &mut Context<Self>,
-    ) -> u32 {
+    ) -> (u32, TerminalIncarnationId) {
         let pty_id = self.next_pty_id;
         self.next_pty_id += 1;
+        let terminal_incarnation_id = TerminalIncarnationId::new();
 
         let cwd = cwd_override
             .map(str::to_string)
@@ -755,6 +820,41 @@ impl AppStore {
             // hook 子进程靠它关联回具体 pane(与装机版同一个变量名,不能改)
             ("MINITERM_PTY_ID".to_string(), pty_id.to_string()),
         ];
+        env.extend([
+            ("MINITERM_TAB_ID".to_string(), tab_id.to_string()),
+            ("MINITERM_PANE_KEY".to_string(), pane_key.to_string()),
+            (
+                "MINITERM_TERMINAL_SESSION_ID".to_string(),
+                terminal_session_id.to_string(),
+            ),
+            (
+                "MINITERM_TERMINAL_INCARNATION_ID".to_string(),
+                terminal_incarnation_id.to_string(),
+            ),
+        ]);
+        let terminal_route = self
+            .project_worktree_bindings
+            .get(&project.id)
+            .map(|binding| TerminalRoute {
+                execution_host_id: binding.execution_host_id.clone(),
+                worktree_id: binding.worktree_id.clone(),
+                tab_id: tab_id.clone(),
+                pane_key: pane_key.clone(),
+                terminal_session_id: terminal_session_id.clone(),
+                terminal_incarnation_id: terminal_incarnation_id.clone(),
+            });
+        if let Some(route) = terminal_route.as_ref() {
+            env.push((
+                "MINITERM_EXECUTION_HOST_ID".to_string(),
+                route.execution_host_id.to_string(),
+            ));
+            env.push((
+                "MINITERM_WORKTREE_ID".to_string(),
+                route.worktree_id.to_string(),
+            ));
+            self.terminal_routes.insert(pty_id, route.clone());
+        }
+
         let hook_port = self.ai.hook_port();
         if hook_port > 0 {
             env.push(("MINITERM_HOOK_PORT".to_string(), hook_port.to_string()));
@@ -847,7 +947,14 @@ impl AppStore {
 
         // 子进程退出 → pane 状态 error(与旧版 pty-exit 同语义);
         // 用户键入 → 清 attention 黄灯(与旧版 clearPaneAttentionByPty 同语义)
+        let expected_route = terminal_route;
         let sub = cx.subscribe(&entity, move |store, _entity, event: &PaneEvent, cx| {
+            if expected_route
+                .as_ref()
+                .is_some_and(|route| store.terminal_routes.get(&pty_id) != Some(route))
+            {
+                return;
+            }
             match event {
                 PaneEvent::Exited(code) => store.on_pty_exit(pty_id, *code, cx),
                 PaneEvent::UserInput => store.clear_pane_attention_by_pty(pty_id, cx),
@@ -860,7 +967,7 @@ impl AppStore {
         });
         self.pane_subs.insert(pty_id, sub);
         self.terminals.insert(pty_id, entity);
-        pty_id
+        (pty_id, terminal_incarnation_id)
     }
 
     /// 拖选停留自动复制的参数(`config.selectionAutoCopySecs`)。

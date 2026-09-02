@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use gpui::{Context, Task};
 use mt_config::{ProjectConfig, SshConnection};
 
-use crate::tree::{gen_id, PaneState, PaneStatus};
+use crate::tree::{PaneState, PaneStatus, gen_id};
 
 use super::{AppStore, ProjectState, SshAssocOutcome};
 
@@ -90,11 +90,7 @@ impl AppStore {
         if name.is_empty() {
             return false;
         }
-        let exists = self
-            .config
-            .ssh_groups
-            .iter()
-            .any(|n| n.trim() == name)
+        let exists = self.config.ssh_groups.iter().any(|n| n.trim() == name)
             || self
                 .config
                 .ssh_connections
@@ -155,7 +151,11 @@ impl AppStore {
         else {
             return;
         };
-        let current = conn.group.as_deref().map(str::trim).filter(|g| !g.is_empty());
+        let current = conn
+            .group
+            .as_deref()
+            .map(str::trim)
+            .filter(|g| !g.is_empty());
         if current == target {
             return;
         }
@@ -235,6 +235,7 @@ impl AppStore {
         tree.push(mt_config::ProjectTreeItem::ProjectId(id.clone()));
         self.project_states.insert(id.clone(), ProjectState::new());
         self.expanded_dirs.insert(id.clone(), HashSet::new());
+        self.register_project_identity(&id);
         if let Some(group_id) = target_group {
             self.move_item(&id, Some(group_id), None, cx);
         }
@@ -306,9 +307,7 @@ impl AppStore {
                     let token = existing_token.clone();
                     let res = cx
                         .background_executor()
-                        .spawn(async move {
-                            crate::ssh_registry::enable(&dir, token.as_deref())
-                        })
+                        .spawn(async move { crate::ssh_registry::enable(&dir, token.as_deref()) })
                         .await?;
                     SshAssocOutcome {
                         enabled: true,
@@ -389,19 +388,37 @@ impl AppStore {
             self.dispose_terminal(old, cx);
         }
 
-        let (shell_name, cwd) = {
-            let pane = self
-                .project_states
-                .get(project_id)
-                .and_then(|s| s.pane(pane_id))?;
-            (pane.shell_name.clone(), pane.cwd.clone())
+        let (shell_name, cwd, tab_id, pane_key, terminal_session_id) = {
+            let state = self.project_states.get(project_id)?;
+            let pane = state.pane(pane_id)?;
+            let tab_id = state
+                .panels
+                .iter()
+                .find(|panel| panel.layout.pane(pane_id).is_some())
+                .map(|panel| panel.tab_id.clone())?;
+            (
+                pane.shell_name.clone(),
+                pane.cwd.clone(),
+                tab_id,
+                pane.pane_key.clone(),
+                pane.terminal_session_id.clone(),
+            )
         };
         let shell = self.resolve_shell(Some(&shell_name))?;
-        let new_pty = self.start_pty(&project, &shell, cwd.as_deref(), cx);
+        let (new_pty, incarnation_id) = self.start_pty(
+            &project,
+            &shell,
+            cwd.as_deref(),
+            &tab_id,
+            &pane_key,
+            &terminal_session_id,
+            cx,
+        );
 
         let state = self.project_states.get_mut(project_id)?;
         let pane = state.pane_mut(pane_id)?;
         pane.pty_id = Some(new_pty);
+        pane.terminal_incarnation_id = Some(incarnation_id);
         pane.status = PaneStatus::Idle;
         state.status = state.highest_status();
         self.after_layout_change(project_id, cx);

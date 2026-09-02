@@ -43,9 +43,10 @@ pub use config::{
     AiLauncher, AppConfig, ConfigStore, EditorConfig, LoadedConfig, MobileRelayConfig,
     OldProjectGroup, ProjectConfig, ProjectEnvVar, ProjectGroup, ProjectTreeItem, SaveError,
     SavedAiSession, SavedLineageEdge, SavedPane, SavedProjectLayout, SavedSplitNode, SavedTab,
-    ShellConfig, SshConnection, default_remote_paste_dir, migrate_config,
-    normalize_saved_layout, read_config_from,
+    ShellConfig, SshConnection, default_remote_paste_dir, migrate_config, normalize_saved_layout,
+    read_config_from,
 };
+pub use mt_identity::{PaneKey, TabId, TerminalIncarnationId, TerminalSessionId, WorktreeId};
 pub use paths::{
     APP_IDENTIFIER, DATA_DIR_ENV, LEGACY_IDENTIFIER, active_data_dir, app_data_dir, config_path,
     migrate_legacy_app_data, themes_dir,

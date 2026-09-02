@@ -1,0 +1,8 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Verify dependency direction, one source of identity truth, end-to-end data flow, and rollback completeness."}
+{"file":".trellis/spec/mt-project/backend/worktree-catalog-contract.md","reason":"Verify canonical local identity uses authoritative Git facts and does not turn degraded scans into destructive evidence."}
+{"file":".trellis/spec/mt-app/backend/file-workbench-contract.md","reason":"Verify document preview/focus behavior remains correct after WorktreeId rekeying and stale callbacks remain fenced."}
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Verify broad AppStore changes have focused tests and preserve existing compatibility paths."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/implement.md","reason":"Verify implementation stays inside the approved Phase 2 boundary and meets its acceptance and rollback contract."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/operation-logic.md","reason":"Verify exact WorktreeId + TabId + PaneKey routing and per-worktree ownership semantics."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/orca-worktree-terminal-agent-architecture.md","reason":"Verify provisional remote identities do not claim authority reserved for the remote runtime child."}
+{"file":".trellis/tasks/09-02-stable-worktree-workbench-identity/implement.md","reason":"Verify every planned implementation slice, Docker validation step, rollback point, and cleanup requirement is complete."}

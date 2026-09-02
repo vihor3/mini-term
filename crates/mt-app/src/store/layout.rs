@@ -10,12 +10,20 @@ use std::time::Duration;
 
 use gpui::{Context, Window};
 use mt_config::ShellConfig;
+use mt_identity::TabId;
 
 use crate::persist;
 use crate::tree::{ProjectPanel, SplitNode};
 
-use super::pure::collect_node_ids;
 use super::AppStore;
+use super::pure::collect_node_ids;
+
+pub(super) fn unix_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 impl AppStore {
     /// 移动端发起会话时挂 pane:追加到布局树**最左侧叶子**的 tab 栏末尾,
@@ -38,7 +46,13 @@ impl AppStore {
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let project = self.project(project_id)?.clone();
-        let mut pane = self.spawn_pane(&project, &shell, None, window, cx)?;
+        let tab_id = self
+            .project_states
+            .get(project_id)
+            .and_then(|state| state.active_panel())
+            .map(|panel| panel.tab_id.clone())
+            .unwrap_or_default();
+        let mut pane = self.spawn_pane(&project, &shell, None, &tab_id, window, cx)?;
         pane.custom_title = custom_title;
         let pane_id = pane.id.clone();
         let pty_id = pane.pty_id;
@@ -52,7 +66,7 @@ impl AppStore {
         };
         if state.panels.is_empty() {
             // 项目还一个终端都没有:新建面板(含根叶子),否则终端区仍是空白
-            let panel = ProjectPanel::new(SplitNode::leaf(pane));
+            let panel = ProjectPanel::with_tab_id(tab_id, SplitNode::leaf(pane));
             state.active_panel_id = Some(panel.id.clone());
             state.panels.push(panel);
         } else {
@@ -142,11 +156,12 @@ impl AppStore {
     ) -> Option<String> {
         let project = self.project(project_id)?.clone();
         let shell = shell.or_else(|| self.resolve_shell(None))?;
-        let pane = self.spawn_pane(&project, &shell, None, window, cx)?;
+        let tab_id = TabId::new();
+        let pane = self.spawn_pane(&project, &shell, None, &tab_id, window, cx)?;
         let pane_id = pane.id.clone();
 
         let state = self.project_states.get_mut(project_id)?;
-        let panel = ProjectPanel::new(SplitNode::leaf(pane));
+        let panel = ProjectPanel::with_tab_id(tab_id, SplitNode::leaf(pane));
         state.active_panel_id = Some(panel.id.clone());
         state.panels.push(panel);
         state.maximized_pane_id = None;
@@ -197,7 +212,10 @@ impl AppStore {
     /// 抽屉宽度。缺省 **340**(`App.tsx:541` 的 `?? 340`),钳在 240~720
     /// (`RightDrawer.tsx:8-9`)。
     pub fn right_drawer_width(&self) -> f64 {
-        self.config.right_drawer_width.unwrap_or(340.0).clamp(240.0, 720.0)
+        self.config
+            .right_drawer_width
+            .unwrap_or(340.0)
+            .clamp(240.0, 720.0)
     }
 
     // === Git 「更改」区的视图模式 ===
@@ -246,19 +264,17 @@ impl AppStore {
         expanded: bool,
         cx: &mut Context<Self>,
     ) {
-        let set = self.expanded_dirs.entry(project_id.to_string()).or_default();
+        let set = self
+            .expanded_dirs
+            .entry(project_id.to_string())
+            .or_default();
         if expanded {
             set.insert(path.to_string());
         } else {
             set.remove(path);
         }
         let dirs: Vec<String> = set.iter().cloned().collect();
-        if let Some(project) = self
-            .config
-            .projects
-            .iter_mut()
-            .find(|p| p.id == project_id)
-        {
+        if let Some(project) = self.config.projects.iter_mut().find(|p| p.id == project_id) {
             project.expanded_dirs = dirs;
         }
         self.save_config_soon(cx);
@@ -354,16 +370,14 @@ impl AppStore {
     /// 把某个项目当前的树序列化进内存缓存,并排上落盘。
     // 拆分前是私有方法;调用点在 `store::panes` 与 `store::ai`,升到 `pub(super)`。
     pub(super) fn save_project_layout_soon(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        let saved = self
-            .project_states
-            .get(project_id)
-            .map(|s| persist::serialize_layout(&s.panels, s.active_panel_index()));
+        let worktree_id = self.worktree_id_for_project(project_id).cloned();
+        let saved = self.project_states.get(project_id).map(|state| {
+            let mut saved = persist::serialize_layout(&state.panels, state.active_panel_index());
+            saved.worktree_id = worktree_id;
+            saved
+        });
         if let Some(saved) = saved
-            && let Some(project) = self
-                .config
-                .projects
-                .iter_mut()
-                .find(|p| p.id == project_id)
+            && let Some(project) = self.config.projects.iter_mut().find(|p| p.id == project_id)
         {
             project.saved_layout = Some(saved);
         }
@@ -420,21 +434,25 @@ impl AppStore {
             }
         }
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+        let now_ms = unix_time_ms();
         for project_id in dirty_projects {
             // 项目在防抖窗口里被删掉了 → 删行(它的树已经不在 config 里了)
             let Some(project) = self.config.projects.iter().find(|p| p.id == project_id) else {
-                if let Err(err) = store.delete_project_layout(&project_id) {
-                    eprintln!("[layout] 删除项目 {project_id} 的布局失败: {err:#}");
+                if let Err(error) = store.delete_project_binding(&project_id) {
+                    eprintln!("[layout] 删除项目 {project_id} 的绑定失败: {error:#}");
                 }
                 continue;
             };
-            let result = match project.saved_layout.as_ref() {
-                Some(layout) => store.save_project_layout(&project_id, layout, now_ms),
-                None => store.delete_project_layout(&project_id),
+            let result = match (
+                self.project_worktree_bindings.get(&project_id),
+                project.saved_layout.as_ref(),
+            ) {
+                (Some(binding), Some(layout)) => {
+                    store.save_worktree_layout(binding, layout, now_ms)
+                }
+                (Some(_), None) => store.delete_project_layout(&project_id),
+                (None, Some(layout)) => store.save_project_layout(&project_id, layout, now_ms),
+                (None, None) => store.delete_project_layout(&project_id),
             };
             if let Err(err) = result {
                 eprintln!("[layout] 项目 {project_id} 的布局写盘失败: {err:#}");

@@ -14,6 +14,7 @@ dirs.workspace = true
 # 本 crate 改为再导出/引用。方向选 mt-config → mt-core 的论证见
 # config.rs 中 `SshConnection` 的文档注释(反向会把 zip/sha2 拖进 sidecar 小二进制)。
 mt-core.workspace = true
+mt-identity.workspace = true
 # 主题包导入:zip 解包 + manifest.json 的 sha256 校验。版本收在工作区(与 mt-relay 共用)。
 sha2.workspace = true
 zip = "8.6.0"

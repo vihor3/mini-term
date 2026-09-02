@@ -1,0 +1,166 @@
+# Workbench Identity Contract
+
+## Scenario: Stable worktree, pane, and terminal routing
+
+### 1. Scope / Trigger
+
+Use this contract when code creates, restores, moves, reconnects, persists, or
+routes a terminal/document workbench. It also applies to deferred callbacks
+that can focus or close a page after the active project binding may have
+changed.
+
+This contract establishes stable routing identities. It does not provide warm
+reattach to a detached OS process, terminal output replay, or authoritative
+remote-device identity.
+
+### 2. Signatures
+
+Shared opaque identities from `mt-identity`:
+
+```rust
+pub struct HostInstallId(String);
+pub struct ExecutionHostId(String);
+pub struct RepoId(String);
+pub struct WorktreeId(String);
+pub struct TabId(String);
+pub struct PaneKey(String);
+pub struct TerminalSessionId(String);
+pub struct TerminalIncarnationId(String);
+```
+
+AppStore routing boundary:
+
+```rust
+pub fn active_worktree_id(&self) -> Option<&WorktreeId>;
+pub fn worktree_id_for_project(&self, project_id: &str) -> Option<&WorktreeId>;
+pub fn terminal_binding_matches(
+    &self,
+    worktree_id: &WorktreeId,
+    tab_id: &TabId,
+    pane_key: &PaneKey,
+    terminal_session_id: &TerminalSessionId,
+    terminal_incarnation_id: &TerminalIncarnationId,
+) -> bool;
+```
+
+Deferred workbench handoff boundary:
+
+```rust
+pub fn close_document_source(
+    expected_worktree_id: WorktreeId,
+    source: DocumentSource,
+    window: &mut Window,
+    cx: &mut App,
+);
+
+pub fn is_document_active(
+    expected_worktree_id: &WorktreeId,
+    source: &DocumentSource,
+    cx: &App,
+) -> bool;
+
+pub fn reactivate_active_document(
+    expected_project_id: &str,
+    expected_worktree_id: &WorktreeId,
+    window: &mut Window,
+    cx: &mut App,
+);
+
+pub fn reactivate_active_page(
+    expected_project_id: &str,
+    expected_worktree_id: &WorktreeId,
+    window: &mut Window,
+    cx: &mut App,
+);
+```
+
+### 3. Contracts
+
+- Serialized identities are the complete routing representation. Random IDs
+  use canonical UUID v4 payloads; derived IDs use SHA-256 with versioned,
+  length-prefixed domains. Callers never concatenate or parse payloads.
+- `project_id` remains a compatibility/configuration key. `WorktreeId` owns
+  workbench layout, document bucket, preview slot, and active-page state.
+- `PaneKey` and `TerminalSessionId` survive save/reload, split, move, reorder,
+  rename, and worktree switches. A new PTY spawn or explicit reconnect keeps
+  the session ID and mints a new `TerminalIncarnationId`.
+- The process-local `u32 pty_id` is an attachment handle only. It is not a
+  persisted logical terminal identity.
+- A terminal event is accepted only when project binding, pane key, logical
+  session, and expected incarnation all match the current route.
+- Every deferred close/focus/search callback captures its originating
+  `WorktreeId` before yielding. The callback revalidates project-to-worktree
+  binding and fails closed after a rebind.
+- Local child processes receive these routing fields:
+  `MINITERM_PTY_ID`, `MINITERM_TAB_ID`, `MINITERM_PANE_KEY`,
+  `MINITERM_TERMINAL_SESSION_ID`, `MINITERM_TERMINAL_INCARNATION_ID`,
+  `MINITERM_EXECUTION_HOST_ID`, and `MINITERM_WORKTREE_ID`.
+- Identity environment values are correlation/fencing keys, not credentials
+  or remote attestation.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|-----------|-------------------|
+| Active project has no binding | Do not open, focus, save, or route worktree state |
+| Project was rebound after a callback was scheduled | Reject the callback without touching either worktree |
+| PTY event has an old incarnation | Reject it even when pane and session IDs still match |
+| Restored stable pointer is invalid | Fall back deterministically and persist the corrected pointer |
+| One project alias is removed while another keeps the worktree | Keep the worktree bucket; remove only stale clean tabs and retain dirty drafts |
+| New PTY is spawned | Preserve pane/session identity and rotate incarnation |
+| Pane is moved or reordered | Preserve pane key, session, incarnation, and current PTY attachment |
+| Remote/WSL identity is provisional | Route consistently but never present it as verified host authority |
+
+### 5. Good / Base / Bad Cases
+
+- Good: Worktree A keeps a terminal page while worktree B keeps a file page;
+  switching restores each worktree's own route.
+- Good: An Agents overlay opened on a document captures project and worktree;
+  closing it after a project rebind does not focus the new worktree.
+- Base: A cold restart creates a new PTY incarnation while preserving the
+  logical terminal session and pane identity.
+- Bad: Recompute `WorktreeId` from whichever project is active when an async
+  callback completes.
+- Bad: Treat `pty_id` as stable across process restart.
+- Bad: Interpret provisional SSH identity as authenticated remote-device
+  identity.
+
+### 6. Tests Required
+
+- Parse/serde tests reject wrong prefixes, uppercase digests, and non-v4 UUIDs.
+- Golden derivation tests freeze domain separation and length framing.
+- Layout round trips assert tab, pane, session, incarnation, active tab, and
+  active pane identities.
+- Split/move/reorder tests assert stable identities and PTY attachment survive.
+- Reconnect tests assert session preservation and incarnation rotation.
+- Route tests assert the prior incarnation cannot match the current binding.
+- Workbench tests assert worktree-isolated previews and stale callback rejection.
+- Search/overlay tests assert same project/path with a different `WorktreeId`
+  cannot receive deferred focus.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+window.defer(cx, move |window, cx| {
+    let project_id = store.read(cx).active_project_id.clone().unwrap();
+    reactivate_active_page(&project_id, window, cx);
+});
+```
+
+The callback derives ownership after the user may have switched or rebound the
+project.
+
+#### Correct
+
+```rust
+let project_id = project.id.clone();
+let worktree_id = store.worktree_id_for_project(&project_id)?.clone();
+window.defer(cx, move |window, cx| {
+    reactivate_active_page(&project_id, &worktree_id, window, cx);
+});
+```
+
+The originating scope is captured before yielding and the workbench validates
+both identities again before focus changes.

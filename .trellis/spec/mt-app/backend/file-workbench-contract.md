@@ -33,15 +33,26 @@ pub fn open_active_file(
     cx: &mut App,
 );
 
-pub fn close_document_source(source: DocumentSource, window: &mut Window, cx: &mut App);
-pub fn is_document_active(source: &DocumentSource, cx: &App) -> bool;
+pub fn close_document_source(
+    expected_worktree_id: WorktreeId,
+    source: DocumentSource,
+    window: &mut Window,
+    cx: &mut App,
+);
+pub fn is_document_active(
+    expected_worktree_id: &WorktreeId,
+    source: &DocumentSource,
+    cx: &App,
+) -> bool;
 pub fn reactivate_active_document(
     expected_project_id: &str,
+    expected_worktree_id: &WorktreeId,
     window: &mut Window,
     cx: &mut App,
 );
 pub fn reactivate_active_page(
     expected_project_id: &str,
+    expected_worktree_id: &WorktreeId,
     window: &mut Window,
     cx: &mut App,
 );
@@ -79,25 +90,27 @@ pub fn save_file_content(
 
 ### 3. Contracts
 
-- A document identity is project ID + backend identity + normalized path. The
-  remote backend identity includes connection ID and connection fingerprint.
-  Local paths are case-folded only on Windows; remote paths stay case-sensitive.
-- Tabs are runtime state scoped to a project. Switching to a document hides the
+- A document identity is `WorktreeId` + backend identity + normalized path.
+  The source project ID remains beside the tab for I/O/binding validation. The
+  remote backend includes connection ID and fingerprint. Local paths are
+  case-folded only on Windows; remote paths stay case-sensitive.
+- Tabs are runtime state scoped to a worktree. Switching to a document hides the
   terminal view but must not destroy terminal entities or PTY sessions.
-- Each project/worktree compatibility bucket remembers its active workbench
-  page independently. After `AppStore::active_project_id` changes,
-  `reactivate_active_page(expected_project_id, ...)` must re-check that project
-  ID and then focus its remembered terminal pane or document. It must not reuse
-  the page or focus target from the previously active worktree.
-- Each project/worktree bucket has at most one replaceable `Preview` tab. A new
+- Each worktree bucket remembers its active workbench page independently. After
+  `AppStore::active_project_id` changes,
+  `reactivate_active_page(expected_project_id, expected_worktree_id, ...)` must
+  re-check both IDs and then focus the remembered terminal pane or document. It
+  must not reuse the page or focus target from another worktree.
+- Each worktree bucket has at most one replaceable `Preview` tab. A new
   file replaces an existing clean preview at the same tab index. A dirty
   preview is promoted to `Permanent` before the new preview is appended. Editing
   a preview or double-clicking its tab also promotes it. Double-clicking a file
   tree row remains the rename gesture and must not promote a workbench tab.
 - Deferred close, focus, search, and reload callbacks capture a concrete
-  `DocumentSource`. Before acting, they re-check the active project/document,
-  active dialog, and overlay ownership. A late callback may update its own
-  document data but may not close or focus a newly active tab.
+  `DocumentSource` and originating `WorktreeId`. Before acting, they re-check
+  project binding, active worktree/document, active dialog, and overlay
+  ownership. A late callback may update its own document data but may not close
+  or focus a newly active tab.
 - Remote connection edits invalidate an old tab identity. The tab may display
   its existing draft, but new saves are refused and late results from the old
   connection may not mutate current UI state.
@@ -137,17 +150,18 @@ pub fn save_file_content(
 - Remote image files go directly to the download/fallback surface; opening them
   must not perform an unnecessary full SFTP read.
 - Global search is local-filesystem-only until a remote search backend exists.
-  Results are bound to the producing local project ID and root; project changes
-  cancel and clear the search rather than reinterpreting old relative paths.
+  Results are bound to the producing local project ID, root, and `WorktreeId`;
+  project changes or rebinds cancel and clear the search rather than
+  reinterpreting old relative paths.
 - The search entity is process-global and lazily created. Closing the overlay
   preserves query, results, count, and the running search task. A single result
   click opens the workbench file and schedules overlay close; a second click
   within the platform double-click interval cancels that close and opens the
   configured external editor. Windows uses `GetDoubleClickTime() + 50ms`; other
   platforms use the project's 500ms grace interval. After the delayed single-
-  click close succeeds, resolve and reactivate the current document for the same
-  project so focus cannot fall back to a hidden terminal pane. Project/search
-  generation checks reject stale close tasks.
+  click close succeeds, reactivate the current document only for the captured
+  project/worktree so focus cannot fall back to a hidden terminal pane.
+  Project/worktree/search generation checks reject stale close tasks.
 - Remote downloads keep project ID, root, connection ID, and fingerprint
   checks. Any mismatch fails closed with a localized toast; never substitute
   the currently active connection. A dirty document that prevents automatic
@@ -178,7 +192,7 @@ pub fn save_file_content(
 | Refresh fails after remote content loaded | Keep editor/result/draft visible and set the refresh warning; do not select the fatal error branch |
 | Remote save returns `Saved` after a refresh failure | Clear `refresh_warning`; preserve any independent save-cleanup warning |
 | Remote save conflicts or fails after a refresh failure | Preserve `refresh_warning` and report the save outcome independently |
-| Search single-click delay closes the overlay | Re-resolve the active document for the same project and hand focus to it |
+| Search single-click delay closes the overlay | Reactivate only the captured project/worktree document scope |
 | Worktree switch completes for a different project generation | Do not focus either the old worktree page or the stale requested worktree |
 | Target worktree last showed a terminal | Restore that worktree's active pane and terminal page |
 | Target worktree last showed a document | Restore that worktree's remembered document and call its activation path |
@@ -245,7 +259,7 @@ pub fn save_file_content(
 - Local search result identity across project switches; assert SSH projects do
   not call the local search engine, overlay reopen preserves state, and click
   count selects workbench preview versus external editor. Assert delayed close
-  hands focus only to the same active project/document generation.
+  hands focus only to the same active project/worktree/document generation.
 - Remote refresh failure decision tests cover no-content fatal state and loaded
   result/editor warning state; successful refresh preserves save warnings.
   Remote save state tests assert only `Saved` clears the refresh warning while
@@ -278,17 +292,18 @@ The callback resolves "active" after the user may have changed tabs.
 #### Correct
 
 ```rust
+let worktree_id = self.worktree_id.clone();
 let source = self.source.clone();
 window.defer(cx, move |window, cx| {
-    close_document_source(source, window, cx);
+    close_document_source(worktree_id, source, window, cx);
 });
 ```
 
-The source identity is captured before yielding and revalidated by the
-workbench before the close is applied.
+The worktree and source identities are captured before yielding and revalidated
+by the workbench before the close is applied.
 
 For preview tabs, do not delete a dirty draft or share preview state across
-projects:
+worktrees:
 
 ```rust
 // Wrong: replacing the first preview without checking dirty state.

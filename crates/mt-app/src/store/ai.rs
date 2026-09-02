@@ -14,8 +14,8 @@ use crate::notify::{NotifyPrefs, PaneRef, StatusTransition};
 use crate::tree::{AiSessionRef, PaneStatus};
 
 use super::pure::{
-    collect_ai_projects, compute_title_bar_light, push_lineage_edge, resolve_fork_edge, AiProjects,
-    DoneScope, PendingFork, TitleBarLight,
+    AiProjects, DoneScope, PendingFork, TitleBarLight, collect_ai_projects,
+    compute_title_bar_light, push_lineage_edge, resolve_fork_edge,
 };
 use super::{AppStore, PendingAlert};
 
@@ -164,24 +164,22 @@ impl AppStore {
         let Some(project_id) = self.active_project_id.clone() else {
             return;
         };
-        let Some(pty_id) = self
-            .active_pane_id(&project_id)
-            .and_then(|pane_id| {
-                self.project_states
-                    .get(&project_id)
-                    .and_then(|s| s.pane(&pane_id))
-                    .and_then(|p| p.pty_id)
-            })
-        else {
+        let Some(pty_id) = self.active_pane_id(&project_id).and_then(|pane_id| {
+            self.project_states
+                .get(&project_id)
+                .and_then(|s| s.pane(&pane_id))
+                .and_then(|p| p.pty_id)
+        }) else {
             return;
         };
         // 先收拾一遍再挑目标:否则刚被 AI 处理掉的那条还挂着「跳不了」的旧状态,
         // 这一下会白白跳过它
         self.refresh_markers_for_pty(pty_id, cx);
-        let mut cursor = self
-            .marker_cursor
-            .get(&pty_id)
-            .and_then(|id| self.markers_for_pty(pty_id).iter().position(|m| &m.id == id));
+        let mut cursor = self.marker_cursor.get(&pty_id).and_then(|id| {
+            self.markers_for_pty(pty_id)
+                .iter()
+                .position(|m| &m.id == id)
+        });
         let len = self.markers_for_pty(pty_id).len();
         // 还挂着的条目跳不动,连按时要**跨过去**继续找下一条 —— 停在它身上的话
         // 游标不会推进,再按一次还是它,方向键就卡死了
@@ -212,6 +210,7 @@ impl AppStore {
         self.clear_pending_fork(pty_id);
         // 退出登记同理:留着会让复用同一编号的新 PTY 一开就顶着「已断开」遮罩
         self.exited_ptys.remove(&pty_id);
+        self.terminal_routes.remove(&pty_id);
         if let Some(entity) = self.terminals.remove(&pty_id) {
             // 组合中关 pane:先把预编辑收掉,免得 IME 还挂在一个即将消失的
             // 输入宿主上(marked range 不收回,下一次按键会被 IME 永久劫持)
@@ -480,9 +479,9 @@ impl AppStore {
                 let order = self.done.order();
                 collect_ai_projects(panes.iter().copied(), projects, |id| order.contains_key(id))
             }
-            DoneScope::Unread => {
-                collect_ai_projects(panes.iter().copied(), projects, |id| self.done.is_unread(id))
-            }
+            DoneScope::Unread => collect_ai_projects(panes.iter().copied(), projects, |id| {
+                self.done.is_unread(id)
+            }),
         }
     }
 

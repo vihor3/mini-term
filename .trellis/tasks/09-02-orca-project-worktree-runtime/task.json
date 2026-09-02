@@ -20,7 +20,8 @@
   "subtasks": [],
   "children": [
     "09-02-worktree-catalog-v2",
-    "09-02-orca-project-sidebar-workbench"
+    "09-02-orca-project-sidebar-workbench",
+    "09-02-stable-worktree-workbench-identity"
   ],
   "parent": null,
   "relatedFiles": [],
