@@ -1,0 +1,5 @@
+{"file":".trellis/spec/mt-app/backend/index.md","reason":"verify mt-app structure, async ownership, UI entity, and quality contracts"}
+{"file":".trellis/spec/mt-app/backend/file-workbench-contract.md","reason":"verify document identity, preview, dirty-state, and focus fencing rules"}
+{"file":".trellis/spec/mt-project/backend/worktree-catalog-contract.md","reason":"verify authoritative/degraded worktree inventory and generation semantics"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"verify cross-layer identity and data flow"}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/orca-ui-ux-mapping.md","reason":"verify approved Orca-aligned visual and interaction contract"}

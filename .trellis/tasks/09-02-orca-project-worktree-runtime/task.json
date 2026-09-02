@@ -19,7 +19,8 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "09-02-worktree-catalog-v2"
+    "09-02-worktree-catalog-v2",
+    "09-02-orca-project-sidebar-workbench"
   ],
   "parent": null,
   "relatedFiles": [],
