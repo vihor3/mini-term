@@ -1,0 +1,34 @@
+name: mini-term-ci
+
+services:
+  ci:
+    build:
+      context: .
+      dockerfile: docker/ci/Dockerfile
+    image: mini-term-ci:rust-1.95
+    init: true
+    user: "${LOCAL_UID:?run through scripts/docker-ci.sh}:${LOCAL_GID:?run through scripts/docker-ci.sh}"
+    working_dir: /workspace
+    environment:
+      CARGO_HOME: /cargo
+      CARGO_TARGET_DIR: /target
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      HOME: /tmp
+      PATH: /usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      RUST_BACKTRACE: "1"
+    volumes:
+      - type: bind
+        source: .
+        target: /workspace
+        read_only: true
+      - type: bind
+        source: ${MINI_TERM_DOCKER_CACHE_DIR:?run through scripts/docker-ci.sh}/cargo
+        target: /cargo
+      - type: bind
+        source: ${MINI_TERM_DOCKER_CACHE_DIR:?run through scripts/docker-ci.sh}/target
+        target: /target
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
