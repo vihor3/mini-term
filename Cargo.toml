@@ -112,6 +112,7 @@ mt-relay = { path = "crates/mt-relay" }
 # 移入;BB 批(SSH 全套 UI)接线用。
 mt-ssh = { path = "crates/mt-ssh" }
 mt-terminal = { path = "crates/mt-terminal" }
+mt-terminal-host = { path = "crates/mt-terminal-host" }
 mt-ui = { path = "crates/mt-ui" }
 mt-usage = { path = "crates/mt-usage" }
 

@@ -199,6 +199,16 @@ impl AppStore {
     /// 回收一个终端:kill 子进程 + 清 AI 感知痕迹 + 摘掉视图与订阅。
     // 拆分前是私有方法;调用点散在 `projects` / `panes` / `ssh` / `layout`,升到 `pub(super)`。
     pub(super) fn dispose_terminal(&mut self, pty_id: u32, cx: &mut Context<Self>) {
+        self.release_terminal(pty_id, true, cx);
+    }
+
+    /// Drops only the GUI attachment for hosted terminals. This is used when a
+    /// project registration disappears while its worktree session remains live.
+    pub(super) fn detach_terminal(&mut self, pty_id: u32, cx: &mut Context<Self>) {
+        self.release_terminal(pty_id, false, cx);
+    }
+
+    fn release_terminal(&mut self, pty_id: u32, kill: bool, cx: &mut Context<Self>) {
         // 对应 `terminalCache.ts:546` 的 `aiPtyIds.delete(ptyId)` ——
         // 不摘的话新 PTY 复用同一个编号时会被误当成 AI pane(嗅探静默失效)
         crate::git_watch::forget_pane(pty_id);
@@ -216,7 +226,11 @@ impl AppStore {
             // 输入宿主上(marked range 不收回,下一次按键会被 IME 永久劫持)
             entity.update(cx, |pane, cx| {
                 pane.clear_preedit(cx);
-                pane.shutdown();
+                if kill {
+                    pane.shutdown();
+                } else {
+                    pane.detach();
+                }
             });
         }
         self.pane_subs.remove(&pty_id);

@@ -10,7 +10,7 @@ use mt_identity::{PaneKey, TabId, TerminalIncarnationId, TerminalSessionId};
 use mt_pty::PtySpawn;
 use mt_ui::{DwellConfig, TerminalStyle};
 
-use crate::pane::{PaneEvent, TerminalPane};
+use crate::pane::{HostedLaunch, PaneEvent, TerminalPane};
 use crate::tree::{
     AiSessionRef, DropZone, PaneState, PaneStatus, ProjectPanel, SplitDirection, SplitNode,
 };
@@ -653,6 +653,7 @@ impl AppStore {
             tab_id: TabId,
             pane_key: PaneKey,
             terminal_session_id: TerminalSessionId,
+            terminal_incarnation_id: Option<TerminalIncarnationId>,
             shell_name: String,
             cwd: Option<String>,
             ai_session: Option<AiSessionRef>,
@@ -678,6 +679,7 @@ impl AppStore {
                         tab_id: tab_id.clone(),
                         pane_key: p.pane_key.clone(),
                         terminal_session_id: p.terminal_session_id.clone(),
+                        terminal_incarnation_id: p.terminal_incarnation_id.clone(),
                         shell_name: p.shell_name.clone(),
                         cwd: p.cwd.clone(),
                         ai_session: p.ai_session.clone(),
@@ -710,13 +712,14 @@ impl AppStore {
             // pane 自己的 cwd 优先,会话 cwd 兜底
             let start_cwd = item.cwd.clone().or_else(|| resume_cwd.clone());
 
-            let (pty_id, incarnation_id) = self.start_pty(
+            let (pty_id, incarnation_id, warm_reattached) = self.start_pty(
                 &project,
                 &shell,
                 start_cwd.as_deref(),
                 &item.tab_id,
                 &item.pane_key,
                 &item.terminal_session_id,
+                item.terminal_incarnation_id.as_ref(),
                 cx,
             );
             spawned_any = true;
@@ -725,6 +728,7 @@ impl AppStore {
             {
                 pane.pty_id = Some(pty_id);
                 pane.terminal_incarnation_id = Some(incarnation_id);
+                pane.resume_pending &= !warm_reattached;
             }
 
             let Some(command) = resolve_auto_resume_command(
@@ -735,6 +739,9 @@ impl AppStore {
             ) else {
                 continue;
             };
+            if warm_reattached {
+                continue;
+            }
 
             // 先清标记再写命令(顺序同旧版):标记的语义是「这个 pane 还没续过」
             let mut session_patch: Option<AiSessionRef> = None;
@@ -777,13 +784,14 @@ impl AppStore {
         cx: &mut Context<Self>,
     ) -> Option<PaneState> {
         let mut pane = PaneState::new(shell.name.clone());
-        let (pty_id, incarnation_id) = self.start_pty(
+        let (pty_id, incarnation_id, _) = self.start_pty(
             project,
             shell,
             cwd_override.as_deref(),
             tab_id,
             &pane.pane_key,
             &pane.terminal_session_id,
+            None,
             cx,
         );
         pane.pty_id = Some(pty_id);
@@ -807,11 +815,11 @@ impl AppStore {
         tab_id: &TabId,
         pane_key: &PaneKey,
         terminal_session_id: &TerminalSessionId,
+        expected_incarnation_id: Option<&TerminalIncarnationId>,
         cx: &mut Context<Self>,
-    ) -> (u32, TerminalIncarnationId) {
+    ) -> (u32, TerminalIncarnationId, bool) {
         let pty_id = self.next_pty_id;
         self.next_pty_id += 1;
-        let terminal_incarnation_id = TerminalIncarnationId::new();
 
         let cwd = cwd_override
             .map(str::to_string)
@@ -827,32 +835,22 @@ impl AppStore {
                 "MINITERM_TERMINAL_SESSION_ID".to_string(),
                 terminal_session_id.to_string(),
             ),
-            (
-                "MINITERM_TERMINAL_INCARNATION_ID".to_string(),
-                terminal_incarnation_id.to_string(),
-            ),
         ]);
-        let terminal_route = self
+        let route_identity = self
             .project_worktree_bindings
             .get(&project.id)
-            .map(|binding| TerminalRoute {
-                execution_host_id: binding.execution_host_id.clone(),
-                worktree_id: binding.worktree_id.clone(),
-                tab_id: tab_id.clone(),
-                pane_key: pane_key.clone(),
-                terminal_session_id: terminal_session_id.clone(),
-                terminal_incarnation_id: terminal_incarnation_id.clone(),
+            .map(|binding| {
+                (
+                    binding.execution_host_id.clone(),
+                    binding.worktree_id.clone(),
+                )
             });
-        if let Some(route) = terminal_route.as_ref() {
+        if let Some((execution_host_id, worktree_id)) = route_identity.as_ref() {
             env.push((
                 "MINITERM_EXECUTION_HOST_ID".to_string(),
-                route.execution_host_id.to_string(),
+                execution_host_id.to_string(),
             ));
-            env.push((
-                "MINITERM_WORKTREE_ID".to_string(),
-                route.worktree_id.to_string(),
-            ));
-            self.terminal_routes.insert(pty_id, route.clone());
+            env.push(("MINITERM_WORKTREE_ID".to_string(), worktree_id.to_string()));
         }
 
         let hook_port = self.ai.hook_port();
@@ -932,6 +930,24 @@ impl AppStore {
                 .collect()
         };
 
+        let hosted = if is_remote {
+            None
+        } else {
+            self.terminal_host
+                .clone()
+                .zip(
+                    route_identity
+                        .as_ref()
+                        .map(|(_, worktree_id)| worktree_id.clone()),
+                )
+                .map(|(client, worktree_id)| HostedLaunch {
+                    client,
+                    worktree_id,
+                    terminal_session_id: terminal_session_id.clone(),
+                    expected_incarnation_id: expected_incarnation_id.cloned(),
+                })
+        };
+
         let style = self.terminal_style();
         let theme = self.terminal_theme.clone();
         let dwell = self.selection_dwell();
@@ -941,9 +957,22 @@ impl AppStore {
         let ai = self.ai.clone();
         let entity = cx.new(|cx| {
             TerminalPane::new(
-                pty_id, spec, user_env, style, theme, dwell, scrollback, ai, extras, cx,
+                pty_id, spec, user_env, style, theme, dwell, scrollback, ai, extras, hosted, cx,
             )
         });
+        let terminal_incarnation_id = entity.read(cx).terminal_incarnation_id().clone();
+        let warm_reattached = entity.read(cx).warm_reattached();
+        let terminal_route = route_identity.map(|(execution_host_id, worktree_id)| TerminalRoute {
+            execution_host_id,
+            worktree_id,
+            tab_id: tab_id.clone(),
+            pane_key: pane_key.clone(),
+            terminal_session_id: terminal_session_id.clone(),
+            terminal_incarnation_id: terminal_incarnation_id.clone(),
+        });
+        if let Some(route) = terminal_route.as_ref() {
+            self.terminal_routes.insert(pty_id, route.clone());
+        }
 
         // 子进程退出 → pane 状态 error(与旧版 pty-exit 同语义);
         // 用户键入 → 清 attention 黄灯(与旧版 clearPaneAttentionByPty 同语义)
@@ -967,7 +996,7 @@ impl AppStore {
         });
         self.pane_subs.insert(pty_id, sub);
         self.terminals.insert(pty_id, entity);
-        (pty_id, terminal_incarnation_id)
+        (pty_id, terminal_incarnation_id, warm_reattached)
     }
 
     /// 拖选停留自动复制的参数(`config.selectionAutoCopySecs`)。

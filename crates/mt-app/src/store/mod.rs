@@ -43,6 +43,7 @@ use mt_config::{AppConfig, ConfigStore, ProjectConfig};
 use mt_identity::{HostInstallId, WorktreeId};
 use mt_layout::ProjectWorktreeBinding;
 use mt_relay::MobileRelayStatusPayload;
+use mt_terminal_host::{TerminalHostClient, terminal_host_enabled};
 use mt_ui::TerminalTheme;
 use mt_ui::icons::ProjectKind;
 use mt_ui::theme_bridge::BackgroundArt;
@@ -400,6 +401,9 @@ pub struct AppStore {
 
     /// 已退出的 PTY(`src/store.ts:660` 的 `exitedPtyIds`,`pty-exit` 登记)。
     /// 悬停缩略图据此画「已断开」遮罩;远程 pane 的重连覆盖层随 #28。
+    /// Per-user PTY host client. `None` keeps the compatibility in-process backend.
+    terminal_host: Option<TerminalHostClient>,
+
     /// **纯运行时,不落盘**;pane 一没跟着没(见 [`Self::dispose_terminal`])。
     exited_ptys: HashSet<u32>,
 
@@ -629,6 +633,18 @@ impl AppStore {
         // 早,轮到它的 future 被 poll 时看到的已是最终队列。
         let config_writer = ConfigWriter::spawn(config_store.clone());
         let drain = config_writer.drain_handle();
+        let terminal_host = if terminal_host_enabled() {
+            match TerminalHostClient::production() {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    eprintln!("[terminal-host] unavailable, using compatibility backend: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // 显式走 `App::on_app_quit` 而不是 `Context::on_app_quit`:排干不需要
         // `&mut AppStore`,而后者会在退出那一刻回头 `update` 本实体 —— 平白多一
         // 条「实体还在不在」的依赖。
@@ -659,6 +675,7 @@ impl AppStore {
             active_project_id,
             project_states,
             terminals: HashMap::new(),
+            terminal_host,
             terminal_routes: HashMap::new(),
             pane_subs: HashMap::new(),
             focused_pane_id: None,

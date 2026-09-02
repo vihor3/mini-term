@@ -1,0 +1,5 @@
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/design.md","reason":"Normative terminal ownership, identity, attach, and recovery architecture."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/implement.md","reason":"Phase 3 dependency, acceptance, validation, and rollback contract."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/operation-logic.md","reason":"Approved terminal create, close, detach, and worktree-switch interaction semantics."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Stable worktree, pane, terminal-session, and incarnation routing rules."}
+{"file":".trellis/spec/mt-pty/backend/index.md","reason":"PTY package boundary and project-specific backend guidance index."}

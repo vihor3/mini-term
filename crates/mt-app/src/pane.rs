@@ -50,11 +50,16 @@ use gpui::{
     Render, Styled, Task, Window, div, prelude::FluentBuilder, px,
 };
 use mt_config::SshConnection;
+use mt_identity::{TerminalIncarnationId, TerminalSessionId, WorktreeId};
 use mt_pty::{PtySession, PtySpawn};
 use mt_terminal::alacritty_terminal::event::Event as TermEvent;
 use mt_terminal::alacritty_terminal::grid::{Dimensions as _, Scroll};
 use mt_terminal::alacritty_terminal::term::TermMode;
 use mt_terminal::{TermSize, TerminalEmulator};
+use mt_terminal_host::{
+    ClientError as HostClientError, ErrorCode as HostErrorCode, HostSpawnSpec, HostedEvent,
+    HostedTerminalSession, TerminalHostClient,
+};
 use mt_ui::terminal::{MouseMods, prefers_local_handling};
 use mt_ui::{
     CopiedTip, DwellConfig, FlashLine, PasteAction, TerminalSearch, TerminalSearchBar,
@@ -91,13 +96,14 @@ pub enum PaneEvent {
 enum PaneSignal {
     Output,
     Exit(Option<u32>),
+    Disconnected(String),
 }
 
 pub struct TerminalPane {
     /// 后端 pane 编号,见模块注释。
     pty_id: u32,
     emulator: Arc<TerminalEmulator>,
-    pty: Option<PtySession>,
+    transport: Option<TerminalTransport>,
     focus: FocusHandle,
     /// 渲染 + 键盘 + IME 全在这一层([`mt_ui::TerminalView`])。
     ///
@@ -114,6 +120,13 @@ pub struct TerminalPane {
     exited: bool,
     /// PTY 起不来时的错误文本(直接显示给用户,不吞)。
     spawn_error: Option<String>,
+    /// Stable incarnation returned by the terminal host or minted for legacy spawn.
+    terminal_incarnation_id: TerminalIncarnationId,
+    /// True only when startup attached to the exact persisted live process.
+    warm_reattached: bool,
+    /// Non-fatal backend/recovery warning rendered over a usable terminal.
+    backend_notice: Option<String>,
+
     /// 「已复制」气泡的落点(**元素相对**坐标)。`None` = 不显示。
     /// 1s 后由自撤任务清掉,与旧版 `tipTimer` 同语义。
     copied_tip: Option<Point<Pixels>>,
@@ -186,6 +199,218 @@ pub struct RemoteLaunchExtras {
     pub preflight_error: Option<String>,
 }
 
+pub struct HostedLaunch {
+    pub client: TerminalHostClient,
+    pub worktree_id: WorktreeId,
+    pub terminal_session_id: TerminalSessionId,
+    pub expected_incarnation_id: Option<TerminalIncarnationId>,
+}
+
+enum TerminalTransport {
+    Hosted(HostedTerminalSession),
+    Legacy(PtySession),
+}
+
+impl TerminalTransport {
+    fn write(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        match self {
+            Self::Hosted(session) => session.write(bytes).map_err(anyhow::Error::new),
+            Self::Legacy(session) => session.write(bytes),
+        }
+    }
+
+    fn resize_if_changed(&self, rows: u16, cols: u16) -> anyhow::Result<bool> {
+        match self {
+            Self::Hosted(session) => session
+                .resize_if_changed(rows, cols)
+                .map_err(anyhow::Error::new),
+            Self::Legacy(session) => session.resize_if_changed(rows, cols),
+        }
+    }
+
+    fn arm_ssh_autofill(&self, password: String, disarm_on_input: bool) -> anyhow::Result<()> {
+        match self {
+            Self::Hosted(session) => session
+                .arm_ssh_autofill(password, disarm_on_input)
+                .map_err(anyhow::Error::new),
+            Self::Legacy(session) => {
+                session.arm_ssh_autofill(password, disarm_on_input);
+                Ok(())
+            }
+        }
+    }
+
+    fn kill(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Hosted(session) => session.kill().map_err(anyhow::Error::new),
+            Self::Legacy(session) => session.kill(),
+        }
+    }
+
+    fn wsl_override(&self) -> Option<(String, String)> {
+        match self {
+            Self::Hosted(session) => session
+                .descriptor()
+                .wsl_override
+                .as_ref()
+                .map(|value| (value.distro.clone(), value.unix_path.clone())),
+            Self::Legacy(session) => session
+                .wsl_override()
+                .map(|value| (value.distro.clone(), value.unix_path.clone())),
+        }
+    }
+}
+
+struct LaunchOutcome {
+    transport: TerminalTransport,
+    terminal_incarnation_id: TerminalIncarnationId,
+    warm_reattached: bool,
+    backend_notice: Option<String>,
+}
+
+fn observe_pty_output(
+    pty_id: u32,
+    emulator: &Arc<TerminalEmulator>,
+    ai: &AiBridge,
+    tx: &mpsc::UnboundedSender<PaneSignal>,
+    bytes: &[u8],
+) {
+    emulator.advance(bytes);
+    ai.perception().observe_output(pty_id, bytes);
+    crate::git_watch::observe_output(pty_id, bytes);
+    let _ = tx.unbounded_send(PaneSignal::Output);
+}
+
+fn host_event_sink(
+    pty_id: u32,
+    emulator: Arc<TerminalEmulator>,
+    ai: AiBridge,
+    tx: mpsc::UnboundedSender<PaneSignal>,
+) -> impl FnMut(HostedEvent) + Send + 'static {
+    move |event| match event {
+        HostedEvent::Output { bytes, .. } => {
+            observe_pty_output(pty_id, &emulator, &ai, &tx, &bytes);
+        }
+        HostedEvent::Exited { exit_code } => {
+            let _ = tx.unbounded_send(PaneSignal::Exit(exit_code));
+        }
+        HostedEvent::Disconnected(error) => {
+            let _ = tx.unbounded_send(PaneSignal::Disconnected(error.to_string()));
+        }
+    }
+}
+
+fn host_spawn_spec(spec: &PtySpawn, user_env: &[(String, String)]) -> HostSpawnSpec {
+    HostSpawnSpec {
+        program: spec.program.clone(),
+        args: spec.args.clone(),
+        cwd: spec.cwd.clone(),
+        env: spec.env.clone(),
+        user_env: user_env.to_vec(),
+        rows: spec.rows,
+        cols: spec.cols,
+        ssh_autofill: None,
+    }
+}
+
+fn start_hosted(
+    launch: HostedLaunch,
+    spec: &PtySpawn,
+    user_env: &[(String, String)],
+    pty_id: u32,
+    emulator: &Arc<TerminalEmulator>,
+    ai: &AiBridge,
+    tx: &mpsc::UnboundedSender<PaneSignal>,
+) -> Result<LaunchOutcome, HostClientError> {
+    let spawn = host_spawn_spec(spec, user_env);
+    let create_fresh = |notice: Option<String>| {
+        launch
+            .client
+            .create_attached(
+                launch.terminal_session_id.clone(),
+                launch.worktree_id.clone(),
+                spawn.clone(),
+                host_event_sink(pty_id, emulator.clone(), ai.clone(), tx.clone()),
+            )
+            .map(|session| LaunchOutcome {
+                terminal_incarnation_id: session.descriptor().incarnation_id.clone(),
+                transport: TerminalTransport::Hosted(session),
+                warm_reattached: false,
+                backend_notice: notice,
+            })
+    };
+
+    let Some(expected) = launch.expected_incarnation_id.clone() else {
+        return create_fresh(None);
+    };
+    match launch.client.attach(
+        launch.terminal_session_id.clone(),
+        expected.clone(),
+        0,
+        host_event_sink(pty_id, emulator.clone(), ai.clone(), tx.clone()),
+    ) {
+        Ok(session) => Ok(LaunchOutcome {
+            terminal_incarnation_id: session.descriptor().incarnation_id.clone(),
+            transport: TerminalTransport::Hosted(session),
+            warm_reattached: true,
+            backend_notice: None,
+        }),
+        Err(error)
+            if error.is_code(HostErrorCode::SessionMissing)
+                || error.is_code(HostErrorCode::SessionExited) =>
+        {
+            create_fresh(Some(
+                "Previous terminal process was unavailable; started a fresh session.".into(),
+            ))
+        }
+        Err(error) if error.is_code(HostErrorCode::ReplayGap) => {
+            launch
+                .client
+                .kill(launch.terminal_session_id.clone(), expected)?;
+            create_fresh(Some(
+                "Terminal replay was incomplete; restarted this session.".into(),
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn start_legacy(
+    mut spec: PtySpawn,
+    user_env: Vec<(String, String)>,
+    pty_id: u32,
+    emulator: &Arc<TerminalEmulator>,
+    ai: &AiBridge,
+    tx: &mpsc::UnboundedSender<PaneSignal>,
+    backend_notice: Option<String>,
+) -> anyhow::Result<LaunchOutcome> {
+    let terminal_incarnation_id = TerminalIncarnationId::new();
+    spec.env
+        .retain(|(key, _)| key != "MINITERM_TERMINAL_INCARNATION_ID");
+    spec.env.push((
+        "MINITERM_TERMINAL_INCARNATION_ID".into(),
+        terminal_incarnation_id.to_string(),
+    ));
+    let exit_tx = tx.clone();
+    let options = mt_pty::PtyOptions::default()
+        .with_user_env(user_env)
+        .on_exit(move |code| {
+            let _ = exit_tx.unbounded_send(PaneSignal::Exit(code));
+        });
+    let output_emulator = emulator.clone();
+    let output_ai = ai.clone();
+    let output_tx = tx.clone();
+    let pty = PtySession::spawn_with_options(spec, options, move |bytes| {
+        observe_pty_output(pty_id, &output_emulator, &output_ai, &output_tx, bytes);
+    })?;
+    Ok(LaunchOutcome {
+        transport: TerminalTransport::Legacy(pty),
+        terminal_incarnation_id,
+        warm_reattached: false,
+        backend_notice,
+    })
+}
+
 impl TerminalPane {
     /// `user_env` 是项目级环境变量:走 [`mt_pty::PtyOptions::user_env`] 而不是
     /// `spec.env`,因为前者会被 `MINITERM_` 前缀过滤挡一道 —— 用户手改配置
@@ -203,6 +428,7 @@ impl TerminalPane {
         scrollback: usize,
         ai: AiBridge,
         remote: RemoteLaunchExtras,
+        hosted: Option<HostedLaunch>,
         cx: &mut Context<Self>,
     ) -> Self {
         // 首帧还没量过字体,先给个能跑的初值;真正的尺寸在元素 prepaint 里量出来
@@ -216,49 +442,72 @@ impl TerminalPane {
         ));
 
         let (tx, mut rx) = mpsc::unbounded::<PaneSignal>();
-        let exit_tx = tx.clone();
-        let options = mt_pty::PtyOptions::default()
-            .with_user_env(user_env)
-            .on_exit(move |code| {
-                let _ = exit_tx.unbounded_send(PaneSignal::Exit(code));
-            });
-
-        // 远程预检失败:根本不 spawn(装机版是 `create_pty` 直接返回 Err,
-        // 连 PTY 都不开 —— 这里同样不留半开的会话)。
-        let pty = if let Some(err) = remote.preflight_error.clone() {
-            Err(anyhow::anyhow!(err))
-        } else {
-            let emulator = emulator.clone();
-            let ai = ai.clone();
-            PtySession::spawn_with_options(spec, options, move |bytes| {
-                // reader 线程:直接推进状态机,没有 IPC、没有批缓冲、没有序列化。
-                emulator.advance(bytes);
-                // AI 感知的输出旁路(命令 echo 回扫 + 输出活跃度)
-                ai.perception().observe_output(pty_id, bytes);
-                // Git 面板的输出旁路(外部跑了 git 命令 → 刷新变更与仓库元信息)。
-                // **这条线程上不跑任何模式匹配**:总闸关着时只有一次原子读,
-                // 开着时也只是把尾部字节塞进有界环形缓冲,5 条口径在主线程节拍上跑。
-                // 详见 `git_watch` 模块注释(后续 Y 批的 git 着色与本条共用)。
-                crate::git_watch::observe_output(pty_id, bytes);
-                let _ = tx.unbounded_send(PaneSignal::Output);
-            })
-        };
-
-        let (pty, spawn_error) = match pty {
-            Ok(pty) => (Some(pty), None),
-            Err(err) => {
-                let msg = format!("{err:#}");
-                eprintln!("[pane {pty_id}] PTY 启动失败: {msg}");
-                (None, Some(msg))
+        let persisted_incarnation = hosted
+            .as_ref()
+            .and_then(|launch| launch.expected_incarnation_id.clone());
+        let launch = if let Some(error) = remote.preflight_error.clone() {
+            Err(anyhow::anyhow!(error))
+        } else if let Some(hosted) = hosted {
+            match start_hosted(hosted, &spec, &user_env, pty_id, &emulator, &ai, &tx) {
+                Ok(outcome) => Ok(outcome),
+                Err(error)
+                    if error.is_code(HostErrorCode::IncarnationMismatch)
+                        || error.is_code(HostErrorCode::SessionExists)
+                        || error.is_code(HostErrorCode::ProtocolMismatch) =>
+                {
+                    Err(anyhow::Error::new(error))
+                }
+                Err(error) => start_legacy(
+                    spec,
+                    user_env,
+                    pty_id,
+                    &emulator,
+                    &ai,
+                    &tx,
+                    Some(format!(
+                        "Terminal host unavailable; using compatibility backend: {error}"
+                    )),
+                ),
             }
+        } else {
+            let notice = if remote.ssh_password.is_some() {
+                Some("Remote terminal uses the compatibility backend.".into())
+            } else {
+                Some("Terminal host unavailable; using compatibility backend.".into())
+            };
+            start_legacy(spec, user_env, pty_id, &emulator, &ai, &tx, notice)
         };
+
+        let (transport, terminal_incarnation_id, warm_reattached, backend_notice, spawn_error) =
+            match launch {
+                Ok(outcome) => (
+                    Some(outcome.transport),
+                    outcome.terminal_incarnation_id,
+                    outcome.warm_reattached,
+                    outcome.backend_notice,
+                    None,
+                ),
+                Err(error) => {
+                    let msg = format!("{error:#}");
+                    eprintln!("[pane {pty_id}] PTY 启动失败: {msg}");
+                    (
+                        None,
+                        persisted_incarnation.unwrap_or_default(),
+                        false,
+                        None,
+                        Some(msg),
+                    )
+                }
+            };
 
         // SSH 远程 pane:密码自动填充**紧贴 spawn** 注册(见 `RemoteLaunchExtras`
         // 的字段注释)。`disarm_on_input = true`:远程项目 pane 起来之后不再写
         // 任何命令,首个 `write` 即用户交互 —— 一打字就解除,避免 SSH 登录密码
         // 被灌进后续 `su` / `mysql -p` / `passwd` 的提示里。
-        if let (Some(session), Some(password)) = (pty.as_ref(), remote.ssh_password) {
-            session.arm_ssh_autofill(password, true);
+        if let (Some(session), Some(password)) = (transport.as_ref(), remote.ssh_password)
+            && let Err(error) = session.arm_ssh_autofill(password, true)
+        {
+            eprintln!("[pane {pty_id}] SSH autofill arm failed: {error:#}");
         }
 
         // WSL 启动器重写的一次性告知(`App.tsx:367-379`)。判定与重写早在
@@ -267,26 +516,37 @@ impl TerminalPane {
         //
         // 「一次性」= 每个新 PTY 各推一次,不去重(原版同款):同一个项目开两个
         // 终端就该看到两条,那正是「这两个都被改用 wsl.exe 启动了」的意思。
-        if let Some(wsl) = pty.as_ref().and_then(|p| p.wsl_override()) {
-            toast::push_wsl_override(&wsl.distro, &wsl.unix_path, cx);
+        if let Some((distro, unix_path)) = transport.as_ref().and_then(|p| p.wsl_override()) {
+            toast::push_wsl_override(&distro, &unix_path, cx);
         }
 
         let wake = cx.spawn(async move |this, cx| {
             while let Some(signal) = rx.next().await {
                 let mut exit: Option<Option<u32>> = None;
+                let mut disconnected: Option<String> = None;
                 match signal {
                     PaneSignal::Output => {}
                     PaneSignal::Exit(code) => exit = Some(code),
+                    PaneSignal::Disconnected(error) => disconnected = Some(error),
                 }
                 // 把已经排队的信号一次抽干,避免一次读一个信号地重绘。
                 while let Ok(extra) = rx.try_recv() {
-                    if let PaneSignal::Exit(code) = extra {
-                        exit = Some(code);
+                    match extra {
+                        PaneSignal::Output => {}
+                        PaneSignal::Exit(code) => exit = Some(code),
+                        PaneSignal::Disconnected(error) => disconnected = Some(error),
                     }
                 }
                 if this
                     .update(cx, |pane, cx| {
                         pane.drain_term_events(cx);
+                        if let Some(error) = disconnected.as_ref() {
+                            pane.backend_notice = Some(format!(
+                                "Terminal host disconnected; this view is read-only: {error}"
+                            ));
+                            pane.exited = true;
+                            cx.emit(PaneEvent::Exited(None));
+                        }
                         if let Some(code) = exit {
                             pane.exited = true;
                             cx.emit(PaneEvent::Exited(code));
@@ -301,7 +561,10 @@ impl TerminalPane {
                 // 重绘交给全局节拍器:多个 pane 一起刷屏也只出一帧,窗口在后台
                 // 时还会自动降到 5fps。**这里不再自己 `notify`** —— 缘由见
                 // `crate::redraw` 的模块注释。
-                if exit.is_none() && cx.update(|cx| redraw::request(this.clone(), cx)).is_err() {
+                if exit.is_none()
+                    && disconnected.is_none()
+                    && cx.update(|cx| redraw::request(this.clone(), cx)).is_err()
+                {
                     return;
                 }
                 cx.background_executor().timer(DRAIN_PERIOD).await;
@@ -337,8 +600,12 @@ impl TerminalPane {
                     // grid 尺寸是渲染侧量出来的(可用像素 ÷ cell 尺寸),PTY 必须跟着改,
                     // 否则 shell 换行位置与画面对不上。
                     let _ = this.update(cx, |pane: &mut TerminalPane, _cx| {
-                        let Some(pty) = pane.pty.as_ref() else { return };
-                        match pty.resize_if_changed(size.screen_lines as u16, size.columns as u16) {
+                        let Some(transport) = pane.transport.as_ref() else {
+                            return;
+                        };
+                        match transport
+                            .resize_if_changed(size.screen_lines as u16, size.columns as u16)
+                        {
                             // 只有**真实下发**的 resize 才开重绘冷却窗口:同尺寸的
                             // resize 不会引起 TUI 重绘,平白开冷却会漏掉真的 AI 活跃
                             Ok(true) => pane.ai.perception().note_resize(pane.pty_id),
@@ -392,7 +659,7 @@ impl TerminalPane {
         Self {
             pty_id,
             emulator,
-            pty,
+            transport,
             focus,
             view,
             style,
@@ -400,6 +667,9 @@ impl TerminalPane {
             ai,
             exited: false,
             spawn_error,
+            terminal_incarnation_id,
+            warm_reattached,
+            backend_notice,
             copied_tip: None,
             _tip_timer: None,
             search,
@@ -419,6 +689,14 @@ impl TerminalPane {
     /// 报成成功,手机侧只能干等 15s 超时。
     pub fn spawn_error(&self) -> Option<&str> {
         self.spawn_error.as_deref()
+    }
+
+    pub fn terminal_incarnation_id(&self) -> &TerminalIncarnationId {
+        &self.terminal_incarnation_id
+    }
+
+    pub fn warm_reattached(&self) -> bool {
+        self.warm_reattached
     }
 
     /// grid 的只读句柄。给悬停缩略图([`crate::pane_preview`])用 ——
@@ -512,8 +790,8 @@ impl TerminalPane {
             self.arm_marks(submits, cx);
         }
 
-        if let Some(pty) = self.pty.as_ref()
-            && let Err(err) = pty.write(bytes)
+        if let Some(transport) = self.transport.as_ref()
+            && let Err(err) = transport.write(bytes)
         {
             eprintln!("[pane {}] 写 PTY 失败: {err:#}", self.pty_id);
         }
@@ -703,7 +981,8 @@ impl TerminalPane {
             line,
             color: gpui::rgba(FLASH_COLOR).into(),
         };
-        self.view.update(cx, |view, cx| view.set_flash(Some(flash), cx));
+        self.view
+            .update(cx, |view, cx| view.set_flash(Some(flash), cx));
         self._flash_timer = Some(cx.spawn(async move |pane, cx| {
             cx.background_executor().timer(FLASH_DURATION).await;
             let _ = pane.update(cx, |pane: &mut TerminalPane, cx| {
@@ -761,8 +1040,8 @@ impl TerminalPane {
 
     /// 不经 AI 输入旁路的写入(终端应答 / 内部序列)。
     fn write_raw(&self, bytes: &[u8]) {
-        if let Some(pty) = self.pty.as_ref()
-            && let Err(err) = pty.write(bytes)
+        if let Some(transport) = self.transport.as_ref()
+            && let Err(err) = transport.write(bytes)
         {
             eprintln!("[pane {}] 写 PTY 失败: {err:#}", self.pty_id);
         }
@@ -782,8 +1061,10 @@ impl TerminalPane {
     ///
     /// PTY 已经没了(pane 起失败 / 已退出)时静默不做。
     pub fn arm_ssh_autofill(&self, password: String, disarm_on_input: bool) {
-        if let Some(session) = self.pty.as_ref() {
-            session.arm_ssh_autofill(password, disarm_on_input);
+        if let Some(session) = self.transport.as_ref()
+            && let Err(error) = session.arm_ssh_autofill(password, disarm_on_input)
+        {
+            eprintln!("[pane {}] SSH autofill arm failed: {error:#}", self.pty_id);
         }
     }
 
@@ -840,12 +1121,20 @@ impl TerminalPane {
 
     /// 关闭 pane:杀子进程 + 清掉 AI 感知里的一切痕迹 + 收掉查找条。
     pub fn shutdown(&mut self) {
-        if let Some(pty) = self.pty.as_mut()
-            && let Err(err) = pty.kill()
+        if let Some(transport) = self.transport.as_mut()
+            && let Err(err) = transport.kill()
         {
             eprintln!("[pane {}] kill 失败: {err:#}", self.pty_id);
         }
-        self.pty = None;
+        self.transport = None;
+        self.ai.remove_pane(self.pty_id);
+        self.close_search_state();
+    }
+
+    /// Releases the GUI attachment. Hosted terminals keep running; the legacy
+    /// transport still terminates when its `PtySession` is dropped.
+    pub fn detach(&mut self) {
+        self.transport = None;
         self.ai.remove_pane(self.pty_id);
         self.close_search_state();
     }
@@ -981,14 +1270,8 @@ mod tests {
 
 impl Drop for TerminalPane {
     fn drop(&mut self) {
-        // pane 实体被丢弃(项目移除 / 应用退出)时同样要回收 —— 否则后端留一个
-        // 谁也看不见、谁也杀不掉的孤儿子进程。
-        if self.pty.is_some() {
-            self.shutdown();
-        }
-        // shutdown 走过就已经摘干净了;这一条兜住「PTY 起失败的 pane 被丢弃」
-        // ——覆盖物栈里留一条死登记,那个 pty_id 复用之后查找条就再也开不出来。
-        self.close_search_state();
+        // Window/application teardown detaches hosted PTYs without killing them.
+        self.detach();
     }
 }
 
@@ -1231,7 +1514,10 @@ fn branch_entries_for_pty(pty_id: u32, cx: &mut gpui::App) -> Vec<menu::MenuEntr
                 )
             })
             .unwrap_or(crate::session_branch::BranchMenuSegment::None);
-        let path = s.project(&project_id).map(|p| p.path.clone()).unwrap_or_default();
+        let path = s
+            .project(&project_id)
+            .map(|p| p.path.clone())
+            .unwrap_or_default();
         (segment, path)
     };
     crate::branch_family::branch_menu_entries(&store, &project_id, &pane_id, project_path, &segment)
@@ -1398,7 +1684,10 @@ impl Render for TerminalPane {
                 .justify_center()
                 .text_size(crate::ui::font_px(13.0))
                 .text_color(crate::ui::color_error())
-                .child(format!("{}:{err}", crate::i18n::t("paneGroup", "startFailed")));
+                .child(format!(
+                    "{}:{err}",
+                    crate::i18n::t("paneGroup", "startFailed")
+                ));
         }
 
         // 焦点 / key_context / 按键 / 左键聚焦全在 TerminalView 里,这里只剩一行。
@@ -1415,12 +1704,8 @@ impl Render for TerminalPane {
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     let mods = event.modifiers;
-                    if !allows_local_menu(
-                        this.emulator.mode(),
-                        mods.shift,
-                        mods.alt,
-                        mods.control,
-                    ) {
+                    if !allows_local_menu(this.emulator.mode(), mods.shift, mods.alt, mods.control)
+                    {
                         return;
                     }
                     cx.stop_propagation();
@@ -1467,6 +1752,24 @@ impl Render for TerminalPane {
             // fixed 坐标,这里由布局白拿)
             .when_some(self.search_bar.clone(), |el, bar| {
                 el.child(div().absolute().top(px(6.0)).right(px(14.0)).child(bar))
+            })
+            .when_some(self.backend_notice.clone(), |el, notice| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top_0()
+                        .h(px(24.0))
+                        .flex()
+                        .items_center()
+                        .px_2()
+                        .bg(crate::ui::with_alpha(crate::ui::color_warning(), 0.12))
+                        .text_size(crate::ui::font_px(11.0))
+                        .text_color(crate::ui::color_warning())
+                        .overflow_hidden()
+                        .child(notice),
+                )
             })
             // 「已复制」气泡:叠在终端之上,坐标是元素相对值
             .when_some(self.copied_tip, |el, origin| {

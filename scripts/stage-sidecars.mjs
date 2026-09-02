@@ -1,7 +1,7 @@
-// 构建 mini-term 的 sidecar 二进制（miniterm-hook、mt-ssh-mcp、mt-ssh-cli）并就位。
+// 构建 mini-term 的辅助二进制并就位。
 //
-// 三个 sidecar 在独立工作区 sidecars/（版本号自成语义，不并入根 workspace），
-// 运行时由主程序按 current_exe().parent() 同目录裸名定位 —— 本脚本把产物
+// 三个 agent/SSH sidecar 在独立工作区 sidecars/；mt-terminal-host 跟随主程序
+// 版本，住在根 workspace。运行时都按 current_exe().parent() 同目录裸名定位，
 // 拷进主程序所在的 target/<profile>/，dev 与 release 同一套就位模型；
 // Windows 下再把便携 ConPTY 一并就位到同目录的 portable-conpty/。
 //
@@ -18,6 +18,7 @@ import { stagePortableConpty, WINDOWS_X64_TARGET } from './stage-conpty.mjs';
 
 const SIDECARS = ['miniterm-hook', 'mt-ssh-mcp', 'mt-ssh-cli'];
 const MANIFEST = join('sidecars', 'Cargo.toml');
+const ROOT_HELPERS = ['mt-terminal-host'];
 
 const args = process.argv.slice(2);
 const release = args.includes('--release');
@@ -49,18 +50,40 @@ console.log(`[stage-sidecars] triple=${triple} profile=${profile}`);
 console.log(`[stage-sidecars] cargo ${cargoArgs.join(' ')}`);
 execFileSync('cargo', cargoArgs, { stdio: 'inherit' });
 
+const rootArgs = ['build'];
+if (release) rootArgs.push('--release');
+if (explicitTarget) rootArgs.push('--target', explicitTarget);
+for (const name of ROOT_HELPERS) rootArgs.push('--bin', name);
+console.log(`[stage-sidecars] cargo ${rootArgs.join(' ')}`);
+execFileSync('cargo', rootArgs, { stdio: 'inherit' });
+
 // 带 --target 时产物在 target/<triple>/<profile>/，否则 target/<profile>/。
 const builtDir = explicitTarget
   ? join('sidecars', 'target', explicitTarget, profile)
   : join('sidecars', 'target', profile);
 
 mkdirSync(EXE_DIR, { recursive: true });
+const rootBuiltDir = explicitTarget
+  ? join('target', explicitTarget, profile)
+  : join('target', profile);
 
 for (const name of SIDECARS) {
   const from = join(builtDir, `${name}${ext}`);
   const staged = join(EXE_DIR, `${name}${ext}`);
   // 目标文件可能正被运行中的 MCP server / daemon 占用而无法覆盖 —— 跳过即可
   // （旧副本仍在，主程序照常起；要换新版本需先重启占用方）。
+  try {
+    copyFileSync(from, staged);
+    console.log(`[stage-sidecars] ${from} -> ${staged}`);
+  } catch (e) {
+    if (release) throw e;
+    console.warn(`[stage-sidecars] 跳过 ${staged}（可能正在运行）: ${e.code ?? e.message}`);
+  }
+}
+
+for (const name of ROOT_HELPERS) {
+  const from = join(rootBuiltDir, `${name}${ext}`);
+  const staged = join(EXE_DIR, `${name}${ext}`);
   try {
     copyFileSync(from, staged);
     console.log(`[stage-sidecars] ${from} -> ${staged}`);

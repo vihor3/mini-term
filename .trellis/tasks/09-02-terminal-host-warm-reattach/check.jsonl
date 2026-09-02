@@ -1,0 +1,5 @@
+{"file":".trellis/tasks/09-02-terminal-host-warm-reattach/prd.md","reason":"Acceptance criteria and explicit out-of-scope boundaries."}
+{"file":".trellis/tasks/09-02-terminal-host-warm-reattach/design.md","reason":"Protocol, ownership, security, replay, fallback, and packaging design."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/design.md","reason":"Normative parent architecture for warm reattach versus cold restore."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Stable routing and stale-incarnation rejection contract."}
+{"file":".trellis/spec/mt-pty/backend/index.md","reason":"PTY backend package guidance and lifecycle boundary."}

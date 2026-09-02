@@ -300,7 +300,7 @@ impl AppStore {
         cx.notify();
     }
 
-    /// 移除项目:先回收它所有 pane 的 PTY,再从配置里摘掉。
+    /// 移除项目注册: hosted pane 只 detach；legacy pane 按旧语义随实体回收。
     pub fn remove_project(&mut self, id: &str, cx: &mut Context<Self>) {
         if crate::workbench_area::project_has_dirty_documents(id, cx) {
             let project_name = self
@@ -322,7 +322,7 @@ impl AppStore {
             .map(|s| s.pty_ids())
             .unwrap_or_default();
         for pty_id in pty_ids {
-            self.dispose_terminal(pty_id, cx);
+            self.detach_terminal(pty_id, cx);
         }
 
         // Preserve the latest worktree layout before removing only the

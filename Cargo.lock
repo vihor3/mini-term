@@ -4267,6 +4267,7 @@ dependencies = [
  "mt-project",
  "mt-pty",
  "mt-relay",
+ "mt-terminal-host",
  "mt-ssh",
  "mt-terminal",
  "mt-ui",
@@ -4415,6 +4416,23 @@ dependencies = [
  "anyhow",
  "mt-pty",
  "parking_lot",
+]
+
+[[package]]
+name = "mt-terminal-host"
+version = "1.2.2"
+dependencies = [
+ "anyhow",
+ "base64",
+ "dirs 6.0.0",
+ "mt-core",
+ "mt-identity",
+ "mt-pty",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

@@ -9,9 +9,10 @@ routes a terminal/document workbench. It also applies to deferred callbacks
 that can focus or close a page after the active project binding may have
 changed.
 
-This contract establishes stable routing identities. It does not provide warm
-reattach to a detached OS process, terminal output replay, or authoritative
-remote-device identity.
+This contract establishes stable routing identities. Local PTY ownership, warm
+reattach, and output replay are layered through the
+`mt-terminal-host/backend/terminal-host-contract.md` contract. Authoritative remote-device
+identity remains outside this contract.
 
 ### 2. Signatures
 
@@ -82,8 +83,9 @@ pub fn reactivate_active_page(
 - `project_id` remains a compatibility/configuration key. `WorktreeId` owns
   workbench layout, document bucket, preview slot, and active-page state.
 - `PaneKey` and `TerminalSessionId` survive save/reload, split, move, reorder,
-  rename, and worktree switches. A new PTY spawn or explicit reconnect keeps
-  the session ID and mints a new `TerminalIncarnationId`.
+  rename, and worktree switches. A successful warm attach keeps both session
+  and incarnation. A new PTY spawn or explicit reconnect keeps the session ID
+  and mints a new `TerminalIncarnationId`.
 - The process-local `u32 pty_id` is an attachment handle only. It is not a
   persisted logical terminal identity.
 - A terminal event is accepted only when project binding, pane key, logical
@@ -110,6 +112,8 @@ pub fn reactivate_active_page(
 | New PTY is spawned | Preserve pane/session identity and rotate incarnation |
 | Pane is moved or reordered | Preserve pane key, session, incarnation, and current PTY attachment |
 | Remote/WSL identity is provisional | Route consistently but never present it as verified host authority |
+| Hosted session remains live after GUI restart | Attach-only and preserve its PID/incarnation |
+| Hosted session is missing or has a replay gap | Follow explicit cold recovery and rotate incarnation |
 
 ### 5. Good / Base / Bad Cases
 
@@ -117,8 +121,9 @@ pub fn reactivate_active_page(
   switching restores each worktree's own route.
 - Good: An Agents overlay opened on a document captures project and worktree;
   closing it after a project rebind does not focus the new worktree.
-- Base: A cold restart creates a new PTY incarnation while preserving the
-  logical terminal session and pane identity.
+- Base: A GUI restart warm-attaches when the host still owns the exact
+  incarnation; otherwise cold recovery creates a new incarnation while
+  preserving the logical terminal session and pane identity.
 - Bad: Recompute `WorktreeId` from whichever project is active when an async
   callback completes.
 - Bad: Treat `pty_id` as stable across process restart.

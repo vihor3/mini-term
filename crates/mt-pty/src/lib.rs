@@ -343,6 +343,14 @@ impl PtySession {
     pub fn wsl_override(&self) -> Option<&WslOverride> {
         self.wsl_override.as_ref()
     }
+    /// Returns the native child process identifier when the backend exposes it.
+    ///
+    /// The dedicated terminal host uses this only as an attachment diagnostic:
+    /// stable routing continues to use `TerminalSessionId` plus
+    /// `TerminalIncarnationId` rather than treating a reusable OS pid as identity.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.lock().process_id()
+    }
 
     /// 挂一个写入路径的旁路观察器:每次 [`write`](Self::write) 的原始字节都会
     /// 先交给它,再写进 PTY。上层用它把「用户键入」转发给别的模块做分析

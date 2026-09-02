@@ -31,6 +31,7 @@ mt-pty.workspace = true
 mt-config.workspace = true
 mt-identity.workspace = true
 # 界面布局(三栏比例 / 分屏树 / 窗口几何)的持久化。
+mt-terminal-host.workspace = true
 mt-layout.workspace = true
 mt-i18n.workspace = true
 mt-project.workspace = true

@@ -405,13 +405,14 @@ impl AppStore {
             )
         };
         let shell = self.resolve_shell(Some(&shell_name))?;
-        let (new_pty, incarnation_id) = self.start_pty(
+        let (new_pty, incarnation_id, _) = self.start_pty(
             &project,
             &shell,
             cwd.as_deref(),
             &tab_id,
             &pane_key,
             &terminal_session_id,
+            None,
             cx,
         );
 

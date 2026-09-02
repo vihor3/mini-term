@@ -21,7 +21,8 @@
   "children": [
     "09-02-worktree-catalog-v2",
     "09-02-orca-project-sidebar-workbench",
-    "09-02-stable-worktree-workbench-identity"
+    "09-02-stable-worktree-workbench-identity",
+    "09-02-terminal-host-warm-reattach"
   ],
   "parent": null,
   "relatedFiles": [],

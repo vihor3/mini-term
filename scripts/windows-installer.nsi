@@ -11,8 +11,8 @@
 ; 文件。这样旧版有、新版没有的残留文件不会留在安装目录里。用户数据在 AppData
 ; 下,卸载器不碰,升级不丢配置。详见 UNINSTALL_OLD 宏的注释。
 ;
-; 包内布局 = 运行时布局:mini-term.exe + 三个 sidecar + portable-conpty\ 全部
-; 平铺 $INSTDIR,与便携解压、target\<profile>\ 开发布局同构(「与 exe 同目录」
+; 包内布局 = 运行时布局:mini-term.exe + 三个 sidecar + mt-terminal-host.exe +
+; portable-conpty\ 全部平铺 $INSTDIR,与便携解压、target\<profile>\ 开发布局同构
 ; 定位铁律)。用户数据在 AppData 下,卸载不碰。
 ;
 ; 编译期必须 /D 传入(全部绝对路径):
@@ -104,6 +104,8 @@ LangString MSG_UNINST_FAIL ${LANG_SIMPCHINESE} "旧版本没有卸载干净(卸�
   Pop $0
   nsExec::Exec 'taskkill /F /IM mt-ssh-mcp.exe'
   Pop $0
+  nsExec::Exec 'taskkill /F /IM mt-terminal-host.exe'
+  Pop $0
 !macroend
 
 ; 跑旧版自己的卸载器。带 `_?=` 是关键:没有它,NSIS 卸载器会先把自己复制到
@@ -175,6 +177,7 @@ Section "Install"
   File "${SOURCE_DIR}\miniterm-hook.exe"
   File "${SOURCE_DIR}\mt-ssh-cli.exe"
   File "${SOURCE_DIR}\mt-ssh-mcp.exe"
+  File "${SOURCE_DIR}\mt-terminal-host.exe"
   SetOutPath "$INSTDIR\portable-conpty"
   File /r "${SOURCE_DIR}\portable-conpty\*"
   SetOutPath "$INSTDIR"
@@ -204,6 +207,7 @@ Section "Uninstall"
   Delete "$INSTDIR\mt-ssh-cli.exe"
   Delete "$INSTDIR\mt-ssh-mcp.exe"
   RMDir /r "$INSTDIR\portable-conpty"
+  Delete "$INSTDIR\mt-terminal-host.exe"
   Delete "$INSTDIR\uninstall.exe"
   ; 只删空目录:用户自选目录里若有别的东西,不动。
   RMDir "$INSTDIR"

@@ -1,0 +1,34 @@
+[package]
+name = "mt-terminal-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lib]
+name = "mt_terminal_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mt-terminal-host"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+dirs.workspace = true
+mt-core.workspace = true
+mt-identity.workspace = true
+mt-pty.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
