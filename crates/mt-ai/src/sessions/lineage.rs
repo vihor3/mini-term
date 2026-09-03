@@ -335,12 +335,9 @@ fn scan_codex_lineage(project_path: &str) -> Vec<LineageEdge> {
             {
                 // 分支标题:父会话用户消息序列做前缀比对,首条对不上的即
                 // 分叉后第一问(父文件已清理时拿不到,回落会话标题)
-                edge.branch_title =
-                    find_codex_session_file(&sessions_dir, &edge.parent_session_id)
-                        .map(|pp| codex_user_texts(&pp, 300))
-                        .and_then(|pt| {
-                            branch_title_from_texts(&pt, &codex_user_texts(&path, 300))
-                        });
+                edge.branch_title = find_codex_session_file(&sessions_dir, &edge.parent_session_id)
+                    .map(|pp| codex_user_texts(&pp, 300))
+                    .and_then(|pt| branch_title_from_texts(&pt, &codex_user_texts(&path, 300)));
                 edges.push(edge);
             }
             break;
