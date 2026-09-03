@@ -105,6 +105,10 @@ reqwest = { package = "zed-reqwest", version = "0.12.15-zed", default-features =
 # 依赖之上追加不动根 manifest(与 gpui-component 的 tree-sitter 同一手法)。
 gpui = { workspace = true, features = ["x11", "wayland"] }
 
+[target.'cfg(unix)'.dependencies]
+# Bounded local/WSL command timeouts kill the command's dedicated process group.
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 # 任务栏闪烁(FlashWindowEx)、提示音(MessageBeep / PlaySoundW)与系统托盘。
 # 版本跟随 gpui 已经在用的那个,不给依赖树引入第二份 windows crate。
@@ -124,7 +128,11 @@ windows = { version = "0.61", features = [
     # GlobalLock / GlobalSize 住在 Memory。gpui 自己的剪贴板只认
     # PNG/JFIF/GIF/SVG 四个**注册格式**,截图工具放的 CF_DIB 它一概读不到。
     "Win32_System_DataExchange",
+    # GitHub task command timeouts own descendants through a kill-on-close Job Object.
+    "Win32_System_JobObjects",
     "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_Security",
     # 托盘线程要注册自己的窗口类,RegisterClassW 的 hInstance 来自 GetModuleHandleW。
     "Win32_System_LibraryLoader",
     # Shell_NotifyIconW / NOTIFYICONDATAW —— 系统托盘图标的唯一入口。

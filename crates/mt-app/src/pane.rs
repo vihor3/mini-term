@@ -406,7 +406,7 @@ fn start_hosted(
                 return Err(error);
             }
         };
-        if session.descriptor() != &descriptor {
+        if !session.descriptor().same_process_as(&descriptor) {
             let _ = session.kill();
             return Err(HostClientError::recovery_unavailable(
                 "restored terminal descriptor changed before attach",
@@ -642,6 +642,7 @@ impl TerminalPane {
                     .update(cx, |pane, cx| {
                         pane.drain_term_events(cx);
                         if let Some(error) = disconnected.as_ref() {
+                            pane.transport = None;
                             pane.backend_notice = Some(format!(
                                 "Terminal host disconnected; this view is read-only: {error}"
                             ));

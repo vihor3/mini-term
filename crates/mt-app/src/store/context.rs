@@ -212,6 +212,22 @@ fn exact_terminal_route<'a>(
     })
 }
 
+fn preferred_agent_route_project_id<'a>(
+    candidate_project_ids: impl IntoIterator<Item = &'a str>,
+    active_project_id: Option<&str>,
+) -> Option<&'a str> {
+    candidate_project_ids.into_iter().min_by(|left, right| {
+        match (
+            active_project_id == Some(*left),
+            active_project_id == Some(*right),
+        ) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => left.cmp(right),
+        }
+    })
+}
+
 impl AppStore {
     /// Canonical path from the stable binding. The configured path is only a
     /// compatibility fallback when no canonical value has been persisted yet.
@@ -249,6 +265,7 @@ impl AppStore {
 
     fn resolve_agent_target(&self, run_id: &AgentRunId) -> Option<AgentTargetView> {
         let run = self.agent_runtime.run(run_id)?;
+        let mut candidates = Vec::new();
         for project in &self.config.projects {
             let Some(binding) = self.project_worktree_bindings.get(&project.id) else {
                 continue;
@@ -299,7 +316,7 @@ impl AppStore {
                 .project_execution_snapshot(&project.id)
                 .map(|snapshot| snapshot.host_label)
                 .unwrap_or_else(|_| run.route.execution_host_id.to_string());
-            return Some(AgentTargetView {
+            candidates.push(AgentTargetView {
                 run_id: run.run_id.clone(),
                 last_event_id: run.last_event_id.clone(),
                 project_id: project.id.clone(),
@@ -325,7 +342,16 @@ impl AppStore {
                 ),
             });
         }
-        None
+        let project_id = preferred_agent_route_project_id(
+            candidates
+                .iter()
+                .map(|candidate| candidate.project_id.as_str()),
+            self.active_project_id.as_deref(),
+        )?
+        .to_string();
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.project_id == project_id)
     }
 
     pub fn agent_target_views(&self) -> Vec<AgentTargetView> {
@@ -679,6 +705,36 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn shared_alias_route_selection_prefers_active_exact_candidate_in_any_order() {
+        for candidates in [
+            vec!["project-b", "project-a"],
+            vec!["project-a", "project-b"],
+        ] {
+            assert_eq!(
+                preferred_agent_route_project_id(candidates, Some("project-b")),
+                Some("project-b")
+            );
+        }
+    }
+
+    #[test]
+    fn shared_alias_route_selection_uses_project_id_without_active_candidate() {
+        for candidates in [
+            vec!["project-b", "project-a"],
+            vec!["project-a", "project-b"],
+        ] {
+            assert_eq!(
+                preferred_agent_route_project_id(candidates.clone(), None),
+                Some("project-a")
+            );
+            assert_eq!(
+                preferred_agent_route_project_id(candidates, Some("other-project")),
+                Some("project-a")
+            );
+        }
     }
 
     #[test]

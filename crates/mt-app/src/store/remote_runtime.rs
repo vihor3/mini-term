@@ -8,6 +8,8 @@ use mt_ssh::RemoteRuntimeSnapshot;
 use super::AppStore;
 use super::identity::AuthoritativeBindingInstall;
 
+const ERROR_SUMMARY_CHARS: usize = 512;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteRuntimePhase {
     Connecting,
@@ -71,6 +73,38 @@ fn connection_epoch_matches(result_epoch: u64, current_epoch: Option<u64>) -> bo
     current_epoch == Some(result_epoch)
 }
 
+fn bounded_error(message: &str) -> String {
+    let mut chars = message.chars();
+    let bounded = chars.by_ref().take(ERROR_SUMMARY_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionInvalidationAction {
+    Refresh { hydrate_after: bool },
+    HydrateFallback,
+    None,
+}
+
+fn connection_invalidation_action(
+    connection_available: bool,
+    pending_hydration: bool,
+) -> ConnectionInvalidationAction {
+    if connection_available {
+        ConnectionInvalidationAction::Refresh {
+            hydrate_after: pending_hydration,
+        }
+    } else if pending_hydration {
+        ConnectionInvalidationAction::HydrateFallback
+    } else {
+        ConnectionInvalidationAction::None
+    }
+}
+
 impl AppStore {
     #[allow(dead_code)]
     pub fn remote_runtime_state(&self, project_id: &str) -> Option<&RemoteRuntimeProjectState> {
@@ -97,17 +131,45 @@ impl AppStore {
         cx.notify();
     }
 
-    pub(super) fn invalidate_remote_runtime_connection(&mut self, connection_id: &str) {
+    pub(super) fn invalidate_remote_runtime_connection(
+        &mut self,
+        connection_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         self.invalidate_remote_agent_connection(connection_id);
+        let connection_available = self
+            .config
+            .ssh_connections
+            .iter()
+            .any(|connection| connection.id == connection_id);
         let affected = self
             .config
             .projects
             .iter()
             .filter(|project| project.ssh_connection_id.as_deref() == Some(connection_id))
-            .map(|project| project.id.clone())
+            .map(|project| {
+                let hydrate_after = self
+                    .remote_runtime_projects
+                    .get(&project.id)
+                    .is_some_and(|state| state.hydrate_after);
+                (project.id.clone(), hydrate_after)
+            })
             .collect::<Vec<_>>();
-        for project_id in affected {
+        for (project_id, pending_hydration) in affected {
             self.remote_runtime_projects.remove(&project_id);
+            match connection_invalidation_action(connection_available, pending_hydration) {
+                ConnectionInvalidationAction::Refresh { hydrate_after } => {
+                    if !self.request_remote_runtime(&project_id, hydrate_after, true, cx)
+                        && hydrate_after
+                    {
+                        self.hydrate_project(&project_id, cx);
+                    }
+                }
+                ConnectionInvalidationAction::HydrateFallback => {
+                    self.hydrate_project(&project_id, cx);
+                }
+                ConnectionInvalidationAction::None => {}
+            }
         }
     }
 
@@ -277,7 +339,11 @@ impl AppStore {
             .is_some_and(|state| state.hydrate_after);
 
         let (phase, snapshot, error) = match outcome {
-            Err(error) => (RemoteRuntimePhase::CompatibilityFallback, None, Some(error)),
+            Err(error) => (
+                RemoteRuntimePhase::CompatibilityFallback,
+                None,
+                Some(bounded_error(&error)),
+            ),
             Ok(snapshot) => {
                 match self.install_authoritative_remote_binding(&request.project_id, &snapshot, cx)
                 {
@@ -288,12 +354,12 @@ impl AppStore {
                     AuthoritativeBindingInstall::Deferred(reason) => (
                         RemoteRuntimePhase::RebindDeferred,
                         Some(snapshot),
-                        Some(reason),
+                        Some(bounded_error(&reason)),
                     ),
                     AuthoritativeBindingInstall::Failed(error) => (
                         RemoteRuntimePhase::CompatibilityFallback,
                         Some(snapshot),
-                        Some(error),
+                        Some(bounded_error(&error)),
                     ),
                 }
             }
@@ -404,5 +470,37 @@ mod tests {
         assert!(!connection_epoch_matches(8, Some(9)));
         assert!(!connection_epoch_matches(10, Some(9)));
         assert!(!connection_epoch_matches(9, None));
+    }
+
+    #[test]
+    fn connection_replacement_preserves_pending_hydration() {
+        assert_eq!(
+            connection_invalidation_action(true, true),
+            ConnectionInvalidationAction::Refresh {
+                hydrate_after: true
+            }
+        );
+        assert_eq!(
+            connection_invalidation_action(true, false),
+            ConnectionInvalidationAction::Refresh {
+                hydrate_after: false
+            }
+        );
+        assert_eq!(
+            connection_invalidation_action(false, true),
+            ConnectionInvalidationAction::HydrateFallback
+        );
+        assert_eq!(
+            connection_invalidation_action(false, false),
+            ConnectionInvalidationAction::None
+        );
+    }
+
+    #[test]
+    fn error_summary_is_bounded_by_characters() {
+        let source = "界".repeat(ERROR_SUMMARY_CHARS + 10);
+        let summary = bounded_error(&source);
+        assert_eq!(summary.chars().count(), ERROR_SUMMARY_CHARS + 3);
+        assert!(summary.ends_with("..."));
     }
 }

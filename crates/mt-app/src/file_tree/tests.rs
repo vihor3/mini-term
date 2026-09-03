@@ -2,6 +2,12 @@ use super::menu::FileMenuAction::*;
 use super::menu::{HeaderActionCapabilities, file_menu_actions, header_action_capabilities};
 use super::*;
 
+fn worktree(hex: char) -> WorktreeId {
+    format!("worktree-v1:{}", hex.to_string().repeat(64))
+        .parse()
+        .unwrap()
+}
+
 #[test]
 fn 文件行单击预览双击重命名() {
     assert_eq!(row_click_action(false, 1), RowClickAction::OpenPreview);
@@ -18,11 +24,6 @@ fn 目录单击展开双击重命名() {
 
 #[test]
 fn 同路径工作树恢复各自文件状态选择与滚动() {
-    let worktree = |hex: char| -> WorktreeId {
-        format!("worktree-v1:{}", hex.to_string().repeat(64))
-            .parse()
-            .unwrap()
-    };
     let worktree_a = worktree('a');
     let worktree_b = worktree('b');
     let root = PathBuf::from("/repo/shared");
@@ -62,6 +63,107 @@ fn 同路径工作树恢复各自文件状态选择与滚动() {
     );
     assert_eq!(restored_a.root_error.as_deref(), Some("last known warning"));
     assert_eq!(restored_a.scroll.offset().y, px(-72.0));
+}
+
+#[test]
+fn 同一工作树切换项目别名保留文件展示状态() {
+    let worktree = worktree('a');
+    let root = PathBuf::from("/repo/shared");
+    let selected = PathBuf::from("/repo/shared/lib.rs");
+    let mut cache = HashMap::new();
+    let mut state = FileTreeScopeState::empty();
+    state.entries.insert(
+        root.clone(),
+        vec![entry("lib.rs", "/repo/shared/lib.rs", false, false)],
+    );
+    state.selected_path = Some(selected.clone());
+    state.root_error = Some("last known warning".into());
+    state.scroll.set_offset(gpui::point(px(0.0), px(-96.0)));
+
+    let (preserved, had_presentation) =
+        swap_file_tree_scope(&mut cache, Some(&worktree), Some(&worktree), state);
+
+    assert!(had_presentation);
+    assert!(cache.is_empty());
+    assert_eq!(preserved.entries[&root][0].name, "lib.rs");
+    assert_eq!(preserved.selected_path.as_deref(), Some(selected.as_path()));
+    assert_eq!(preserved.root_error.as_deref(), Some("last known warning"));
+    assert_eq!(preserved.scroll.offset().y, px(-96.0));
+}
+
+#[test]
+fn 文件树作用域早退同时比较来源与工作树身份() {
+    let worktree_a = worktree('a');
+    let worktree_b = worktree('b');
+
+    assert!(file_tree_scope_matches(
+        Some(&worktree_a),
+        Some("project-a|/repo/shared|local"),
+        Some(&worktree_a),
+        Some("project-a|/repo/shared|local"),
+    ));
+    assert!(!file_tree_scope_matches(
+        Some(&worktree_a),
+        Some("project-a|/repo/shared|local"),
+        Some(&worktree_b),
+        Some("project-a|/repo/shared|local"),
+    ));
+    assert!(!file_tree_scope_matches(
+        Some(&worktree_a),
+        Some("project-a|/repo/shared|local"),
+        Some(&worktree_a),
+        Some("project-b|/repo/shared|local"),
+    ));
+}
+
+#[test]
+fn 目录请求所有者拒绝同来源下的工作树切换() {
+    let worktree_a = worktree('a');
+    let worktree_b = worktree('b');
+    let owner = DirectoryRequestOwner {
+        project_id: Some("project-a".into()),
+        worktree_id: Some(worktree_a.clone()),
+        source_signature: Some("project-a|/repo/shared|local".into()),
+        source_generation: 7,
+    };
+
+    assert!(owner.matches(
+        Some("project-a"),
+        Some(&worktree_a),
+        Some("project-a|/repo/shared|local"),
+        7,
+    ));
+    assert!(!owner.matches(
+        Some("project-a"),
+        Some(&worktree_b),
+        Some("project-a|/repo/shared|local"),
+        7,
+    ));
+}
+
+#[test]
+fn watcher来源键拒绝工作树变化与_aba_旧世代() {
+    let worktree_a = worktree('a');
+    let worktree_b = worktree('b');
+    let source = Some("project-a|/repo/shared|local");
+    let first_a = watcher_source_key(source, Some(&worktree_a), 7).unwrap();
+    let worktree_b_key = watcher_source_key(source, Some(&worktree_b), 8).unwrap();
+    let second_a = watcher_source_key(source, Some(&worktree_a), 9).unwrap();
+
+    assert_ne!(first_a, worktree_b_key);
+    assert_ne!(first_a, second_a);
+    assert!(watcher_event_matches(
+        Some(second_a.as_str()),
+        Some(Path::new("/repo/shared")),
+        Some(second_a.as_str()),
+        "/repo/shared",
+    ));
+    assert!(!watcher_event_matches(
+        Some(second_a.as_str()),
+        Some(Path::new("/repo/shared")),
+        Some(first_a.as_str()),
+        "/repo/shared",
+    ));
 }
 
 #[test]

@@ -358,9 +358,11 @@ pub struct AppStore {
     /// 终端区右缘「终端列表」竖条的显隐。与 [`Self::window_geometry`] 同类:
     /// config 里没有对应字段,只住在 `layout.db` 与这里。
     terminals_panel_visible: bool,
-    /// 攒着待写的项目 id 与「全局项脏了」标记。防抖窗口内拖十次分隔条只落一次盘,
-    /// 且不同项目的改动互不覆盖。
+    /// 攒着待写的项目 id 与「全局项脏了」标记。防抖窗口内拖十次分隔条只落一次盘。
     layout_dirty_projects: HashSet<String>,
+    /// 每个 worktree 最后一次排队保存来自哪个兼容项目别名。共享 worktree 只允许
+    /// 这个显式 owner 落盘,不能让 HashSet 遍历顺序决定最终内容。
+    layout_dirty_worktree_owners: HashMap<WorktreeId, String>,
     layout_globals_dirty: bool,
     /// 布局防抖的代号,与 [`Self::save_generation`] 同一套路。
     /// **单独一份**:布局与配置现在写去两个地方,共用代号会让其中一路饿死。
@@ -544,8 +546,12 @@ fn apply_layout_db(
         eprintln!("[identity] 读取持久化项目绑定失败: {error:#}");
         HashMap::new()
     });
-    let desired_bindings =
-        identity::resolve_project_bindings(&config.projects, &host_install_id, &existing_bindings);
+    let desired_bindings = identity::resolve_project_bindings(
+        &config.projects,
+        &config.ssh_connections,
+        &host_install_id,
+        &existing_bindings,
+    );
 
     let (mut layouts, bindings) = if may_reconcile {
         let now_ms = layout::unix_time_ms();
@@ -610,6 +616,7 @@ impl AppStore {
                 let host_install_id = HostInstallId::new();
                 let bindings = identity::resolve_project_bindings(
                     &config.projects,
+                    &config.ssh_connections,
                     &host_install_id,
                     &HashMap::new(),
                 )
@@ -696,6 +703,7 @@ impl AppStore {
             // 缺省展开:面板是发现型入口,收着的话没人知道它存在
             terminals_panel_visible: terminals_panel_visible.unwrap_or(true),
             layout_dirty_projects: HashSet::new(),
+            layout_dirty_worktree_owners: HashMap::new(),
             layout_globals_dirty: false,
             layout_save_generation: 0,
             _layout_save_task: None,

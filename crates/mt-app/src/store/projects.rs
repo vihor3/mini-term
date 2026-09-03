@@ -341,10 +341,10 @@ impl AppStore {
             self.detach_terminal(pty_id, cx);
         }
 
-        // Preserve the latest worktree layout before removing only the
-        // compatibility project registration.
-        self.save_project_layout_soon(id, cx);
-        self.flush_layout_now();
+        // Flush a departing alias only when it owns the latest pending shared
+        // snapshot. Older or ownerless aliases must not overwrite that row.
+        let worktree_is_shared = self.project_has_other_worktree_alias(id);
+        self.flush_project_layout_before_removal(id, worktree_is_shared, cx);
         self.project_states.remove(id);
         self.expanded_dirs.remove(id);
         self.done.retain_panes(&self.live_pane_ids());

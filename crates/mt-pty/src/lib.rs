@@ -111,19 +111,186 @@ pub const FOCUS_OUT_SEQ: &[u8] = b"\x1b[O";
 const EXIT_POLL_FAST: Duration = Duration::from_millis(50);
 const EXIT_POLL_SLOW: Duration = Duration::from_millis(250);
 const EXIT_POLL_FAST_WINDOW: Duration = Duration::from_secs(2);
+const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 type BoxedChild = Box<dyn Child + Send + Sync>;
+type BoxedMaster = Box<dyn MasterPty + Send>;
 type BoxedWriter = Box<dyn Write + Send>;
 type InputObserver = Box<dyn FnMut(&[u8]) + Send>;
 type ExitCallback = Box<dyn FnOnce(Option<u32>) + Send>;
+type ExitStatusCallback = Box<dyn FnOnce(PtyExitStatus) + Send>;
+type ExitFinalizer = Box<dyn FnOnce() + Send>;
+type MasterCloser = std::sync::mpsc::Sender<BoxedMaster>;
+
+/// 子进程结束后的 PTY 输出收口结果。
+///
+/// 正常路径只有在 reader 已交付完最后一批输出后才返回 [`Self::Drained`]。
+/// reader 失败返回 [`Self::OutputDrainFailed`];若后代进程继续持有 PTY/pipe
+/// 导致 reader 无法结束,watcher 会在有界等待后返回
+/// [`Self::OutputDrainTimedOut`]。两种异常都让上层明确失效恢复历史。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyExitStatus {
+    Drained(Option<u32>),
+    OutputDrainFailed(Option<u32>),
+    OutputDrainTimedOut(Option<u32>),
+}
+
+impl PtyExitStatus {
+    pub fn exit_code(self) -> Option<u32> {
+        match self {
+            Self::Drained(exit_code)
+            | Self::OutputDrainFailed(exit_code)
+            | Self::OutputDrainTimedOut(exit_code) => exit_code,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OutputPumpResult {
+    Drained,
+    Failed,
+}
+
+struct OutputPumpCompletion {
+    sender: Option<std::sync::mpsc::Sender<OutputPumpResult>>,
+    result: OutputPumpResult,
+}
+
+impl OutputPumpCompletion {
+    fn new(sender: std::sync::mpsc::Sender<OutputPumpResult>) -> Self {
+        Self {
+            sender: Some(sender),
+            result: OutputPumpResult::Failed,
+        }
+    }
+
+    fn mark_drained(&mut self) {
+        self.result = OutputPumpResult::Drained;
+    }
+}
+
+impl Drop for OutputPumpCompletion {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(self.result);
+        }
+    }
+}
+
+struct OutputDeliveryState {
+    accepting: bool,
+    active: usize,
+    cancelled: bool,
+    finalizer: Option<ExitFinalizer>,
+}
+
+struct OutputDelivery {
+    state: Mutex<OutputDeliveryState>,
+}
+
+struct OutputDeliveryGuard<'a> {
+    delivery: &'a OutputDelivery,
+}
+
+impl Drop for OutputDeliveryGuard<'_> {
+    fn drop(&mut self) {
+        self.delivery.finish_delivery();
+    }
+}
+
+impl OutputDelivery {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(OutputDeliveryState {
+                accepting: true,
+                active: 0,
+                cancelled: false,
+                finalizer: None,
+            }),
+        }
+    }
+
+    fn deliver(&self, callback: impl FnOnce()) -> bool {
+        {
+            let mut state = self.state.lock();
+            if !state.accepting {
+                return false;
+            }
+            state.active += 1;
+        }
+        let _guard = OutputDeliveryGuard { delivery: self };
+        callback();
+        true
+    }
+
+    fn finish_delivery(&self) {
+        let finalizer = {
+            let mut state = self.state.lock();
+            debug_assert!(state.active > 0);
+            state.active -= 1;
+            if state.active == 0 && !state.cancelled {
+                state.finalizer.take()
+            } else {
+                None
+            }
+        };
+        if let Some(finalizer) = finalizer {
+            finalizer();
+        }
+    }
+
+    fn finalize(&self, callback: impl FnOnce() + Send + 'static) {
+        let finalizer = {
+            let mut state = self.state.lock();
+            state.accepting = false;
+            if state.cancelled {
+                return;
+            }
+            debug_assert!(state.finalizer.is_none());
+            if state.active == 0 {
+                Some(Box::new(callback) as ExitFinalizer)
+            } else {
+                state.finalizer = Some(Box::new(callback));
+                None
+            }
+        };
+        if let Some(finalizer) = finalizer {
+            finalizer();
+        }
+    }
+
+    fn close(&self) {
+        let finalizer = {
+            let mut state = self.state.lock();
+            state.accepting = false;
+            state.cancelled = true;
+            state.finalizer.take()
+        };
+        drop(finalizer);
+    }
+}
+
+struct ExitWatcher {
+    child: Arc<Mutex<BoxedChild>>,
+    master: Arc<Mutex<Option<BoxedMaster>>>,
+    writer: Arc<Mutex<Option<BoxedWriter>>>,
+    master_closer: MasterCloser,
+    closing: Arc<std::sync::atomic::AtomicBool>,
+    output_delivery: Arc<OutputDelivery>,
+    output_done: std::sync::mpsc::Receiver<OutputPumpResult>,
+    output_drain_timeout: Duration,
+    on_exit: Option<ExitCallback>,
+    on_exit_status: Option<ExitStatusCallback>,
+}
 
 /// 一个活着的 PTY 会话。持有 master 端、子进程句柄和写入端。
 pub struct PtySession {
-    /// `Option` 只为 [`Drop`] 能把 master 移到后台线程上销毁(见 `impl Drop`),
-    /// 正常生命周期内始终是 `Some`。
-    master: Option<Box<dyn MasterPty + Send>>,
+    /// watcher 在子进程自然退出时也会取走 master,确保 ConPTY 输出泵收口。
+    master: Arc<Mutex<Option<BoxedMaster>>>,
     child: Arc<Mutex<BoxedChild>>,
-    writer: Arc<Mutex<BoxedWriter>>,
+    writer: Arc<Mutex<Option<BoxedWriter>>>,
+    /// Master 销毁可能阻塞;实际 drop 始终交给预先启动的后台 worker。
+    master_closer: MasterCloser,
     /// 写入路径的旁路观察器(见 [`PtySession::set_input_observer`])。
     input_observer: Arc<Mutex<Option<InputObserver>>>,
     /// SSH 密码自动填充状态,与 reader 线程共享。
@@ -133,6 +300,8 @@ pub struct PtySession {
     /// 会话正在被上层关闭。置位后退出 watcher 不再回调 —— `Drop` 里的 kill
     /// 不该被当成「子进程自己退出了」上报。
     closing: Arc<std::sync::atomic::AtomicBool>,
+    /// Rejects output reads that begin after exit finalization or active close.
+    output_delivery: Arc<OutputDelivery>,
     /// cwd 命中 WSL UNC 时的重写结果,上层可据此提示用户一次。
     wsl_override: Option<WslOverride>,
 }
@@ -169,10 +338,16 @@ pub struct PtyOptions {
     pub wsl_cwd_rewrite: bool,
     /// 子进程退出时回调一次,参数是退出码(取不到为 `None`)。
     ///
-    /// 在一条独立的 watcher 线程上调用,与 `on_output` **并发**:回调抵达时
-    /// reader 可能还在交付最后一批输出(Windows 上这批要等 PTY 销毁才吐完)。
+    /// 在一条独立的 watcher 线程上调用。reader 正常结束或已返回失败时，回调
+    /// 严格晚于最后一次 `on_output`。若 drain 超时，watcher 会停止接纳新输出并
+    /// 及时返回；已经开始的 `on_output` 完成后才触发退出回调。
     /// 会话被 [`Drop`] 掉时不会回调 —— 那是上层自己关掉的,不是子进程退出。
     pub on_exit: Option<ExitCallback>,
+    /// Extended exit callback used by lifecycle owners that must distinguish a clean
+    /// output drain from reader failure or timeout.
+    pub on_exit_status: Option<ExitStatusCallback>,
+    /// 子进程退出后等待 reader 输出泵收口的最大时长。
+    pub output_drain_timeout: Duration,
 }
 
 impl Default for PtyOptions {
@@ -183,6 +358,8 @@ impl Default for PtyOptions {
             reserved_env_prefixes: vec!["MINITERM_".to_string()],
             wsl_cwd_rewrite: true,
             on_exit: None,
+            on_exit_status: None,
+            output_drain_timeout: OUTPUT_DRAIN_TIMEOUT,
         }
     }
 }
@@ -195,6 +372,8 @@ impl std::fmt::Debug for PtyOptions {
             .field("reserved_env_prefixes", &self.reserved_env_prefixes)
             .field("wsl_cwd_rewrite", &self.wsl_cwd_rewrite)
             .field("on_exit", &self.on_exit.is_some())
+            .field("on_exit_status", &self.on_exit_status.is_some())
+            .field("output_drain_timeout", &self.output_drain_timeout)
             .finish()
     }
 }
@@ -215,12 +394,28 @@ impl PtyOptions {
         self
     }
 
+    pub fn with_output_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.output_drain_timeout = timeout;
+        self
+    }
+
     /// 注册退出回调(见 [`Self::on_exit`])。
     pub fn on_exit<F>(mut self, callback: F) -> Self
     where
         F: FnOnce(Option<u32>) + Send + 'static,
     {
         self.on_exit = Some(Box::new(callback));
+        self.on_exit_status = None;
+        self
+    }
+
+    /// Registers an exit callback that also reports whether PTY output drained cleanly.
+    pub fn on_exit_status<F>(mut self, callback: F) -> Self
+    where
+        F: FnOnce(PtyExitStatus) + Send + 'static,
+    {
+        self.on_exit_status = Some(Box::new(callback));
+        self.on_exit = None;
         self
     }
 }
@@ -251,15 +446,27 @@ impl PtySession {
     {
         // on_exit 要移进退出 watcher 线程,其余字段还要留给 plan 用,先摘出来。
         let on_exit = options.on_exit.take();
+        let on_exit_status = options.on_exit_status.take();
+        let output_drain_timeout = options.output_drain_timeout;
         let plan = launch::plan(&spec, &options);
-        Self::spawn_planned(plan, spec.rows, spec.cols, on_exit, on_output)
+        Self::spawn_planned(
+            plan,
+            spec.rows,
+            spec.cols,
+            output_drain_timeout,
+            on_exit,
+            on_exit_status,
+            on_output,
+        )
     }
 
     fn spawn_planned<F>(
         plan: launch::LaunchPlan,
         rows: u16,
         cols: u16,
+        output_drain_timeout: Duration,
         on_exit: Option<ExitCallback>,
+        on_exit_status: Option<ExitStatusCallback>,
         mut on_output: F,
     ) -> Result<Self>
     where
@@ -286,6 +493,11 @@ impl PtySession {
             cmd.env(k, v);
         }
 
+        // This worker is a fallible constructor step. Start it before the child so a
+        // thread-creation failure cannot leave a spawned process without an owner.
+        let master_closer = spawn_drop_worker("mini-term-pty-master-closer")
+            .context("start PTY master closer failed")?;
+
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -297,43 +509,68 @@ impl PtySession {
             .master
             .try_clone_reader()
             .context("clone reader 失败")?;
-        let writer: Arc<Mutex<BoxedWriter>> = Arc::new(Mutex::new(
+        let writer: Arc<Mutex<Option<BoxedWriter>>> = Arc::new(Mutex::new(Some(
             pair.master.take_writer().context("take writer 失败")?,
-        ));
+        )));
+        let master = Arc::new(Mutex::new(Some(pair.master)));
         let child: Arc<Mutex<BoxedChild>> = Arc::new(Mutex::new(child));
         let autofill: Arc<Mutex<Option<SshAutofill>>> = Arc::new(Mutex::new(None));
+        let (output_done_tx, output_done_rx) = std::sync::mpsc::channel();
+        let output_delivery = Arc::new(OutputDelivery::new());
 
         let autofill_for_reader = Arc::clone(&autofill);
         let writer_for_reader = Arc::clone(&writer);
+        let output_delivery_for_reader = Arc::clone(&output_delivery);
         std::thread::spawn(move || {
+            let mut completion = OutputPumpCompletion::new(output_done_tx);
             let mut buf = [0u8; READ_CHUNK];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => {
+                        completion.mark_drained();
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
                     Ok(n) => {
                         let chunk = &buf[..n];
-                        // SSH 密码自动填充先于交付:命中提示就直接回写密码,
-                        // 不经 `write` —— 那是用户输入通道,不该被自动填充污染。
-                        pump_autofill(&autofill_for_reader, &writer_for_reader, chunk);
-                        on_output(chunk);
+                        if !output_delivery_for_reader.deliver(|| {
+                            // SSH 密码自动填充先于交付:命中提示就直接回写密码,
+                            // 不经 `write` —— 那是用户输入通道,不该被自动填充污染。
+                            pump_autofill(&autofill_for_reader, &writer_for_reader, chunk);
+                            on_output(chunk);
+                        }) {
+                            break;
+                        }
                     }
                 }
             }
         });
 
         let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        if let Some(on_exit) = on_exit {
-            spawn_exit_watcher(Arc::clone(&child), Arc::clone(&closing), on_exit);
-        }
+        spawn_exit_watcher(ExitWatcher {
+            child: Arc::clone(&child),
+            master: Arc::clone(&master),
+            writer: Arc::clone(&writer),
+            master_closer: master_closer.clone(),
+            closing: Arc::clone(&closing),
+            output_delivery: Arc::clone(&output_delivery),
+            output_done: output_done_rx,
+            output_drain_timeout,
+            on_exit,
+            on_exit_status,
+        });
 
         Ok(Self {
-            master: Some(pair.master),
+            master,
             child,
             writer,
+            master_closer,
             input_observer: Arc::new(Mutex::new(None)),
             autofill,
             last_size: Mutex::new((cols, rows)),
             closing,
+            output_delivery,
             wsl_override: plan.wsl_override,
         })
     }
@@ -414,6 +651,7 @@ impl PtySession {
             self.disarm_ssh_autofill_on_user_input();
         }
         let mut writer = self.writer.lock();
+        let writer = writer.as_mut().context("PTY 已关闭")?;
         write_chunked(&mut **writer, bytes)
     }
 
@@ -436,6 +674,7 @@ impl PtySession {
             return Ok(false);
         }
         self.master
+            .lock()
             .as_ref()
             .context("PTY 已关闭")?
             .resize(PtySize {
@@ -469,10 +708,32 @@ impl Drop for PtySession {
     fn drop(&mut self) {
         self.closing
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.output_delivery.close();
         let _ = self.child.lock().kill();
-        if let Some(master) = self.master.take() {
-            std::thread::spawn(move || drop(master));
+        drop(self.writer.lock().take());
+        if let Some(master) = self.master.lock().take() {
+            queue_background_drop(&self.master_closer, master);
         }
+    }
+}
+
+fn spawn_drop_worker<T: Send + 'static>(name: &str) -> std::io::Result<std::sync::mpsc::Sender<T>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            for value in receiver {
+                drop(value);
+            }
+        })?;
+    Ok(sender)
+}
+
+fn queue_background_drop<T>(sender: &std::sync::mpsc::Sender<T>, value: T) {
+    if let Err(error) = sender.send(value) {
+        // Dropping here could be the unbounded ClosePseudoConsole call this
+        // worker exists to isolate, so a failed worker deliberately leaks it.
+        std::mem::forget(error.0);
     }
 }
 
@@ -509,7 +770,7 @@ fn write_chunked(writer: &mut dyn Write, bytes: &[u8]) -> Result<()> {
 /// 把一段 PTY 输出喂给 SSH 密码自动填充;命中密码提示则直接回写密码 + 回车。
 fn pump_autofill(
     autofill: &Arc<Mutex<Option<SshAutofill>>>,
-    writer: &Arc<Mutex<BoxedWriter>>,
+    writer: &Arc<Mutex<Option<BoxedWriter>>>,
     chunk: &[u8],
 ) {
     let password = {
@@ -521,6 +782,9 @@ fn pump_autofill(
     };
     if let Some(password) = password {
         let mut writer = writer.lock();
+        let Some(writer) = writer.as_mut() else {
+            return;
+        };
         let _ = writer.write_all(password.as_bytes());
         let _ = writer.write_all(b"\r");
         let _ = writer.flush();
@@ -534,12 +798,21 @@ fn pump_autofill(
 ///
 /// 线程自终结:会话被销毁时 [`Drop`] 会 kill 子进程,下一轮 `try_wait` 即拿到
 /// 结果退出循环(`closing` 已置位,不回调)。
-fn spawn_exit_watcher(
-    child: Arc<Mutex<BoxedChild>>,
-    closing: Arc<std::sync::atomic::AtomicBool>,
-    on_exit: ExitCallback,
-) {
+fn spawn_exit_watcher(watcher: ExitWatcher) {
     use std::sync::atomic::Ordering;
+
+    let ExitWatcher {
+        child,
+        master,
+        writer,
+        master_closer,
+        closing,
+        output_delivery,
+        output_done,
+        output_drain_timeout,
+        mut on_exit,
+        mut on_exit_status,
+    } = watcher;
 
     std::thread::spawn(move || {
         let started = Instant::now();
@@ -563,12 +836,40 @@ fn spawn_exit_watcher(
                 // 免得线程空转到进程结束。
                 Err(_) => None,
             };
-            if !closing.load(Ordering::Relaxed) {
-                on_exit(exit_code);
+            drop(writer.lock().take());
+            if let Some(master) = master.lock().take() {
+                queue_background_drop(&master_closer, master);
             }
+            let status = wait_for_output_drain(&output_done, output_drain_timeout, exit_code);
+            output_delivery.finalize(move || {
+                if !closing.load(Ordering::Relaxed) {
+                    if let Some(callback) = on_exit_status.take() {
+                        callback(status);
+                    }
+                    if let Some(callback) = on_exit.take() {
+                        callback(status.exit_code());
+                    }
+                }
+            });
             return;
         }
     });
+}
+
+fn wait_for_output_drain(
+    output_done: &std::sync::mpsc::Receiver<OutputPumpResult>,
+    timeout: Duration,
+    exit_code: Option<u32>,
+) -> PtyExitStatus {
+    match output_done.recv_timeout(timeout) {
+        Ok(OutputPumpResult::Drained) => PtyExitStatus::Drained(exit_code),
+        Ok(OutputPumpResult::Failed) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            PtyExitStatus::OutputDrainFailed(exit_code)
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            PtyExitStatus::OutputDrainTimedOut(exit_code)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -591,6 +892,17 @@ mod tests {
         PtySpawn {
             program: program.to_string(),
             args,
+            cwd: None,
+            env: Vec::new(),
+            rows: INITIAL_PTY_ROWS,
+            cols: INITIAL_PTY_COLS,
+        }
+    }
+
+    fn interactive_spec() -> PtySpawn {
+        PtySpawn {
+            program: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.to_string(),
+            args: Vec::new(),
             cwd: None,
             env: Vec::new(),
             rows: INITIAL_PTY_ROWS,
@@ -632,15 +944,15 @@ mod tests {
     fn spawn_streams_output_and_reports_exit_code() {
         enum SmokeEvent {
             Output(Vec<u8>),
-            Exit(Option<u32>),
+            Exit(PtyExitStatus),
         }
 
         let (tx, rx) = mpsc::channel();
         let exit_tx = tx.clone();
         let session = PtySession::spawn_with_options(
             smoke_spec(),
-            PtyOptions::default().on_exit(move |code| {
-                let _ = exit_tx.send(SmokeEvent::Exit(code));
+            PtyOptions::default().on_exit_status(move |status| {
+                let _ = exit_tx.send(SmokeEvent::Exit(status));
             }),
             move |bytes| {
                 let _ = tx.send(SmokeEvent::Output(bytes.to_vec()));
@@ -650,23 +962,138 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut output = Vec::new();
-        let mut exit_code = None;
-        while exit_code.is_none()
-            || !output
-                .windows(b"mt-pty-smoke".len())
-                .any(|w| w == b"mt-pty-smoke")
-        {
+        let exit_status = loop {
             let event = rx
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .expect("输出与退出回调未在 30s 内全部触发");
             match event {
                 SmokeEvent::Output(bytes) => output.extend_from_slice(&bytes),
-                SmokeEvent::Exit(code) => exit_code = Some(code),
+                SmokeEvent::Exit(status) => {
+                    assert!(
+                        output
+                            .windows(b"mt-pty-smoke".len())
+                            .any(|window| window == b"mt-pty-smoke"),
+                        "退出回调不得越过最后一批 PTY 输出"
+                    );
+                    break status;
+                }
+            }
+        };
+
+        assert_eq!(exit_status, PtyExitStatus::Drained(Some(0)));
+        assert!(
+            session.master.lock().is_none(),
+            "自然退出必须释放 PTY master"
+        );
+        assert!(
+            session.writer.lock().is_none(),
+            "自然退出必须释放 PTY writer"
+        );
+        drop(session);
+    }
+
+    #[test]
+    fn output_drain_timeout_is_bounded_and_closes_late_output() {
+        let (_done_tx, done_rx) = mpsc::channel::<OutputPumpResult>();
+        let started = Instant::now();
+        let status = wait_for_output_drain(&done_rx, Duration::from_millis(20), Some(7));
+
+        assert_eq!(status, PtyExitStatus::OutputDrainTimedOut(Some(7)));
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "输出泵超时必须有界"
+        );
+    }
+
+    #[test]
+    fn output_drain_failure_is_distinct_from_clean_eof() {
+        let (done_tx, done_rx) = mpsc::channel();
+        done_tx.send(OutputPumpResult::Failed).unwrap();
+
+        assert_eq!(
+            wait_for_output_drain(&done_rx, Duration::from_secs(1), Some(9)),
+            PtyExitStatus::OutputDrainFailed(Some(9))
+        );
+    }
+
+    #[test]
+    fn timeout_finalization_defers_exit_until_admitted_output_finishes() {
+        let delivery = Arc::new(OutputDelivery::new());
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let output_delivery = delivery.clone();
+        let output_order = order.clone();
+        let output = std::thread::spawn(move || {
+            assert!(output_delivery.deliver(|| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                output_order.lock().push("output");
+            }));
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let (_done_tx, done_rx) = mpsc::channel::<OutputPumpResult>();
+        let started = Instant::now();
+        let status = wait_for_output_drain(&done_rx, Duration::from_millis(20), Some(7));
+        assert_eq!(status, PtyExitStatus::OutputDrainTimedOut(Some(7)));
+        assert!(started.elapsed() < Duration::from_millis(250));
+
+        let exit_started = Instant::now();
+        let exit_order = order.clone();
+        delivery.finalize(move || {
+            exit_order.lock().push("exit");
+        });
+        assert!(exit_started.elapsed() < Duration::from_millis(100));
+        assert!(order.lock().is_empty());
+        assert!(
+            !delivery.deliver(|| order.lock().push("late-output")),
+            "a new output delivery was accepted after exit finalization"
+        );
+
+        release_tx.send(()).unwrap();
+        output.join().unwrap();
+        assert_eq!(&*order.lock(), &["output", "exit"]);
+    }
+
+    #[test]
+    fn on_exit_keeps_the_legacy_option_code_signature() {
+        let options = PtyOptions::default().on_exit(|exit_code: Option<u32>| {
+            let _ = exit_code;
+        });
+        assert!(options.on_exit.is_some());
+        assert!(options.on_exit_status.is_none());
+    }
+
+    #[test]
+    fn blocking_resource_destruction_runs_off_the_watcher_path() {
+        struct BlockingDrop {
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        }
+
+        impl Drop for BlockingDrop {
+            fn drop(&mut self) {
+                let _ = self.entered.send(());
+                let _ = self.release.recv();
             }
         }
 
-        assert_eq!(exit_code, Some(Some(0)));
-        drop(session);
+        let closer = spawn_drop_worker("mini-term-pty-test-closer").unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let started = Instant::now();
+        queue_background_drop(
+            &closer,
+            BlockingDrop {
+                entered: entered_tx,
+                release: release_rx,
+            },
+        );
+        assert!(started.elapsed() < Duration::from_millis(100));
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        release_tx.send(()).unwrap();
+        drop(closer);
     }
 
     #[test]
@@ -674,17 +1101,8 @@ mod tests {
         // 上层关 pane(drop)时 Drop 会 kill 子进程,那不是「子进程自己退出了」,
         // 不该回调 —— 否则 UI 刚删掉的 pane 又收到一条退出通知。
         let (tx, rx) = mpsc::channel();
-        let spec = PtySpawn {
-            program: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.to_string(),
-            args: Vec::new(), // 交互式 shell:不给输入就一直活着
-            cwd: None,
-            env: Vec::new(),
-            rows: INITIAL_PTY_ROWS,
-            cols: INITIAL_PTY_COLS,
-        };
-
         let session = PtySession::spawn_with_options(
-            spec,
+            interactive_spec(),
             PtyOptions::default().on_exit(move |code| {
                 let _ = tx.send(code);
             }),
@@ -704,7 +1122,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::<u8>::new()));
         let observer_sink = Arc::clone(&seen);
 
-        let session = PtySession::spawn(smoke_spec(), |_| {}).expect("spawn 失败");
+        let session = PtySession::spawn(interactive_spec(), |_| {}).expect("spawn 失败");
         session.set_input_observer(move |bytes| observer_sink.lock().extend_from_slice(bytes));
         session.write(b"hello\r").expect("write 失败");
         assert_eq!(&*seen.lock(), b"hello\r");
@@ -717,7 +1135,7 @@ mod tests {
 
     #[test]
     fn resize_dedupes_identical_size() {
-        let session = PtySession::spawn(smoke_spec(), |_| {}).expect("spawn 失败");
+        let session = PtySession::spawn(interactive_spec(), |_| {}).expect("spawn 失败");
         // 初始尺寸来自 spec,重复上报同尺寸不得下发 resize
         assert!(
             !session
@@ -732,7 +1150,7 @@ mod tests {
 
     #[test]
     fn user_input_disarms_autofill_when_flagged() {
-        let session = PtySession::spawn(smoke_spec(), |_| {}).expect("spawn 失败");
+        let session = PtySession::spawn(interactive_spec(), |_| {}).expect("spawn 失败");
         session.arm_ssh_autofill("secret".into(), true);
         session.write(b"l").expect("write 失败");
         assert!(
@@ -745,7 +1163,7 @@ mod tests {
     fn user_input_keeps_autofill_when_not_flagged() {
         // 「SSH 连接」菜单路径:arm 后紧跟的 ssh 命令写入不得解除,
         // 否则密码提示到达前 autofill 已被删。
-        let session = PtySession::spawn(smoke_spec(), |_| {}).expect("spawn 失败");
+        let session = PtySession::spawn(interactive_spec(), |_| {}).expect("spawn 失败");
         session.arm_ssh_autofill("secret".into(), false);
         session.write(b"ssh u@h\r").expect("write 失败");
         assert!(session.autofill.lock().is_some());
@@ -755,7 +1173,7 @@ mod tests {
     fn focus_events_do_not_disarm_autofill() {
         // 焦点进/出序列由终端自动发送,不是用户按键 —— 认证期碰上焦点切换
         // 不能把 autofill 解除掉,否则密码永远灌不进去。
-        let session = PtySession::spawn(smoke_spec(), |_| {}).expect("spawn 失败");
+        let session = PtySession::spawn(interactive_spec(), |_| {}).expect("spawn 失败");
         session.arm_ssh_autofill("secret".into(), true);
         session.write(FOCUS_IN_SEQ).expect("write 失败");
         session.write(FOCUS_OUT_SEQ).expect("write 失败");
@@ -780,8 +1198,8 @@ mod tests {
     fn pump_autofill_writes_password_and_newline_once() {
         let autofill = Arc::new(Mutex::new(Some(SshAutofill::new("secret".into(), false))));
         let written = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let sink: Arc<Mutex<BoxedWriter>> =
-            Arc::new(Mutex::new(Box::new(SharedSink(Arc::clone(&written)))));
+        let sink: Arc<Mutex<Option<BoxedWriter>>> =
+            Arc::new(Mutex::new(Some(Box::new(SharedSink(Arc::clone(&written))))));
 
         pump_autofill(&autofill, &sink, b"Last login: Mon\r\n");
         assert!(written.lock().is_empty(), "普通输出不该触发回写");

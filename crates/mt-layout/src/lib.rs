@@ -26,7 +26,7 @@
 //!   混进去等于给它装了个自毁开关。
 //! - **版本不匹配不重建**:见 [`SCHEMA_VERSION`] 的注释。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -52,7 +52,7 @@ use mt_identity::{
 /// 加字段一律走 `CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ADD COLUMN` 的加法路线,
 /// 读到**更高**的版本号(用户装过新版又降级回来)也照常读写 —— kv 表天生向前兼容,
 /// 不认识的 key 原样留着,新版装回去还在。
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (
@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS project_worktree_binding (
   worktree_id             TEXT NOT NULL,
   identity_source         TEXT NOT NULL,
   canonical_worktree_path TEXT,
+  identity_context        TEXT,
   updated_at_ms           INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_project_worktree_binding_worktree
@@ -174,6 +175,9 @@ pub struct ProjectWorktreeBinding {
     pub worktree_id: WorktreeId,
     pub identity_source: String,
     pub canonical_worktree_path: Option<String>,
+    /// Opaque resolver-owned provenance. `mt-layout` persists it but never
+    /// interprets it; missing values remain backward compatible.
+    pub identity_context: Option<String>,
 }
 
 /// Startup projection returned after bindings and layouts have been reconciled
@@ -247,6 +251,8 @@ impl LayoutStore {
         let tx = conn.transaction()?;
         tx.execute_batch(SCHEMA)
             .with_context(|| format!("增量升级布局库 schema 失败: {}", path.display()))?;
+        ensure_project_binding_identity_context_column(&tx)
+            .with_context(|| format!("升级项目绑定 provenance 失败: {}", path.display()))?;
         tx.commit()?;
 
         let store = Self {
@@ -426,21 +432,27 @@ impl LayoutStore {
     ///
     /// An existing destination worktree row always wins. If it is absent, a
     /// prior bound worktree row is copied before falling back to the project's
-    /// legacy mirror. Source rows are never deleted by reconciliation.
+    /// legacy mirror. Alias groups select one newest candidate per source tier,
+    /// with project ID as the stable tie-breaker, then project that layout to
+    /// every alias. Source rows are never deleted by reconciliation.
     pub fn reconcile_worktree_layouts(
         &self,
         desired_bindings: &[ProjectWorktreeBinding],
         now_ms: i64,
     ) -> Result<ReconciledProjectLayouts> {
         let mut seen_projects = HashSet::new();
-        let mut worktree_binding_counts = HashMap::new();
+        let mut bindings_by_worktree = BTreeMap::<WorktreeId, Vec<&ProjectWorktreeBinding>>::new();
         for binding in desired_bindings {
             if !seen_projects.insert(binding.project_id.as_str()) {
                 anyhow::bail!("重复的项目 worktree 绑定: {}", binding.project_id);
             }
-            *worktree_binding_counts
+            bindings_by_worktree
                 .entry(binding.worktree_id.clone())
-                .or_insert(0usize) += 1;
+                .or_default()
+                .push(binding);
+        }
+        for bindings in bindings_by_worktree.values_mut() {
+            bindings.sort_by(|left, right| left.project_id.cmp(&right.project_id));
         }
 
         let mut conn = self
@@ -450,82 +462,70 @@ impl LayoutStore {
         let tx = conn.transaction()?;
         let mut reconciled = ReconciledProjectLayouts::default();
 
-        for binding in desired_bindings {
-            let previous = load_project_binding_from(&tx, &binding.project_id)?;
-            let destination = load_worktree_layout_row(&tx, &binding.worktree_id)?;
-            let candidate = if let Some(row) = destination {
-                Some((LayoutRowSource::Destination, row))
-            } else {
-                let previous_row = if let Some(previous) = previous.as_ref().filter(|previous| {
-                    previous.worktree_id.as_str() != binding.worktree_id.as_str()
-                }) {
-                    load_worktree_layout_row(&tx, &previous.worktree_id)?
-                } else {
-                    None
-                };
-                if let Some(row) = previous_row {
-                    Some((LayoutRowSource::PreviousBinding, row))
-                } else {
-                    load_legacy_layout_row(&tx, &binding.project_id)?
-                        .map(|row| (LayoutRowSource::LegacyProject, row))
-                }
-            };
+        let mut reconciliation_groups = Vec::with_capacity(bindings_by_worktree.len());
+        for (worktree_id, bindings) in bindings_by_worktree {
+            let candidate = select_reconciliation_candidate(&tx, &worktree_id, &bindings)?;
+            reconciliation_groups.push((worktree_id, bindings, candidate));
+        }
 
-            if let Some((source, row)) = candidate {
-                match decode_saved_layout(&row.layout_json, Some(&binding.worktree_id)) {
+        for (worktree_id, bindings, candidate) in reconciliation_groups {
+            if let Some(candidate) = candidate {
+                match decode_saved_layout(&candidate.row.layout_json, Some(&worktree_id)) {
                     Ok(decoded) => {
                         if decoded.repaired {
                             eprintln!(
-                                "[layout] 项目 {} 从 {} 修复布局: {}",
-                                binding.project_id,
-                                source.label(),
+                                "[layout] worktree {} 从 {} 修复布局: {}",
+                                worktree_id,
+                                candidate.label(),
                                 decoded.stats.summary()
                             );
                         }
                         upsert_worktree_layout_if_changed(
                             &tx,
-                            &binding.worktree_id,
+                            &worktree_id,
                             &decoded.normalized_json,
                             now_ms,
                         )?;
-                        let preserve_conflicting_legacy =
-                            matches!(source, LayoutRowSource::Destination)
-                                && worktree_binding_counts
-                                    .get(&binding.worktree_id)
-                                    .is_some_and(|count| *count > 1)
+                        for binding in &bindings {
+                            let selected_legacy_owner = candidate.legacy_owner();
+                            let preserve_conflicting_legacy = bindings.len() > 1
+                                && selected_legacy_owner != Some(binding.project_id.as_str())
                                 && load_legacy_layout_row(&tx, &binding.project_id)?.is_some_and(
                                     |legacy| legacy.layout_json != decoded.normalized_json,
                                 );
-                        if preserve_conflicting_legacy {
-                            eprintln!(
-                                "[layout] 项目 {} 与共享 worktree {} 的 legacy 布局冲突; 保留 legacy 行并使用目标 worktree 布局",
-                                binding.project_id, binding.worktree_id
-                            );
-                        } else {
-                            upsert_legacy_layout_if_changed(
-                                &tx,
-                                &binding.project_id,
-                                &decoded.normalized_json,
-                                now_ms,
-                            )?;
+                            if preserve_conflicting_legacy {
+                                eprintln!(
+                                    "[layout] 项目 {} 与共享 worktree {} 的 legacy 布局冲突; 保留 legacy 行并使用已选 worktree 布局",
+                                    binding.project_id, worktree_id
+                                );
+                            } else {
+                                upsert_legacy_layout_if_changed(
+                                    &tx,
+                                    &binding.project_id,
+                                    &decoded.normalized_json,
+                                    now_ms,
+                                )?;
+                            }
+                            reconciled
+                                .layouts
+                                .insert(binding.project_id.clone(), decoded.layout.clone());
                         }
-                        reconciled
-                            .layouts
-                            .insert(binding.project_id.clone(), decoded.layout);
                     }
                     Err(error) => eprintln!(
-                        "[layout] 项目 {} 的 {} 布局无法恢复,该行保持原样: {}",
-                        binding.project_id,
-                        source.label(),
+                        "[layout] worktree {} 的 {} 布局无法恢复,该行保持原样: {}",
+                        worktree_id,
+                        candidate.label(),
                         error
                     ),
                 }
             }
 
-            upsert_project_binding(&tx, binding, now_ms)?;
-            reconciled
-                .bindings
-                .insert(binding.project_id.clone(), binding.clone());
+            for binding in bindings {
+                upsert_project_binding(&tx, binding, now_ms)?;
+                reconciled
+                    .bindings
+                    .insert(binding.project_id.clone(), binding.clone());
+            }
         }
 
         tx.commit()?;
@@ -751,6 +751,7 @@ struct RawProjectWorktreeBinding {
     worktree_id: String,
     identity_source: String,
     canonical_worktree_path: Option<String>,
+    identity_context: Option<String>,
 }
 
 impl RawProjectWorktreeBinding {
@@ -772,13 +773,15 @@ impl RawProjectWorktreeBinding {
             worktree_id,
             identity_source: self.identity_source,
             canonical_worktree_path: self.canonical_worktree_path,
+            identity_context: self.identity_context,
         })
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct StoredLayoutRow {
     layout_json: String,
+    updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -796,6 +799,117 @@ impl LayoutRowSource {
             Self::LegacyProject => "legacy project",
         }
     }
+}
+
+#[derive(Debug)]
+struct ReconciliationCandidate {
+    source: LayoutRowSource,
+    owner_project_id: Option<String>,
+    source_key: String,
+    row: StoredLayoutRow,
+}
+
+impl ReconciliationCandidate {
+    fn label(&self) -> String {
+        match self.owner_project_id.as_deref() {
+            Some(project_id) => format!("{} ({project_id})", self.source.label()),
+            None => self.source.label().to_string(),
+        }
+    }
+
+    fn legacy_owner(&self) -> Option<&str> {
+        if matches!(self.source, LayoutRowSource::LegacyProject) {
+            self.owner_project_id.as_deref()
+        } else {
+            None
+        }
+    }
+}
+
+fn select_reconciliation_candidate(
+    conn: &Connection,
+    worktree_id: &WorktreeId,
+    bindings: &[&ProjectWorktreeBinding],
+) -> Result<Option<ReconciliationCandidate>> {
+    if let Some(row) = load_worktree_layout_row(conn, worktree_id)? {
+        return Ok(Some(ReconciliationCandidate {
+            source: LayoutRowSource::Destination,
+            owner_project_id: None,
+            source_key: worktree_id.as_str().to_string(),
+            row,
+        }));
+    }
+
+    let mut previous_candidates = Vec::new();
+    for binding in bindings {
+        let Some(previous) = load_project_binding_from(conn, &binding.project_id)? else {
+            continue;
+        };
+        if previous.worktree_id.as_str() == worktree_id.as_str() {
+            continue;
+        }
+        let Some(row) = load_worktree_layout_row(conn, &previous.worktree_id)? else {
+            continue;
+        };
+        previous_candidates.push(ReconciliationCandidate {
+            source: LayoutRowSource::PreviousBinding,
+            owner_project_id: Some(binding.project_id.clone()),
+            source_key: previous.worktree_id.as_str().to_string(),
+            row,
+        });
+    }
+    if let Some(candidate) = newest_reconciliation_candidate(previous_candidates) {
+        return Ok(Some(candidate));
+    }
+
+    let mut legacy_candidates = Vec::new();
+    for binding in bindings {
+        let Some(row) = load_legacy_layout_row(conn, &binding.project_id)? else {
+            continue;
+        };
+        legacy_candidates.push(ReconciliationCandidate {
+            source: LayoutRowSource::LegacyProject,
+            owner_project_id: Some(binding.project_id.clone()),
+            source_key: binding.project_id.clone(),
+            row,
+        });
+    }
+    Ok(newest_reconciliation_candidate(legacy_candidates))
+}
+
+fn newest_reconciliation_candidate(
+    mut candidates: Vec<ReconciliationCandidate>,
+) -> Option<ReconciliationCandidate> {
+    candidates.sort_by(|left, right| {
+        right
+            .row
+            .updated_at_ms
+            .cmp(&left.row.updated_at_ms)
+            .then_with(|| left.owner_project_id.cmp(&right.owner_project_id))
+            .then_with(|| left.source_key.cmp(&right.source_key))
+    });
+    candidates.into_iter().next()
+}
+
+fn ensure_project_binding_identity_context_column(conn: &Connection) -> Result<()> {
+    let exists = conn
+        .query_row(
+            "SELECT 1
+             FROM pragma_table_info('project_worktree_binding')
+             WHERE name = 'identity_context'
+             LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !exists {
+        conn.execute_batch(
+            "ALTER TABLE project_worktree_binding
+             ADD COLUMN identity_context TEXT",
+        )?;
+    }
+    Ok(())
 }
 
 fn definitely_not_sqlite(path: &Path) -> Result<bool> {
@@ -820,6 +934,7 @@ fn raw_binding_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawProjectW
         worktree_id: row.get(3)?,
         identity_source: row.get(4)?,
         canonical_worktree_path: row.get(5)?,
+        identity_context: row.get(6)?,
     })
 }
 
@@ -828,7 +943,7 @@ fn load_project_bindings_from(
 ) -> Result<HashMap<String, ProjectWorktreeBinding>> {
     let mut stmt = conn.prepare(
         "SELECT project_id, execution_host_id, repo_id, worktree_id,
-                identity_source, canonical_worktree_path
+                identity_source, canonical_worktree_path, identity_context
          FROM project_worktree_binding",
     )?;
     let rows = stmt.query_map([], raw_binding_from_row)?;
@@ -855,7 +970,7 @@ fn load_project_binding_from(
     let raw = conn
         .query_row(
             "SELECT project_id, execution_host_id, repo_id, worktree_id,
-                    identity_source, canonical_worktree_path
+                    identity_source, canonical_worktree_path, identity_context
              FROM project_worktree_binding WHERE project_id = ?1",
             params![project_id],
             raw_binding_from_row,
@@ -890,21 +1005,24 @@ fn upsert_project_binding(
     conn.execute(
         "INSERT INTO project_worktree_binding(
            project_id, execution_host_id, repo_id, worktree_id, identity_source,
-           canonical_worktree_path, updated_at_ms
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+           canonical_worktree_path, identity_context, updated_at_ms
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(project_id) DO UPDATE SET
            execution_host_id = excluded.execution_host_id,
            repo_id = excluded.repo_id,
            worktree_id = excluded.worktree_id,
            identity_source = excluded.identity_source,
            canonical_worktree_path = excluded.canonical_worktree_path,
+           identity_context = excluded.identity_context,
            updated_at_ms = excluded.updated_at_ms
          WHERE project_worktree_binding.execution_host_id IS NOT excluded.execution_host_id
             OR project_worktree_binding.repo_id IS NOT excluded.repo_id
             OR project_worktree_binding.worktree_id IS NOT excluded.worktree_id
             OR project_worktree_binding.identity_source IS NOT excluded.identity_source
             OR project_worktree_binding.canonical_worktree_path
-               IS NOT excluded.canonical_worktree_path",
+               IS NOT excluded.canonical_worktree_path
+            OR project_worktree_binding.identity_context
+               IS NOT excluded.identity_context",
         params![
             binding.project_id.as_str(),
             binding.execution_host_id.as_str(),
@@ -912,6 +1030,7 @@ fn upsert_project_binding(
             binding.worktree_id.as_str(),
             binding.identity_source.as_str(),
             binding.canonical_worktree_path.as_deref(),
+            binding.identity_context.as_deref(),
             now_ms,
         ],
     )?;
@@ -923,11 +1042,12 @@ fn load_worktree_layout_row(
     worktree_id: &WorktreeId,
 ) -> Result<Option<StoredLayoutRow>> {
     conn.query_row(
-        "SELECT layout_json FROM worktree_layout WHERE worktree_id = ?1",
+        "SELECT layout_json, updated_at_ms FROM worktree_layout WHERE worktree_id = ?1",
         params![worktree_id.as_str()],
         |row| {
             Ok(StoredLayoutRow {
                 layout_json: row.get(0)?,
+                updated_at_ms: row.get(1)?,
             })
         },
     )
@@ -937,11 +1057,12 @@ fn load_worktree_layout_row(
 
 fn load_legacy_layout_row(conn: &Connection, project_id: &str) -> Result<Option<StoredLayoutRow>> {
     conn.query_row(
-        "SELECT layout_json FROM project_layout WHERE project_id = ?1",
+        "SELECT layout_json, updated_at_ms FROM project_layout WHERE project_id = ?1",
         params![project_id],
         |row| {
             Ok(StoredLayoutRow {
                 layout_json: row.get(0)?,
+                updated_at_ms: row.get(1)?,
             })
         },
     )
@@ -950,12 +1071,14 @@ fn load_legacy_layout_row(conn: &Connection, project_id: &str) -> Result<Option<
 }
 
 fn load_all_legacy_layout_rows(conn: &Connection) -> Result<Vec<(String, StoredLayoutRow)>> {
-    let mut stmt = conn.prepare("SELECT project_id, layout_json FROM project_layout")?;
+    let mut stmt =
+        conn.prepare("SELECT project_id, layout_json, updated_at_ms FROM project_layout")?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             StoredLayoutRow {
                 layout_json: row.get(1)?,
+                updated_at_ms: row.get(2)?,
             },
         ))
     })?;
@@ -1727,6 +1850,7 @@ mod tests {
             worktree_id,
             identity_source: "authoritative-local-git".into(),
             canonical_worktree_path: Some(worktree_path.into()),
+            identity_context: None,
         }
     }
 
@@ -1986,7 +2110,8 @@ mod tests {
     fn worktree_保存会归一化并双写且绑定可只读加载() {
         let dir = temp_dir("dual-write");
         let store = LayoutStore::open_at(&dir).unwrap();
-        let binding = binding("p1", "/repo/main");
+        let mut binding = binding("p1", "/repo/main");
+        binding.identity_context = Some("test-authority-v1".into());
         store
             .save_worktree_layout(&binding, &layout("cmd"), 10)
             .unwrap();
@@ -2017,6 +2142,105 @@ mod tests {
 
         let bindings = store.load_project_bindings().unwrap();
         assert_eq!(bindings.get("p1"), Some(&binding));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn schema_v2_adds_identity_context_without_rewriting_existing_data() {
+        let dir = temp_dir("schema-v2-identity-context");
+        let path = dir.join("layout.db");
+        let expected = binding("p1", "/repo/main");
+        let layout_json = serde_json::to_string(&layout("v2-shell")).unwrap();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (
+                   key   TEXT PRIMARY KEY,
+                   value TEXT NOT NULL
+                 );
+                 INSERT INTO meta(key, value) VALUES('schema_version', '2');
+                 CREATE TABLE project_worktree_binding (
+                   project_id              TEXT PRIMARY KEY,
+                   execution_host_id       TEXT NOT NULL,
+                   repo_id                 TEXT NOT NULL,
+                   worktree_id             TEXT NOT NULL,
+                   identity_source         TEXT NOT NULL,
+                   canonical_worktree_path TEXT,
+                   updated_at_ms           INTEGER NOT NULL
+                 );
+                 CREATE TABLE worktree_layout (
+                   worktree_id    TEXT PRIMARY KEY,
+                   layout_json   TEXT NOT NULL,
+                   updated_at_ms INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO project_worktree_binding(
+                   project_id, execution_host_id, repo_id, worktree_id,
+                   identity_source, canonical_worktree_path, updated_at_ms
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    expected.project_id.as_str(),
+                    expected.execution_host_id.as_str(),
+                    expected.repo_id.as_str(),
+                    expected.worktree_id.as_str(),
+                    expected.identity_source.as_str(),
+                    expected.canonical_worktree_path.as_deref(),
+                    17_i64,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO worktree_layout(worktree_id, layout_json, updated_at_ms)
+                 VALUES(?1, ?2, ?3)",
+                params![expected.worktree_id.as_str(), layout_json.as_str(), 19_i64],
+            )
+            .unwrap();
+        }
+
+        let store = LayoutStore::open_at(&dir).unwrap();
+        assert_eq!(
+            store.load_project_bindings().unwrap().get("p1"),
+            Some(&expected)
+        );
+        let conn = store.conn.lock().unwrap();
+        let migrated_version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migrated_version, SCHEMA_VERSION.to_string());
+        let identity_context_columns: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('project_worktree_binding')
+                 WHERE name = 'identity_context'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(identity_context_columns, 1);
+        let persisted_binding: (Option<String>, i64) = conn
+            .query_row(
+                "SELECT identity_context, updated_at_ms
+                 FROM project_worktree_binding WHERE project_id = 'p1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(persisted_binding, (None, 17));
+        let persisted_layout: (String, i64) = conn
+            .query_row(
+                "SELECT layout_json, updated_at_ms FROM worktree_layout
+                 WHERE worktree_id = ?1",
+                params![expected.worktree_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(persisted_layout, (layout_json, 19));
+        drop(conn);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -2103,6 +2327,126 @@ mod tests {
             store.load_project_bindings().unwrap(),
             HashMap::from([("p1".to_string(), first), ("p2".to_string(), second)])
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 共享_worktree_协调与输入顺序无关() {
+        fn reconcile(order: [&str; 2], label: &str, older_json: &str, newer_json: &str) -> String {
+            let dir = temp_dir(label);
+            let store = LayoutStore::open_at(&dir).unwrap();
+            let first = binding("p1", "/repo/shared");
+            let second = binding("p2", "/repo/shared");
+            let bindings = HashMap::from([
+                (first.project_id.clone(), first.clone()),
+                (second.project_id.clone(), second.clone()),
+            ]);
+            {
+                let conn = store.conn.lock().unwrap();
+                upsert_legacy_layout(&conn, "p1", older_json, 10).unwrap();
+                upsert_legacy_layout(&conn, "p2", newer_json, 20).unwrap();
+            }
+            let desired = order
+                .iter()
+                .map(|project_id| bindings.get(*project_id).unwrap().clone())
+                .collect::<Vec<_>>();
+
+            let reconciled = store.reconcile_worktree_layouts(&desired, 30).unwrap();
+            let first_layout_json =
+                serde_json::to_string(reconciled.layouts.get("p1").unwrap()).unwrap();
+            let second_layout_json =
+                serde_json::to_string(reconciled.layouts.get("p2").unwrap()).unwrap();
+            let destination_json = worktree_json(&store, &first.worktree_id).unwrap();
+            assert_eq!(first_layout_json, second_layout_json);
+            assert_eq!(first_layout_json, destination_json);
+            assert_eq!(
+                first_shell(
+                    &serde_json::from_str::<SavedProjectLayout>(
+                        &legacy_json(&store, "p1").unwrap(),
+                    )
+                    .unwrap(),
+                ),
+                "older-shell",
+                "未选中的冲突 legacy 镜像必须保留"
+            );
+            fs::remove_dir_all(&dir).ok();
+            destination_json
+        }
+
+        let target = binding("seed", "/repo/shared");
+        let mut older = layout("older-shell");
+        let mut newer = layout("newer-shell");
+        normalize_saved_layout_stable_ids(
+            &mut older,
+            Some(&target.worktree_id),
+            &mut SalvageStats::default(),
+        );
+        normalize_saved_layout_stable_ids(
+            &mut newer,
+            Some(&target.worktree_id),
+            &mut SalvageStats::default(),
+        );
+        let older_json = serde_json::to_string(&older).unwrap();
+        let newer_json = serde_json::to_string(&newer).unwrap();
+
+        let forward = reconcile(
+            ["p1", "p2"],
+            "shared-worktree-forward",
+            &older_json,
+            &newer_json,
+        );
+        let reverse = reconcile(
+            ["p2", "p1"],
+            "shared-worktree-reverse",
+            &older_json,
+            &newer_json,
+        );
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            first_shell(&serde_json::from_str::<SavedProjectLayout>(&forward).unwrap()),
+            "newer-shell"
+        );
+    }
+
+    #[test]
+    fn 跨_worktree_协调在写入前冻结全部候选() {
+        let dir = temp_dir("cross-worktree-candidate-snapshot");
+        let store = LayoutStore::open_at(&dir).unwrap();
+        let old_first = binding("p1", "/repo/first");
+        let old_second = binding("p2", "/repo/second");
+        let new_first = binding("p1", "/repo/second");
+        let new_second = binding("p2", "/repo/first");
+        assert_eq!(old_first.worktree_id, new_second.worktree_id);
+        assert_eq!(old_second.worktree_id, new_first.worktree_id);
+
+        let first_legacy = serde_json::to_string(&layout("first-shell")).unwrap();
+        let second_legacy = serde_json::to_string(&layout("second-shell")).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            upsert_project_binding(&conn, &old_first, 1).unwrap();
+            upsert_project_binding(&conn, &old_second, 1).unwrap();
+            upsert_legacy_layout(&conn, "p1", &first_legacy, 10).unwrap();
+            upsert_legacy_layout(&conn, "p2", &second_legacy, 20).unwrap();
+        }
+
+        let reconciled = store
+            .reconcile_worktree_layouts(&[new_first.clone(), new_second.clone()], 30)
+            .unwrap();
+
+        assert_eq!(
+            first_shell(reconciled.layouts.get("p1").unwrap()),
+            "first-shell"
+        );
+        assert_eq!(
+            first_shell(reconciled.layouts.get("p2").unwrap()),
+            "second-shell"
+        );
+        let first_destination: SavedProjectLayout =
+            serde_json::from_str(&worktree_json(&store, &new_first.worktree_id).unwrap()).unwrap();
+        let second_destination: SavedProjectLayout =
+            serde_json::from_str(&worktree_json(&store, &new_second.worktree_id).unwrap()).unwrap();
+        assert_eq!(first_shell(&first_destination), "first-shell");
+        assert_eq!(first_shell(&second_destination), "second-shell");
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -6,8 +6,8 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::thread;
+use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use mt_config::SshConnection;
@@ -15,6 +15,17 @@ use mt_github::{CommandExecutionError, CommandExecutionErrorKind, CommandOutput,
 use mt_identity::{ExecutionHostId, WorktreeId};
 
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(windows)]
+const WINDOWS_PROCESS_CREATION_FLAGS: u32 = 0x0800_0000 | 0x0000_0004;
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    #[link_name = "NtResumeProcess"]
+    fn nt_resume_process(process_handle: *mut std::ffi::c_void) -> i32;
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ExecutionBackendSignature {
@@ -67,6 +78,8 @@ pub struct ExecutionSourceSignature {
     pub execution_host_id: ExecutionHostId,
     pub root_project_id: String,
     pub root_source_path: String,
+    pub worktree_id: WorktreeId,
+    pub canonical_path: String,
     pub backend: ExecutionBackendSignature,
 }
 
@@ -103,6 +116,8 @@ impl ProjectExecutionSnapshot {
             execution_host_id: self.execution_host_id.clone(),
             root_project_id: self.root_project_id.clone(),
             root_source_path: self.root_source_path.clone(),
+            worktree_id: self.worktree_id.clone(),
+            canonical_path: self.canonical_path.clone(),
             backend: self.backend.signature(),
         }
     }
@@ -284,6 +299,369 @@ fn command_error(
     CommandExecutionError::new(kind, message)
 }
 
+#[cfg(unix)]
+struct ProcessTree {
+    process_group_id: Option<i32>,
+    attached: bool,
+}
+
+#[cfg(unix)]
+impl ProcessTree {
+    fn configure(command: &mut Command) -> Result<Self, CommandExecutionError> {
+        use std::os::unix::process::CommandExt as _;
+
+        command.process_group(0);
+        Ok(Self {
+            process_group_id: None,
+            attached: false,
+        })
+    }
+
+    fn attach(&mut self, child: &Child) -> Result<(), CommandExecutionError> {
+        self.process_group_id = Some(i32::try_from(child.id()).map_err(|_| {
+            command_error(
+                CommandExecutionErrorKind::Io,
+                "process group identity exceeded the platform PID range",
+            )
+        })?);
+        self.attached = true;
+        Ok(())
+    }
+
+    fn terminate(&mut self) -> Result<(), CommandExecutionError> {
+        if !self.attached {
+            return Err(command_error(
+                CommandExecutionErrorKind::Io,
+                "process group was not attached",
+            ));
+        }
+        let Some(process_group_id) = self.process_group_id else {
+            return Ok(());
+        };
+        // SAFETY: the child was spawned with process_group(0), so its positive
+        // PID is the group ID and the negated value targets only that group.
+        if unsafe { libc::kill(-process_group_id, libc::SIGKILL) } == 0 {
+            self.process_group_id = None;
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            self.process_group_id = None;
+            return Ok(());
+        }
+        Err(command_error(
+            CommandExecutionErrorKind::Io,
+            format!("process group could not be terminated: {error}"),
+        ))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        let _ = self.terminate();
+    }
+}
+
+#[cfg(windows)]
+struct ProcessTree {
+    job: windows::core::Owned<windows::Win32::Foundation::HANDLE>,
+    attached: bool,
+    terminated: bool,
+}
+
+#[cfg(windows)]
+impl ProcessTree {
+    fn configure(command: &mut Command) -> Result<Self, CommandExecutionError> {
+        use std::os::windows::process::CommandExt as _;
+        use windows::Win32::System::JobObjects::{
+            CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+
+        // CREATE_SUSPENDED closes the spawn-to-assignment window: no child code
+        // can create a descendant before the process belongs to this job.
+        command.creation_flags(WINDOWS_PROCESS_CREATION_FLAGS);
+        let job =
+            unsafe { CreateJobObjectW(None, windows::core::PCWSTR::null()) }.map_err(|error| {
+                command_error(
+                    CommandExecutionErrorKind::Io,
+                    format!("process job could not be created: {error}"),
+                )
+            })?;
+        // SAFETY: CreateJobObjectW returned a newly owned handle.
+        let job = unsafe { windows::core::Owned::new(job) };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let limits_size = u32::try_from(std::mem::size_of_val(&limits)).map_err(|_| {
+            command_error(
+                CommandExecutionErrorKind::Io,
+                "process job limit structure exceeded the Windows API size range",
+            )
+        })?;
+        unsafe {
+            SetInformationJobObject(
+                *job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                limits_size,
+            )
+        }
+        .map_err(|error| {
+            command_error(
+                CommandExecutionErrorKind::Io,
+                format!("process job could not enable kill-on-close: {error}"),
+            )
+        })?;
+        Ok(Self {
+            job,
+            attached: false,
+            terminated: false,
+        })
+    }
+
+    fn attach(&mut self, child: &Child) -> Result<(), CommandExecutionError> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        let process = HANDLE(child.as_raw_handle());
+        unsafe { AssignProcessToJobObject(*self.job, process) }.map_err(|error| {
+            command_error(
+                CommandExecutionErrorKind::Io,
+                format!("process could not be attached to its cleanup job: {error}"),
+            )
+        })?;
+        self.attached = true;
+
+        // SAFETY: Command created this valid child handle suspended. Marking the
+        // job attached first makes a resume failure follow job cleanup.
+        let status = unsafe { nt_resume_process(child.as_raw_handle()) };
+        if status < 0 {
+            return Err(command_error(
+                CommandExecutionErrorKind::Io,
+                format!(
+                    "process could not be resumed after job attachment: NTSTATUS 0x{:08x}",
+                    status as u32
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn terminate(&mut self) -> Result<(), CommandExecutionError> {
+        use windows::Win32::System::JobObjects::TerminateJobObject;
+
+        if !self.attached {
+            return Err(command_error(
+                CommandExecutionErrorKind::Io,
+                "process job was not attached",
+            ));
+        }
+        if self.terminated {
+            return Ok(());
+        }
+
+        unsafe { TerminateJobObject(*self.job, 1) }.map_err(|error| {
+            command_error(
+                CommandExecutionErrorKind::Io,
+                format!("process job could not be terminated: {error}"),
+            )
+        })?;
+        self.terminated = true;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        if self.attached && !self.terminated {
+            let _ = self.terminate();
+        }
+    }
+}
+
+type OutputReader = JoinHandle<Result<BoundedRead, CommandExecutionError>>;
+
+struct ChildPipes {
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+}
+
+struct ProcessCleanup {
+    status: Option<ExitStatus>,
+    error: Option<CommandExecutionError>,
+}
+
+fn output_readers_finished(stdout: &OutputReader, stderr: &OutputReader) -> bool {
+    stdout.is_finished() && stderr.is_finished()
+}
+
+fn wait_for_output_readers(
+    stdout: &OutputReader,
+    stderr: &OutputReader,
+    timeout: Duration,
+) -> bool {
+    let started = Instant::now();
+    let deadline = started.checked_add(timeout).unwrap_or(started);
+    while !output_readers_finished(stdout, stderr) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL);
+    }
+    true
+}
+
+fn wait_for_output_reader(reader: &OutputReader, timeout: Duration) -> bool {
+    let started = Instant::now();
+    let deadline = started.checked_add(timeout).unwrap_or(started);
+    while !reader.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL);
+    }
+    true
+}
+
+fn spawn_output_reader(
+    name: &str,
+    reader: impl Read + Send + 'static,
+    output_cap: usize,
+) -> Result<OutputReader, CommandExecutionError> {
+    thread::Builder::new()
+        .name(name.into())
+        .spawn(move || read_bounded(reader, output_cap))
+        .map_err(|error| {
+            command_error(
+                CommandExecutionErrorKind::Io,
+                format!("process {name} reader could not start: {error}"),
+            )
+        })
+}
+
+fn wait_for_child_exit(
+    child: &mut Child,
+    timeout: Duration,
+) -> std::io::Result<Option<ExitStatus>> {
+    let started = Instant::now();
+    let deadline = started.checked_add(timeout).unwrap_or(started);
+    loop {
+        match child.try_wait()? {
+            Some(status) => return Ok(Some(status)),
+            None if Instant::now() >= deadline => return Ok(None),
+            None => thread::sleep(PROCESS_POLL_INTERVAL),
+        }
+    }
+}
+
+fn cleanup_spawned_process(
+    process_tree: &mut ProcessTree,
+    child: &mut Child,
+    known_status: Option<ExitStatus>,
+) -> ProcessCleanup {
+    let mut issues = Vec::new();
+    if let Err(error) = process_tree.terminate() {
+        issues.push(error.message);
+    }
+    let mut status = known_status;
+    if status.is_none() {
+        match child.try_wait() {
+            Ok(next) => status = next,
+            Err(error) => issues.push(format!("direct child status failed: {error}")),
+        }
+    }
+    let mut direct_kill_error = None;
+    if status.is_none() {
+        direct_kill_error = child.kill().err();
+        match wait_for_child_exit(child, PROCESS_CLEANUP_TIMEOUT) {
+            Ok(next) => status = next,
+            Err(error) => issues.push(format!("direct child reap failed: {error}")),
+        }
+    }
+    if status.is_none() {
+        if let Some(error) = direct_kill_error {
+            issues.push(format!(
+                "direct child fallback could not terminate: {error}"
+            ));
+        }
+        issues.push("direct child did not exit before the cleanup deadline".into());
+    }
+    ProcessCleanup {
+        status,
+        error: (!issues.is_empty()).then(|| {
+            command_error(
+                CommandExecutionErrorKind::Io,
+                format!("process cleanup failed: {}", issues.join("; ")),
+            )
+        }),
+    }
+}
+
+fn error_after_spawn_cleanup(
+    error: CommandExecutionError,
+    process_tree: &mut ProcessTree,
+    child: &mut Child,
+) -> CommandExecutionError {
+    let cleanup = cleanup_spawned_process(process_tree, child, None);
+    let Some(cleanup_error) = cleanup.error else {
+        return error;
+    };
+    command_error(
+        error.kind,
+        format!("{}; {}", error.message, cleanup_error.message),
+    )
+}
+
+fn error_with_cleanup_context(
+    error: CommandExecutionError,
+    cleanup_error: Option<CommandExecutionError>,
+    readers_closed: bool,
+) -> CommandExecutionError {
+    if cleanup_error.is_none() && readers_closed {
+        return error;
+    }
+    let mut message = error.message;
+    if let Some(cleanup_error) = cleanup_error {
+        message.push_str("; ");
+        message.push_str(&cleanup_error.message);
+    }
+    if !readers_closed {
+        message.push_str("; process output pipes remained open after cleanup");
+    }
+    command_error(error.kind, message)
+}
+
+fn take_child_pipes(
+    child: &mut Child,
+    process_tree: &mut ProcessTree,
+) -> Result<ChildPipes, CommandExecutionError> {
+    let Some(stdout) = child.stdout.take() else {
+        return Err(error_after_spawn_cleanup(
+            command_error(
+                CommandExecutionErrorKind::Io,
+                "process stdout was unavailable",
+            ),
+            process_tree,
+            child,
+        ));
+    };
+    let Some(stderr) = child.stderr.take() else {
+        return Err(error_after_spawn_cleanup(
+            command_error(
+                CommandExecutionErrorKind::Io,
+                "process stderr was unavailable",
+            ),
+            process_tree,
+            child,
+        ));
+    };
+    Ok(ChildPipes { stdout, stderr })
+}
+
 fn run_process(
     program: &str,
     args: &[String],
@@ -300,7 +678,7 @@ fn run_process(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    hide_console_window(&mut command);
+    let mut process_tree = ProcessTree::configure(&mut command)?;
     let mut child = command.spawn().map_err(|error| {
         let kind = if error.kind() == std::io::ErrorKind::NotFound {
             CommandExecutionErrorKind::ProgramNotFound
@@ -309,44 +687,96 @@ fn run_process(
         };
         command_error(kind, format!("process could not start: {error}"))
     })?;
+    if let Err(error) = process_tree.attach(&child) {
+        return Err(error_after_spawn_cleanup(
+            error,
+            &mut process_tree,
+            &mut child,
+        ));
+    }
 
-    let stdout = child.stdout.take().ok_or_else(|| {
-        command_error(
-            CommandExecutionErrorKind::Io,
-            "process stdout was unavailable",
-        )
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        command_error(
-            CommandExecutionErrorKind::Io,
-            "process stderr was unavailable",
-        )
-    })?;
-    let stdout_reader = thread::spawn(move || read_bounded(stdout, output_cap));
-    let stderr_reader = thread::spawn(move || read_bounded(stderr, output_cap));
-
-    let deadline = Instant::now() + timeout;
-    let (status, timed_out) = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break (Some(status), false),
-            Ok(None) if Instant::now() < deadline => thread::sleep(PROCESS_POLL_INTERVAL),
-            Ok(None) => {
-                let _ = child.kill();
-                let status = child.wait().ok();
-                break (status, true);
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(command_error(
-                    CommandExecutionErrorKind::Io,
-                    format!("process status failed: {error}"),
-                ));
-            }
+    let ChildPipes { stdout, stderr } = take_child_pipes(&mut child, &mut process_tree)?;
+    let stdout_reader = match spawn_output_reader("stdout", stdout, output_cap) {
+        Ok(reader) => reader,
+        Err(error) => {
+            drop(stderr);
+            return Err(error_after_spawn_cleanup(
+                error,
+                &mut process_tree,
+                &mut child,
+            ));
         }
     };
+    let stderr_reader = match spawn_output_reader("stderr", stderr, output_cap) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let cleanup = cleanup_spawned_process(&mut process_tree, &mut child, None);
+            let reader_closed = wait_for_output_reader(&stdout_reader, PROCESS_CLEANUP_TIMEOUT);
+            return Err(error_with_cleanup_context(
+                error,
+                cleanup.error,
+                reader_closed,
+            ));
+        }
+    };
+
+    let started = Instant::now();
+    let deadline = started.checked_add(timeout).unwrap_or(started);
+    let mut status = None;
+    let timed_out = loop {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(next)) => status = Some(next),
+                Ok(None) => {}
+                Err(error) => {
+                    let cleanup = cleanup_spawned_process(&mut process_tree, &mut child, None);
+                    let readers_closed = wait_for_output_readers(
+                        &stdout_reader,
+                        &stderr_reader,
+                        PROCESS_CLEANUP_TIMEOUT,
+                    );
+                    return Err(error_with_cleanup_context(
+                        command_error(
+                            CommandExecutionErrorKind::Io,
+                            format!("process status failed: {error}"),
+                        ),
+                        cleanup.error,
+                        readers_closed,
+                    ));
+                }
+            }
+        }
+        if status.is_some() && output_readers_finished(&stdout_reader, &stderr_reader) {
+            break false;
+        }
+        if Instant::now() >= deadline {
+            let cleanup = cleanup_spawned_process(&mut process_tree, &mut child, status);
+            let readers_closed =
+                wait_for_output_readers(&stdout_reader, &stderr_reader, PROCESS_CLEANUP_TIMEOUT);
+            if cleanup.error.is_some() || !readers_closed {
+                return Err(error_with_cleanup_context(
+                    command_error(
+                        CommandExecutionErrorKind::Io,
+                        format!("process timed out after {}ms", timeout.as_millis()),
+                    ),
+                    cleanup.error,
+                    readers_closed,
+                ));
+            }
+            status = cleanup.status;
+            break true;
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL);
+    };
+
+    if !output_readers_finished(&stdout_reader, &stderr_reader)
+        && !wait_for_output_readers(&stdout_reader, &stderr_reader, PROCESS_CLEANUP_TIMEOUT)
+    {
+        return Err(command_error(
+            CommandExecutionErrorKind::Io,
+            "process output pipes remained open after process-tree termination",
+        ));
+    }
 
     let stdout = stdout_reader
         .join()
@@ -354,6 +784,9 @@ fn run_process(
     let stderr = stderr_reader
         .join()
         .map_err(|_| command_error(CommandExecutionErrorKind::Io, "stderr reader failed"))??;
+    if !timed_out {
+        process_tree.terminate()?;
+    }
     Ok(CommandOutput {
         stdout: stdout.bytes,
         stderr: stderr.bytes,
@@ -374,12 +807,16 @@ fn read_bounded(mut reader: impl Read, cap: usize) -> Result<BoundedRead, Comman
     let mut truncated = false;
     let mut chunk = [0_u8; 8 * 1024];
     loop {
-        let read = reader.read(&mut chunk).map_err(|error| {
-            command_error(
-                CommandExecutionErrorKind::Io,
-                format!("process output read failed: {error}"),
-            )
-        })?;
+        let read = match reader.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(command_error(
+                    CommandExecutionErrorKind::Io,
+                    format!("process output read failed: {error}"),
+                ));
+            }
+        };
         if read == 0 {
             break;
         }
@@ -390,16 +827,6 @@ fn read_bounded(mut reader: impl Read, cap: usize) -> Result<BoundedRead, Comman
     }
     Ok(BoundedRead { bytes, truncated })
 }
-
-#[cfg(windows)]
-fn hide_console_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt as _;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_console_window(_command: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
@@ -429,6 +856,46 @@ mod tests {
 
     fn command() -> CommandPlan {
         CommandPlan::new("gh", ["issue", "list", "--repo", "host/o/r"])
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_process_running(pid: u32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(") ")
+                    .and_then(|(_, rest)| rest.chars().next())
+            })
+            .is_some_and(|state| !matches!(state, 'Z' | 'X'))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_linux_process_stops(pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while linux_process_running(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "process {pid} survived bounded cleanup"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_pid_file(path: &std::path::Path) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Ok(pid) = std::fs::read_to_string(path)
+                && let Ok(pid) = pid.trim().parse()
+            {
+                return pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child did not publish its descendant PID"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -562,5 +1029,146 @@ mod tests {
                 connection_epoch: Some(10),
             }
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timeout_kills_descendants_that_keep_inherited_pipes_open() {
+        let script = "sleep 30 & child=$!; printf '%s\\n' \"$child\"; exit 0";
+        let started = Instant::now();
+        let output = run_process(
+            "sh",
+            &["-c".into(), script.into()],
+            None,
+            Duration::from_millis(150),
+            1024,
+        )
+        .expect("timed-out process tree should be collected");
+
+        assert!(output.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let pid = std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert_linux_process_stops(pid);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn completion_kills_descendants_that_close_inherited_pipes() {
+        let script = "sleep 30 >/dev/null 2>&1 & child=$!; printf '%s\\n' \"$child\"; exit 0";
+        let output = run_process(
+            "sh",
+            &["-c".into(), script.into()],
+            None,
+            Duration::from_secs(2),
+            1024,
+        )
+        .expect("completed process tree should be collected");
+
+        assert!(!output.timed_out);
+        let pid = std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert_linux_process_stops(pid);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_post_spawn_pipe_terminates_and_reaps_the_process_tree() {
+        let pid_path = std::env::temp_dir().join(format!(
+            "mini-term-execution-host-{}-missing-pipe.pid",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&pid_path);
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "sleep 30 & child=$!; printf '%s\\n' \"$child\" > \"$1\"; wait",
+                "sh",
+            ])
+            .arg(&pid_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut process_tree = ProcessTree::configure(&mut command).unwrap();
+        let mut child = command.spawn().unwrap();
+        process_tree.attach(&child).unwrap();
+        let parent_pid = child.id();
+        let descendant_pid = wait_for_pid_file(&pid_path);
+
+        let started = Instant::now();
+        let error = match take_child_pipes(&mut child, &mut process_tree) {
+            Ok(_) => panic!("missing stdout should fail after cleaning up the child"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, CommandExecutionErrorKind::Io);
+        assert!(error.message.contains("stdout was unavailable"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_linux_process_stops(parent_pid);
+        assert_linux_process_stops(descendant_pid);
+        let _ = std::fs::remove_file(pid_path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unattached_tree_cleanup_uses_bounded_direct_child_fallback() {
+        let mut command = Command::new("sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut process_tree = ProcessTree::configure(&mut command).unwrap();
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+
+        let started = Instant::now();
+        let error = error_after_spawn_cleanup(
+            command_error(CommandExecutionErrorKind::Io, "process attachment failed"),
+            &mut process_tree,
+            &mut child,
+        );
+        assert!(error.message.contains("process attachment failed"));
+        assert!(error.message.contains("process group was not attached"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_linux_process_stops(pid);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unix_process_tree_disarms_after_kill_and_esrch() {
+        let mut running_command = Command::new("sleep");
+        running_command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut running_tree = ProcessTree::configure(&mut running_command).unwrap();
+        let mut running_child = running_command.spawn().unwrap();
+        running_tree.attach(&running_child).unwrap();
+        running_tree.terminate().unwrap();
+        assert!(running_tree.process_group_id.is_none());
+        running_tree.terminate().unwrap();
+        running_child.wait().unwrap();
+
+        let mut exited_command = Command::new("sh");
+        exited_command
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut exited_tree = ProcessTree::configure(&mut exited_command).unwrap();
+        let mut exited_child = exited_command.spawn().unwrap();
+        exited_tree.attach(&exited_child).unwrap();
+        exited_child.wait().unwrap();
+        exited_tree.terminate().unwrap();
+        assert!(exited_tree.process_group_id.is_none());
+        exited_tree.terminate().unwrap();
     }
 }

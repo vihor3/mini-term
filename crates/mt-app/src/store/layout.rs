@@ -5,12 +5,13 @@
 //! 原 `store.rs` 里那个独立的 `impl AppStore` 块整块搬来,段注释随代码走,
 //! 逻辑一行未改。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use gpui::{Context, Window};
 use mt_config::ShellConfig;
-use mt_identity::TabId;
+use mt_identity::{TabId, WorktreeId};
+use mt_layout::ProjectWorktreeBinding;
 
 use crate::persist;
 use crate::tree::{ProjectPanel, SplitNode};
@@ -23,6 +24,116 @@ pub(super) fn unix_time_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn prepare_project_layout_removal(
+    dirty_projects: &mut HashSet<String>,
+    dirty_worktree_owners: &mut HashMap<WorktreeId, String>,
+    bindings: &HashMap<String, ProjectWorktreeBinding>,
+    project_id: &str,
+    worktree_is_shared: bool,
+) -> bool {
+    if !worktree_is_shared {
+        return true;
+    }
+
+    let Some(worktree_id) = bindings.get(project_id).map(|binding| &binding.worktree_id) else {
+        dirty_projects.remove(project_id);
+        return false;
+    };
+    if dirty_worktree_owners.get(worktree_id).map(String::as_str) == Some(project_id) {
+        // The departing alias already serialized the latest known snapshot.
+        // Keep it as the sole flush owner, while dropping older aliases so
+        // HashSet iteration cannot promote stale state after this save.
+        dirty_projects.retain(|dirty_project_id| {
+            dirty_project_id == project_id
+                || bindings
+                    .get(dirty_project_id)
+                    .is_none_or(|binding| &binding.worktree_id != worktree_id)
+        });
+        dirty_projects.insert(project_id.to_string());
+    } else {
+        // Another alias owns the pending save, or no alias has a pending
+        // snapshot. In either case, do not serialize the departing state.
+        dirty_projects.remove(project_id);
+    }
+    false
+}
+
+fn mark_project_layout_dirty(
+    dirty_projects: &mut HashSet<String>,
+    dirty_worktree_owners: &mut HashMap<WorktreeId, String>,
+    project_id: &str,
+    worktree_id: Option<&WorktreeId>,
+) {
+    dirty_projects.insert(project_id.to_string());
+    dirty_worktree_owners.retain(|_, owner| owner != project_id);
+    if let Some(worktree_id) = worktree_id {
+        dirty_worktree_owners.insert(worktree_id.clone(), project_id.to_string());
+    }
+}
+
+fn should_flush_project_layout(
+    dirty_worktree_owners: &HashMap<WorktreeId, String>,
+    project_id: &str,
+    binding: Option<&ProjectWorktreeBinding>,
+) -> bool {
+    let Some(binding) = binding else {
+        return true;
+    };
+    dirty_worktree_owners
+        .get(&binding.worktree_id)
+        .is_some_and(|owner| owner == project_id)
+}
+
+fn expanded_dir_scope_project_ids(
+    bindings: &HashMap<String, ProjectWorktreeBinding>,
+    project_id: &str,
+    share_worktree: bool,
+) -> Vec<String> {
+    let worktree_id = if share_worktree {
+        bindings.get(project_id).map(|binding| &binding.worktree_id)
+    } else {
+        None
+    };
+    let Some(worktree_id) = worktree_id else {
+        return vec![project_id.to_string()];
+    };
+    let mut project_ids = bindings
+        .iter()
+        .filter(|(_, binding)| &binding.worktree_id == worktree_id)
+        .map(|(project_id, _)| project_id.clone())
+        .collect::<Vec<_>>();
+    project_ids.sort();
+    project_ids
+}
+
+fn is_dir_expanded_in_scope(
+    expanded_dirs: &HashMap<String, HashSet<String>>,
+    project_ids: &[String],
+    path: &str,
+) -> bool {
+    project_ids.iter().any(|project_id| {
+        expanded_dirs
+            .get(project_id)
+            .is_some_and(|dirs| dirs.contains(path))
+    })
+}
+
+fn update_dir_expanded_in_scope(
+    expanded_dirs: &mut HashMap<String, HashSet<String>>,
+    project_ids: &[String],
+    path: &str,
+    expanded: bool,
+) {
+    for project_id in project_ids {
+        let dirs = expanded_dirs.entry(project_id.clone()).or_default();
+        if expanded {
+            dirs.insert(path.to_string());
+        } else {
+            dirs.remove(path);
+        }
+    }
 }
 
 impl AppStore {
@@ -274,10 +385,12 @@ impl AppStore {
     // === 文件树展开状态 ===
 
     pub fn is_dir_expanded(&self, project_id: &str, path: &str) -> bool {
-        self.expanded_dirs
-            .get(project_id)
-            .map(|set| set.contains(path))
-            .unwrap_or(false)
+        let project_ids = expanded_dir_scope_project_ids(
+            &self.project_worktree_bindings,
+            project_id,
+            super::orca_worktree_context_enabled(),
+        );
+        is_dir_expanded_in_scope(&self.expanded_dirs, &project_ids, path)
     }
 
     pub fn set_dir_expanded(
@@ -287,17 +400,27 @@ impl AppStore {
         expanded: bool,
         cx: &mut Context<Self>,
     ) {
-        let set = self
-            .expanded_dirs
-            .entry(project_id.to_string())
-            .or_default();
-        if expanded {
-            set.insert(path.to_string());
-        } else {
-            set.remove(path);
-        }
-        let dirs: Vec<String> = set.iter().cloned().collect();
-        if let Some(project) = self.config.projects.iter_mut().find(|p| p.id == project_id) {
+        let project_ids = expanded_dir_scope_project_ids(
+            &self.project_worktree_bindings,
+            project_id,
+            super::orca_worktree_context_enabled(),
+        );
+        update_dir_expanded_in_scope(&mut self.expanded_dirs, &project_ids, path, expanded);
+        for project_id in project_ids {
+            let Some(project) = self
+                .config
+                .projects
+                .iter_mut()
+                .find(|project| project.id == project_id)
+            else {
+                continue;
+            };
+            let mut dirs = self
+                .expanded_dirs
+                .get(&project_id)
+                .map(|dirs| dirs.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            dirs.sort();
             project.expanded_dirs = dirs;
         }
         self.save_config_soon(cx);
@@ -396,7 +519,7 @@ impl AppStore {
         let worktree_id = self.worktree_id_for_project(project_id).cloned();
         let saved = self.project_states.get(project_id).map(|state| {
             let mut saved = persist::serialize_layout(&state.panels, state.active_panel_index());
-            saved.worktree_id = worktree_id;
+            saved.worktree_id = worktree_id.clone();
             saved
         });
         if let Some(saved) = saved
@@ -404,8 +527,31 @@ impl AppStore {
         {
             project.saved_layout = Some(saved);
         }
-        self.layout_dirty_projects.insert(project_id.to_string());
+        mark_project_layout_dirty(
+            &mut self.layout_dirty_projects,
+            &mut self.layout_dirty_worktree_owners,
+            project_id,
+            worktree_id.as_ref(),
+        );
         self.schedule_layout_flush(cx);
+    }
+
+    pub(super) fn flush_project_layout_before_removal(
+        &mut self,
+        project_id: &str,
+        worktree_is_shared: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if prepare_project_layout_removal(
+            &mut self.layout_dirty_projects,
+            &mut self.layout_dirty_worktree_owners,
+            &self.project_worktree_bindings,
+            project_id,
+            worktree_is_shared,
+        ) {
+            self.save_project_layout_soon(project_id, cx);
+        }
+        self.flush_layout_now();
     }
 
     /// 全局布局项(三栏比例 / 中栏比例 / 中栏显隐 / 抽屉宽度 / 窗口几何)脏了。
@@ -438,6 +584,7 @@ impl AppStore {
     /// 写入、把日志刷满。
     pub fn flush_layout_now(&mut self) {
         let dirty_projects = std::mem::take(&mut self.layout_dirty_projects);
+        let dirty_worktree_owners = std::mem::take(&mut self.layout_dirty_worktree_owners);
         let globals_dirty = std::mem::take(&mut self.layout_globals_dirty);
         let Some(store) = self.layout_store.clone() else {
             return;
@@ -466,10 +613,11 @@ impl AppStore {
                 }
                 continue;
             };
-            let result = match (
-                self.project_worktree_bindings.get(&project_id),
-                project.saved_layout.as_ref(),
-            ) {
+            let binding = self.project_worktree_bindings.get(&project_id);
+            if !should_flush_project_layout(&dirty_worktree_owners, &project_id, binding) {
+                continue;
+            }
+            let result = match (binding, project.saved_layout.as_ref()) {
                 (Some(binding), Some(layout)) => {
                     store.save_worktree_layout(binding, layout, now_ms)
                 }
@@ -558,5 +706,169 @@ impl AppStore {
         }
         self.config_writer
             .enqueue(&self.config_store, self.token, self.config.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mt_identity::{ExecutionHostId, HostInstallId, RepoId};
+
+    fn shared_bindings() -> (WorktreeId, HashMap<String, ProjectWorktreeBinding>) {
+        let install_id = HostInstallId::new();
+        let execution_host_id = ExecutionHostId::derive("layout-test", &install_id);
+        let repo_id = RepoId::derive(&execution_host_id, "/repo/.git");
+        let worktree_id = WorktreeId::derive(&repo_id, "/repo", None);
+        let binding = |project_id: &str| ProjectWorktreeBinding {
+            project_id: project_id.to_string(),
+            execution_host_id: execution_host_id.clone(),
+            repo_id: repo_id.clone(),
+            worktree_id: worktree_id.clone(),
+            identity_source: "test".to_string(),
+            canonical_worktree_path: Some("/repo".to_string()),
+            identity_context: None,
+        };
+        let bindings = HashMap::from([
+            ("first".to_string(), binding("first")),
+            ("latest".to_string(), binding("latest")),
+        ]);
+        (worktree_id, bindings)
+    }
+
+    #[test]
+    fn shared_worktree_flushes_only_the_explicit_latest_alias() {
+        let (_, bindings) = shared_bindings();
+        let mut dirty = HashSet::new();
+        let mut owners = HashMap::new();
+        mark_project_layout_dirty(
+            &mut dirty,
+            &mut owners,
+            "first",
+            bindings.get("first").map(|binding| &binding.worktree_id),
+        );
+        mark_project_layout_dirty(
+            &mut dirty,
+            &mut owners,
+            "latest",
+            bindings.get("latest").map(|binding| &binding.worktree_id),
+        );
+
+        let flushable: HashSet<String> = dirty
+            .iter()
+            .filter(|project_id| {
+                should_flush_project_layout(&owners, project_id, bindings.get(project_id.as_str()))
+            })
+            .cloned()
+            .collect();
+
+        assert_eq!(flushable, HashSet::from(["latest".to_string()]));
+    }
+
+    #[test]
+    fn shared_worktree_aliases_share_expansion_only_with_the_context_gate() {
+        let (_, bindings) = shared_bindings();
+        let path = "/repo/src";
+        let mut expanded_dirs = HashMap::from([
+            ("first".to_string(), HashSet::from([path.to_string()])),
+            ("latest".to_string(), HashSet::new()),
+        ]);
+
+        let shared = expanded_dir_scope_project_ids(&bindings, "latest", true);
+        assert_eq!(shared, vec!["first".to_string(), "latest".to_string()]);
+        assert!(is_dir_expanded_in_scope(&expanded_dirs, &shared, path));
+
+        update_dir_expanded_in_scope(&mut expanded_dirs, &shared, path, false);
+        assert!(!is_dir_expanded_in_scope(&expanded_dirs, &shared, path));
+        update_dir_expanded_in_scope(&mut expanded_dirs, &shared, path, true);
+        assert!(
+            shared
+                .iter()
+                .all(|project_id| { expanded_dirs[project_id].contains(path) })
+        );
+
+        assert_eq!(
+            expanded_dir_scope_project_ids(&bindings, "latest", false),
+            vec!["latest".to_string()]
+        );
+    }
+
+    #[test]
+    fn removing_older_shared_alias_preserves_the_latest_pending_owner() {
+        let (worktree_id, bindings) = shared_bindings();
+        let mut dirty = HashSet::new();
+        let mut owners = HashMap::new();
+        mark_project_layout_dirty(&mut dirty, &mut owners, "first", Some(&worktree_id));
+        mark_project_layout_dirty(&mut dirty, &mut owners, "latest", Some(&worktree_id));
+
+        assert!(!prepare_project_layout_removal(
+            &mut dirty,
+            &mut owners,
+            &bindings,
+            "first",
+            true,
+        ));
+        assert!(!dirty.contains("first"));
+        assert!(dirty.contains("latest"));
+        assert_eq!(owners.get(&worktree_id).map(String::as_str), Some("latest"));
+    }
+
+    #[test]
+    fn removing_latest_shared_alias_flushes_it_without_promoting_an_older_save() {
+        let (worktree_id, bindings) = shared_bindings();
+        let mut dirty = HashSet::new();
+        let mut owners = HashMap::new();
+        mark_project_layout_dirty(&mut dirty, &mut owners, "first", Some(&worktree_id));
+        mark_project_layout_dirty(&mut dirty, &mut owners, "latest", Some(&worktree_id));
+
+        assert!(!prepare_project_layout_removal(
+            &mut dirty,
+            &mut owners,
+            &bindings,
+            "latest",
+            true,
+        ));
+        assert!(!dirty.contains("first"));
+        assert!(dirty.contains("latest"));
+        assert_eq!(owners.get(&worktree_id).map(String::as_str), Some("latest"));
+        let flushable: HashSet<String> = dirty
+            .iter()
+            .filter(|project_id| {
+                should_flush_project_layout(&owners, project_id, bindings.get(project_id.as_str()))
+            })
+            .cloned()
+            .collect();
+        assert_eq!(flushable, HashSet::from(["latest".to_string()]));
+    }
+
+    #[test]
+    fn removing_shared_alias_without_pending_owner_does_not_serialize_it() {
+        let (_, bindings) = shared_bindings();
+        let mut dirty = HashSet::from(["first".to_string()]);
+        let mut owners = HashMap::new();
+
+        assert!(!prepare_project_layout_removal(
+            &mut dirty,
+            &mut owners,
+            &bindings,
+            "first",
+            true,
+        ));
+        assert!(!dirty.contains("first"));
+        assert!(owners.is_empty());
+    }
+
+    #[test]
+    fn removing_last_alias_still_requests_a_final_layout_save() {
+        let mut dirty = HashSet::new();
+        let mut owners = HashMap::new();
+        let (_, bindings) = shared_bindings();
+
+        assert!(prepare_project_layout_removal(
+            &mut dirty,
+            &mut owners,
+            &bindings,
+            "first",
+            false,
+        ));
     }
 }

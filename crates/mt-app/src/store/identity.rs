@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use gpui::Context;
-use mt_config::ProjectConfig;
+use mt_config::{AppConfig, ProjectConfig, SavedProjectLayout, SshConnection};
 use mt_identity::{
     HostInstallId, PaneKey, TabId, TerminalIncarnationId, TerminalSessionId, WorktreeId,
 };
@@ -19,7 +19,7 @@ use mt_ssh::RemoteRuntimeSnapshot;
 use crate::execution_host::{ExecutionBackend, ProjectExecutionSnapshot};
 use crate::persist;
 
-use super::AppStore;
+use super::{AppStore, ProjectState};
 
 pub(super) type TerminalRoute = mt_ai::AgentRoute;
 
@@ -46,31 +46,126 @@ fn authoritative_rebind_blocker(
     }
 }
 
+fn is_authoritative_remote_binding(binding: &ProjectWorktreeBinding) -> bool {
+    binding.identity_source == WorktreeIdentitySource::AuthoritativeRemoteGit.as_str()
+        || binding.identity_source == WorktreeIdentitySource::AuthoritativeRemoteDirectory.as_str()
+}
+
+fn normalized_ssh_port(port: u16) -> u16 {
+    if port == 0 { 22 } else { port }
+}
+
+fn ssh_binding_identity_context(
+    connection: &SshConnection,
+    normalized_configured_path: &str,
+) -> String {
+    serde_json::to_string(&(
+        "ssh-authority-v2",
+        connection.id.as_str(),
+        connection.host.as_str(),
+        normalized_ssh_port(connection.port),
+        connection.user.as_str(),
+        normalized_configured_path,
+    ))
+    .expect("SSH binding context contains only JSON-safe scalar values")
+}
+
+fn preserved_authoritative_ssh_binding(
+    project_id: String,
+    binding: &ProjectWorktreeBinding,
+    identity_context: String,
+) -> ProjectWorktreeBinding {
+    ProjectWorktreeBinding {
+        project_id,
+        execution_host_id: binding.execution_host_id.clone(),
+        repo_id: binding.repo_id.clone(),
+        worktree_id: binding.worktree_id.clone(),
+        identity_source: binding.identity_source.clone(),
+        canonical_worktree_path: binding.canonical_worktree_path.clone(),
+        identity_context: Some(identity_context),
+    }
+}
+
+fn has_other_worktree_alias(
+    bindings: &HashMap<String, ProjectWorktreeBinding>,
+    project_id: &str,
+) -> bool {
+    let Some(worktree_id) = bindings.get(project_id).map(|binding| &binding.worktree_id) else {
+        return false;
+    };
+    bindings
+        .iter()
+        .any(|(other_id, binding)| other_id != project_id && &binding.worktree_id == worktree_id)
+}
+
+fn apply_reconciled_project_layout(
+    config: &mut AppConfig,
+    project_states: &mut HashMap<String, ProjectState>,
+    project_id: &str,
+    layout: SavedProjectLayout,
+    replace_nonempty_state: bool,
+) {
+    if let Some(project) = config
+        .projects
+        .iter_mut()
+        .find(|project| project.id == project_id)
+    {
+        project.saved_layout = Some(layout.clone());
+    }
+    let should_restore = project_states
+        .get(project_id)
+        .is_some_and(|state| replace_nonempty_state || state.panels.is_empty());
+    if !should_restore {
+        return;
+    }
+
+    let (panels, active_panel_id) = persist::restore_layout(&layout, config);
+    if let Some(state) = project_states.get_mut(project_id) {
+        state.panels = panels;
+        state.active_panel_id = active_panel_id;
+        state.maximized_pane_id = None;
+        state.status = state.highest_status();
+    }
+}
+
 pub(super) fn resolve_project_bindings(
     projects: &[ProjectConfig],
+    ssh_connections: &[SshConnection],
     install_id: &HostInstallId,
     existing: &HashMap<String, ProjectWorktreeBinding>,
 ) -> Vec<ProjectWorktreeBinding> {
     projects
         .iter()
         .filter_map(|project| {
-            resolve_project_binding(project, install_id, existing.get(&project.id))
-                .map_err(|error| {
-                    eprintln!(
-                        "[identity] 项目 {} ({}) 无法建立 worktree 身份: {error:#}",
-                        project.id, project.path
-                    );
-                })
-                .ok()
+            resolve_project_binding(
+                project,
+                ssh_connections,
+                install_id,
+                existing.get(&project.id),
+            )
+            .map_err(|error| {
+                eprintln!(
+                    "[identity] 项目 {} ({}) 无法建立 worktree 身份: {error:#}",
+                    project.id, project.path
+                );
+            })
+            .ok()
         })
         .collect()
 }
 
 fn resolve_project_binding(
     project: &ProjectConfig,
+    ssh_connections: &[SshConnection],
     install_id: &HostInstallId,
     existing: Option<&ProjectWorktreeBinding>,
 ) -> anyhow::Result<ProjectWorktreeBinding> {
+    let persisted_authoritative_ssh_binding = project
+        .ssh_connection_id
+        .as_ref()
+        .and_then(|_| existing.filter(|binding| is_authoritative_remote_binding(binding)));
+    let connection = crate::ssh_conn::remote_connection(project, ssh_connections);
+
     let resolution = if let Some(connection_id) = project.ssh_connection_id.as_deref() {
         worktree::resolve_provisional_ssh(install_id, connection_id, &project.path)
     } else if let Some(wsl) = mt_core::parse_wsl_unc(&project.path.replace('/', "\\")) {
@@ -83,7 +178,32 @@ fn resolve_project_binding(
         }
     };
     let resolved = match resolution {
-        Ok(resolved) => resolved,
+        Ok(resolved) => {
+            if let Some(binding) = persisted_authoritative_ssh_binding
+                && let Some(connection) = connection
+            {
+                let identity_context = ssh_binding_identity_context(
+                    connection,
+                    &resolved.canonical_worktree_path,
+                );
+                if binding.identity_context.as_deref() == Some(identity_context.as_str()) {
+                    // Provenance names the same configured endpoint and path. Keep
+                    // the authenticated canonical path because the configured path
+                    // may be a symlink or another remote alias for that worktree.
+                    return Ok(preserved_authoritative_ssh_binding(
+                        project.id.clone(),
+                        binding,
+                        identity_context,
+                    ));
+                }
+            }
+            resolved
+        }
+        Err(error) if persisted_authoritative_ssh_binding.is_some() => {
+            // Without a normalized configured path there is no proof that the
+            // persisted remote identity still belongs to this project.
+            return Err(error);
+        }
         Err(error) => {
             let Some(binding) = existing else {
                 return Err(error);
@@ -124,6 +244,7 @@ pub(super) fn binding_from_resolved(
         worktree_id: resolved.worktree_id,
         identity_source,
         canonical_worktree_path: Some(resolved.canonical_worktree_path),
+        identity_context: None,
     }
 }
 
@@ -302,7 +423,12 @@ impl AppStore {
             return;
         };
         let existing = self.project_worktree_bindings.get(project_id);
-        let Ok(binding) = resolve_project_binding(&project, &self.host_install_id, existing) else {
+        let Ok(binding) = resolve_project_binding(
+            &project,
+            &self.config.ssh_connections,
+            &self.host_install_id,
+            existing,
+        ) else {
             return;
         };
 
@@ -326,26 +452,13 @@ impl AppStore {
         }
 
         if let Some(layout) = restored_layout {
-            if let Some(project) = self
-                .config
-                .projects
-                .iter_mut()
-                .find(|project| project.id == project_id)
-            {
-                project.saved_layout = Some(layout.clone());
-            }
-            if self
-                .project_states
-                .get(project_id)
-                .is_some_and(|state| state.panels.is_empty())
-            {
-                let (panels, active_panel_id) = persist::restore_layout(&layout, &self.config);
-                if let Some(state) = self.project_states.get_mut(project_id) {
-                    state.panels = panels;
-                    state.active_panel_id = active_panel_id;
-                    state.status = state.highest_status();
-                }
-            }
+            apply_reconciled_project_layout(
+                &mut self.config,
+                &mut self.project_states,
+                project_id,
+                layout,
+                false,
+            );
         }
         self.sync_active_worktree();
     }
@@ -359,18 +472,39 @@ impl AppStore {
         let Some(project) = self.project(project_id) else {
             return AuthoritativeBindingInstall::Failed("project no longer exists".into());
         };
-        if project.ssh_connection_id.is_none() {
+        let Some(connection_id) = project.ssh_connection_id.as_deref() else {
             return AuthoritativeBindingInstall::Failed(
                 "project is no longer an SSH project".into(),
             );
-        }
+        };
+        let Some(connection) =
+            crate::ssh_conn::remote_connection(project, &self.config.ssh_connections)
+        else {
+            return AuthoritativeBindingInstall::Failed(format!(
+                "SSH connection {connection_id} is unavailable"
+            ));
+        };
+        let normalized_configured_path = match worktree::resolve_provisional_ssh(
+            &self.host_install_id,
+            connection_id,
+            &project.path,
+        ) {
+            Ok(resolved) => resolved.canonical_worktree_path,
+            Err(error) => {
+                return AuthoritativeBindingInstall::Failed(format!(
+                    "configured SSH worktree path is invalid: {error:#}"
+                ));
+            }
+        };
+        let identity_context =
+            ssh_binding_identity_context(connection, &normalized_configured_path);
 
         let source = if snapshot.canonical_git_common_dir.is_some() {
             WorktreeIdentitySource::AuthoritativeRemoteGit
         } else {
             WorktreeIdentitySource::AuthoritativeRemoteDirectory
         };
-        let binding = binding_from_resolved(
+        let mut binding = binding_from_resolved(
             project_id.to_string(),
             ResolvedWorktreeIdentity {
                 execution_host_id: snapshot.identity.execution_host_id.clone(),
@@ -381,6 +515,7 @@ impl AppStore {
                 source,
             },
         );
+        binding.identity_context = Some(identity_context);
 
         let previous = self.project_worktree_bindings.get(project_id).cloned();
         if previous.as_ref() == Some(&binding) {
@@ -420,29 +555,20 @@ impl AppStore {
         }
 
         if let Some(layout) = restored_layout {
-            if let Some(project) = self
-                .config
-                .projects
-                .iter_mut()
-                .find(|project| project.id == project_id)
-            {
-                project.saved_layout = Some(layout.clone());
-            }
-            if self
-                .project_states
-                .get(project_id)
-                .is_some_and(|state| state.panels.is_empty())
-            {
-                let (panels, active_panel_id) = persist::restore_layout(&layout, &self.config);
-                if let Some(state) = self.project_states.get_mut(project_id) {
-                    state.panels = panels;
-                    state.active_panel_id = active_panel_id;
-                    state.status = state.highest_status();
-                }
-            }
+            apply_reconciled_project_layout(
+                &mut self.config,
+                &mut self.project_states,
+                project_id,
+                layout,
+                worktree_changed,
+            );
         }
         self.sync_active_worktree();
         AuthoritativeBindingInstall::Installed
+    }
+
+    pub(super) fn project_has_other_worktree_alias(&self, project_id: &str) -> bool {
+        has_other_worktree_alias(&self.project_worktree_bindings, project_id)
     }
 
     pub(super) fn remove_project_identity(&mut self, project_id: &str) {
@@ -459,7 +585,8 @@ impl AppStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mt_identity::ExecutionHostId;
+    use mt_config::{SavedPane, SavedSplitNode, SavedTab};
+    use mt_identity::{ExecutionHostId, RepoId};
 
     fn project(id: &str, path: &str, ssh_connection_id: Option<&str>) -> ProjectConfig {
         ProjectConfig {
@@ -494,6 +621,66 @@ mod tests {
         }
     }
 
+    fn saved_layout(shell_name: &str, cwd: &str, worktree_id: WorktreeId) -> SavedProjectLayout {
+        SavedProjectLayout {
+            worktree_id: Some(worktree_id),
+            tabs: vec![SavedTab {
+                tab_id: Some(TabId::new()),
+                custom_title: None,
+                split_layout: SavedSplitNode::Leaf {
+                    active_pane_key: None,
+                    pane: None,
+                    panes: vec![SavedPane {
+                        pane_key: Some(PaneKey::new()),
+                        terminal_session_id: Some(TerminalSessionId::new()),
+                        terminal_incarnation_id: None,
+                        shell_name: shell_name.to_string(),
+                        cwd: Some(cwd.to_string()),
+                        ai_session: None,
+                    }],
+                },
+            }],
+            active_tab_index: 0,
+            active_tab_id: None,
+        }
+    }
+
+    fn ssh_connection(id: &str, host: &str, port: u16, user: &str) -> SshConnection {
+        SshConnection {
+            id: id.to_string(),
+            name: format!("display-{id}"),
+            host: host.to_string(),
+            port,
+            user: user.to_string(),
+            password: None,
+            identity_file: None,
+            group: None,
+        }
+    }
+
+    fn authoritative_remote_binding(
+        project_id: &str,
+        path: &str,
+        connection: &SshConnection,
+    ) -> ProjectWorktreeBinding {
+        let remote_install = HostInstallId::new();
+        let execution_host_id = ExecutionHostId::derive("SHA256:verified-host", &remote_install);
+        let repo_id = RepoId::derive(&execution_host_id, &format!("{path}/.git"));
+        let mut binding = binding_from_resolved(
+            project_id.to_string(),
+            ResolvedWorktreeIdentity {
+                execution_host_id,
+                repo_id: repo_id.clone(),
+                worktree_id: WorktreeId::derive(&repo_id, path, None),
+                canonical_worktree_path: path.to_string(),
+                canonical_git_common_dir: Some(format!("{path}/.git")),
+                source: WorktreeIdentitySource::AuthoritativeRemoteGit,
+            },
+        );
+        binding.identity_context = Some(ssh_binding_identity_context(connection, path));
+        binding
+    }
+
     #[test]
     fn prior_incarnation_cannot_match_current_terminal_route() {
         let old = route(TerminalIncarnationId::new());
@@ -522,6 +709,7 @@ mod tests {
     #[test]
     fn persisted_binding_survives_temporarily_invalid_ssh_identity_input() {
         let install = HostInstallId::new();
+        let connection = ssh_connection("connection-1", "host.example", 22, "deploy");
         let existing = binding_from_resolved(
             "ssh-project".to_string(),
             worktree::resolve_provisional_ssh(&install, "connection-1", "/srv/repo").unwrap(),
@@ -533,7 +721,12 @@ mod tests {
         )];
         let existing_by_project = HashMap::from([(existing.project_id.clone(), existing.clone())]);
 
-        let resolved = resolve_project_bindings(&projects, &install, &existing_by_project);
+        let resolved = resolve_project_bindings(
+            &projects,
+            std::slice::from_ref(&connection),
+            &install,
+            &existing_by_project,
+        );
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].execution_host_id, existing.execution_host_id);
@@ -544,6 +737,351 @@ mod tests {
             resolved[0].canonical_worktree_path,
             existing.canonical_worktree_path
         );
+    }
+
+    #[test]
+    fn unchanged_ssh_context_preserves_authoritative_remote_identity() {
+        let local_install = HostInstallId::new();
+        let persisted_connection = ssh_connection("connection-1", "host.example", 0, "deploy");
+        let authoritative =
+            authoritative_remote_binding("ssh-project", "/srv/repo", &persisted_connection);
+        let mut current_connection = persisted_connection.clone();
+        current_connection.port = 22;
+        current_connection.name = "renamed display".into();
+        current_connection.password = Some("new password".into());
+        current_connection.identity_file = Some("/new/private/key".into());
+        let configured = project("ssh-project", "/srv/repo", Some("connection-1"));
+        let provisional = binding_from_resolved(
+            configured.id.clone(),
+            worktree::resolve_provisional_ssh(&local_install, "connection-1", "/srv/repo").unwrap(),
+        );
+        assert_ne!(provisional.worktree_id, authoritative.worktree_id);
+
+        let resolved = resolve_project_bindings(
+            &[configured],
+            std::slice::from_ref(&current_connection),
+            &local_install,
+            &HashMap::from([("ssh-project".to_string(), authoritative.clone())]),
+        );
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].execution_host_id,
+            authoritative.execution_host_id
+        );
+        assert_eq!(resolved[0].repo_id, authoritative.repo_id);
+        assert_eq!(resolved[0].worktree_id, authoritative.worktree_id);
+        assert_eq!(
+            resolved[0].canonical_worktree_path,
+            authoritative.canonical_worktree_path
+        );
+        assert_eq!(
+            resolved[0].identity_source,
+            WorktreeIdentitySource::AuthoritativeRemoteGit.as_str()
+        );
+        assert_eq!(
+            resolved[0].identity_context.as_deref(),
+            Some(ssh_binding_identity_context(&current_connection, "/srv/repo").as_str())
+        );
+    }
+
+    #[test]
+    fn configured_ssh_alias_preserves_authenticated_canonical_path() {
+        let local_install = HostInstallId::new();
+        let connection = ssh_connection("connection-1", "host.example", 22, "deploy");
+        let mut authoritative =
+            authoritative_remote_binding("ssh-project", "/srv/repo-real", &connection);
+        authoritative.identity_context = Some(ssh_binding_identity_context(
+            &connection,
+            "/srv/repo-link",
+        ));
+        let configured = project("ssh-project", "/srv/repo-link", Some("connection-1"));
+
+        let resolved = resolve_project_bindings(
+            &[configured],
+            &[connection],
+            &local_install,
+            &HashMap::from([("ssh-project".to_string(), authoritative.clone())]),
+        );
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].execution_host_id, authoritative.execution_host_id);
+        assert_eq!(resolved[0].repo_id, authoritative.repo_id);
+        assert_eq!(resolved[0].worktree_id, authoritative.worktree_id);
+        assert_eq!(
+            resolved[0].canonical_worktree_path.as_deref(),
+            Some("/srv/repo-real")
+        );
+        assert_eq!(resolved[0].identity_context, authoritative.identity_context);
+    }
+
+    #[test]
+    fn ssh_authority_context_contains_only_public_endpoint_identity() {
+        let mut connection = ssh_connection("connection-1", "host.example", 0, "deploy");
+        connection.name = "display-name-secret".into();
+        connection.password = Some("password-secret".into());
+        connection.identity_file = Some("private-key-secret".into());
+        connection.group = Some("group-secret".into());
+
+        let context = ssh_binding_identity_context(&connection, "/srv/repo");
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&context).unwrap(),
+            serde_json::json!([
+                "ssh-authority-v2",
+                "connection-1",
+                "host.example",
+                22,
+                "deploy",
+                "/srv/repo"
+            ])
+        );
+        for secret in [
+            "display-name-secret",
+            "password-secret",
+            "private-key-secret",
+            "group-secret",
+            "token-secret",
+        ] {
+            assert!(!context.contains(secret));
+        }
+    }
+
+    #[test]
+    fn changed_ssh_host_user_or_port_rejects_authoritative_binding() {
+        let local_install = HostInstallId::new();
+        let persisted_connection = ssh_connection("connection-1", "host.example", 22, "deploy");
+        let authoritative =
+            authoritative_remote_binding("ssh-project", "/srv/repo", &persisted_connection);
+        let configured = project("ssh-project", "/srv/repo", Some("connection-1"));
+        let expected = binding_from_resolved(
+            configured.id.clone(),
+            worktree::resolve_provisional_ssh(&local_install, "connection-1", "/srv/repo").unwrap(),
+        );
+
+        let mut changed_host = persisted_connection.clone();
+        changed_host.host = "other.example".into();
+        let mut changed_user = persisted_connection.clone();
+        changed_user.user = "other-user".into();
+        let mut changed_port = persisted_connection;
+        changed_port.port = 2222;
+
+        for connection in [changed_host, changed_user, changed_port] {
+            let resolved = resolve_project_bindings(
+                std::slice::from_ref(&configured),
+                std::slice::from_ref(&connection),
+                &local_install,
+                &HashMap::from([("ssh-project".to_string(), authoritative.clone())]),
+            );
+            assert_eq!(resolved, vec![expected.clone()]);
+        }
+    }
+
+    #[test]
+    fn legacy_null_ssh_context_rejects_authoritative_binding() {
+        let local_install = HostInstallId::new();
+        let connection = ssh_connection("connection-1", "host.example", 22, "deploy");
+        let mut authoritative =
+            authoritative_remote_binding("ssh-project", "/srv/repo", &connection);
+        authoritative.identity_context = None;
+        let configured = project("ssh-project", "/srv/repo", Some("connection-1"));
+        let expected = binding_from_resolved(
+            configured.id.clone(),
+            worktree::resolve_provisional_ssh(&local_install, "connection-1", "/srv/repo").unwrap(),
+        );
+
+        let resolved = resolve_project_bindings(
+            &[configured],
+            &[connection],
+            &local_install,
+            &HashMap::from([("ssh-project".to_string(), authoritative)]),
+        );
+
+        assert_eq!(resolved, vec![expected]);
+    }
+
+    #[test]
+    fn missing_ssh_connection_rejects_authoritative_binding() {
+        let local_install = HostInstallId::new();
+        let connection = ssh_connection("connection-1", "host.example", 22, "deploy");
+        let authoritative = authoritative_remote_binding("ssh-project", "/srv/repo", &connection);
+        let configured = project("ssh-project", "/srv/repo", Some("connection-1"));
+        let expected = binding_from_resolved(
+            configured.id.clone(),
+            worktree::resolve_provisional_ssh(&local_install, "connection-1", "/srv/repo").unwrap(),
+        );
+
+        let resolved = resolve_project_bindings(
+            &[configured],
+            &[],
+            &local_install,
+            &HashMap::from([("ssh-project".to_string(), authoritative)]),
+        );
+
+        assert_eq!(resolved, vec![expected]);
+    }
+
+    #[test]
+    fn untyped_persisted_fallback_cannot_become_ssh_host_authority() {
+        let install = HostInstallId::new();
+        let connection = ssh_connection("connection-1", "host.example", 22, "deploy");
+        let configured = project("ssh-project", "/srv/repo", Some("connection-1"));
+        let expected = binding_from_resolved(
+            configured.id.clone(),
+            worktree::resolve_provisional_ssh(&install, "connection-1", "/srv/repo").unwrap(),
+        );
+        let local_execution_host_id = ExecutionHostId::derive("local", &install);
+        let local_repo_id = RepoId::derive(&local_execution_host_id, "/srv/repo");
+        let stale_fallback = ProjectWorktreeBinding {
+            project_id: configured.id.clone(),
+            execution_host_id: local_execution_host_id,
+            repo_id: local_repo_id.clone(),
+            worktree_id: WorktreeId::derive(&local_repo_id, "/srv/repo", None),
+            identity_source: WorktreeIdentitySource::PersistedFallback
+                .as_str()
+                .to_string(),
+            canonical_worktree_path: Some("/srv/repo".into()),
+            identity_context: None,
+        };
+
+        let resolved = resolve_project_bindings(
+            &[configured],
+            &[connection],
+            &install,
+            &HashMap::from([("ssh-project".to_string(), stale_fallback.clone())]),
+        );
+
+        assert_eq!(resolved, vec![expected]);
+        assert_ne!(
+            resolved[0].execution_host_id,
+            stale_fallback.execution_host_id
+        );
+        assert_eq!(
+            resolved[0].identity_source,
+            WorktreeIdentitySource::ProvisionalSsh.as_str()
+        );
+    }
+
+    #[test]
+    fn changed_authoritative_remote_path_rejects_fallback_and_resolves_provisionally() {
+        let local_install = HostInstallId::new();
+        let connection = ssh_connection("connection-1", "host.example", 22, "deploy");
+        let authoritative = authoritative_remote_binding("ssh-project", "/srv/repo", &connection);
+        let configured = project("ssh-project", "/srv/renamed-repo", Some("connection-1"));
+        let expected = binding_from_resolved(
+            configured.id.clone(),
+            worktree::resolve_provisional_ssh(&local_install, "connection-1", "/srv/renamed-repo")
+                .unwrap(),
+        );
+
+        let resolved = resolve_project_bindings(
+            &[configured],
+            &[connection],
+            &local_install,
+            &HashMap::from([("ssh-project".to_string(), authoritative.clone())]),
+        );
+
+        assert_eq!(resolved, vec![expected]);
+        assert_ne!(resolved[0].worktree_id, authoritative.worktree_id);
+        assert_eq!(
+            resolved[0].identity_source,
+            WorktreeIdentitySource::ProvisionalSsh.as_str()
+        );
+    }
+
+    #[test]
+    fn invalid_remote_path_never_reuses_old_authoritative_binding() {
+        let local_install = HostInstallId::new();
+        let connection = ssh_connection("connection-1", "host.example", 22, "deploy");
+        let authoritative = authoritative_remote_binding("ssh-project", "/srv/repo", &connection);
+        let configured = project(
+            "ssh-project",
+            "temporarily-not-an-absolute-path",
+            Some("connection-1"),
+        );
+
+        let resolved = resolve_project_bindings(
+            &[configured],
+            &[connection],
+            &local_install,
+            &HashMap::from([("ssh-project".to_string(), authoritative)]),
+        );
+
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn authoritative_rebind_replaces_nonempty_cold_provisional_state() {
+        let mut config = AppConfig {
+            projects: vec![project("ssh-project", "/srv/repo", Some("connection-1"))],
+            ..AppConfig::default()
+        };
+        let shell_name = config.default_shell.clone();
+        let old_route = route(TerminalIncarnationId::new());
+        let new_route = route(TerminalIncarnationId::new());
+        let old_layout = saved_layout(&shell_name, "/srv/repo/provisional", old_route.worktree_id);
+        let destination_layout = saved_layout(
+            &shell_name,
+            "/srv/repo/authoritative",
+            new_route.worktree_id.clone(),
+        );
+        let (panels, active_panel_id) = persist::restore_layout(&old_layout, &config);
+        let mut state = ProjectState::new();
+        state.panels = panels;
+        state.active_panel_id = active_panel_id;
+        let old_pane_id = state.all_panes()[0].id.clone();
+        state.maximized_pane_id = Some(old_pane_id);
+        assert!(!state.panels.is_empty());
+        assert!(
+            state.pty_ids().is_empty(),
+            "restored state must still be cold"
+        );
+        let mut states = HashMap::from([("ssh-project".to_string(), state)]);
+
+        apply_reconciled_project_layout(
+            &mut config,
+            &mut states,
+            "ssh-project",
+            destination_layout,
+            true,
+        );
+
+        let state = states.get("ssh-project").unwrap();
+        assert_eq!(
+            state.all_panes()[0].cwd.as_deref(),
+            Some("/srv/repo/authoritative")
+        );
+        assert!(state.maximized_pane_id.is_none());
+        assert_eq!(
+            config.projects[0]
+                .saved_layout
+                .as_ref()
+                .and_then(|layout| layout.worktree_id.as_ref()),
+            Some(&new_route.worktree_id)
+        );
+    }
+
+    #[test]
+    fn shared_alias_detection_uses_stable_worktree_id() {
+        let first = binding_from_resolved(
+            "p1".into(),
+            worktree::resolve_provisional_ssh(&HostInstallId::new(), "ssh", "/repo").unwrap(),
+        );
+        let mut second = first.clone();
+        second.project_id = "p2".into();
+        let unrelated = binding_from_resolved(
+            "p3".into(),
+            worktree::resolve_provisional_ssh(&HostInstallId::new(), "ssh", "/other").unwrap(),
+        );
+        let bindings = HashMap::from([
+            (first.project_id.clone(), first),
+            (second.project_id.clone(), second),
+            (unrelated.project_id.clone(), unrelated),
+        ]);
+
+        assert!(has_other_worktree_alias(&bindings, "p1"));
+        assert!(has_other_worktree_alias(&bindings, "p2"));
+        assert!(!has_other_worktree_alias(&bindings, "p3"));
     }
 
     #[test]

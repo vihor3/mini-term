@@ -194,12 +194,60 @@ fn swap_file_tree_scope(
     next_worktree: Option<&WorktreeId>,
     current_state: FileTreeScopeState,
 ) -> (FileTreeScopeState, bool) {
+    if current_worktree.is_some() && current_worktree == next_worktree {
+        return (current_state, true);
+    }
     if let Some(worktree_id) = current_worktree {
         cache.insert(worktree_id.clone(), current_state);
     }
     match next_worktree.and_then(|worktree_id| cache.remove(worktree_id)) {
         Some(state) => (state, true),
         None => (FileTreeScopeState::empty(), false),
+    }
+}
+
+fn file_tree_scope_matches(
+    current_worktree: Option<&WorktreeId>,
+    current_signature: Option<&str>,
+    next_worktree: Option<&WorktreeId>,
+    next_signature: Option<&str>,
+) -> bool {
+    current_worktree == next_worktree && current_signature == next_signature
+}
+
+fn watcher_source_key(
+    source_signature: Option<&str>,
+    worktree_id: Option<&WorktreeId>,
+    source_generation: u64,
+) -> Option<String> {
+    source_signature.map(|signature| {
+        format!(
+            "{signature}\0{}\0{source_generation}",
+            worktree_id.map(WorktreeId::as_str).unwrap_or_default()
+        )
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DirectoryRequestOwner {
+    project_id: Option<String>,
+    worktree_id: Option<WorktreeId>,
+    source_signature: Option<String>,
+    source_generation: u64,
+}
+
+impl DirectoryRequestOwner {
+    fn matches(
+        &self,
+        project_id: Option<&str>,
+        worktree_id: Option<&WorktreeId>,
+        source_signature: Option<&str>,
+        source_generation: u64,
+    ) -> bool {
+        self.project_id.as_deref() == project_id
+            && self.worktree_id.as_ref() == worktree_id
+            && self.source_signature.as_deref() == source_signature
+            && self.source_generation == source_generation
     }
 }
 
@@ -225,6 +273,8 @@ pub struct FileTree {
     selected_path: Option<PathBuf>,
     scroll: ScrollHandle,
     /// 项目 + 根路径 + 后端/连接配置的身份签名。连接配置原地修改时也会变化。
+    /// watcher 另把 worktree 与 generation 编入注册 source key，避免 A→B→A
+    /// 后接收第一轮 A 遗留在 channel 里的事件。
     source_signature: Option<String>,
     /// 每次 source signature 变化递增，后台结果回写前必须对号。
     source_generation: u64,
@@ -317,8 +367,13 @@ impl FileTree {
                 };
                 if this
                     .update(cx, |tree: &mut FileTree, cx| {
-                        if !watcher_event_matches(
+                        let current_source_key = watcher_source_key(
                             tree.source_signature.as_deref(),
+                            tree.current_worktree.as_ref(),
+                            tree.source_generation,
+                        );
+                        if !watcher_event_matches(
+                            current_source_key.as_deref(),
                             tree.project_root(cx).as_deref(),
                             change.source_key.as_deref(),
                             &change.project_path,
@@ -518,14 +573,18 @@ impl FileTree {
                 None => (None, None, None, false, false, None),
             }
         };
-        if signature == self.source_signature {
+        if file_tree_scope_matches(
+            self.current_worktree.as_ref(),
+            self.source_signature.as_deref(),
+            worktree_id.as_ref(),
+            signature.as_deref(),
+        ) {
             return;
         }
         for dir in std::mem::take(&mut self.watched) {
             self.watcher.unwatch(&dir);
         }
-        let scope_changed = worktree_id != self.current_worktree;
-        if orca_worktree_context_enabled() && scope_changed {
+        if orca_worktree_context_enabled() {
             let current_worktree = self.current_worktree.clone();
             let current_state = self.take_scope_state();
             let (state, _) = swap_file_tree_scope(
@@ -537,9 +596,7 @@ impl FileTree {
             self.install_scope_state(state);
         } else {
             self.clear_scope();
-            if !orca_worktree_context_enabled() {
-                self.scope_cache.clear();
-            }
+            self.scope_cache.clear();
         }
         self.loading.clear();
         self.dir_request_ids.clear();
@@ -673,12 +730,18 @@ impl FileTree {
 
         // 远程项目**不注册 watcher**:远端文件系统本机监听不到
         let remote = self.remote_conn(cx);
+        let current_watcher_source_key = watcher_source_key(
+            self.source_signature.as_deref(),
+            self.current_worktree.as_ref(),
+            self.source_generation,
+        )
+        .unwrap_or_default();
         if remote.is_none()
             && self.watched.insert(dir.clone())
             && let Err(err) = self.watcher.watch_scoped(
                 &dir,
                 root.to_string_lossy().as_ref(),
-                self.source_signature.clone().unwrap_or_default(),
+                current_watcher_source_key,
             )
         {
             eprintln!("[files] 监听 {} 失败: {err:#}", dir.display());
@@ -686,9 +749,12 @@ impl FileTree {
 
         let task_dir = dir.clone();
         let task_root = root.clone();
-        let request_project = self.current_project.clone();
-        let request_signature = self.source_signature.clone();
-        let request_generation = self.source_generation;
+        let request_owner = DirectoryRequestOwner {
+            project_id: self.current_project.clone(),
+            worktree_id: self.current_worktree.clone(),
+            source_signature: self.source_signature.clone(),
+            source_generation: self.source_generation,
+        };
         // 根目录那一趟额外承担三态占位(loading / 加载失败 / 刷新失败)
         let is_root = dir == root;
         cx.spawn(async move |this, cx| {
@@ -715,10 +781,12 @@ impl FileTree {
                 })
                 .await;
             let _ = this.update(cx, |tree: &mut FileTree, cx| {
-                if tree.current_project != request_project
-                    || tree.source_signature != request_signature
-                    || tree.source_generation != request_generation
-                    || tree.dir_request_ids.get(&dir) != Some(&request_id)
+                if !request_owner.matches(
+                    tree.current_project.as_deref(),
+                    tree.current_worktree.as_ref(),
+                    tree.source_signature.as_deref(),
+                    tree.source_generation,
+                ) || tree.dir_request_ids.get(&dir) != Some(&request_id)
                 {
                     return;
                 }
@@ -753,11 +821,17 @@ impl FileTree {
                                     // 链上**每一段**都要监听:后端 watcher 是
                                     // NonRecursive,中段新增文件否则无人上报,
                                     // 压缩前提破了也不知道
+                                    let current_watcher_source_key = watcher_source_key(
+                                        tree.source_signature.as_deref(),
+                                        tree.current_worktree.as_ref(),
+                                        tree.source_generation,
+                                    )
+                                    .unwrap_or_default();
                                     if tree.watched.insert(segment.clone())
                                         && let Err(err) = tree.watcher.watch_scoped(
                                             segment,
                                             root.to_string_lossy().as_ref(),
-                                            tree.source_signature.clone().unwrap_or_default(),
+                                            current_watcher_source_key,
                                         )
                                     {
                                         eprintln!(

@@ -6,10 +6,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mt_identity::{TerminalIncarnationId, TerminalSessionId, WorktreeId};
 use mt_terminal::{TermSize, TerminalEmulator};
+use mt_terminal_host::protocol::{
+    ClientRequest, PROTOCOL_VERSION, ServerFrame, decode_frame, encode_frame,
+};
 use mt_terminal_host::{
-    ErrorCode, HostSpawnSpec, HostedEvent, ServeOutcome, TerminalHostClient,
+    ErrorCode, HostSpawnSpec, HostedEvent, ServeOutcome, SessionDescriptor, TerminalHostClient,
     serve_with_history_root,
 };
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -59,6 +63,100 @@ fn start_server(endpoint: String) -> std::thread::JoinHandle<Result<ServeOutcome
             ))
             .map_err(|error| error.message().to_string())
     })
+}
+
+fn start_attach_failure_server(
+    endpoint: String,
+    descriptor: SessionDescriptor,
+) -> std::thread::JoinHandle<()> {
+    let parent = Path::new(&endpoint).parent().unwrap();
+    std::fs::create_dir_all(parent).unwrap();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+            ready_tx.send(()).unwrap();
+            for step in 0..3 {
+                let (stream, _) = tokio::time::timeout(WAIT, listener.accept())
+                    .await
+                    .expect("scripted server timed out waiting for request")
+                    .unwrap();
+                let (reader, mut writer) = tokio::io::split(stream);
+                let hello = encode_frame(&ServerFrame::Hello {
+                    version: "test".into(),
+                    protocol_version: PROTOCOL_VERSION,
+                    pid: std::process::id(),
+                    live_sessions: usize::from(step > 0),
+                })
+                .unwrap();
+                writer.write_all(hello.as_bytes()).await.unwrap();
+                writer.flush().await.unwrap();
+
+                let mut reader = BufReader::new(reader);
+                let mut line = String::new();
+                tokio::time::timeout(WAIT, reader.read_line(&mut line))
+                    .await
+                    .expect("scripted server timed out reading request")
+                    .unwrap();
+                let request = decode_frame::<ClientRequest>(&line).unwrap();
+                let response = match (step, request) {
+                    (
+                        0,
+                        ClientRequest::Create {
+                            session_id,
+                            worktree_id,
+                            expected_absent: true,
+                            ..
+                        },
+                    ) => {
+                        assert_eq!(session_id, descriptor.session_id);
+                        assert_eq!(worktree_id, descriptor.worktree_id);
+                        ServerFrame::Created {
+                            descriptor: descriptor.clone(),
+                        }
+                    }
+                    (
+                        1,
+                        ClientRequest::Attach {
+                            session_id,
+                            expected_incarnation_id,
+                            after_sequence: 0,
+                            ..
+                        },
+                    ) => {
+                        assert_eq!(session_id, descriptor.session_id);
+                        assert_eq!(expected_incarnation_id, descriptor.incarnation_id);
+                        ServerFrame::Error {
+                            code: ErrorCode::SessionExited,
+                            message: "scripted attach failure".into(),
+                        }
+                    }
+                    (
+                        2,
+                        ClientRequest::Kill {
+                            session_id,
+                            expected_incarnation_id,
+                            ..
+                        },
+                    ) => {
+                        assert_eq!(session_id, descriptor.session_id);
+                        assert_eq!(expected_incarnation_id, descriptor.incarnation_id);
+                        ServerFrame::Ok
+                    }
+                    (_, request) => panic!("unexpected scripted request: {request:?}"),
+                };
+                let response = encode_frame(&response).unwrap();
+                writer.write_all(response.as_bytes()).await.unwrap();
+                writer.flush().await.unwrap();
+            }
+        });
+    });
+    ready_rx.recv_timeout(WAIT).unwrap();
+    handle
 }
 
 fn wait_until_ready(client: &TerminalHostClient) {
@@ -132,6 +230,23 @@ fn wait_for_exit(receiver: &mpsc::Receiver<HostedEvent>) -> Option<u32> {
         match receiver.recv_timeout(remaining) {
             Ok(HostedEvent::Output { .. }) => {}
             Ok(HostedEvent::Exited { exit_code }) => return exit_code,
+            Ok(HostedEvent::Disconnected(error)) => {
+                panic!("attachment disconnected before terminal exit: {error}")
+            }
+            Err(error) => panic!("output channel closed before terminal exit: {error}"),
+        }
+    }
+}
+
+fn collect_until_exit(receiver: &mpsc::Receiver<HostedEvent>) -> (Vec<u8>, Option<u32>) {
+    let deadline = Instant::now() + WAIT;
+    let mut output = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "timed out waiting for terminal exit");
+        match receiver.recv_timeout(remaining) {
+            Ok(HostedEvent::Output { bytes, .. }) => output.extend_from_slice(&bytes),
+            Ok(HostedEvent::Exited { exit_code }) => return (output, exit_code),
             Ok(HostedEvent::Disconnected(error)) => {
                 panic!("attachment disconnected before terminal exit: {error}")
             }
@@ -248,6 +363,162 @@ fn detached_session_reattaches_to_same_process_and_replays_output() {
     drop(second);
     wait_until_process_exits(original_pid);
     assert!(client.list().unwrap().is_empty());
+    client.shutdown_if_idle().unwrap();
+    assert_eq!(server.join().unwrap().unwrap(), ServeOutcome::Shutdown);
+    cleanup_endpoint(&endpoint);
+}
+
+#[test]
+fn natural_exit_orders_final_output_and_explicit_close_purges_history() {
+    let endpoint = unique_endpoint();
+    let root = history_root(&endpoint);
+    let server = start_server(endpoint.clone());
+    let client = TerminalHostClient::for_endpoint(endpoint.clone()).unwrap();
+    wait_until_ready(&client);
+
+    let session_id = TerminalSessionId::new();
+    let worktree_id = worktree_id();
+    let descriptor = client
+        .create(session_id.clone(), worktree_id.clone(), spawn_spec())
+        .unwrap();
+    let process_id = descriptor.process_id.unwrap();
+    let incarnation_id = descriptor.incarnation_id.clone();
+    let (event_tx, event_rx) = mpsc::channel();
+    let attachment = client
+        .attach(
+            session_id.clone(),
+            incarnation_id.clone(),
+            0,
+            move |event| {
+                let _ = event_tx.send(event);
+            },
+        )
+        .unwrap();
+
+    attachment.write(b"stty -echo\r").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    attachment
+        .write(b"printf '__FINAL_OUTPUT__'; exit 7\r")
+        .unwrap();
+    let (output, exit_code) = collect_until_exit(&event_rx);
+    assert_eq!(exit_code, Some(7));
+    assert!(
+        output
+            .windows(b"__FINAL_OUTPUT__".len())
+            .any(|window| window == b"__FINAL_OUTPUT__"),
+        "Hosted Exited arrived before the final PTY output"
+    );
+    wait_until_process_exits(process_id);
+
+    let attach_error = client
+        .attach(session_id.clone(), incarnation_id.clone(), 0, |_| {})
+        .unwrap_err();
+    assert!(attach_error.is_code(ErrorCode::SessionExited));
+
+    let stale_restore = client
+        .restore(
+            session_id.clone(),
+            worktree_id,
+            TerminalIncarnationId::new(),
+            spawn_spec(),
+        )
+        .unwrap_err();
+    assert!(stale_restore.is_code(ErrorCode::IncarnationMismatch));
+
+    client.kill(session_id.clone(), incarnation_id).unwrap();
+    drop(attachment);
+    assert!(client.list().unwrap().is_empty());
+    assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+
+    client.shutdown_if_idle().unwrap();
+    assert_eq!(server.join().unwrap().unwrap(), ServeOutcome::Shutdown);
+    cleanup_endpoint(&endpoint);
+}
+
+#[test]
+fn create_attached_kills_the_created_incarnation_when_attach_fails() {
+    let endpoint = unique_endpoint();
+    let descriptor = SessionDescriptor {
+        session_id: TerminalSessionId::new(),
+        incarnation_id: TerminalIncarnationId::new(),
+        worktree_id: worktree_id(),
+        process_id: Some(42),
+        rows: 24,
+        cols: 80,
+        first_sequence: 1,
+        latest_sequence: 0,
+        wsl_override: None,
+        recovery_available: true,
+    };
+    let server = start_attach_failure_server(endpoint.clone(), descriptor.clone());
+    let client = TerminalHostClient::for_endpoint(endpoint.clone()).unwrap();
+
+    let error = client
+        .create_attached(
+            descriptor.session_id.clone(),
+            descriptor.worktree_id.clone(),
+            spawn_spec(),
+            |_| {},
+        )
+        .unwrap_err();
+    assert!(error.is_code(ErrorCode::SessionExited));
+    server.join().unwrap();
+    cleanup_endpoint(&endpoint);
+}
+
+#[test]
+fn live_restore_drains_history_before_starting_the_new_incarnation() {
+    let endpoint = unique_endpoint();
+    let server = start_server(endpoint.clone());
+    let client = TerminalHostClient::for_endpoint(endpoint.clone()).unwrap();
+    wait_until_ready(&client);
+
+    let session_id = TerminalSessionId::new();
+    let worktree_id = worktree_id();
+    let created = client
+        .create(session_id.clone(), worktree_id.clone(), spawn_spec())
+        .unwrap();
+    let old_incarnation = created.incarnation_id.clone();
+    let old_pid = created.process_id.unwrap();
+    let (event_tx, event_rx) = mpsc::channel();
+    let old_attachment = client
+        .attach(
+            session_id.clone(),
+            old_incarnation.clone(),
+            0,
+            move |event| {
+                let _ = event_tx.send(event);
+            },
+        )
+        .unwrap();
+    old_attachment.write(b"stty -echo\r").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    old_attachment
+        .write(b"printf '__LIVE_RESTORE_HISTORY__\n'\r")
+        .unwrap();
+    let _ = wait_for_marker(&event_rx, "__LIVE_RESTORE_HISTORY__");
+
+    let (restored, snapshot) = client
+        .restore(
+            session_id.clone(),
+            worktree_id,
+            old_incarnation,
+            spawn_spec(),
+        )
+        .unwrap();
+    assert_ne!(restored.process_id, Some(old_pid));
+    let emulator = TerminalEmulator::new(TermSize::new(1, 1));
+    emulator.restore_snapshot(&snapshot).unwrap();
+    assert!(
+        emulator
+            .visible_lines()
+            .join("\n")
+            .contains("__LIVE_RESTORE_HISTORY__")
+    );
+    wait_until_process_exits(old_pid);
+
+    client.kill(session_id, restored.incarnation_id).unwrap();
+    drop(old_attachment);
     client.shutdown_if_idle().unwrap();
     assert_eq!(server.join().unwrap().unwrap(), ServeOutcome::Shutdown);
     cleanup_endpoint(&endpoint);

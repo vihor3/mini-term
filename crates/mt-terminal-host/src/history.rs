@@ -2,6 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
@@ -21,6 +22,7 @@ const LOG_BYTES_LIMIT: usize = 8 * 1024 * 1024;
 const FRAME_PAYLOAD_LIMIT: usize = 1024 * 1024;
 const GENERATION_BYTES_LIMIT: usize = 128;
 const JSON_BYTES_LIMIT: usize = SNAPSHOT_MAX_COMPRESSED_BYTES * 2;
+const INVALIDATED_MARKER: &[u8] = b"terminal recovery invalidated\n";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,6 +89,7 @@ struct HistoryPaths {
     meta: PathBuf,
     checkpoint: PathBuf,
     log: PathBuf,
+    invalidated: PathBuf,
 }
 
 impl HistoryPaths {
@@ -106,6 +109,7 @@ impl HistoryPaths {
             meta: directory.join("meta.json"),
             checkpoint: directory.join("checkpoint.json"),
             log: directory.join("output.log"),
+            invalidated: directory.join("invalidated"),
             directory,
         })
     }
@@ -116,6 +120,9 @@ pub(crate) struct RecoveredHistory {
 }
 
 pub(crate) struct SessionHistory {
+    paths: HistoryPaths,
+    invalidated: AtomicBool,
+    available: AtomicBool,
     state: Mutex<HistoryState>,
 }
 
@@ -155,6 +162,9 @@ impl SessionHistory {
             emulator.reset_parser_state();
         }
         Ok(Self {
+            paths: paths.clone(),
+            invalidated: AtomicBool::new(false),
+            available: AtomicBool::new(false),
             state: Mutex::new(HistoryState {
                 paths,
                 session_id: seed.session_id,
@@ -171,67 +181,118 @@ impl SessionHistory {
     }
 
     pub(crate) fn activate(&self) -> bool {
-        let mut state = self.state.lock();
-        if let Err(error) = state.activate() {
-            state.fail(error);
+        if self.invalidated.load(Ordering::Acquire) {
             return false;
         }
+        let mut state = self.state.lock();
+        if self.invalidated.load(Ordering::Acquire) {
+            return false;
+        }
+        if let Err(error) = state.activate() {
+            self.fail_locked(&mut state, error);
+            return false;
+        }
+        if self.invalidated.load(Ordering::Acquire) {
+            state.deactivate();
+            drop(state);
+            if let Err(error) = write_invalidation_marker(&self.paths) {
+                eprintln!(
+                    "terminal history invalidation raced activation for {}: {error:#}",
+                    self.paths.directory.display()
+                );
+            }
+            return false;
+        }
+        self.available.store(true, Ordering::Release);
         true
     }
 
     pub(crate) fn record_output(&self, bytes: &[u8]) {
+        if self.invalidated.load(Ordering::Acquire) {
+            return;
+        }
         let mut state = self.state.lock();
-        if state.failure.is_some() {
+        if self.invalidated.load(Ordering::Acquire) || state.failure.is_some() {
             return;
         }
         if let Err(error) = state.record_output(bytes) {
-            state.fail(error);
+            self.fail_locked(&mut state, error);
         }
     }
 
     pub(crate) fn record_resize(&self, rows: u16, cols: u16) {
+        if self.invalidated.load(Ordering::Acquire) {
+            return;
+        }
         let mut state = self.state.lock();
-        if state.failure.is_some() {
+        if self.invalidated.load(Ordering::Acquire) || state.failure.is_some() {
             return;
         }
         if let Err(error) = state.record_resize(rows, cols) {
-            state.fail(error);
+            self.fail_locked(&mut state, error);
         }
     }
 
     pub(crate) fn flush_checkpoint(&self) {
+        if self.invalidated.load(Ordering::Acquire) {
+            return;
+        }
         let mut state = self.state.lock();
-        if state.failure.is_some() || !state.active {
+        if self.invalidated.load(Ordering::Acquire) || state.failure.is_some() || !state.active {
             return;
         }
         if let Err(error) = state.checkpoint() {
-            state.fail(error);
+            self.fail_locked(&mut state, error);
         }
     }
 
     pub(crate) fn seal(&self) -> bool {
+        if self.invalidated.load(Ordering::Acquire) {
+            return false;
+        }
         let mut state = self.state.lock();
-        if state.failure.is_some() || !state.active {
+        if self.invalidated.load(Ordering::Acquire) || state.failure.is_some() || !state.active {
             return false;
         }
         if let Err(error) = state.checkpoint() {
-            state.fail(error);
+            self.fail_locked(&mut state, error);
+            return false;
+        }
+        if self.invalidated.load(Ordering::Acquire) {
+            state.deactivate();
             return false;
         }
         state.log = None;
         state.active = false;
+        self.available.store(false, Ordering::Release);
         true
     }
 
-    pub(crate) fn discard(&self) {
+    pub(crate) fn invalidate(&self) -> anyhow::Result<()> {
+        self.invalidated.store(true, Ordering::Release);
+        self.available.store(false, Ordering::Release);
+        if let Some(mut state) = self.state.try_lock() {
+            state.deactivate();
+        }
+        write_invalidation_marker(&self.paths)
+    }
+
+    pub(crate) fn invalidate_and_wait(&self) -> anyhow::Result<()> {
+        self.invalidated.store(true, Ordering::Release);
+        self.available.store(false, Ordering::Release);
         let mut state = self.state.lock();
-        state.log = None;
-        state.active = false;
+        state.deactivate();
+        write_invalidation_marker(&self.paths)
     }
 
     pub(crate) fn is_available(&self) -> bool {
-        let state = self.state.lock();
-        state.active && state.failure.is_none()
+        self.available.load(Ordering::Acquire) && !self.invalidated.load(Ordering::Acquire)
+    }
+
+    fn fail_locked(&self, state: &mut HistoryState, error: anyhow::Error) {
+        self.invalidated.store(true, Ordering::Release);
+        self.available.store(false, Ordering::Release);
+        state.fail(error);
     }
 }
 
@@ -254,6 +315,11 @@ impl HistoryState {
             &self.worktree_id,
             &self.generation,
         )?;
+        match fs::remove_file(&self.paths.invalidated) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("clear terminal history invalidation marker"),
+        }
         self.log = Some(log);
         self.log_bytes = 0;
         self.active = true;
@@ -331,15 +397,24 @@ impl HistoryState {
         Ok(())
     }
 
+    fn deactivate(&mut self) {
+        self.log = None;
+        self.active = false;
+    }
+
     fn fail(&mut self, error: anyhow::Error) {
-        let message = format!("{error:#}");
+        self.deactivate();
+        let mut message = format!("{error:#}");
+        if let Err(invalidation_error) = write_invalidation_marker(&self.paths) {
+            message.push_str(&format!(
+                "; could not durably invalidate recovery history: {invalidation_error:#}"
+            ));
+        }
         eprintln!(
             "terminal history disabled for {}: {message}",
             self.session_id
         );
         self.failure = Some(message);
-        self.log = None;
-        self.active = false;
     }
 }
 
@@ -361,6 +436,13 @@ pub(crate) fn recover(
     expected_previous_incarnation: &TerminalIncarnationId,
 ) -> anyhow::Result<RecoveredHistory> {
     let paths = HistoryPaths::new(root, session_id)?;
+    if paths
+        .invalidated
+        .try_exists()
+        .context("check terminal history invalidation marker")?
+    {
+        bail!("terminal history was invalidated after an incomplete output drain");
+    }
     let meta: HistoryMeta = read_json(&paths.meta, 64 * 1024)?;
     validate_meta(
         &meta,
@@ -434,6 +516,10 @@ pub(crate) fn recover(
     Ok(RecoveredHistory {
         snapshot: emulator.snapshot()?,
     })
+}
+
+pub(crate) fn invalidate(root: &Path, session_id: &TerminalSessionId) -> anyhow::Result<()> {
+    write_invalidation_marker(&HistoryPaths::new(root, session_id)?)
 }
 
 pub(crate) fn purge(root: &Path, session_id: &TerminalSessionId) -> anyhow::Result<()> {
@@ -529,28 +615,56 @@ fn encode_frame(
     Ok(encoded)
 }
 
+fn torn_frames(frames: Vec<HistoryFrame>, valid_len: usize) -> anyhow::Result<ParsedFrames> {
+    Ok(ParsedFrames {
+        frames,
+        valid_len,
+        torn_tail: true,
+    })
+}
+
+fn valid_generation_prefix(bytes: &[u8], total_len: usize) -> bool {
+    let identity_prefix = TerminalIncarnationId::PREFIX.as_bytes();
+    const UUID_LEN: usize = 36;
+    if total_len != identity_prefix.len() + UUID_LEN || bytes.len() > total_len {
+        return false;
+    }
+    bytes.iter().copied().enumerate().all(|(index, byte)| {
+        if index < identity_prefix.len() {
+            return byte == identity_prefix[index];
+        }
+        match index - identity_prefix.len() {
+            8 | 13 | 18 | 23 => byte == b'-',
+            14 => byte == b'4',
+            19 => matches!(byte, b'8' | b'9' | b'a' | b'b'),
+            _ => byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase(),
+        }
+    })
+}
+
 fn parse_frames(bytes: &[u8]) -> anyhow::Result<ParsedFrames> {
     let mut frames = Vec::new();
     let mut offset = 0;
     while offset < bytes.len() {
         let start = offset;
         if bytes.len() - offset < LOG_MAGIC.len() {
-            return Ok(ParsedFrames {
-                frames,
-                valid_len: start,
-                torn_tail: true,
-            });
+            if LOG_MAGIC.starts_with(&bytes[offset..]) {
+                return torn_frames(frames, start);
+            }
+            bail!("terminal history frame magic mismatch at byte {offset}");
         }
         if &bytes[offset..offset + LOG_MAGIC.len()] != LOG_MAGIC {
             bail!("terminal history frame magic mismatch at byte {offset}");
         }
         offset += LOG_MAGIC.len();
-        if bytes.len() - offset < 5 {
-            return Ok(ParsedFrames {
-                frames,
-                valid_len: start,
-                torn_tail: true,
-            });
+
+        let version_bytes = LOG_VERSION.to_le_bytes();
+        let available = (bytes.len() - offset).min(version_bytes.len());
+        if bytes[offset..offset + available] != version_bytes[..available] {
+            bail!("unsupported terminal history log version prefix");
+        }
+        if available < version_bytes.len() {
+            return torn_frames(frames, start);
         }
         let body_start = offset;
         let version = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
@@ -558,44 +672,83 @@ fn parse_frames(bytes: &[u8]) -> anyhow::Result<ParsedFrames> {
         if version != LOG_VERSION {
             bail!("unsupported terminal history log version {version}");
         }
+
+        if offset == bytes.len() {
+            return torn_frames(frames, start);
+        }
         let kind = FrameKind::try_from(bytes[offset])?;
         offset += 1;
+
+        let generation_length_bytes = (bytes.len() - offset).min(2);
+        if generation_length_bytes == 0 {
+            return torn_frames(frames, start);
+        }
+        let expected_generation_len = TerminalIncarnationId::PREFIX.len() + 36;
+        if generation_length_bytes == 1 {
+            if bytes[offset] as usize != expected_generation_len {
+                bail!("terminal history generation length prefix is invalid");
+            }
+            return torn_frames(frames, start);
+        }
         let generation_len = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]) as usize;
         offset += 2;
-        if generation_len > GENERATION_BYTES_LIMIT {
+        if generation_len > GENERATION_BYTES_LIMIT || generation_len != expected_generation_len {
             bail!("terminal history generation length exceeds limit");
         }
-        if bytes.len() - offset < generation_len + 12 {
-            return Ok(ParsedFrames {
-                frames,
-                valid_len: start,
-                torn_tail: true,
-            });
+
+        let available_generation = (bytes.len() - offset).min(generation_len);
+        if !valid_generation_prefix(
+            &bytes[offset..offset + available_generation],
+            generation_len,
+        ) {
+            bail!("terminal history generation prefix is invalid");
+        }
+        if available_generation < generation_len {
+            return torn_frames(frames, start);
         }
         let generation = std::str::from_utf8(&bytes[offset..offset + generation_len])
             .context("terminal history generation is not UTF-8")?;
         let generation = TerminalIncarnationId::from_str(generation)
             .context("terminal history generation is invalid")?;
         offset += generation_len;
+
+        if bytes.len() - offset < 8 {
+            return torn_frames(frames, start);
+        }
         let sequence = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
         offset += 8;
+
+        let available_payload_len = (bytes.len() - offset).min(4);
+        if available_payload_len < 4 {
+            let mut lower_bound = [0u8; 4];
+            lower_bound[..available_payload_len]
+                .copy_from_slice(&bytes[offset..offset + available_payload_len]);
+            if u32::from_le_bytes(lower_bound) as usize > FRAME_PAYLOAD_LIMIT {
+                bail!("terminal history payload length exceeds limit");
+            }
+            return torn_frames(frames, start);
+        }
         let payload_len =
             u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         if payload_len > FRAME_PAYLOAD_LIMIT {
             bail!("terminal history payload length exceeds limit");
         }
-        if bytes.len() - offset < payload_len + 4 {
-            return Ok(ParsedFrames {
-                frames,
-                valid_len: start,
-                torn_tail: true,
-            });
+        if bytes.len() - offset < payload_len {
+            return torn_frames(frames, start);
         }
         let payload = bytes[offset..offset + payload_len].to_vec();
         offset += payload_len;
-        let expected = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
         let actual = crc32fast::hash(&bytes[body_start..offset]);
+        let checksum = actual.to_le_bytes();
+        let available_checksum = (bytes.len() - offset).min(checksum.len());
+        if bytes[offset..offset + available_checksum] != checksum[..available_checksum] {
+            bail!("terminal history frame checksum mismatch at byte {start}");
+        }
+        if available_checksum < checksum.len() {
+            return torn_frames(frames, start);
+        }
+        let expected = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
         offset += 4;
         if actual != expected {
             bail!("terminal history frame checksum mismatch at byte {start}");
@@ -632,6 +785,13 @@ fn prepare_directory(path: &Path) -> anyhow::Result<()> {
             .context("secure terminal history directory")?;
     }
     Ok(())
+}
+
+fn write_invalidation_marker(paths: &HistoryPaths) -> anyhow::Result<()> {
+    prepare_directory(&paths.directory)?;
+    mt_core::atomic_write(&paths.invalidated, INVALIDATED_MARKER)
+        .context("write terminal history invalidation marker")?;
+    secure_file(&paths.invalidated)
 }
 
 fn secure_file(_path: &Path) -> anyhow::Result<()> {
@@ -719,19 +879,23 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, max_bytes: usize) -> any
 }
 
 fn read_limited(path: &Path, max_bytes: usize) -> anyhow::Result<Vec<u8>> {
-    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let length = file.metadata()?.len();
-    if length > max_bytes as u64 {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("{} byte limit overflow", path.display()))?;
+    let mut limited = file.take(read_limit as u64);
+    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
+    limited.read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
         bail!("{} exceeds byte limit", path.display());
     }
-    let mut bytes = Vec::with_capacity(length as usize);
-    file.read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
 
@@ -765,6 +929,13 @@ mod tests {
         let mut corrupt = first;
         *corrupt.last_mut().unwrap() ^= 0xff;
         assert!(parse_frames(&corrupt).is_err());
+
+        let mut invalid_suffix = encode_frame(FrameKind::Output, &generation, 1, b"one").unwrap();
+        invalid_suffix.extend_from_slice(b"BAD");
+        assert!(
+            parse_frames(&invalid_suffix).is_err(),
+            "an arbitrary suffix is not a torn frame prefix"
+        );
     }
 
     #[test]
@@ -903,7 +1074,7 @@ mod tests {
         })
         .unwrap();
         assert!(history.activate());
-        history.discard();
+        assert!(history.seal());
         let paths = HistoryPaths::new(&root, &session_id).unwrap();
 
         let first = encode_frame(FrameKind::Output, &generation, 1, b"one").unwrap();
@@ -925,6 +1096,95 @@ mod tests {
         invalid_version[LOG_MAGIC.len()] = 0xff;
         fs::write(&paths.log, invalid_version).unwrap();
         assert!(recover(&root, &session_id, &worktree_id, &generation).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn limited_reads_accept_the_bound_and_reject_one_extra_byte() {
+        let root = root("read-limit");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("bounded.bin");
+        fs::write(&path, b"1234").unwrap();
+        assert_eq!(read_limited(&path, 4).unwrap(), b"1234");
+
+        fs::write(&path, b"12345").unwrap();
+        assert!(read_limited(&path, 4).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn history_io_failure_is_durably_invalidated() {
+        let root = root("durable-invalidation");
+        let session_id = TerminalSessionId::new();
+        let worktree_id = worktree_id();
+        let generation = TerminalIncarnationId::new();
+        let history = SessionHistory::pending(HistorySeed {
+            root: &root,
+            session_id: session_id.clone(),
+            worktree_id: worktree_id.clone(),
+            generation: generation.clone(),
+            rows: 4,
+            cols: 20,
+            scrollback: 8,
+            initial_snapshot: None,
+        })
+        .unwrap();
+        assert!(history.activate());
+        history.state.lock().log = None;
+        history.record_output(b"cannot-be-recorded");
+
+        let paths = HistoryPaths::new(&root, &session_id).unwrap();
+        assert!(paths.invalidated.is_file());
+        assert!(recover(&root, &session_id, &worktree_id, &generation).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalidation_fence_quiesces_history_before_purge() {
+        let root = root("purge-fence");
+        let session_id = TerminalSessionId::new();
+        let history = Arc::new(
+            SessionHistory::pending(HistorySeed {
+                root: &root,
+                session_id: session_id.clone(),
+                worktree_id: worktree_id(),
+                generation: TerminalIncarnationId::new(),
+                rows: 4,
+                cols: 20,
+                scrollback: 8,
+                initial_snapshot: None,
+            })
+            .unwrap(),
+        );
+        assert!(history.activate());
+        let paths = HistoryPaths::new(&root, &session_id).unwrap();
+
+        let state = history.state.lock();
+        let worker_history = history.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx.send(worker_history.invalidate_and_wait()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "purge fence returned while history state was still in flight"
+        );
+        drop(state);
+
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+        purge(&root, &session_id).unwrap();
+        history.record_output(b"late-output");
+        assert!(
+            !paths.directory.exists(),
+            "invalidated history recreated files after purge"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

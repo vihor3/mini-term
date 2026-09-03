@@ -4258,6 +4258,7 @@ dependencies = [
  "gpui-component",
  "iana-time-zone",
  "image",
+ "libc",
  "markdown",
  "mt-ai",
  "mt-config",

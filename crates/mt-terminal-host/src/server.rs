@@ -2,26 +2,30 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use parking_lot::Mutex;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use parking_lot::{Condvar, Mutex};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader};
 use tokio::sync::{Notify, broadcast};
 
 use mt_identity::{TerminalIncarnationId, TerminalSessionId, WorktreeId};
-use mt_pty::{PtyOptions, PtySession, PtySpawn};
+use mt_pty::{PtyExitStatus, PtyOptions, PtySession, PtySpawn};
 use mt_terminal::TerminalSnapshot;
 
 use crate::history::{self, HistorySeed, SessionHistory};
 use crate::ipc;
 use crate::protocol::{
     ClientRequest, ErrorCode, HostSpawnSpec, PROTOCOL_VERSION, ServerFrame, SessionDescriptor,
-    WslOverrideDescriptor, decode_bytes, decode_frame, encode_bytes, encode_frame,
+    WslOverrideDescriptor, decode_frame, decode_write_bytes, encode_bytes, encode_frame,
+    read_frame_line, write_frame_line,
 };
 
 pub const DEFAULT_IDLE_EXIT: Duration = Duration::from_secs(10 * 60);
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const HELLO_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const RESTORE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const PTY_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const REPLAY_BYTES_LIMIT: usize = 64 * 1024 * 1024;
 const LIVE_EVENT_CAPACITY: usize = 512;
 
@@ -77,6 +81,7 @@ struct OutputChunk {
 enum StreamEvent {
     Output(OutputChunk),
     Exited(Option<u32>),
+    Failed { code: ErrorCode, message: String },
 }
 
 struct SessionStream {
@@ -129,12 +134,24 @@ struct HostedSession {
     incarnation_id: TerminalIncarnationId,
     worktree_id: WorktreeId,
     process_id: AtomicU32,
-    pty: Mutex<Option<PtySession>>,
+    lifecycle: Mutex<SessionLifecycle>,
+    exit_ready: Condvar,
     size: Mutex<(u16, u16)>,
     wsl_override: Mutex<Option<WslOverrideDescriptor>>,
     stream: Mutex<SessionStream>,
     history: Arc<SessionHistory>,
-    exit: Mutex<Option<Option<u32>>>,
+}
+
+#[derive(Default)]
+struct SessionLifecycle {
+    pty: Option<PtySession>,
+    termination: Option<SessionTermination>,
+}
+
+#[derive(Clone)]
+enum SessionTermination {
+    Exited(Option<u32>),
+    Failed { code: ErrorCode, message: String },
 }
 
 struct AttachState {
@@ -180,19 +197,20 @@ impl HostedSession {
             incarnation_id,
             worktree_id,
             process_id: AtomicU32::new(0),
-            pty: Mutex::new(None),
+            lifecycle: Mutex::new(SessionLifecycle::default()),
+            exit_ready: Condvar::new(),
             size: Mutex::new((spawn.cols, spawn.rows)),
             wsl_override: Mutex::new(None),
             stream: Mutex::new(SessionStream::new()),
             history,
-            exit: Mutex::new(None),
         });
 
         let output_session = session.clone();
         let exit_session = session.clone();
         let options = PtyOptions::default()
             .with_user_env(spawn.user_env.clone())
-            .on_exit(move |exit_code| exit_session.note_exit(exit_code));
+            .with_output_drain_timeout(PTY_OUTPUT_DRAIN_TIMEOUT)
+            .on_exit_status(move |status| exit_session.note_exit(status));
         let spec = PtySpawn {
             program: spawn.program,
             args: spawn.args,
@@ -202,8 +220,7 @@ impl HostedSession {
             cols: spawn.cols,
         };
         let pty = PtySession::spawn_with_options(spec, options, move |bytes| {
-            output_session.stream.lock().push(bytes);
-            output_session.history.record_output(bytes);
+            output_session.record_output(bytes);
         })
         .map_err(|error| HostFailure::new(ErrorCode::SpawnFailed, format!("{error:#}")))?;
 
@@ -217,24 +234,92 @@ impl HostedSession {
         if let Some(autofill) = spawn.ssh_autofill {
             pty.arm_ssh_autofill(autofill.password, autofill.disarm_on_input);
         }
-        *session.pty.lock() = Some(pty);
+        let mut lifecycle = session.lifecycle.lock();
+        if lifecycle.termination.is_none() {
+            lifecycle.pty = Some(pty);
+            drop(lifecycle);
+        } else {
+            drop(lifecycle);
+            drop(pty);
+        }
         session.history.activate();
+        if matches!(
+            session.lifecycle.lock().termination.as_ref(),
+            Some(SessionTermination::Failed { .. })
+        ) {
+            let _ = session.history.invalidate();
+        }
         Ok(session)
     }
 
-    fn note_exit(&self, exit_code: Option<u32>) {
-        let mut exit = self.exit.lock();
-        if exit.is_some() {
+    fn record_output(&self, bytes: &[u8]) {
+        {
+            let mut stream = self.stream.lock();
+            if self.lifecycle.lock().termination.is_some() {
+                return;
+            }
+            stream.push(bytes);
+        }
+        self.history.record_output(bytes);
+    }
+
+    fn note_exit(&self, status: PtyExitStatus) {
+        let termination = match status {
+            PtyExitStatus::Drained(exit_code) => SessionTermination::Exited(exit_code),
+            PtyExitStatus::OutputDrainFailed(exit_code) => SessionTermination::Failed {
+                code: ErrorCode::RecoveryUnavailable,
+                message: format!(
+                    "terminal output pump failed after child exit with code {exit_code:?}"
+                ),
+            },
+            PtyExitStatus::OutputDrainTimedOut(exit_code) => SessionTermination::Failed {
+                code: ErrorCode::RecoveryUnavailable,
+                message: format!(
+                    "terminal output did not drain after child exit with code {exit_code:?}"
+                ),
+            },
+        };
+        self.finish_termination(termination);
+    }
+
+    fn finish_termination(&self, mut termination: SessionTermination) {
+        let stream = self.stream.lock();
+        let mut lifecycle = self.lifecycle.lock();
+        if lifecycle.termination.is_some() {
             return;
         }
-        *exit = Some(exit_code);
-        self.history.flush_checkpoint();
-        let stream = self.stream.lock();
-        let _ = stream.events.send(StreamEvent::Exited(exit_code));
+        match &mut termination {
+            SessionTermination::Exited(_) => self.history.flush_checkpoint(),
+            SessionTermination::Failed { message, .. } => {
+                if let Err(error) = self.history.invalidate() {
+                    message.push_str(&format!(
+                        "; could not durably invalidate recovery history: {error:#}"
+                    ));
+                }
+            }
+        }
+        let pty = lifecycle.pty.take();
+        lifecycle.termination = Some(termination.clone());
+        drop(lifecycle);
+        drop(pty);
+        let event = match termination {
+            SessionTermination::Exited(exit_code) => StreamEvent::Exited(exit_code),
+            SessionTermination::Failed { code, message } => StreamEvent::Failed { code, message },
+        };
+        let _ = stream.events.send(event);
+        self.exit_ready.notify_all();
+    }
+
+    fn fail_restore_drain(&self) {
+        self.finish_termination(SessionTermination::Failed {
+            code: ErrorCode::RecoveryUnavailable,
+            message: "terminal session did not drain before restore timeout".into(),
+        });
     }
 
     fn is_live(&self) -> bool {
-        self.exit.lock().is_none() && self.pty.lock().is_some()
+        let lifecycle = self.lifecycle.lock();
+        lifecycle.termination.is_none() && lifecycle.pty.is_some()
     }
 
     fn descriptor_with_stream(&self, stream: &SessionStream) -> SessionDescriptor {
@@ -263,7 +348,7 @@ impl HostedSession {
         self.descriptor_with_stream(&stream)
     }
 
-    fn validate_incarnation(&self, expected: &TerminalIncarnationId) -> Result<(), HostFailure> {
+    fn validate_identity(&self, expected: &TerminalIncarnationId) -> Result<(), HostFailure> {
         if &self.incarnation_id != expected {
             return Err(HostFailure::new(
                 ErrorCode::IncarnationMismatch,
@@ -273,13 +358,45 @@ impl HostedSession {
                 ),
             ));
         }
-        if let Some(exit_code) = *self.exit.lock() {
-            return Err(HostFailure::new(
+        Ok(())
+    }
+
+    fn ensure_live(lifecycle: &SessionLifecycle) -> Result<(), HostFailure> {
+        match lifecycle.termination.as_ref() {
+            Some(SessionTermination::Exited(exit_code)) => Err(HostFailure::new(
                 ErrorCode::SessionExited,
                 format!("terminal session exited with code {exit_code:?}"),
-            ));
+            )),
+            Some(SessionTermination::Failed { code, message }) => {
+                Err(HostFailure::new(*code, message.clone()))
+            }
+            None => Ok(()),
         }
-        Ok(())
+    }
+
+    fn wait_for_termination(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut lifecycle = self.lifecycle.lock();
+        while lifecycle.termination.is_none() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let wait = self.exit_ready.wait_for(&mut lifecycle, remaining);
+            if wait.timed_out() && lifecycle.termination.is_none() {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn recovery_failure(&self) -> Option<HostFailure> {
+        match self.lifecycle.lock().termination.as_ref() {
+            Some(SessionTermination::Failed { code, message }) => {
+                Some(HostFailure::new(*code, message.clone()))
+            }
+            _ => None,
+        }
     }
 
     fn prepare_attach(
@@ -287,8 +404,10 @@ impl HostedSession {
         expected: &TerminalIncarnationId,
         after_sequence: u64,
     ) -> Result<AttachState, HostFailure> {
-        self.validate_incarnation(expected)?;
+        self.validate_identity(expected)?;
         let stream = self.stream.lock();
+        let lifecycle = self.lifecycle.lock();
+        Self::ensure_live(&lifecycle)?;
         let (first_sequence, latest_sequence) = stream.bounds();
         if latest_sequence > after_sequence && after_sequence.saturating_add(1) < first_sequence {
             return Err(HostFailure::new(
@@ -308,6 +427,7 @@ impl HostedSession {
             .collect();
         let receiver = stream.events.subscribe();
         let descriptor = self.descriptor_with_stream(&stream);
+        drop(lifecycle);
         Ok(AttachState {
             descriptor,
             replay,
@@ -316,9 +436,11 @@ impl HostedSession {
     }
 
     fn write(&self, expected: &TerminalIncarnationId, bytes: &[u8]) -> Result<(), HostFailure> {
-        self.validate_incarnation(expected)?;
-        self.pty
-            .lock()
+        self.validate_identity(expected)?;
+        let lifecycle = self.lifecycle.lock();
+        Self::ensure_live(&lifecycle)?;
+        lifecycle
+            .pty
             .as_ref()
             .ok_or_else(|| HostFailure::new(ErrorCode::SessionMissing, "PTY is unavailable"))?
             .write(bytes)
@@ -331,9 +453,11 @@ impl HostedSession {
         rows: u16,
         cols: u16,
     ) -> Result<(), HostFailure> {
-        self.validate_incarnation(expected)?;
-        self.pty
-            .lock()
+        self.validate_identity(expected)?;
+        let lifecycle = self.lifecycle.lock();
+        Self::ensure_live(&lifecycle)?;
+        lifecycle
+            .pty
             .as_ref()
             .ok_or_else(|| HostFailure::new(ErrorCode::SessionMissing, "PTY is unavailable"))?
             .resize(rows, cols)
@@ -349,9 +473,11 @@ impl HostedSession {
         password: String,
         disarm_on_input: bool,
     ) -> Result<(), HostFailure> {
-        self.validate_incarnation(expected)?;
-        self.pty
-            .lock()
+        self.validate_identity(expected)?;
+        let lifecycle = self.lifecycle.lock();
+        Self::ensure_live(&lifecycle)?;
+        lifecycle
+            .pty
             .as_ref()
             .ok_or_else(|| HostFailure::new(ErrorCode::SessionMissing, "PTY is unavailable"))?
             .arm_ssh_autofill(password, disarm_on_input);
@@ -359,19 +485,75 @@ impl HostedSession {
     }
 
     fn kill(&self, expected: &TerminalIncarnationId) -> Result<(), HostFailure> {
-        self.validate_incarnation(expected)?;
-        let mut pty = self.pty.lock();
-        pty.as_mut()
+        self.validate_identity(expected)?;
+        let mut lifecycle = self.lifecycle.lock();
+        if lifecycle.termination.is_some() {
+            return Ok(());
+        }
+        lifecycle
+            .pty
+            .as_mut()
             .ok_or_else(|| HostFailure::new(ErrorCode::SessionMissing, "PTY is unavailable"))?
             .kill()
             .map_err(|error| HostFailure::new(ErrorCode::IoFailed, format!("{error:#}")))
     }
+
+    fn close_explicitly(&self, expected: &TerminalIncarnationId) -> Result<(), HostFailure> {
+        self.validate_identity(expected)?;
+        let stream = self.stream.lock();
+        let mut lifecycle = self.lifecycle.lock();
+        if lifecycle.termination.is_some() {
+            return Ok(());
+        }
+        let mut pty = lifecycle
+            .pty
+            .take()
+            .ok_or_else(|| HostFailure::new(ErrorCode::SessionMissing, "PTY is unavailable"))?;
+        let kill_result = pty
+            .kill()
+            .map_err(|error| HostFailure::new(ErrorCode::IoFailed, format!("{error:#}")));
+        lifecycle.termination = Some(SessionTermination::Exited(None));
+        drop(lifecycle);
+        drop(pty);
+        let _ = stream.events.send(StreamEvent::Exited(None));
+        self.exit_ready.notify_all();
+        kill_result
+    }
+
+    fn retire_uncommitted(&self) -> Result<(), HostFailure> {
+        let close = self.close_explicitly(&self.incarnation_id);
+        let history = self.history.invalidate_and_wait();
+        match (close, history) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(HostFailure::new(
+                ErrorCode::IoFailed,
+                format!("invalidate uncommitted terminal history: {error:#}"),
+            )),
+            (Err(close_error), Err(history_error)) => Err(HostFailure::new(
+                ErrorCode::IoFailed,
+                format!(
+                    "invalidate uncommitted terminal history: {history_error:#}; terminal close also failed: {}",
+                    close_error.message
+                ),
+            )),
+        }
+    }
+}
+
+fn restore_cancelled(session_id: &TerminalSessionId) -> HostFailure {
+    HostFailure::new(
+        ErrorCode::RecoveryUnavailable,
+        format!("terminal restore for session {session_id} was cancelled by explicit close"),
+    )
 }
 
 #[derive(Default)]
 struct Registry {
     sessions: HashMap<TerminalSessionId, Arc<HostedSession>>,
     creating: HashSet<TerminalSessionId>,
+    restoring: HashMap<TerminalSessionId, TerminalIncarnationId>,
+    cancelled_restores: HashSet<TerminalSessionId>,
 }
 
 struct DaemonState {
@@ -412,18 +594,25 @@ impl DaemonState {
             .count()
     }
 
+    fn is_busy(&self) -> bool {
+        let registry = self.registry.lock();
+        !registry.creating.is_empty() || registry.sessions.values().any(|session| session.is_live())
+    }
+
     fn session(&self, id: &TerminalSessionId) -> Result<Arc<HostedSession>, HostFailure> {
-        self.registry
-            .lock()
-            .sessions
-            .get(id)
-            .cloned()
-            .ok_or_else(|| {
-                HostFailure::new(
-                    ErrorCode::SessionMissing,
-                    format!("terminal session {id} does not exist"),
-                )
-            })
+        let registry = self.registry.lock();
+        if registry.creating.contains(id) {
+            return Err(HostFailure::new(
+                ErrorCode::SessionCreating,
+                format!("terminal session {id} is being created or restored"),
+            ));
+        }
+        registry.sessions.get(id).cloned().ok_or_else(|| {
+            HostFailure::new(
+                ErrorCode::SessionMissing,
+                format!("terminal session {id} does not exist"),
+            )
+        })
     }
 
     fn create(
@@ -441,6 +630,12 @@ impl DaemonState {
         }
         {
             let mut registry = self.registry.lock();
+            if registry.creating.contains(&session_id) {
+                return Err(HostFailure::new(
+                    ErrorCode::SessionCreating,
+                    format!("terminal session {session_id} is already being created"),
+                ));
+            }
             let existing_is_live = registry
                 .sessions
                 .get(&session_id)
@@ -452,12 +647,7 @@ impl DaemonState {
                 ));
             }
             registry.sessions.remove(&session_id);
-            if !registry.creating.insert(session_id.clone()) {
-                return Err(HostFailure::new(
-                    ErrorCode::SessionCreating,
-                    format!("terminal session {session_id} is already being created"),
-                ));
-            }
+            registry.creating.insert(session_id.clone());
         }
 
         let result = HostedSession::spawn(
@@ -483,6 +673,93 @@ impl DaemonState {
         expected_previous_incarnation_id: TerminalIncarnationId,
         spawn: HostSpawnSpec,
     ) -> Result<(SessionDescriptor, TerminalSnapshot), HostFailure> {
+        self.restore_with_timeout(
+            session_id,
+            worktree_id,
+            expected_previous_incarnation_id,
+            spawn,
+            RESTORE_DRAIN_TIMEOUT,
+        )
+    }
+
+    fn restore_with_timeout(
+        &self,
+        session_id: TerminalSessionId,
+        worktree_id: WorktreeId,
+        expected_previous_incarnation_id: TerminalIncarnationId,
+        spawn: HostSpawnSpec,
+        drain_timeout: Duration,
+    ) -> Result<(SessionDescriptor, TerminalSnapshot), HostFailure> {
+        self.restore_with_timeout_with_hooks(
+            session_id,
+            worktree_id,
+            expected_previous_incarnation_id,
+            spawn,
+            drain_timeout,
+            (|| {}, |_| {}),
+        )
+    }
+
+    #[cfg(test)]
+    fn restore_with_timeout_after_reserve<F>(
+        &self,
+        session_id: TerminalSessionId,
+        worktree_id: WorktreeId,
+        expected_previous_incarnation_id: TerminalIncarnationId,
+        spawn: HostSpawnSpec,
+        drain_timeout: Duration,
+        after_reserve: F,
+    ) -> Result<(SessionDescriptor, TerminalSnapshot), HostFailure>
+    where
+        F: FnOnce(),
+    {
+        self.restore_with_timeout_with_hooks(
+            session_id,
+            worktree_id,
+            expected_previous_incarnation_id,
+            spawn,
+            drain_timeout,
+            (after_reserve, |_| {}),
+        )
+    }
+
+    #[cfg(test)]
+    fn restore_with_timeout_after_spawn<F>(
+        &self,
+        session_id: TerminalSessionId,
+        worktree_id: WorktreeId,
+        expected_previous_incarnation_id: TerminalIncarnationId,
+        spawn: HostSpawnSpec,
+        drain_timeout: Duration,
+        after_spawn: F,
+    ) -> Result<(SessionDescriptor, TerminalSnapshot), HostFailure>
+    where
+        F: FnOnce(&Arc<HostedSession>),
+    {
+        self.restore_with_timeout_with_hooks(
+            session_id,
+            worktree_id,
+            expected_previous_incarnation_id,
+            spawn,
+            drain_timeout,
+            (|| {}, after_spawn),
+        )
+    }
+
+    fn restore_with_timeout_with_hooks<F, G>(
+        &self,
+        session_id: TerminalSessionId,
+        worktree_id: WorktreeId,
+        expected_previous_incarnation_id: TerminalIncarnationId,
+        spawn: HostSpawnSpec,
+        drain_timeout: Duration,
+        hooks: (F, G),
+    ) -> Result<(SessionDescriptor, TerminalSnapshot), HostFailure>
+    where
+        F: FnOnce(),
+        G: FnOnce(&Arc<HostedSession>),
+    {
+        let (after_reserve, after_spawn) = hooks;
         let existing = {
             let mut registry = self.registry.lock();
             if registry.creating.contains(&session_id) {
@@ -491,23 +768,9 @@ impl DaemonState {
                     format!("terminal session {session_id} is already being restored"),
                 ));
             }
-            let existing = registry.sessions.remove(&session_id);
-            if let Some(existing) = existing.as_ref()
-                && existing.is_live()
-            {
-                if existing.incarnation_id != expected_previous_incarnation_id {
-                    registry
-                        .sessions
-                        .insert(session_id.clone(), existing.clone());
-                    return Err(HostFailure::new(
-                        ErrorCode::IncarnationMismatch,
-                        format!("terminal session {session_id} has a newer live incarnation"),
-                    ));
-                }
+            if let Some(existing) = registry.sessions.get(&session_id) {
+                existing.validate_identity(&expected_previous_incarnation_id)?;
                 if existing.worktree_id != worktree_id {
-                    registry
-                        .sessions
-                        .insert(session_id.clone(), existing.clone());
                     return Err(HostFailure::new(
                         ErrorCode::RecoveryUnavailable,
                         format!("terminal session {session_id} belongs to another worktree"),
@@ -515,58 +778,110 @@ impl DaemonState {
                 }
             }
             registry.creating.insert(session_id.clone());
-            existing
+            registry
+                .restoring
+                .insert(session_id.clone(), expected_previous_incarnation_id.clone());
+            registry.sessions.get(&session_id).cloned()
         };
+        after_reserve();
 
-        if let Some(existing) = existing.as_ref()
-            && existing.is_live()
-        {
-            if !existing.history.seal() {
-                let mut registry = self.registry.lock();
-                registry.creating.remove(&session_id);
-                registry
-                    .sessions
-                    .insert(session_id.clone(), existing.clone());
-                return Err(HostFailure::new(
-                    ErrorCode::RecoveryUnavailable,
-                    "terminal history could not be sealed before recovery",
-                ));
+        let result = (|| {
+            if self.restore_cancelled(&session_id) {
+                return Err(restore_cancelled(&session_id));
             }
-            if let Err(error) = existing.kill(&expected_previous_incarnation_id) {
-                let mut registry = self.registry.lock();
-                registry.creating.remove(&session_id);
-                registry
-                    .sessions
-                    .insert(session_id.clone(), existing.clone());
-                return Err(error);
+            if let Some(existing) = existing.as_ref() {
+                if existing.is_live() {
+                    existing.kill(&expected_previous_incarnation_id)?;
+                    if !existing.wait_for_termination(drain_timeout) {
+                        existing.fail_restore_drain();
+                        return Err(HostFailure::new(
+                            ErrorCode::RecoveryUnavailable,
+                            "terminal session did not drain before restore timeout",
+                        ));
+                    }
+                }
+                if self.restore_cancelled(&session_id) {
+                    return Err(restore_cancelled(&session_id));
+                }
+                if let Some(error) = existing.recovery_failure() {
+                    return Err(error);
+                }
+                if !existing.history.seal() {
+                    let mut message =
+                        "terminal history could not be sealed before recovery".to_string();
+                    if let Err(error) = existing.history.invalidate() {
+                        message.push_str(&format!(
+                            "; could not durably invalidate recovery history: {error:#}"
+                        ));
+                    }
+                    return Err(HostFailure::new(ErrorCode::RecoveryUnavailable, message));
+                }
             }
-        }
 
-        let recovered = history::recover(
-            &self.history_root,
-            &session_id,
-            &worktree_id,
-            &expected_previous_incarnation_id,
-        )
-        .map_err(|error| {
-            HostFailure::new(
-                ErrorCode::RecoveryUnavailable,
-                format!("terminal history recovery failed: {error:#}"),
+            if self.restore_cancelled(&session_id) {
+                return Err(restore_cancelled(&session_id));
+            }
+            let recovered = history::recover(
+                &self.history_root,
+                &session_id,
+                &worktree_id,
+                &expected_previous_incarnation_id,
             )
-        });
-        let result = recovered.and_then(|recovered| {
-            HostedSession::spawn(
+            .map_err(|error| {
+                let mut message = format!("terminal history recovery failed: {error:#}");
+                if let Some(existing) = existing.as_ref()
+                    && let Err(invalidation_error) = existing.history.invalidate()
+                {
+                    message.push_str(&format!(
+                        "; could not durably invalidate recovery history: {invalidation_error:#}"
+                    ));
+                }
+                HostFailure::new(ErrorCode::RecoveryUnavailable, message)
+            })?;
+            if self.restore_cancelled(&session_id) {
+                return Err(restore_cancelled(&session_id));
+            }
+            let session = HostedSession::spawn(
                 session_id.clone(),
-                worktree_id,
+                worktree_id.clone(),
                 spawn,
                 &self.history_root,
                 Some(&recovered.snapshot),
-            )
-            .map(|session| (session, recovered.snapshot))
-        });
+            )?;
+            after_spawn(&session);
+            Ok((session, recovered.snapshot))
+        })();
 
         let mut registry = self.registry.lock();
         registry.creating.remove(&session_id);
+        registry.restoring.remove(&session_id);
+        let cancelled = registry.cancelled_restores.remove(&session_id);
+        let still_owned = existing.as_ref().map_or_else(
+            || !registry.sessions.contains_key(&session_id),
+            |existing| {
+                registry
+                    .sessions
+                    .get(&session_id)
+                    .is_some_and(|registered| Arc::ptr_eq(registered, existing))
+            },
+        );
+        if cancelled || !still_owned {
+            drop(registry);
+            let mut failure = restore_cancelled(&session_id);
+            if let Ok((session, _)) = result
+                && let Err(error) = session.retire_uncommitted()
+            {
+                failure
+                    .message
+                    .push_str(&format!("; replacement cleanup failed: {}", error.message));
+            }
+            if let Err(error) = history::purge(&self.history_root, &session_id) {
+                failure
+                    .message
+                    .push_str(&format!("; history purge failed: {error:#}"));
+            }
+            return Err(failure);
+        }
         let (session, snapshot) = result?;
         let descriptor = session.descriptor();
         registry.sessions.insert(session_id, session);
@@ -574,32 +889,90 @@ impl DaemonState {
         Ok((descriptor, snapshot))
     }
 
+    fn restore_cancelled(&self, session_id: &TerminalSessionId) -> bool {
+        self.registry.lock().cancelled_restores.contains(session_id)
+    }
+
     fn remove_and_kill(
         &self,
         id: &TerminalSessionId,
         expected: &TerminalIncarnationId,
     ) -> Result<(), HostFailure> {
-        let session = self.session(id)?;
-        session.kill(expected)?;
-        session.history.discard();
-        self.registry.lock().sessions.remove(id);
-        history::purge(&self.history_root, id).map_err(|error| {
-            HostFailure::new(
-                ErrorCode::IoFailed,
-                format!("remove terminal recovery history: {error:#}"),
-            )
-        })?;
+        let session = {
+            let mut registry = self.registry.lock();
+            let cancelling_restore = match registry.restoring.get(id) {
+                Some(restore_incarnation) if restore_incarnation == expected => {
+                    registry.cancelled_restores.insert(id.clone());
+                    true
+                }
+                Some(_) => {
+                    return Err(HostFailure::new(
+                        ErrorCode::IncarnationMismatch,
+                        format!("terminal incarnation mismatch for session {id}"),
+                    ));
+                }
+                None => false,
+            };
+            let session = registry.sessions.get(id).cloned();
+            if let Some(session) = session.as_ref() {
+                session.validate_identity(expected)?;
+                registry.sessions.remove(id);
+            } else if !cancelling_restore {
+                return Err(HostFailure::new(
+                    ErrorCode::SessionMissing,
+                    format!("terminal session {id} does not exist"),
+                ));
+            }
+            session
+        };
+
+        let invalidation = match session.as_ref() {
+            Some(session) => session.history.invalidate(),
+            None => history::invalidate(&self.history_root, id),
+        };
+        let close = session
+            .as_ref()
+            .map_or(Ok(()), |session| session.close_explicitly(expected));
+        let history_fence = session
+            .as_ref()
+            .map_or(Ok(()), |session| session.history.invalidate_and_wait());
+        let purge = history::purge(&self.history_root, id);
         self.touch();
-        Ok(())
+        match (close, purge) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (close, Err(purge_error)) => {
+                let mut message = format!("remove terminal recovery history: {purge_error:#}");
+                if let Err(invalidation_error) = invalidation {
+                    message.push_str(&format!(
+                        "; could not durably invalidate recovery history: {invalidation_error:#}"
+                    ));
+                }
+                if let Err(fence_error) = history_fence {
+                    message.push_str(&format!(
+                        "; could not fence terminal history writes: {fence_error:#}"
+                    ));
+                }
+                if let Err(close_error) = close {
+                    message.push_str(&format!(
+                        "; terminal close also failed: {}",
+                        close_error.message
+                    ));
+                }
+                Err(HostFailure::new(ErrorCode::IoFailed, message))
+            }
+        }
     }
 
     fn descriptors(&self) -> Vec<SessionDescriptor> {
-        let mut descriptors: Vec<_> = self
-            .registry
-            .lock()
+        let registry = self.registry.lock();
+        let mut descriptors: Vec<_> = registry
             .sessions
-            .values()
-            .filter(|session| session.is_live())
+            .iter()
+            .filter(|(session_id, session)| {
+                !registry.creating.contains(*session_id) && session.is_live()
+            })
+            .map(|(_, session)| session)
             .map(|session| session.descriptor())
             .collect();
         descriptors.sort_by(|left, right| left.session_id.as_str().cmp(right.session_id.as_str()));
@@ -635,7 +1008,9 @@ async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, frame: &ServerFrame)
     let Ok(line) = encode_frame(frame) else {
         return false;
     };
-    writer.write_all(line.as_bytes()).await.is_ok() && writer.flush().await.is_ok()
+    write_frame_line(writer, &line, FRAME_WRITE_TIMEOUT)
+        .await
+        .is_ok()
 }
 
 async fn handle_connection<S>(stream: S, state: Arc<DaemonState>)
@@ -655,11 +1030,19 @@ where
         return;
     }
 
-    let mut line = String::new();
-    let read = tokio::time::timeout(REQUEST_READ_TIMEOUT, reader.read_line(&mut line)).await;
-    if !matches!(read, Ok(Ok(count)) if count > 0) {
-        return;
-    }
+    let line = match tokio::time::timeout(REQUEST_READ_TIMEOUT, read_frame_line(&mut reader)).await
+    {
+        Ok(Ok(Some(line))) => line,
+        Ok(Err(error)) => {
+            let _ = write_frame(
+                &mut writer,
+                &HostFailure::new(ErrorCode::InvalidRequest, error).frame(),
+            )
+            .await;
+            return;
+        }
+        Ok(Ok(None)) | Err(_) => return,
+    };
     let request = match decode_frame::<ClientRequest>(&line) {
         Ok(request) => request,
         Err(error) => {
@@ -734,12 +1117,23 @@ where
             }
         }
         loop {
-            let frame = match attachment.receiver.recv().await {
+            let mut peer_byte = [0u8; 1];
+            let event = tokio::select! {
+                read = reader.read(&mut peer_byte) => {
+                    match read {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => return,
+                    }
+                }
+                event = attachment.receiver.recv() => event,
+            };
+            let frame = match event {
                 Ok(StreamEvent::Output(chunk)) => ServerFrame::Output {
                     sequence: chunk.sequence,
                     data_b64: encode_bytes(&chunk.bytes),
                 },
                 Ok(StreamEvent::Exited(exit_code)) => ServerFrame::Exited { exit_code },
+                Ok(StreamEvent::Failed { code, message }) => ServerFrame::Error { code, message },
                 Err(broadcast::error::RecvError::Lagged(skipped)) => ServerFrame::Error {
                     code: ErrorCode::ReplayGap,
                     message: format!("attachment lagged by {skipped} output events"),
@@ -789,7 +1183,7 @@ where
             expected_incarnation_id,
             data_b64,
             ..
-        } => decode_bytes(&data_b64)
+        } => decode_write_bytes(&data_b64)
             .map_err(|error| HostFailure::new(ErrorCode::InvalidRequest, error))
             .and_then(|bytes| {
                 state
@@ -832,7 +1226,11 @@ where
             ..
         } => state
             .session(&session_id)
-            .and_then(|session| session.validate_incarnation(&expected_incarnation_id))
+            .and_then(|session| {
+                session.validate_identity(&expected_incarnation_id)?;
+                let lifecycle = session.lifecycle.lock();
+                HostedSession::ensure_live(&lifecycle)
+            })
             .map(|()| ServerFrame::Ok),
         ClientRequest::List { .. } => Ok(ServerFrame::Sessions {
             sessions: state.descriptors(),
@@ -842,7 +1240,7 @@ where
             live_sessions: state.live_session_count(),
         }),
         ClientRequest::ShutdownIfIdle { .. } => {
-            if state.live_session_count() == 0 {
+            if !state.is_busy() {
                 request_shutdown = true;
                 Ok(ServerFrame::Ok)
             } else {
@@ -865,12 +1263,10 @@ where
     S: AsyncRead + Unpin,
 {
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
     matches!(
-        tokio::time::timeout(HELLO_PROBE_TIMEOUT, reader.read_line(&mut line)).await,
-        Ok(Ok(count))
-            if count > 0
-                && matches!(decode_frame::<ServerFrame>(&line), Ok(ServerFrame::Hello { .. }))
+        tokio::time::timeout(HELLO_PROBE_TIMEOUT, read_frame_line(&mut reader)).await,
+        Ok(Ok(Some(line)))
+            if matches!(decode_frame::<ServerFrame>(&line), Ok(ServerFrame::Hello { .. }))
     )
 }
 
@@ -908,7 +1304,7 @@ fn idle_tick(idle_exit: Duration) -> Duration {
 
 fn should_exit_idle(state: &DaemonState, idle_exit: Duration) -> bool {
     state.active_connections.load(Ordering::SeqCst) == 0
-        && state.live_session_count() == 0
+        && !state.is_busy()
         && state.idle_for() >= idle_exit
 }
 
@@ -1134,7 +1530,56 @@ async fn serve_until_exit(
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
+
+    fn test_root(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("mth-server-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    fn test_worktree_id() -> WorktreeId {
+        format!("worktree-v1:{}", "0".repeat(64)).parse().unwrap()
+    }
+
+    fn test_spawn() -> HostSpawnSpec {
+        HostSpawnSpec {
+            program: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            user_env: Vec::new(),
+            rows: 24,
+            cols: 80,
+            scrollback: 100,
+            ssh_autofill: None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn process_is_alive(process_id: u32) -> bool {
+        unsafe extern "C" {
+            fn kill(process_id: i32, signal: i32) -> i32;
+        }
+
+        unsafe { kill(process_id as i32, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_process_exit(process_id: u32) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_is_alive(process_id) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !process_is_alive(process_id),
+            "cancelled restore leaked process {process_id}"
+        );
+    }
 
     #[test]
     fn replay_bounds_start_at_one_and_advance() {
@@ -1143,5 +1588,239 @@ mod tests {
         stream.push(b"a");
         stream.push(b"b");
         assert_eq!(stream.bounds(), (1, 2));
+    }
+
+    #[test]
+    fn restore_timeout_reinserts_a_failed_incarnation_and_invalidates_history() {
+        mt_pty::conpty::initialize_default();
+        let root = test_root("restore-timeout");
+        let state = DaemonState::new(root.clone());
+        let session_id = TerminalSessionId::new();
+        let worktree_id = test_worktree_id();
+        let descriptor = state
+            .create(session_id.clone(), worktree_id.clone(), true, test_spawn())
+            .unwrap();
+
+        let error = state
+            .restore_with_timeout(
+                session_id.clone(),
+                worktree_id.clone(),
+                descriptor.incarnation_id.clone(),
+                test_spawn(),
+                Duration::ZERO,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::RecoveryUnavailable);
+        assert_eq!(
+            state.session(&session_id).unwrap().incarnation_id,
+            descriptor.incarnation_id
+        );
+
+        let failed = state.session(&session_id).unwrap();
+        assert!(
+            !failed.is_live(),
+            "restore timeout must not reinsert an unusable live capability"
+        );
+        let attach_error = failed
+            .prepare_attach(&descriptor.incarnation_id, 0)
+            .err()
+            .expect("failed incarnation must reject attach");
+        assert_eq!(attach_error.code, ErrorCode::RecoveryUnavailable);
+
+        let restarted = DaemonState::new(root.clone());
+        let restart_error = restarted
+            .restore(
+                session_id.clone(),
+                worktree_id,
+                descriptor.incarnation_id.clone(),
+                test_spawn(),
+            )
+            .unwrap_err();
+        assert_eq!(restart_error.code, ErrorCode::RecoveryUnavailable);
+        assert!(restart_error.message.contains("invalidated"));
+        state
+            .remove_and_kill(&session_id, &descriptor.incarnation_id)
+            .unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_close_cancels_a_reserved_cold_restore_without_resurrection() {
+        let root = test_root("close-restore-race");
+        let state = Arc::new(DaemonState::new(root.clone()));
+        let session_id = TerminalSessionId::new();
+        let worktree_id = test_worktree_id();
+        let generation = TerminalIncarnationId::new();
+        let history = SessionHistory::pending(HistorySeed {
+            root: &root,
+            session_id: session_id.clone(),
+            worktree_id: worktree_id.clone(),
+            generation: generation.clone(),
+            rows: 24,
+            cols: 80,
+            scrollback: 100,
+            initial_snapshot: None,
+        })
+        .unwrap();
+        assert!(history.activate());
+        history.record_output(b"restorable history");
+        assert!(history.seal());
+
+        let (reserved_tx, reserved_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let restore_state = state.clone();
+        let restore_session_id = session_id.clone();
+        let restore_worktree_id = worktree_id.clone();
+        let restore_generation = generation.clone();
+        let restore = std::thread::spawn(move || {
+            restore_state.restore_with_timeout_after_reserve(
+                restore_session_id,
+                restore_worktree_id,
+                restore_generation,
+                test_spawn(),
+                Duration::from_secs(1),
+                || {
+                    reserved_tx.send(()).unwrap();
+                    continue_rx.recv().unwrap();
+                },
+            )
+        });
+
+        reserved_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        state.remove_and_kill(&session_id, &generation).unwrap();
+        continue_tx.send(()).unwrap();
+        let restore_error = restore.join().unwrap().unwrap_err();
+        assert_eq!(restore_error.code, ErrorCode::RecoveryUnavailable);
+        assert!(
+            restore_error
+                .message
+                .contains("cancelled by explicit close")
+        );
+        assert!(!state.registry.lock().sessions.contains_key(&session_id));
+
+        let restarted = DaemonState::new(root.clone());
+        let restart_error = restarted
+            .restore(session_id, worktree_id, generation, test_spawn())
+            .unwrap_err();
+        assert_eq!(restart_error.code, ErrorCode::RecoveryUnavailable);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_close_after_restore_spawn_retires_the_replacement() {
+        mt_pty::conpty::initialize_default();
+        let root = test_root("close-after-restore-spawn");
+        let state = Arc::new(DaemonState::new(root.clone()));
+        let session_id = TerminalSessionId::new();
+        let worktree_id = test_worktree_id();
+        let generation = TerminalIncarnationId::new();
+        let history = SessionHistory::pending(HistorySeed {
+            root: &root,
+            session_id: session_id.clone(),
+            worktree_id: worktree_id.clone(),
+            generation: generation.clone(),
+            rows: 24,
+            cols: 80,
+            scrollback: 100,
+            initial_snapshot: None,
+        })
+        .unwrap();
+        assert!(history.activate());
+        history.record_output(b"restorable history");
+        assert!(history.seal());
+        drop(history);
+
+        let (spawned_tx, spawned_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let restore_state = state.clone();
+        let restore_session_id = session_id.clone();
+        let restore_worktree_id = worktree_id.clone();
+        let restore_generation = generation.clone();
+        let restore = std::thread::spawn(move || {
+            restore_state.restore_with_timeout_after_spawn(
+                restore_session_id,
+                restore_worktree_id,
+                restore_generation,
+                test_spawn(),
+                Duration::from_secs(1),
+                |session| {
+                    spawned_tx
+                        .send(session.descriptor().process_id.unwrap())
+                        .unwrap();
+                    continue_rx.recv().unwrap();
+                },
+            )
+        });
+
+        let replacement_process_id = spawned_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        state.remove_and_kill(&session_id, &generation).unwrap();
+        continue_tx.send(()).unwrap();
+        let restore_error = restore.join().unwrap().unwrap_err();
+        assert_eq!(restore_error.code, ErrorCode::RecoveryUnavailable);
+        assert!(
+            restore_error
+                .message
+                .contains("cancelled by explicit close")
+        );
+        wait_for_process_exit(replacement_process_id);
+        assert!(!state.registry.lock().sessions.contains_key(&session_id));
+        assert!(
+            std::fs::read_dir(&root)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(true),
+            "cancelled restore left terminal history behind"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attachment_peer_eof_releases_the_server_connection() {
+        mt_pty::conpty::initialize_default();
+        let root = test_root("peer-eof");
+        let state = Arc::new(DaemonState::new(root.clone()));
+        let session_id = TerminalSessionId::new();
+        let descriptor = state
+            .create(session_id.clone(), test_worktree_id(), true, test_spawn())
+            .unwrap();
+
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(handle_connection(server, state.clone()));
+        let (reader, mut writer) = tokio::io::split(client);
+        let mut reader = BufReader::new(reader);
+
+        let hello = read_frame_line(&mut reader).await.unwrap().unwrap();
+        assert!(matches!(
+            decode_frame::<ServerFrame>(&hello).unwrap(),
+            ServerFrame::Hello { .. }
+        ));
+        let request = ClientRequest::Attach {
+            v: PROTOCOL_VERSION,
+            session_id: session_id.clone(),
+            expected_incarnation_id: descriptor.incarnation_id.clone(),
+            after_sequence: 0,
+        };
+        let line = encode_frame(&request).unwrap();
+        write_frame_line(&mut writer, &line, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let attached = read_frame_line(&mut reader).await.unwrap().unwrap();
+        assert!(matches!(
+            decode_frame::<ServerFrame>(&attached).unwrap(),
+            ServerFrame::Attached { .. }
+        ));
+
+        drop(reader);
+        drop(writer);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("attachment server did not observe peer EOF")
+            .unwrap();
+        assert_eq!(state.active_connections.load(Ordering::SeqCst), 0);
+
+        state
+            .remove_and_kill(&session_id, &descriptor.incarnation_id)
+            .unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

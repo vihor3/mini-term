@@ -24,13 +24,14 @@ use mt_github::{
     discover_remote_plan, list_plan, parse_account, parse_remote_url, parse_work_item_detail,
     parse_work_item_list, require_success, version_plan,
 };
-use mt_identity::WorktreeId;
+use mt_identity::{ExecutionHostId, WorktreeId};
 use mt_ui::icons::usage_glyphs::ICON_REFRESH;
 use mt_ui::icons::vector::VectorIcon;
 use mt_ui::tooltip::Tooltip;
 
 use crate::execution_host::{
-    ExecutionSourceSignature, HostCommandResult, ProjectExecutionSnapshot, execute_host_command,
+    ExecutionBackendSignature, ExecutionSourceSignature, HostCommandResult,
+    ProjectExecutionSnapshot, execute_host_command,
 };
 use crate::store::AppStore;
 use crate::ui;
@@ -50,11 +51,62 @@ fn github_project_tasks_enabled_for(value: Option<&OsStr>) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct RepositoryCacheSource {
+    execution_host_id: ExecutionHostId,
+    root_project_id: String,
+    root_source_path: String,
+    backend: ExecutionBackendSignature,
+}
+
+impl From<&ExecutionSourceSignature> for RepositoryCacheSource {
+    fn from(source: &ExecutionSourceSignature) -> Self {
+        Self {
+            execution_host_id: source.execution_host_id.clone(),
+            root_project_id: source.root_project_id.clone(),
+            root_source_path: source.root_source_path.clone(),
+            backend: source.backend.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct RepositoryCacheKey {
-    source: ExecutionSourceSignature,
+    source: RepositoryCacheSource,
     repository: GitHubRepoIdentity,
     account: String,
     auth_generation: u64,
+}
+
+impl RepositoryCacheKey {
+    fn new(
+        source: &ExecutionSourceSignature,
+        repository: GitHubRepoIdentity,
+        account: impl Into<String>,
+        auth_generation: u64,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            repository,
+            account: account.into().to_ascii_lowercase(),
+            auth_generation,
+        }
+    }
+}
+
+fn apply_auth_generation_rotation(
+    scope: RepositoryCacheSource,
+    generation: u64,
+    auth_scopes: &mut HashMap<RepositoryCacheSource, u64>,
+    sources: &mut HashMap<ExecutionSourceSignature, SourceRecord>,
+    repositories: &mut HashMap<RepositoryCacheKey, RepositoryCache>,
+) {
+    auth_scopes.insert(scope.clone(), generation);
+    repositories.retain(|key, _| key.source != scope);
+    for (source_key, source) in sources {
+        if RepositoryCacheSource::from(source_key) == scope {
+            source.reset_auth(generation);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -114,6 +166,15 @@ impl SourceRecord {
             request_id: 0,
             last_known: None,
         }
+    }
+
+    fn reset_auth(&mut self, auth_generation: u64) {
+        self.phase = SourcePhase::Idle;
+        self.repository = None;
+        self.account = None;
+        self.error = None;
+        self.auth_generation = auth_generation;
+        self.last_known = None;
     }
 }
 
@@ -503,13 +564,24 @@ impl OpenGitHubWorkItem {
     }
 
     fn repository_cache_key(&self) -> RepositoryCacheKey {
-        RepositoryCacheKey {
-            source: self.source.clone(),
-            repository: self.repository.clone(),
-            account: self.account.clone(),
-            auth_generation: self.auth_generation,
-        }
+        RepositoryCacheKey::new(
+            &self.source,
+            self.repository.clone(),
+            self.account.clone(),
+            self.auth_generation,
+        )
     }
+}
+
+fn source_is_ready(
+    source: Option<&SourceRecord>,
+    cache_key: &RepositoryCacheKey,
+    auth_generation: u64,
+) -> bool {
+    source.is_some_and(|source| {
+        source.auth_generation == auth_generation
+            && matches!(&source.phase, SourcePhase::Ready(current) if current.as_ref() == cache_key)
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -523,6 +595,7 @@ pub struct GitHubDetailView {
 pub struct GitHubTaskService {
     store: Entity<AppStore>,
     sources: HashMap<ExecutionSourceSignature, SourceRecord>,
+    auth_scopes: HashMap<RepositoryCacheSource, u64>,
     repositories: HashMap<RepositoryCacheKey, RepositoryCache>,
     next_request_id: u64,
     next_auth_generation: u64,
@@ -534,6 +607,7 @@ impl GitHubTaskService {
         Self {
             store,
             sources: HashMap::new(),
+            auth_scopes: HashMap::new(),
             repositories: HashMap::new(),
             next_request_id: 0,
             next_auth_generation: 0,
@@ -544,6 +618,7 @@ impl GitHubTaskService {
     fn allocate_request(&mut self) -> u64 {
         self.next_request_id = self.next_request_id.checked_add(1).unwrap_or_else(|| {
             self.sources.clear();
+            self.auth_scopes.clear();
             self.repositories.clear();
             1
         });
@@ -553,10 +628,34 @@ impl GitHubTaskService {
     fn allocate_auth_generation(&mut self) -> u64 {
         self.next_auth_generation = self.next_auth_generation.checked_add(1).unwrap_or_else(|| {
             self.sources.clear();
+            self.auth_scopes.clear();
             self.repositories.clear();
             1
         });
         self.next_auth_generation
+    }
+
+    fn auth_generation_for_source(&mut self, source: &ExecutionSourceSignature) -> u64 {
+        let scope = RepositoryCacheSource::from(source);
+        if let Some(generation) = self.auth_scopes.get(&scope) {
+            return *generation;
+        }
+        let generation = self.allocate_auth_generation();
+        self.auth_scopes.insert(scope, generation);
+        generation
+    }
+
+    fn rotate_auth_generation(&mut self, source: &ExecutionSourceSignature) -> u64 {
+        let scope = RepositoryCacheSource::from(source);
+        let generation = self.allocate_auth_generation();
+        apply_auth_generation_rotation(
+            scope,
+            generation,
+            &mut self.auth_scopes,
+            &mut self.sources,
+            &mut self.repositories,
+        );
+        generation
     }
 
     fn mark_list_request_stale(
@@ -619,7 +718,7 @@ impl GitHubTaskService {
     ) {
         let source_key = snapshot.source_signature();
         if !self.sources.contains_key(&source_key) {
-            let auth_generation = self.allocate_auth_generation();
+            let auth_generation = self.auth_generation_for_source(&source_key);
             self.sources.insert(
                 source_key.clone(),
                 SourceRecord::new(&snapshot, auth_generation),
@@ -627,27 +726,21 @@ impl GitHubTaskService {
         }
 
         if force {
-            let request_id = self.allocate_request();
-            let auth_generation = self.allocate_auth_generation();
-            if let Some(source) = self.sources.get_mut(&source_key) {
-                source.request_id = request_id;
-                source.auth_generation = auth_generation;
-                source.phase = SourcePhase::Idle;
-                source.error = None;
-                source.repository = None;
-                source.account = None;
-            }
+            let auth_generation = self.rotate_auth_generation(&source_key);
+            self.sources
+                .entry(source_key.clone())
+                .or_insert_with(|| SourceRecord::new(&snapshot, auth_generation));
         }
 
         let ready_key = self.sources.get(&source_key).and_then(|source| {
             if let SourcePhase::Ready(key) = &source.phase {
-                Some(key.as_ref().clone())
+                Some((key.as_ref().clone(), source.auth_generation))
             } else {
                 None
             }
         });
-        if let Some(cache_key) = ready_key {
-            self.ensure_ready_list(snapshot, cache_key, kind, force, cx);
+        if let Some((cache_key, auth_generation)) = ready_key {
+            self.ensure_ready_list(snapshot, cache_key, auth_generation, kind, force, cx);
             return;
         }
 
@@ -704,17 +797,28 @@ impl GitHubTaskService {
                     return;
                 }
 
+                let observed_scope = RepositoryCacheSource::from(&observed_source);
+                let current_auth_generation = service
+                    .auth_scopes
+                    .entry(observed_scope)
+                    .or_insert(auth_generation);
+                if *current_auth_generation != auth_generation {
+                    service.sources.remove(&request_source);
+                    cx.notify();
+                    return;
+                }
+
                 let Some(mut source) = service.sources.remove(&request_source) else {
                     return;
                 };
                 match result {
                     Ok(success) => {
-                        let cache_key = RepositoryCacheKey {
-                            source: success.observed_source.clone(),
-                            repository: success.repository.clone(),
-                            account: success.account.clone(),
+                        let cache_key = RepositoryCacheKey::new(
+                            &success.observed_source,
+                            success.repository.clone(),
+                            success.account.clone(),
                             auth_generation,
-                        };
+                        );
                         let cache = service.repositories.entry(cache_key.clone()).or_default();
                         cache.lists.insert(
                             kind,
@@ -749,6 +853,7 @@ impl GitHubTaskService {
         &mut self,
         snapshot: ProjectExecutionSnapshot,
         cache_key: RepositoryCacheKey,
+        auth_generation: u64,
         kind: WorkItemKind,
         force: bool,
         cx: &mut Context<Self>,
@@ -779,7 +884,7 @@ impl GitHubTaskService {
         let project_id = snapshot.project_id.clone();
         let repository = cache_key.repository.clone();
         let account = cache_key.account.clone();
-        let expected_source = cache_key.source.clone();
+        let expected_source = snapshot.source_signature();
         let store = self.store.clone();
         self._tasks.push(cx.spawn(async move |this, cx| {
             let result = cx
@@ -798,9 +903,11 @@ impl GitHubTaskService {
                     cx.notify();
                     return;
                 }
-                let source_ready = service.sources.get(&expected_source).is_some_and(|source| {
-                    matches!(&source.phase, SourcePhase::Ready(current) if current.as_ref() == &cache_key)
-                });
+                let source_ready = source_is_ready(
+                    service.sources.get(&expected_source),
+                    &cache_key,
+                    auth_generation,
+                );
                 if !source_ready {
                     service.mark_list_request_stale(&cache_key, kind, request_id);
                     cx.notify();
@@ -894,7 +1001,6 @@ impl GitHubTaskService {
         {
             view.repository = Some(cache_key.repository.clone());
             view.account = Some(cache_key.account.clone());
-            view.auth_generation = cache_key.auth_generation;
             view.rows = slot.rows.clone();
             view.loading |= slot.loading;
             if slot.error.is_some() {
@@ -907,8 +1013,10 @@ impl GitHubTaskService {
 
     pub fn ensure_detail(&mut self, request: OpenGitHubWorkItem, cx: &mut Context<Self>) {
         let cache_key = request.repository_cache_key();
-        let source_ready = self.sources.get(&request.source).is_some_and(
-            |source| matches!(&source.phase, SourcePhase::Ready(current) if current.as_ref() == &cache_key),
+        let source_ready = source_is_ready(
+            self.sources.get(&request.source),
+            &cache_key,
+            request.auth_generation,
         );
         if !source_ready {
             return;
@@ -969,9 +1077,11 @@ impl GitHubTaskService {
                     cx.notify();
                     return;
                 }
-                let source_ready = service.sources.get(&expected_source).is_some_and(|source| {
-                    matches!(&source.phase, SourcePhase::Ready(current) if current.as_ref() == &cache_key)
-                });
+                let source_ready = source_is_ready(
+                    service.sources.get(&expected_source),
+                    &cache_key,
+                    request.auth_generation,
+                );
                 if !source_ready {
                     service.mark_detail_request_stale(&cache_key, item_key, request_id);
                     cx.notify();
@@ -1019,7 +1129,7 @@ impl GitHubTaskService {
                 error: Some(GitHubError::repository_changed()),
             };
         };
-        if !matches!(&source.phase, SourcePhase::Ready(current) if current.as_ref() == &cache_key) {
+        if !source_is_ready(Some(source), &cache_key, request.auth_generation) {
             return GitHubDetailView {
                 detail: None,
                 loading: false,
@@ -1886,11 +1996,171 @@ mod tests {
     }
 
     #[test]
-    fn sibling_worktrees_share_source_cache_identity() {
+    fn discovery_source_identity_is_exact_to_worktree_and_path() {
         let main = snapshot("main", "/repo");
         let linked = snapshot("linked", "/repo-feature");
-        assert_eq!(main.source_signature(), linked.source_signature());
-        assert_ne!(main.worktree_id, linked.worktree_id);
+        let main_source = main.source_signature();
+        let linked_source = linked.source_signature();
+        assert_ne!(main_source, linked_source);
+        assert_eq!(main_source.worktree_id, main.worktree_id);
+        assert_eq!(main_source.canonical_path, "/repo");
+        assert_eq!(linked_source.worktree_id, linked.worktree_id);
+        assert_eq!(linked_source.canonical_path, "/repo-feature");
+
+        let mut same_id_different_path = main.clone();
+        same_id_different_path.canonical_path = "/repo-alias".into();
+        assert_ne!(main_source, same_id_different_path.source_signature());
+
+        let mut same_path_different_id = main.clone();
+        same_path_different_id.worktree_id = linked.worktree_id;
+        assert_ne!(main_source, same_path_different_id.source_signature());
+    }
+
+    #[test]
+    fn normalized_repository_and_account_share_downstream_cache() {
+        let main = snapshot("main", "/repo");
+        let linked = snapshot("linked", "/repo-feature");
+        let repository = GitHubRepoIdentity::new("github.com", "Owner", "Repo").unwrap();
+        let mut auth_scopes = HashMap::new();
+        auth_scopes.insert(RepositoryCacheSource::from(&main.source_signature()), 7);
+
+        let main_key =
+            RepositoryCacheKey::new(&main.source_signature(), repository.clone(), "OctoCat", 7);
+        let linked_key =
+            RepositoryCacheKey::new(&linked.source_signature(), repository, "octocat", 7);
+        assert_ne!(main.source_signature(), linked.source_signature());
+        assert_eq!(
+            auth_scopes.get(&RepositoryCacheSource::from(&linked.source_signature())),
+            Some(&7)
+        );
+        assert_eq!(main_key, linked_key);
+    }
+
+    #[test]
+    fn sibling_worktrees_keep_distinct_remote_discovery_results() {
+        let main = snapshot("main", "/repo");
+        let linked = snapshot("linked", "/repo-feature");
+        let mut main_execute = |_: &ProjectExecutionSnapshot,
+                                plan: &CommandPlan,
+                                _: Duration,
+                                _: usize|
+         -> Result<HostCommandResult, CommandExecutionError> {
+            Ok(fixture_result(
+                plan,
+                "git@github.com:owner/main.git\n",
+                "octocat",
+                None,
+            ))
+        };
+        let mut linked_execute = |_: &ProjectExecutionSnapshot,
+                                  plan: &CommandPlan,
+                                  _: Duration,
+                                  _: usize|
+         -> Result<HostCommandResult, CommandExecutionError> {
+            Ok(fixture_result(
+                plan,
+                "git@github.com:owner/feature.git\n",
+                "octocat",
+                None,
+            ))
+        };
+
+        let main_result =
+            run_list_pipeline_with(main, WorkItemKind::Issue, &mut main_execute).unwrap();
+        let linked_result =
+            run_list_pipeline_with(linked, WorkItemKind::Issue, &mut linked_execute).unwrap();
+        assert_ne!(main_result.observed_source, linked_result.observed_source);
+        assert_ne!(main_result.repository, linked_result.repository);
+        assert_eq!(
+            RepositoryCacheSource::from(&main_result.observed_source),
+            RepositoryCacheSource::from(&linked_result.observed_source)
+        );
+
+        let main_key = RepositoryCacheKey::new(
+            &main_result.observed_source,
+            main_result.repository,
+            main_result.account,
+            7,
+        );
+        let linked_key = RepositoryCacheKey::new(
+            &linked_result.observed_source,
+            linked_result.repository,
+            linked_result.account,
+            7,
+        );
+        assert_ne!(main_key, linked_key);
+    }
+
+    #[test]
+    fn force_rotation_invalidates_shared_downstream_cache_and_source_readiness() {
+        let main = snapshot("main", "/repo");
+        let linked = snapshot("linked", "/repo-feature");
+        let unrelated = snapshot_with_backend(
+            "other",
+            "/other",
+            ExecutionBackend::Wsl {
+                distro: "Ubuntu".into(),
+            },
+        );
+        let repository = GitHubRepoIdentity::new("github.com", "owner", "repo").unwrap();
+        let old_key =
+            RepositoryCacheKey::new(&main.source_signature(), repository.clone(), "octocat", 7);
+        let unrelated_key =
+            RepositoryCacheKey::new(&unrelated.source_signature(), repository, "octocat", 9);
+        let mut main_source = SourceRecord::new(&main, 7);
+        main_source.phase = SourcePhase::Ready(Box::new(old_key.clone()));
+        main_source.last_known = Some(old_key.clone());
+        let mut linked_source = SourceRecord::new(&linked, 7);
+        linked_source.phase = SourcePhase::Ready(Box::new(old_key.clone()));
+        linked_source.last_known = Some(old_key.clone());
+        let mut sources = HashMap::from([
+            (main.source_signature(), main_source),
+            (linked.source_signature(), linked_source),
+            (
+                unrelated.source_signature(),
+                SourceRecord::new(&unrelated, 9),
+            ),
+        ]);
+        let scope = RepositoryCacheSource::from(&main.source_signature());
+        let unrelated_scope = RepositoryCacheSource::from(&unrelated.source_signature());
+        let mut auth_scopes = HashMap::from([(scope.clone(), 7), (unrelated_scope, 9)]);
+        let mut repositories = HashMap::new();
+        repositories.insert(old_key.clone(), RepositoryCache::default());
+        repositories.insert(unrelated_key.clone(), RepositoryCache::default());
+
+        apply_auth_generation_rotation(
+            scope.clone(),
+            8,
+            &mut auth_scopes,
+            &mut sources,
+            &mut repositories,
+        );
+
+        assert_eq!(auth_scopes.get(&scope), Some(&8));
+        assert!(!repositories.contains_key(&old_key));
+        assert!(repositories.contains_key(&unrelated_key));
+        for snapshot in [&main, &linked] {
+            let source = &sources[&snapshot.source_signature()];
+            assert_eq!(source.auth_generation, 8);
+            assert!(matches!(source.phase, SourcePhase::Idle));
+            assert!(source.last_known.is_none());
+            assert!(source.repository.is_none());
+            assert!(source.account.is_none());
+        }
+        assert_eq!(sources[&unrelated.source_signature()].auth_generation, 9);
+    }
+
+    #[test]
+    fn shared_repository_cache_still_requires_the_source_auth_generation() {
+        let snapshot = snapshot("main", "/repo");
+        let repository = GitHubRepoIdentity::new("github.com", "owner", "repo").unwrap();
+        let cache_key =
+            RepositoryCacheKey::new(&snapshot.source_signature(), repository, "octocat", 7);
+        let mut source = SourceRecord::new(&snapshot, 7);
+        source.phase = SourcePhase::Ready(Box::new(cache_key.clone()));
+
+        assert!(source_is_ready(Some(&source), &cache_key, 7));
+        assert!(!source_is_ready(Some(&source), &cache_key, 8));
     }
 
     #[test]

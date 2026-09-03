@@ -208,6 +208,23 @@ fn configured_local_project_for_path<'a>(
     })
 }
 
+fn configured_local_project_for_activation<'a>(
+    projects: &'a [ProjectConfig],
+    configured_project_id: Option<&str>,
+    path: &Path,
+) -> Option<&'a ProjectConfig> {
+    let target = normalized_path(path);
+    configured_project_id
+        .and_then(|project_id| {
+            projects.iter().find(|project| {
+                project.id == project_id
+                    && project.ssh_connection_id.is_none()
+                    && mt_project::worktree::normalize_path_for_comparison(&project.path) == target
+            })
+        })
+        .or_else(|| configured_local_project_for_path(projects, path))
+}
+
 fn configured_children<'a>(
     projects: &'a [ProjectConfig],
     parent_id: &str,
@@ -246,8 +263,18 @@ fn configured_worktree_row(project: &ProjectConfig, is_main: bool) -> WorktreeRo
     }
 }
 
-fn catalog_worktree_row(fact: &WorktreeFact, projects: &[ProjectConfig]) -> WorktreeRowModel {
-    let configured = configured_local_project_for_path(projects, &fact.path);
+fn catalog_worktree_row<'a>(
+    fact: &WorktreeFact,
+    parent: &'a ProjectConfig,
+    projects: &'a [ProjectConfig],
+) -> WorktreeRowModel {
+    let target_path = normalized_path(&fact.path);
+    let configured = std::iter::once(parent)
+        .chain(configured_children(projects, &parent.id))
+        .find(|project| {
+            mt_project::worktree::normalize_path_for_comparison(&project.path) == target_path
+        })
+        .or_else(|| configured_local_project_for_path(projects, &fact.path));
     let branch = short_branch(fact.branch_ref.as_deref());
     let fallback = if fact.is_main { "main" } else { "worktree" };
     let label = branch
@@ -288,7 +315,7 @@ fn merge_local_worktrees(
         {
             let key = normalized_path(&fact.path);
             if seen_paths.insert(key) {
-                rows.push(catalog_worktree_row(fact, projects));
+                rows.push(catalog_worktree_row(fact, parent, projects));
             }
         }
     }
@@ -347,6 +374,23 @@ fn build_project_rows(
             })
         })
         .collect()
+}
+
+fn group_agent_targets_by_project(
+    targets: Vec<AgentTargetView>,
+) -> HashMap<String, Vec<AgentTargetView>> {
+    let mut seen_run_ids = HashSet::new();
+    let mut by_project = HashMap::<String, Vec<AgentTargetView>>::new();
+    for target in targets {
+        if !seen_run_ids.insert(target.run_id.clone()) {
+            continue;
+        }
+        by_project
+            .entry(target.project_id.clone())
+            .or_default()
+            .push(target);
+    }
+    by_project
 }
 
 fn scan_targets(projects: &[ProjectConfig], tree: Option<&[ProjectTreeItem]>) -> Vec<ScanTarget> {
@@ -613,16 +657,12 @@ impl OrcaProjectSidebar {
 
             // Resolve again inside the store update. A previous click or a
             // concurrent catalog completion may already have materialized it.
-            let path_string = path.to_string_lossy();
-            let existing = store
-                .find_project_by_path(&path_string)
-                .map(|project| project.id.clone())
-                .or_else(|| {
-                    configured_project_id
-                        .as_deref()
-                        .filter(|id| store.project(id).is_some())
-                        .map(str::to_string)
-                });
+            let existing = configured_local_project_for_activation(
+                store.projects(),
+                configured_project_id.as_deref(),
+                &path,
+            )
+            .map(|project| project.id.clone());
             let id = existing
                 .unwrap_or_else(|| store.add_project_at(&path, Some(parent_id.as_str()), cx));
             store.set_active_project(&id, cx);
@@ -1175,20 +1215,10 @@ impl OrcaProjectSidebar {
 
 impl Render for OrcaProjectSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (projects, active_project_id, agents_by_project) = {
+        let (projects, active_project_id, mut agents_by_project) = {
             let store = self.store.read(cx);
             let agents_by_project = if orca_worktree_context_enabled() {
-                store
-                    .projects()
-                    .iter()
-                    .filter_map(|project| {
-                        let worktree_id = store.worktree_id_for_project(&project.id)?;
-                        Some((
-                            project.id.clone(),
-                            store.agent_target_views_for_worktree(worktree_id),
-                        ))
-                    })
-                    .collect::<HashMap<_, _>>()
+                group_agent_targets_by_project(store.agent_target_views())
             } else {
                 HashMap::new()
             };
@@ -1220,9 +1250,9 @@ impl Render for OrcaProjectSidebar {
                         cx,
                     ));
                     if let Some(project_id) = worktree.configured_project_id.as_deref()
-                        && let Some(agents) = agents_by_project.get(project_id)
+                        && let Some(agents) = agents_by_project.remove(project_id)
                     {
-                        for agent in agents {
+                        for agent in &agents {
                             rows = rows.child(self.render_agent_row(agent, cx));
                         }
                     }
@@ -1251,7 +1281,12 @@ impl Render for OrcaProjectSidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mt_ai::{AgentEvidence, AgentProvider, AgentRoute};
     use mt_config::ProjectGroup;
+    use mt_identity::{
+        AgentEventId, AgentRunId, ExecutionHostId, HostInstallId, PaneKey, TabId,
+        TerminalIncarnationId, TerminalSessionId, WorktreeId,
+    };
     use mt_project::worktree::WorktreeScanSource;
 
     fn project(id: &str, path: &str, parent: Option<&str>) -> ProjectConfig {
@@ -1315,6 +1350,41 @@ mod tests {
         }
     }
 
+    fn agent_target(
+        run_id: AgentRunId,
+        project_id: &str,
+        execution_host_id: &ExecutionHostId,
+        worktree_id: &WorktreeId,
+    ) -> AgentTargetView {
+        AgentTargetView {
+            run_id,
+            last_event_id: AgentEventId::new(),
+            project_id: project_id.to_string(),
+            project_name: project_id.to_string(),
+            root_project_name: project_id.to_string(),
+            worktree_name: "shared".into(),
+            host_label: "Local machine".into(),
+            pane_id: format!("{project_id}-pane"),
+            pane_label: format!("{project_id} terminal"),
+            route: AgentRoute {
+                execution_host_id: execution_host_id.clone(),
+                worktree_id: worktree_id.clone(),
+                tab_id: TabId::new(),
+                pane_key: PaneKey::new(),
+                terminal_session_id: TerminalSessionId::new(),
+                terminal_incarnation_id: TerminalIncarnationId::new(),
+            },
+            provider: "codex".parse::<AgentProvider>().unwrap(),
+            provider_session_id: Some(format!("{project_id}-session")),
+            activity: AgentActivity::Working,
+            connectivity: AgentConnectivity::Live,
+            evidence: AgentEvidence::Hook,
+            received_at_unix_ms: 1,
+            attention: false,
+            unread: false,
+        }
+    }
+
     #[test]
     fn top_level_order_flattens_groups_and_ignores_visual_collapse() {
         let projects = vec![
@@ -1359,6 +1429,34 @@ mod tests {
     }
 
     #[test]
+    fn worktree_activation_prefers_the_rows_validated_same_path_alias() {
+        let projects = vec![
+            project("alias-a", "/repo", None),
+            project("alias-b", "/repo", None),
+        ];
+
+        assert_eq!(
+            configured_local_project_for_activation(
+                &projects,
+                Some("alias-b"),
+                Path::new("/repo"),
+            )
+            .map(|project| project.id.as_str()),
+            Some("alias-b")
+        );
+        assert_eq!(
+            configured_local_project_for_activation(
+                &projects,
+                Some("alias-b"),
+                Path::new("/other"),
+            )
+            .map(|project| project.id.as_str()),
+            None,
+            "a stale row owner must not route after its configured path changes"
+        );
+    }
+
+    #[test]
     fn authoritative_catalog_omits_absent_configured_children() {
         let projects = vec![
             project("parent", "/repo", None),
@@ -1388,6 +1486,102 @@ mod tests {
             .collect();
         assert_eq!(ids, vec![Some("parent"), Some("feature")]);
         assert!(!ids.contains(&Some("stale")));
+    }
+
+    #[test]
+    fn authoritative_main_rows_prefer_their_current_same_path_parent() {
+        let projects = vec![
+            project("alias-a", "/repo", None),
+            project("alias-b", "/repo", None),
+        ];
+        let snapshots = HashMap::from([
+            (
+                "alias-a".to_string(),
+                snapshot("/repo", scan(true, vec![fact("/repo", "main", true)])),
+            ),
+            (
+                "alias-b".to_string(),
+                snapshot("/repo", scan(true, vec![fact("/repo", "main", true)])),
+            ),
+        ]);
+
+        let rows = build_project_rows(&projects, None, &snapshots);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.worktrees[0].configured_project_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("alias-a"), Some("alias-b")]
+        );
+    }
+
+    #[test]
+    fn authoritative_linked_rows_prefer_their_current_same_path_parent() {
+        let projects = vec![
+            project("alias-a", "/repo/linked", None),
+            project("alias-b", "/repo/linked", None),
+        ];
+        let catalog = scan(
+            true,
+            vec![
+                fact("/repo/main", "main", true),
+                fact("/repo/linked", "feature", false),
+            ],
+        );
+        let snapshots = HashMap::from([
+            (
+                "alias-a".to_string(),
+                snapshot("/repo/linked", catalog.clone()),
+            ),
+            ("alias-b".to_string(), snapshot("/repo/linked", catalog)),
+        ]);
+
+        let rows = build_project_rows(&projects, None, &snapshots);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter()
+                .map(|row| {
+                    row.worktrees
+                        .iter()
+                        .find(|worktree| worktree.path == Path::new("/repo/linked"))
+                        .and_then(|worktree| worktree.configured_project_id.as_deref())
+                })
+                .collect::<Vec<_>>(),
+            vec![Some("alias-a"), Some("alias-b")]
+        );
+    }
+
+    #[test]
+    fn catalog_rows_prefer_children_of_the_current_project_over_global_aliases() {
+        let projects = vec![
+            project("other-alias", "/repo/linked", None),
+            project("parent", "/repo/main", None),
+            project("child", "/repo/linked", Some("parent")),
+        ];
+        let snapshots = HashMap::from([(
+            "parent".to_string(),
+            snapshot(
+                "/repo/main",
+                scan(
+                    true,
+                    vec![
+                        fact("/repo/main", "main", true),
+                        fact("/repo/linked", "feature", false),
+                    ],
+                ),
+            ),
+        )]);
+
+        let rows = build_project_rows(&projects, None, &snapshots);
+        let parent = rows.iter().find(|row| row.id == "parent").unwrap();
+        let linked = parent
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.path == Path::new("/repo/linked"))
+            .unwrap();
+        assert_eq!(linked.configured_project_id.as_deref(), Some("child"));
     }
 
     #[test]
@@ -1453,5 +1647,41 @@ mod tests {
             rows[0].worktrees[0].configured_project_id.as_deref(),
             Some("remote")
         );
+    }
+
+    #[test]
+    fn shared_worktree_agents_use_exact_project_and_unique_run_rows() {
+        let execution_host_id = ExecutionHostId::derive("local", &HostInstallId::new());
+        let worktree_id: WorktreeId = format!("worktree-v1:{}", "a".repeat(64)).parse().unwrap();
+        let run_a = AgentRunId::new();
+        let run_b = AgentRunId::new();
+        let target_a = agent_target(run_a.clone(), "alias-a", &execution_host_id, &worktree_id);
+        let target_b = agent_target(run_b.clone(), "alias-b", &execution_host_id, &worktree_id);
+
+        let grouped = group_agent_targets_by_project(vec![
+            target_a.clone(),
+            target_a.clone(),
+            target_b.clone(),
+        ]);
+
+        assert_eq!(grouped["alias-a"], vec![target_a.clone()]);
+        assert_eq!(grouped["alias-b"], vec![target_b.clone()]);
+        let rows = grouped.values().flatten().collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter()
+                .map(|target| target.run_id.clone())
+                .collect::<HashSet<_>>(),
+            HashSet::from([run_a, run_b])
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|target| format!("orca-agent-{}", target.run_id))
+                .collect::<HashSet<_>>()
+                .len(),
+            rows.len()
+        );
+        assert_eq!(grouped["alias-a"][0].route, target_a.route);
+        assert_eq!(grouped["alias-b"][0].route, target_b.route);
     }
 }
