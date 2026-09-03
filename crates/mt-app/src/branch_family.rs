@@ -374,9 +374,7 @@ impl BranchFamilyPanel {
                         .child(row.prefix.clone()),
                 )
             })
-            .when_some(live, |el, (_, _, status)| {
-                el.child(ui::status_dot(status))
-            })
+            .when_some(live, |el, (_, _, status)| el.child(ui::status_dot(status)))
             .child(
                 div()
                     .flex_none()

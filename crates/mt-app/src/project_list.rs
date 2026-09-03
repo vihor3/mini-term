@@ -301,7 +301,11 @@ fn remote_badge_chip(id: &str, remote: RemoteBadge) -> gpui::Stateful<gpui::Div>
 }
 
 /// 完成标 / 状态灯二选一,**idle 且没有完成标时两个都不画**(原版 `ProjectList.tsx:912`)。
-fn row_status_mark(show_done_tag: bool, done_tag_in: f32, status: PaneStatus) -> Option<AnyElement> {
+fn row_status_mark(
+    show_done_tag: bool,
+    done_tag_in: f32,
+    status: PaneStatus,
+) -> Option<AnyElement> {
     if show_done_tag {
         Some(done_tag(done_tag_in))
     } else if status != PaneStatus::Idle {

@@ -15,8 +15,8 @@
 //! 同步到调用方给的窗口,见 spec/backend/russh-sftp-file-transfer.md 坑 1。
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use russh_sftp::client::SftpSession;

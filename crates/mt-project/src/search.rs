@@ -723,8 +723,7 @@ mod tests {
     #[test]
     fn filename_search_regex_with_separator_matches_path() {
         let root = make_nested_project("regex-path");
-        let (items, total, _) =
-            collect_with(&root, r"task/.*\.vue$", SearchMode::FileName, true);
+        let (items, total, _) = collect_with(&root, r"task/.*\.vue$", SearchMode::FileName, true);
         assert_eq!(total, 2);
         assert!(items.iter().all(|i| i.match_in_path));
         // 不带 / 的正则仍只看文件名:\ 是转义符,不算路径分隔符

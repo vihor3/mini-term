@@ -1381,102 +1381,102 @@ impl TerminalArea {
             let focus = self.tab_focus.get(&pane_id).cloned();
             let (pid_click, pane_click) = (pid.clone(), pane_id.clone());
             let (pid_key, pane_key) = (pid.clone(), pane_id.clone());
-            let (pid_menu, pane_menu, label_menu) =
-                (pid.clone(), pane_id.clone(), label.clone());
+            let (pid_menu, pane_menu, label_menu) = (pid.clone(), pane_id.clone(), label.clone());
             let pane_hover = pane_id.clone();
             let pane_rect = pane_id.clone();
             let this_rect = this_area.clone();
-            bar = bar.child(
-                div()
-                    .id(SharedString::from(format!("collapsed-tab-{pane_id}")))
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .h_full()
-                    .gap(px(6.0))
-                    .px(px(10.0))
-                    .flex_none()
-                    .when_some(focus, |el, focus| el.track_focus(&focus).tab_index(0))
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            cx.stop_propagation();
-                            this.take_over_maximized(&pid_key, &pane_key, window, cx);
-                        }
-                    }))
-                    // 悬停缩略图:折叠条上**每个** tab 都值得预览 —— 这一整组的画面
-                    // 一个都不在屏幕上(展开态是「只有非激活 tab 需要」,判据在
-                    // `render_tab_preview` 里按最大化态放宽)
-                    .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-                        let mine = this.hovered_tab.as_deref() == Some(pane_hover.as_str());
-                        if *hovered {
-                            if mine {
-                                return;
+            bar =
+                bar.child(
+                    div()
+                        .id(SharedString::from(format!("collapsed-tab-{pane_id}")))
+                        .relative()
+                        .flex()
+                        .items_center()
+                        .h_full()
+                        .gap(px(6.0))
+                        .px(px(10.0))
+                        .flex_none()
+                        .when_some(focus, |el, focus| el.track_focus(&focus).tab_index(0))
+                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                cx.stop_propagation();
+                                this.take_over_maximized(&pid_key, &pane_key, window, cx);
                             }
-                            this.hovered_tab = Some(pane_hover.clone());
-                            this.schedule_tab_preview(pane_hover.clone(), cx);
-                        } else {
-                            if !mine {
-                                return;
-                            }
-                            this.hovered_tab = None;
-                            this.close_tab_preview(cx);
-                        }
-                        cx.notify();
-                    }))
-                    // 缩略图的锚点(与展开态 tab 共用 `tab_rects`:两者互斥,
-                    // 同一个 pane 不会在一帧里既折叠又展开)。故意不 notify
-                    .child({
-                        canvas(
-                            move |bounds, _window, cx| {
-                                this_rect.update(cx, |area: &mut TerminalArea, _cx| {
-                                    area.tab_rects.insert(pane_rect.clone(), bounds);
-                                });
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full()
-                    })
-                    .text_color(if is_active {
-                        ui::text_primary()
-                    } else {
-                        ui::text_muted()
-                    })
-                    .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.take_over_maximized(&pid_click, &pane_click, window, cx);
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            this.close_tab_preview(cx);
-                            let entries =
-                                tab_menu(&this.store, &pid_menu, &pane_menu, &label_menu, cx);
-                            menu::show(event.position, entries, window, cx);
-                        }),
-                    )
-                    .child(ui::status_dot(status))
-                    .when_some(vendor, |el, vendor| {
-                        el.child(BrandIcon::new(Some(vendor)).size(px(12.0)).color(
-                            if is_active {
-                                ui::text_primary()
+                        }))
+                        // 悬停缩略图:折叠条上**每个** tab 都值得预览 —— 这一整组的画面
+                        // 一个都不在屏幕上(展开态是「只有非激活 tab 需要」,判据在
+                        // `render_tab_preview` 里按最大化态放宽)
+                        .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                            let mine = this.hovered_tab.as_deref() == Some(pane_hover.as_str());
+                            if *hovered {
+                                if mine {
+                                    return;
+                                }
+                                this.hovered_tab = Some(pane_hover.clone());
+                                this.schedule_tab_preview(pane_hover.clone(), cx);
                             } else {
-                                ui::text_muted()
-                            },
-                        ))
-                    })
-                    .child(div().child(label))
-                    .when(unread, |el| {
-                        el.child(
-                            div()
-                                .w(px(5.0))
-                                .h(px(5.0))
-                                .rounded_full()
-                                .bg(ui::color_success()),
+                                if !mine {
+                                    return;
+                                }
+                                this.hovered_tab = None;
+                                this.close_tab_preview(cx);
+                            }
+                            cx.notify();
+                        }))
+                        // 缩略图的锚点(与展开态 tab 共用 `tab_rects`:两者互斥,
+                        // 同一个 pane 不会在一帧里既折叠又展开)。故意不 notify
+                        .child({
+                            canvas(
+                                move |bounds, _window, cx| {
+                                    this_rect.update(cx, |area: &mut TerminalArea, _cx| {
+                                        area.tab_rects.insert(pane_rect.clone(), bounds);
+                                    });
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full()
+                        })
+                        .text_color(if is_active {
+                            ui::text_primary()
+                        } else {
+                            ui::text_muted()
+                        })
+                        .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.take_over_maximized(&pid_click, &pane_click, window, cx);
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab_preview(cx);
+                                let entries =
+                                    tab_menu(&this.store, &pid_menu, &pane_menu, &label_menu, cx);
+                                menu::show(event.position, entries, window, cx);
+                            }),
                         )
-                    }),
-            );
+                        .child(ui::status_dot(status))
+                        .when_some(vendor, |el, vendor| {
+                            el.child(BrandIcon::new(Some(vendor)).size(px(12.0)).color(
+                                if is_active {
+                                    ui::text_primary()
+                                } else {
+                                    ui::text_muted()
+                                },
+                            ))
+                        })
+                        .child(div().child(label))
+                        .when(unread, |el| {
+                            el.child(
+                                div()
+                                    .w(px(5.0))
+                                    .h(px(5.0))
+                                    .rounded_full()
+                                    .bg(ui::color_success()),
+                            )
+                        }),
+                );
         }
 
         // 右端那颗「点这里铺满」的提示图标。**不挂自己的点击** —— 整条都是热区,

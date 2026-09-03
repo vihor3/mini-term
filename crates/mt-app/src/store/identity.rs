@@ -182,10 +182,8 @@ fn resolve_project_binding(
             if let Some(binding) = persisted_authoritative_ssh_binding
                 && let Some(connection) = connection
             {
-                let identity_context = ssh_binding_identity_context(
-                    connection,
-                    &resolved.canonical_worktree_path,
-                );
+                let identity_context =
+                    ssh_binding_identity_context(connection, &resolved.canonical_worktree_path);
                 if binding.identity_context.as_deref() == Some(identity_context.as_str()) {
                     // Provenance names the same configured endpoint and path. Keep
                     // the authenticated canonical path because the configured path
@@ -791,10 +789,8 @@ mod tests {
         let connection = ssh_connection("connection-1", "host.example", 22, "deploy");
         let mut authoritative =
             authoritative_remote_binding("ssh-project", "/srv/repo-real", &connection);
-        authoritative.identity_context = Some(ssh_binding_identity_context(
-            &connection,
-            "/srv/repo-link",
-        ));
+        authoritative.identity_context =
+            Some(ssh_binding_identity_context(&connection, "/srv/repo-link"));
         let configured = project("ssh-project", "/srv/repo-link", Some("connection-1"));
 
         let resolved = resolve_project_bindings(
@@ -805,7 +801,10 @@ mod tests {
         );
 
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].execution_host_id, authoritative.execution_host_id);
+        assert_eq!(
+            resolved[0].execution_host_id,
+            authoritative.execution_host_id
+        );
         assert_eq!(resolved[0].repo_id, authoritative.repo_id);
         assert_eq!(resolved[0].worktree_id, authoritative.worktree_id);
         assert_eq!(

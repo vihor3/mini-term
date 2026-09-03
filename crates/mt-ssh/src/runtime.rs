@@ -13,7 +13,7 @@ use mt_identity::{ExecutionHostId, HostInstallId, RepoId, WorktreeId};
 
 use crate::pool::{BoundedExecOutput, BoundedExecState, CachedSession};
 use crate::sftp::{SftpBoundedFileRead, SftpHandle, SftpNodeKind};
-use crate::{run_bounded_exec_on_session, SftpTransferError};
+use crate::{SftpTransferError, run_bounded_exec_on_session};
 
 pub const REMOTE_RUNTIME_PROTOCOL_VERSION: u32 = 1;
 const INSTALL_ID_MAX_BYTES: usize = 128;
@@ -343,17 +343,15 @@ async fn load_or_create_install_id(
                     }
                     Ok(observed)
                 }
-                Err(create_error) => {
-                    read_install_id(sftp, install_path)
-                        .await
-                        .map_err(|read_error| {
-                            RemoteRuntimeError::state(format!(
-                        "remote runtime install identity could not be created or read: {}; {}",
-                        create_error.message(),
-                        read_error.message()
-                    ))
-                        })
-                }
+                Err(create_error) => read_install_id(sftp, install_path).await.map_err(
+                    |read_error| {
+                        RemoteRuntimeError::state(format!(
+                            "remote runtime install identity could not be created or read: {}; {}",
+                            create_error.message(),
+                            read_error.message()
+                        ))
+                    },
+                ),
             }
         }
     }
