@@ -628,11 +628,20 @@ mod tests {
         );
     }
 
-    /// 分隔符 / 大小写 / 尾斜杠都不该让「已存在」判成「新项目」。
+    /// 尾斜杠始终归一；分隔符与大小写只按当前平台的路径语义归一。
     #[test]
-    fn 重复判定走路径归一() {
-        let dirs = vec![PathBuf::from(r"D:\Git\A")];
-        let existing = vec!["d:/git/a/".to_string()];
+    fn 重复判定走平台路径归一() {
+        let (dirs, existing) = if cfg!(windows) {
+            (
+                vec![PathBuf::from(r"D:\Git\A")],
+                vec!["d:/git/a/".to_string()],
+            )
+        } else {
+            (
+                vec![PathBuf::from("/home/U/Repo")],
+                vec!["/home/U/Repo/".to_string()],
+            )
+        };
         assert_eq!(
             classify_external(&dirs, &existing),
             ExternalDropKind::Duplicate

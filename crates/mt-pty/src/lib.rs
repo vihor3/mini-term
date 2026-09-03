@@ -630,29 +630,42 @@ mod tests {
 
     #[test]
     fn spawn_streams_output_and_reports_exit_code() {
-        let collected = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let sink = Arc::clone(&collected);
-        let (tx, rx) = mpsc::channel();
+        enum SmokeEvent {
+            Output(Vec<u8>),
+            Exit(Option<u32>),
+        }
 
+        let (tx, rx) = mpsc::channel();
+        let exit_tx = tx.clone();
         let session = PtySession::spawn_with_options(
             smoke_spec(),
             PtyOptions::default().on_exit(move |code| {
-                let _ = tx.send(code);
+                let _ = exit_tx.send(SmokeEvent::Exit(code));
             }),
-            move |bytes| sink.lock().extend_from_slice(bytes),
+            move |bytes| {
+                let _ = tx.send(SmokeEvent::Output(bytes.to_vec()));
+            },
         )
         .expect("spawn 失败");
 
-        let exit_code = rx
-            .recv_timeout(Duration::from_secs(30))
-            .expect("退出回调未在 30s 内触发");
-        assert_eq!(exit_code, Some(0));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut output = Vec::new();
+        let mut exit_code = None;
+        while exit_code.is_none()
+            || !output
+                .windows(b"mt-pty-smoke".len())
+                .any(|w| w == b"mt-pty-smoke")
+        {
+            let event = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("输出与退出回调未在 30s 内全部触发");
+            match event {
+                SmokeEvent::Output(bytes) => output.extend_from_slice(&bytes),
+                SmokeEvent::Exit(code) => exit_code = Some(code),
+            }
+        }
 
-        let output = String::from_utf8_lossy(&collected.lock()).into_owned();
-        assert!(
-            output.contains("mt-pty-smoke"),
-            "reader 线程未把子进程输出交出来: {output:?}"
-        );
+        assert_eq!(exit_code, Some(Some(0)));
         drop(session);
     }
 

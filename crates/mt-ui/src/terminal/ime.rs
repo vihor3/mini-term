@@ -258,7 +258,8 @@ mod tests {
         assert_eq!(ime.text_for_range_utf16(0..2).as_deref(), Some("你好"));
         assert_eq!(ime.text_for_range_utf16(2..4).as_deref(), Some("世界"));
         // 倒序区间不 panic
-        assert_eq!(ime.text_for_range_utf16(3..1).as_deref(), Some(""));
+        let reversed = std::ops::Range { start: 3, end: 1 };
+        assert_eq!(ime.text_for_range_utf16(reversed).as_deref(), Some(""));
         ime.clear();
         assert_eq!(ime.text_for_range_utf16(0..1), None);
     }
