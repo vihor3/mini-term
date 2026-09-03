@@ -24,7 +24,9 @@ mt-app -> mt-terminal-host client -> current-user IPC
 
 The protocol is newline-delimited JSON with base64 byte payloads. Every
 connection receives a version hello before one request. Long-lived `attach`
-connections then receive ordered output and exit frames.
+connections then receive ordered output and exit frames. One JSONL frame is
+bounded to 48 MiB, one decoded terminal write to 1 MiB, and each attachment's
+command queue to 32 entries.
 
 Required operations:
 
@@ -43,11 +45,17 @@ list, status, shutdown_if_idle
 - `restore` is explicit. It validates the persisted `WorktreeId` and previous
   incarnation, reconstructs history, and only then starts a new PTY with a new
   host-generated incarnation while preserving the logical terminal session.
+  Explicit close may cancel an in-flight restore; any spawned-but-uncommitted
+  replacement is killed, history-invalidated, and purged before the restore
+  returns failure.
 - An old incarnation cannot attach or restore over the new incarnation.
 - A stale incarnation must fail before write, resize, autofill, or kill reaches
   the current PTY.
 - Host-returned identity is persisted and installed into `TerminalRoute` only
-  after create or attach succeeds.
+  after create or attach succeeds. Restore fencing compares only stable process
+  fields: session, incarnation, worktree, and process ID. Dynamic sequence
+  bounds, size, recovery availability, and WSL presentation do not make the same
+  process a different incarnation.
 - `u32 pty_id` remains a process-local GUI attachment handle, never a persisted
   terminal identity.
 
@@ -57,7 +65,14 @@ Each session serializes PTY output under one stream lock:
 
 1. allocate a monotonically increasing sequence;
 2. retain the exact bytes in a bounded replay buffer;
-3. publish the same sequence and bytes to live attachments.
+3. publish the same sequence and bytes to live attachments;
+4. record the same bytes in durable history before the output callback completes.
+
+Child exit is finalized only after the PTY output pump reports a clean drain and
+all already-started output callbacks complete. The exit/error frame is therefore
+strictly after accepted output. Reader failure or the bounded drain timeout
+terminates the incarnation as `RecoveryUnavailable`, writes an invalidation
+marker, and forbids future replay/restore from incomplete history.
 
 Attach validates `after_sequence`, snapshots retained chunks, subscribes to
 live events while holding the same lock, and then releases it. Therefore the
@@ -78,17 +93,21 @@ binary framed stream with magic, version, kind, generation, monotonic sequence,
 payload length, payload, and CRC32. The log is capped at 8 MiB; rotation writes
 a checkpoint through the latest sequence before truncation.
 
-Recovery may truncate only a torn final frame. Checksum failures, sequence
-gaps, invalid versions, wrong generations, malformed complete frames, or
-oversized payloads fail with `RecoveryUnavailable`. Launch arguments, user
-environment values, autofill passwords, and other secrets are never persisted.
+Recovery may truncate only a torn final frame after a valid frame prefix.
+Short garbage, checksum failures, sequence gaps, invalid versions, wrong
+generations, malformed complete frames, or oversized payloads fail with
+`RecoveryUnavailable`. File reads enforce the byte limit on bytes actually read,
+not metadata observed before the read. Invalidation acquires the history state
+fence before purge so late writers cannot recreate deleted files. Launch
+arguments, user environment values, autofill passwords, and other secrets are
+never persisted.
 
 ### 5. Lifecycle Contract
 
 | Trigger | Hosted terminal | Compatibility terminal |
 |---------|-----------------|------------------------|
 | GUI/window/entity drop | Detach only | Drop legacy PTY |
-| Explicit pane/tab close | Fenced kill | Kill legacy PTY |
+| Explicit pane/tab close | Fenced close, invalidate, quiesce, and purge even after natural exit | Kill legacy PTY |
 | Project registration removal | Detach only | Drop legacy PTY |
 | Worktree deletion | Explicitly kill first | Explicitly kill first |
 | Host crash | Host PTY drops; explicit restore uses durable history | Not applicable |
@@ -104,7 +123,14 @@ connections.
   unlinking the socket.
 - Windows uses a per-user named pipe whose DACL grants the current SID only.
 - Concurrent auto-start attempts converge at endpoint ownership. A contender
-  must report an already-running host and must not replace the live owner.
+  must report an already-running host and must not replace the live owner. Every
+  spawned host child has a waiter; a startup failure/cancellation kills and
+  reaps an uncommitted child.
+- Client connect, hello, request write, and response read share one absolute
+  10-second RPC deadline. Server request reads and frame writes are separately
+  bounded. Queue overflow, oversized input, stalled peers, or transport failure
+  permanently disconnect that attachment; the application clears its writable
+  transport before presenting the read-only view.
 - `MINITERM_TERMINAL_HOST_ENDPOINT` overrides the endpoint for tests.
 - `MINITERM_TERMINAL_HOST_BIN` overrides packaged-binary discovery.
 - `MINI_TERM_TERMINAL_HOST=0` forces the compatibility backend.
@@ -117,6 +143,8 @@ connections.
 | Exact session and incarnation found | Quiet warm attach; preserve process and incarnation |
 | Session missing or exited with valid history | Explicit restore; apply snapshot; rotate incarnation |
 | Replay gap with valid history | Seal and end the unusable incarnation, then explicitly restore |
+| PTY output drain fails or times out | Emit recovery-unavailable after accepted output; invalidate history and never replay it |
+| Explicit close races restore | Cancel restore, retire any uncommitted replacement, quiesce history, and purge |
 | History missing or corrupt | Start clean with a visible recovery-unavailable notice |
 | Incarnation mismatch | Fail closed; do not take over the host session |
 | Protocol mismatch or existing-session conflict | Fail closed; do not mutate either session |
@@ -131,6 +159,9 @@ incarnation is attached, and provider resume may run only after that restore.
 
 ### 8. Packaging Contract
 
+General build/stage ordering, locked-graph, PE, and extracted-payload rules are
+normative in `mt-app/backend/release-staging-contract.md`.
+
 `mt-terminal-host[.exe]` is installed beside `mini-term` and the three existing
 sidecars on every desktop release path. Windows upgrade must terminate the old
 host before replacing files; uninstall must remove it. A package validation is
@@ -143,6 +174,10 @@ matches the staged source.
 - Missing attach never creates.
 - Detach and reattach preserve PID and incarnation.
 - Detached output replays exactly once and live output continues in order.
+- Natural exit delivers final output before exactly one exit frame; explicit
+  close afterward still purges registry and recovery history.
+- Drain failure/timeout invalidates recovery, and attach cannot land between
+  lifecycle validation and exit publication.
 - Stale write, resize, autofill, and kill all fail closed.
 - Explicit kill removes the child; idle shutdown refuses while a child is live.
 - Unix endpoint modes, stale socket recovery, and live-owner contention.
@@ -151,7 +186,12 @@ matches the staged source.
 - Snapshot round trips preserve grid, cursor, source size, scrollback, wide
   cells, colors, and an incomplete parser sequence.
 - Host restart restores valid history into a new incarnation; stale restore,
-  wrong worktree, corruption, sequence gaps, and wrong generations fail closed.
+  wrong worktree, corruption, short garbage tails, sequence gaps, and wrong
+  generations fail closed.
+- Restore/close races retire uncommitted replacements and prevent late history
+  recreation. Stable descriptor comparison ignores dynamic output/size fields.
+- JSONL, write, command-queue, RPC/read/write, history-file, and PTY drain bounds
+  have oversized/stalled-peer regressions.
 - Log rotation stays within the bound, explicit kill removes history, and
   persisted bytes exclude launch secrets.
 - Extracted Windows installer contains `mt-terminal-host.exe`.
@@ -161,6 +201,8 @@ matches the staged source.
 - Do not let `TerminalPane::drop` call hosted `kill`.
 - Do not create a fresh shell from inside `attach`.
 - Do not accept a mutation by session ID alone.
+- Do not publish exit before the output pump and accepted output callbacks have
+  finalized, and do not retain recovery history after an incomplete drain.
 - Do not present compatibility fallback or a new process as warm attach.
 - Do not apply new-incarnation replay before installing the restored snapshot;
   that would overwrite newer output with older terminal state.

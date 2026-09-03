@@ -37,6 +37,14 @@ the catalog; they must not introduce a second parser or authority model.
 
 - Run structured argv `git worktree list --porcelain -z` and parse raw bytes
   before any lossy conversion.
+- Capture stdout and stderr independently with a 16 MiB retained-byte limit per
+  stream. Continue draining after the limit so the child cannot block, then
+  reject the scan instead of parsing a truncated authoritative inventory.
+- The command timeout is an end-to-end deadline covering child execution and
+  output-pipe drain. On Unix the command owns a dedicated process group; on
+  Windows it is created suspended, assigned to a kill-on-close Job Object, and
+  only then resumed. Timeout/error/success cleanup terminates descendants and
+  bounds reader shutdown; inherited pipes cannot block the caller indefinitely.
 - Retry text porcelain only when `-z` is unsupported (currently exit code 129).
   Ordinary Git failures do not change parser mode.
 - Successful complete NUL/text porcelain scans are authoritative. Last-known
@@ -64,6 +72,9 @@ the catalog; they must not introduce a second parser or authority model.
 | Command/parse failure with last authoritative snapshot | `LastKnown`, non-authoritative, warning |
 | No snapshot but libgit2 succeeds | `Libgit2Fallback`, non-authoritative, warning |
 | Mutation races with an in-flight scan | Downgrade stale result; current generation wins |
+| Either output stream exceeds 16 MiB | Drain/terminate safely and reject the scan; never parse truncated output |
+| Leader exits but descendant holds a pipe | Deadline expires, terminate the complete process tree, and return a bounded error |
+| Reader or process cleanup exceeds its bound | Return cleanup context; never wait indefinitely |
 | Non-authoritative empty result in app | Preserve last-known rows/badges |
 | Filesystem path missing but Git still registers it | Keep persisted project; absence is not proven |
 | Current authoritative inventory omits registered child path | Cleanup may remove the legacy child project |
@@ -77,6 +88,9 @@ the catalog; they must not introduce a second parser or authority model.
 - Bad: a transient Git error returns an empty fallback and the project list
   deletes worktree children. This is forbidden because fallback absence is not
   authoritative.
+- Bad: call `read_to_end`, kill only the direct child, and then unconditionally
+  join readers. A descendant that inherited stdout/stderr can retain the caller
+  forever and output can consume unbounded memory.
 
 ### 6. Tests Required
 
@@ -84,15 +98,17 @@ the catalog; they must not introduce a second parser or authority model.
   with and without reasons, unknown fields, invalid UTF-8, malformed quoting,
   conflicting duplicates, and missing worktree path.
 - Catalog tests: unsupported `-z`, ordinary failure without retry, last-known
-  fallback, common-dir singleflight, mutation generation fencing, timeout
-  kill/wait, and a real-Git linked/detached/locked/prunable smoke test.
+  fallback, common-dir singleflight, mutation generation fencing, per-stream
+  output overflow, timeout process-tree cleanup, successful leader exit with a
+  descendant holding pipes, and a real-Git linked/detached/locked/prunable smoke
+  test.
 - App tests: stale request rejection, degraded-result preservation,
   authoritative-only cleanup, branch projection, and POSIX case/backslash
   distinctions.
-- Verification runs only through `scripts/docker-ci.sh`: the focused `worktree`
-  suite covers `mt-project`, linked `mt-app` checks/tests, and Clippy; `fmt` runs
-  the changed-line rustfmt gate. The host retains no Rust toolchain or repository
-  `target` directory. Cargo state is isolated in the documented Docker cache.
+- Verification runs only in GitHub Actions. The focused catalog job covers
+  `mt-project`, linked `mt-app` checks/tests, changed-line rustfmt, and Clippy;
+  Windows MSVC checks cover both process-tree implementations. The local
+  workstation must not invoke Rust, test, staging, packaging, or Docker CI jobs.
 
 ### 7. Wrong vs Correct
 

@@ -89,10 +89,14 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
   account. Cached list and detail requests perform the same context probe both
   before and after the data command. No command uses `--web`, prints a token, or
   runs login.
-- Cache identity is execution-host source signature + root project + normalized
-  repository + account + auth generation. Sibling worktrees share list/detail
-  data and in-flight work, while mode, filter, selection, scroll, and workbench
-  preview/permanent state remain keyed by `WorktreeId`.
+- Discovery/source identity includes execution host, root project/source,
+  backend, exact `WorktreeId`, and exact canonical worktree path. Sibling
+  worktrees therefore cannot reuse one another's unverified `origin` result.
+- Only after each exact source independently discovers the same normalized
+  repository and account may list/detail data and in-flight work share a
+  `RepositoryCacheKey` scoped by execution host/root/backend plus repository,
+  lowercase account, and auth generation. Mode, filter, selection, scroll, and
+  workbench preview/permanent state remain keyed by `WorktreeId`.
 - Every completion validates request ID, auth generation, repository cache key,
   current source signature, re-discovered repository, re-probed account, and
   observed SSH connection epoch before publishing. The first observed SSH epoch
@@ -133,9 +137,11 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
 | JSON is truncated, invalid UTF-8, malformed, or has an unknown state | Reject as `MalformedResponse` |
 | First SSH stage reconnects before execution | Adopt its observed epoch for the request source |
 | SSH epoch changes after a stage was observed | Reject completion and do not publish rows/detail |
-| User switches worktree while list/detail is running | Shared data may finish in its exact bucket; presentation is not changed for the new worktree |
+| User switches worktree while list/detail is running | Exact-source data may finish in its bucket; presentation is not changed for the new worktree |
 | Retry occurs while an old request is running | New auth/request generations win; old completion is inert |
-| Same path has two different `WorktreeId` values | Keep separate Tasks UI and detail tabs |
+| Sibling worktrees expose different `origin` values | Keep discovery/results separate and derive different repository cache keys |
+| Sibling worktrees independently prove the same normalized repository/account/auth generation | Share downstream list/detail cache only after those proofs |
+| Same path has two different `WorktreeId` values | Keep discovery source, Tasks UI, and detail tabs separate |
 | Detail body contains HTML, images, or links | Render inert visible text; perform no navigation or asset load |
 | Rollback variable equals `0` | Render the prior unavailable placeholder and start no Tasks probe |
 
@@ -168,14 +174,16 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
   and SSH snapshots; every discovery/auth/data/context stage must plan against
   that selected backend. Separate tests assert structured argv, hostile SSH
   quoting, NUL rejection, and no fallback.
-- Cache/generation tests assert sibling source sharing; distinct root, distro,
-  connection fingerprint, and epoch signatures; and rejection of changed remote,
-  account, auth generation, request ID, or mid-pipeline SSH epoch.
+- Cache/generation tests assert exact worktree/path discovery signatures;
+  downstream sharing only after normalized repository/account proof; distinct
+  root, distro, connection fingerprint, and epoch scopes; and rejection of
+  changed remote, account, auth generation, request ID, or mid-pipeline SSH
+  epoch.
 - Workbench tests assert same-item tabs differ by `WorktreeId`, one preview per
   worktree is replaceable, double-click promotes, and close is isolated.
 - Markdown tests reparse sanitized GitHub bodies and assert no disallowed HTML,
   image, definition, or link replacement remains.
-- Run focused tests, workspace check, Clippy, and Windows MSVC check in Docker.
+- Run focused tests, workspace check, Clippy, and Windows MSVC checks only in GitHub Actions.
 
 ### 7. Wrong vs Correct
 

@@ -111,6 +111,19 @@ pub fn reactivate_active_page(
   only before PTY hydration and while no document from that project is open.
   Existing panes or documents force a visible deferred-rebind state; they are
   never silently retagged.
+- A persisted authoritative SSH binding is reusable only when its opaque
+  `identity_context` exactly matches the current non-secret tuple
+  `("ssh-authority-v2", connection_id, host, normalized_port, user,
+  normalized_configured_path)`. Display name, password, and private-key path do
+  not participate. Missing legacy context or any endpoint/path mismatch fails
+  closed to provisional resolution and a fresh authenticated probe.
+- `identity_context` proves the configured path alias; the binding's
+  `canonical_worktree_path` remains the authenticated canonical target. A
+  configured symlink such as `/srv/repo-link` therefore may retain authenticated
+  `/srv/repo-real` across restart without deriving a new worktree identity.
+- A safe authoritative rebind with no live PTY and no open document replaces
+  any non-empty provisional startup hydration with the reconciled destination
+  layout. Non-empty panels alone are not proof of live ownership.
 
 ### 4. Validation & Error Matrix
 
@@ -124,7 +137,10 @@ pub fn reactivate_active_page(
 | New PTY is spawned | Preserve pane/session identity and rotate incarnation |
 | Pane is moved or reordered | Preserve pane key, session, incarnation, and current PTY attachment |
 | Remote/WSL identity is provisional | Route consistently but never present it as verified host authority |
-| Authenticated remote identity differs before hydration | Reconcile layout transactionally, install binding, then hydrate |
+| Persisted authoritative SSH context exactly matches current endpoint and configured path | Reuse the authoritative IDs and authenticated canonical path |
+| Persisted authoritative SSH context is missing, legacy, or mismatched | Do not reuse it; resolve provisionally and require a fresh probe |
+| Configured SSH path is an alias of the authenticated canonical path | Match provenance by configured path but preserve the authenticated canonical path |
+| Authenticated remote identity differs before hydration | Reconcile layout transactionally, install binding, replace cold provisional state, then hydrate |
 | Authenticated remote identity differs with live PTY or open document | Defer the binding change and preserve the current route |
 | Hosted session remains live after GUI restart | Attach-only and preserve its PID/incarnation |
 | Hosted session is missing or has a replay gap with valid history | Explicitly restore, apply snapshot first, and rotate incarnation |
@@ -137,6 +153,9 @@ pub fn reactivate_active_page(
   switching restores each worktree's own route.
 - Good: An Agents overlay opened on a document captures project and worktree;
   closing it after a project rebind does not focus the new worktree.
+- Good: An SSH project configured as `/srv/repo-link` reuses its matching
+  authenticated `/srv/repo-real` binding after restart; changing host, user,
+  port, connection ID, or configured path makes that persisted authority inert.
 - Base: A GUI restart warm-attaches when the host still owns the exact
   incarnation; otherwise cold recovery creates a new incarnation while
   preserving the logical terminal session and pane identity.
@@ -164,6 +183,10 @@ pub fn reactivate_active_page(
 - Remote runtime tests assert authoritative rebind is blocked by either live PTYs
   or open documents and that a safe rebind uses layout reconciliation before
   hydration.
+- SSH persistence tests cover exact-context reuse, normalized default port,
+  display/credential changes that do not affect identity, endpoint/path changes
+  that do, legacy/missing context rejection, configured symlink preservation,
+  and replacement of cold non-empty provisional hydration.
 
 ### 7. Wrong vs Correct
 

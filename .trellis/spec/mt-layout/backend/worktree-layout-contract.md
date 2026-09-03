@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS project_worktree_binding (
   worktree_id             TEXT NOT NULL,
   identity_source         TEXT NOT NULL,
   canonical_worktree_path TEXT,
+  identity_context        TEXT,
   updated_at_ms           INTEGER NOT NULL
 );
 
@@ -57,6 +58,9 @@ pub fn retain_project_bindings(&self, live_project_ids: &HashSet<String>) -> Res
 Saved JSON adds optional `worktreeId`, `activeTabId`, `tabId`,
 `activePaneKey`, `paneKey`, `terminalSessionId`, and
 `terminalIncarnationId` fields. Missing fields remain readable.
+`ProjectWorktreeBinding::identity_context` is an optional opaque provenance
+value. It may contain non-secret identity facts needed to decide whether a
+persisted authoritative binding can be reused.
 
 ### 3. Contracts
 
@@ -65,17 +69,31 @@ Saved JSON adds optional `worktreeId`, `activeTabId`, `tabId`,
 - Reconciliation is one SQLite transaction. For each desired binding, source
   priority is existing destination worktree row, previous bound worktree row,
   then the compatibility `project_layout` row.
+- Schema version 3 adds nullable `identity_context` with `ALTER TABLE`. Opening
+  a version-2 database preserves every existing binding/layout payload and its
+  timestamp; old rows read as `None`.
 - An existing destination row always wins and is never overwritten by stale
   previous-binding or legacy data.
+- Desired bindings are grouped by `WorktreeId`, and every group's candidate is
+  selected before any destination or binding write occurs. This prevents one
+  group's migration from changing another group's source candidates.
+- When a source tier has multiple candidates, select the greatest
+  `updated_at_ms`; break ties by ascending owner project ID and then source key.
+  Input order must not affect the selected layout.
 - Reconciliation never deletes source rows. Project removal deletes only the
   compatibility binding and its legacy mirror; orphan worktree rows remain
   recoverable.
 - A successful normal save writes `worktree_layout` and that project's legacy
   `project_layout` mirror in the same transaction. Empty layouts delete both
   content rows while retaining the binding.
-- When multiple desired project aliases resolve to one worktree, the first
-  created/existing worktree destination is authoritative. A differing legacy
-  row for another alias is retained and logged, not silently mirrored over.
+- When multiple desired project aliases resolve to one worktree, the selected
+  destination is projected to every alias. A differing legacy row for an
+  unselected alias is retained and logged, not silently mirrored over.
+- In-memory save coalescing has one explicit latest dirty owner per
+  `WorktreeId`. Only that alias may flush the shared row. Removing an older or
+  ownerless alias never serializes it over newer state; removing the current
+  owner flushes that owner without promoting an older snapshot. Removing the
+  last alias still performs its final save.
 - Valid JSON is salvaged per tab, split child, and pane. Invalid stable IDs are
   regenerated only for the affected object; surviving siblings remain.
 - Syntactically invalid destination JSON is isolated to that worktree. It does
@@ -90,13 +108,17 @@ Saved JSON adds optional `worktreeId`, `activeTabId`, `tabId`,
 | Duplicate project ID in one reconcile request | Abort before opening the transaction |
 | Existing destination and stale legacy row | Use destination; mirror only when it is not a shared-worktree conflict |
 | Two aliases have different legacy layouts for one worktree | Use the destination for both, retain/log the conflicting legacy row |
+| No destination and several candidates in one tier | Choose newest timestamp, then stable project/source key; ignore input order |
+| Two worktree groups swap previous sources | Freeze both candidates before writing either destination |
 | Destination absent, prior binding row exists | Copy and normalize the prior worktree row |
 | Destination/prior row absent, legacy exists | Copy, normalize, dual-write, and bind |
+| Version-2 binding table has no `identity_context` | Add the nullable column without rewriting payloads or timestamps |
 | Valid JSON contains one malformed pane | Drop/regenerate only that pane and preserve valid siblings |
 | Destination JSON is syntactically invalid | Keep it unchanged, return no layout for that project, continue other rows |
-| Future schema version is present | Return compatibility error without moving or deleting the database |
+| Future schema version is present | Continue compatibility read/write, log it, and preserve unknown data without rebuilding the database |
 | Empty layout is saved | Delete worktree content and the current alias mirror; keep binding |
-| Project binding is removed | Delete binding and alias mirror; keep worktree content |
+| Shared alias is removed | Flush only when it owns the latest pending snapshot; keep the shared worktree row |
+| Last project binding is removed | Final-save it, then delete binding and alias mirror; keep worktree content |
 
 ### 5. Good / Base / Bad Cases
 
@@ -104,6 +126,8 @@ Saved JSON adds optional `worktreeId`, `activeTabId`, `tabId`,
   while a conflicting second legacy row remains available for rollback review.
 - Good: A moved project rebinds to a destination that already has state; the
   destination wins and the old worktree row remains untouched.
+- Good: Reversing two alias records still picks the same newest legacy layout,
+  and deleting the older alias cannot overwrite the latest pending snapshot.
 - Base: A legacy layout gains stable IDs on first load and performs no second
   write when reopened.
 - Bad: Loop over project rows and copy each legacy layout into the same
@@ -117,9 +141,15 @@ Saved JSON adds optional `worktreeId`, `activeTabId`, `tabId`,
 - Host install ID remains stable across two database opens.
 - Legacy migration writes a normalized worktree row and mirror once, with no
   timestamp churn on second reconcile.
+- Version-2 migration adds `identity_context` while preserving binding and
+  layout data plus their original timestamps.
 - Destination-wins rebind retains the previous source row.
-- Shared-worktree collision returns one destination to both aliases and keeps
-  the conflicting legacy row unchanged.
+- Shared-worktree collision and reversed input order select the same newest
+  candidate, return one destination to both aliases, and keep the conflicting
+  legacy row unchanged.
+- Cross-worktree source swaps prove all candidates are frozen before writes.
+- Latest-owner save/remove tests prove older aliases cannot flush shared state,
+  while the final alias still requests a save.
 - Salvage tests assert bad pane removal, split collapse, equal-size repair, and
   stable active-pointer fallback.
 - Invalid JSON isolation tests assert healthy bindings still reconcile.
@@ -144,16 +174,17 @@ destination.
 #### Correct
 
 ```rust
-let destination = load_worktree_layout(&binding.worktree_id)?;
-let candidate = destination
-    .map(|row| (Destination, row))
-    .or_else(|| load_previous_binding_row(&binding).transpose())
-    .or_else(|| load_legacy_row(&binding.project_id).transpose());
+let groups = group_bindings_by_worktree(desired_bindings);
+let frozen = groups
+    .iter()
+    .map(|group| select_candidate_by_tier_timestamp_and_stable_key(group))
+    .collect::<Result<Vec<_>>>()?;
 
-// Existing destination wins. Shared conflicting legacy rows are logged and
-// retained rather than mirrored over.
-reconcile_candidate_in_one_transaction(candidate, binding)?;
+for (group, candidate) in groups.into_iter().zip(frozen) {
+    reconcile_group_in_one_transaction(group, candidate)?;
+}
 ```
 
-Source selection and all binding/layout writes belong to one transaction, and
-no compatibility source row is deleted by reconciliation.
+All source selection is frozen before any write. Candidate ordering is explicit,
+all binding/layout writes remain in one transaction, and no compatibility source
+row is deleted by reconciliation.

@@ -97,6 +97,11 @@ or provider session ID.
 - Session files are historical evidence only. A row may show activity and
   connectivity only after matching an authoritative `AgentTargetView` by
   normalized provider plus exact provider session ID.
+- When one run route matches several configured aliases of the same
+  `WorktreeId`, target projection selects the active exact alias when present;
+  otherwise it selects the lexicographically smallest project ID. The Orca
+  sidebar consumes the global projection, groups by that selected project, and
+  renders each `AgentRunId` at most once.
 - Agent activation starts from `AgentRunId`, re-resolves the current route, and
   verifies execution host, worktree, tab, pane, terminal session, incarnation,
   current PTY route, and terminal entity before focus. Exact live navigation
@@ -125,6 +130,7 @@ or provider session ID.
 | Pull/push is running when the user switches | Cache `refresh_needed`, not permanent `Loading`; refresh on return |
 | Historical session has no authoritative run | Show history only; do not claim live, stale, or offline state |
 | Provider matches but provider session ID differs | Do not attach an Agent badge or route |
+| Shared worktree route matches multiple project aliases | Prefer the active exact alias; otherwise choose stable smallest project ID and render one run row |
 | Agent route incarnation or PTY owner changed | `activate_agent_run` returns false and leaves focus unchanged |
 | Cold transcript is restored and Agent is live | Show `Restored history` and Agent connectivity independently |
 | Remote process probe is unsupported | Show unsupported capability; do not infer that the Agent is done |
@@ -150,6 +156,8 @@ or provider session ID.
 
 - Rollback parsing accepts only exact `0` as disabled.
 - Agent target ordering keeps activity priority separate from connectivity.
+- Shared-alias tests reverse candidate order, prefer the active exact project,
+  fall back to stable project-ID ordering, and render one row per `AgentRunId`.
 - Exact route tests vary execution host, worktree, tab, pane, terminal session,
   and incarnation one at a time and reject every mismatch.
 - FileTree tests switch between same-path worktree IDs and assert independent
@@ -168,7 +176,7 @@ or provider session ID.
 - Recovery label tests cover Fresh, Reattached, RestoredHistory, Compatibility,
   Unavailable, exited, Live, Stale, Offline, Linux process probing, detecting,
   and unsupported probing.
-- Run Linux tests/check/Clippy and a Windows MSVC check in Docker.
+- Run Linux tests/check/Clippy and Windows MSVC checks only in GitHub Actions.
 
 ### 7. Wrong vs Correct
 

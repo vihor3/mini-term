@@ -75,9 +75,18 @@ pub fn resolve_provisional_ssh(
   `ExecutionHostId`; configuration IDs and labels never override that result.
 - Resolution functions are pure for provisional inputs and perform no network
   calls. They do not claim remote host-key or runtime authority.
-- AppStore may reuse a persisted binding as `PersistedFallback` when local,
-  WSL, or SSH facts are temporarily unavailable. That fallback must be
-  transactionally replaceable when stronger facts arrive.
+- AppStore may reuse a persisted binding as `PersistedFallback` when local or
+  WSL facts are temporarily unavailable. That fallback must be transactionally
+  replaceable when stronger facts arrive.
+- Persisted authoritative SSH identity is a stricter case: reuse requires an
+  exact opaque provenance match for connection ID, host, normalized port, user,
+  and normalized configured path. The provenance excludes display names,
+  passwords, and private-key paths. Legacy/missing provenance and mismatches are
+  not authority evidence.
+- The configured SSH path and authenticated canonical path serve different
+  purposes. Provenance tracks the configured alias; `WorktreeId` and the stored
+  canonical path continue to use the authenticated target, including when the
+  configured path resolves through a remote symlink.
 
 ### 4. Validation & Error Matrix
 
@@ -92,6 +101,9 @@ pub fn resolve_provisional_ssh(
 | SSH connection ID is empty or contains NUL | Reject input |
 | Authenticated remote Git common directory is present | Resolve as `AuthoritativeRemoteGit` using that directory for `RepoId` |
 | Authenticated remote folder has no Git repository | Resolve as `AuthoritativeRemoteDirectory` using the canonical folder path |
+| Persisted SSH authority has exact current provenance | Reuse the authoritative host/repo/worktree IDs and canonical target |
+| Persisted SSH authority has missing or mismatched provenance | Reject authority reuse and resolve/probe from current configuration |
+| Configured SSH path is a symlink/alias | Match the configured-path provenance while retaining the authenticated canonical target |
 | Same install/common-dir/worktree path is resolved twice | Return identical derived identities |
 | Same repository has two linked worktree paths | Return same `RepoId`, different `WorktreeId` |
 
@@ -101,6 +113,9 @@ pub fn resolve_provisional_ssh(
   so they share `RepoId` but retain independent workbench IDs.
 - Good: A temporarily unavailable SSH path keeps its persisted provisional
   binding until a future remote runtime supplies authenticated facts.
+- Good: A matching configured SSH alias retains the prior authenticated
+  canonical target, while an endpoint or configured-path change cannot borrow
+  that authority.
 - Base: A canonical non-Git directory remains stable across application
   restarts on the same installation.
 - Bad: Hash `project_id + branch_name`; recreating or renaming configuration
@@ -120,8 +135,11 @@ pub fn resolve_provisional_ssh(
 - Authoritative remote source serde tests freeze camel-case storage names and
   assert both remote variants report `is_authoritative()`.
 - Invalid absolute-path, NUL, empty ID, and mismatched WSL distro cases fail.
-- Persisted fallback tests cover local and SSH resolution failure without
-  identity churn.
+- Persisted fallback tests cover local and provisional SSH resolution failure
+  without identity churn.
+- Authoritative SSH persistence tests cover exact provenance reuse, normalized
+  port equivalence, alias/canonical-path separation, secret/display-field
+  exclusion, and missing/mismatched provenance rejection.
 
 ### 7. Wrong vs Correct
 

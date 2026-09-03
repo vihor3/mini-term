@@ -66,13 +66,17 @@ MINI_TERM_GLOBAL_AGENT_ACTIVITY=0
   paths, and provider names cannot manufacture a live row.
 - Row identity is `AgentRunId`. Current unread identity is
   `AgentRunId -> AgentEventId`; the watermark is process-local and intentionally
-  separate from the legacy pane-level `DoneTracker`.
+  separate from the legacy pane-level `DoneTracker`. If an exact run route is
+  reachable through multiple project aliases, resolve it through the active
+  exact alias first and then stable project-ID order so one run yields one row.
 - Opening or closing the overlay never changes a watermark. Window focus may
   clear legacy tray completion state but cannot acknowledge the global feed.
 - A target is unread only when its current event differs from the run watermark
   and the current state is pane attention, Blocked, Failed, Done, or Waiting.
   A later accepted event on the same run differs from the stored event and is
-  unread again without an invalidation callback.
+  unread again without an invalidation callback. Repeating identical
+  connectivity at the same route/epoch is not an accepted event and cannot
+  renew unread state or recency.
 - Needs You contains pane attention, Blocked, Failed, and unread Done/Waiting.
   Working contains Live Starting/Working. Recent contains acknowledged
   Done/Waiting, Interrupted, Exited, Unknown, and all remaining Stale or
@@ -105,8 +109,10 @@ MINI_TERM_GLOBAL_AGENT_ACTIVITY=0
 |-----------|-------------------|
 | Historical session exists without an exact target | No global feed row |
 | Same provider has multiple current runs | Render separate `AgentRunId` rows |
+| Same worktree route has multiple project aliases | Render once through active exact alias, else stable smallest project ID |
 | Same path exists on different hosts/worktrees | Keep rows and routes distinct |
 | Current event equals watermark | Mark acknowledged; do not classify Done/Waiting as unread |
+| Identical connectivity repeats at the same epoch | Preserve event ID, receipt time, ordering, and watermark |
 | Same run accepts a later event | Mark the new event unread |
 | Window becomes focused | Preserve feed watermarks |
 | Working activity is disconnected | Display Working plus Offline in Recent; never call it Done |
@@ -136,7 +142,10 @@ MINI_TERM_GLOBAL_AGENT_ACTIVITY=0
   deterministic equal-timestamp ordering, duplicate provider runs, same-path
   multi-host routes, and Recent bounding without limiting active rows.
 - Watermark tests assert exact run/event acknowledgement, no unread for ordinary
-  Working state, later-event renewal, and selective route-prune behavior.
+  Working state, later-event renewal, identical-connectivity suppression, and
+  selective route-prune behavior.
+- Alias tests assert active-first/stable-ID projection and one global/sidebar row
+  per `AgentRunId` independent of configuration order.
 - Route tests vary execution host, worktree, tab, pane, terminal session,
   incarnation, PTY route, and terminal entity and require failure for every
   mismatch.
@@ -145,7 +154,7 @@ MINI_TERM_GLOBAL_AGENT_ACTIVITY=0
   project/workbench mutation.
 - Rollback parsing accepts only exact `0`; inline Agent and Sessions tests remain
   unchanged and passing.
-- Run focused tests, workspace check, Clippy, and Windows MSVC check in Docker.
+- Run focused tests, workspace check, Clippy, and Windows MSVC checks only in GitHub Actions.
 
 ### 7. Wrong vs Correct
 

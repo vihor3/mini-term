@@ -26,6 +26,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Remote Agent Reconciliation Contract](./remote-agent-reconciliation-contract.md) | Exact-route SSH agent probes, epoch fencing, and legacy projection | Active |
 | [GitHub Project Tasks Contract](./github-project-tasks-contract.md) | Execution-host gh routing, repository/account fencing, and worktree-scoped read-only tasks | Active |
 | [Global Agent Activity Contract](./global-agent-activity-contract.md) | Exact-run feed grouping, two-phase activation, acknowledgement, focus, and rollback | Active |
+| [Release Staging Contract](./release-staging-contract.md) | Locked dual-workspace Actions builds, job-owned staging, PE validation, and installer payload proof | Active |
 
 ---
 

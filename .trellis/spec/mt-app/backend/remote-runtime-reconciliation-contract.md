@@ -64,10 +64,15 @@ MINI_TERM_REMOTE_RUNTIME=0
   values do not disable it.
 - Every successful pool acquisition records a monotonic connection epoch. Exact
   session eviction clears only that same epoch; an older task cannot erase a
-  newer observation. Connection edits/removal and project removal clear related
-  runtime state.
-  Late completions cannot recreate cleared state because generation and owner
-  facts are revalidated.
+  newer observation. Project removal clears related runtime state. Late
+  completions cannot recreate cleared state because generation and owner facts
+  are revalidated.
+- An SSH connection identity edit invalidates its pool, Agent polls, and runtime
+  states, then immediately starts a forced fresh runtime request for each still-
+  connected project. The replacement request preserves the prior
+  `hydrate_after` intent. Removing the connection instead resumes pending
+  hydration through compatibility fallback and leaves non-pending projects
+  inert until configuration is repaired.
 - Errors shown to UI are bounded summaries. Credentials, private-key contents,
   prompts, environment, and raw command output are never persisted.
 
@@ -78,7 +83,10 @@ MINI_TERM_REMOTE_RUNTIME=0
 | Local or WSL project | Skip remote probe and hydrate normally |
 | SSH project begins probe | Store `Connecting`; defer hydration/spawn |
 | Same request asks to hydrate again | Reuse request and retain `hydrate_after=true` |
-| Path, endpoint, user, credential, or connection ID changes | Reject old completion and start a new generation when requested |
+| Path, endpoint, user, credential, or connection ID changes | Reject old completion; an available edited connection starts a forced new generation immediately |
+| Edited connection had `hydrate_after=true` | Carry that intent to the replacement request and hydrate only after its result/fallback |
+| Connection is removed while hydration is pending | Clear stale authority and resume compatibility hydration |
+| Connection is removed without pending hydration | Clear stale authority and wait for explicit configuration/retry |
 | Snapshot epoch differs from the current observed epoch | Reject it before binding reconciliation and enter compatibility fallback |
 | Authenticated binding is unchanged | Enter `Ready`, then hydrate if requested |
 | Binding changes with no PTY/documents | Reconcile transactionally, enter `Ready`, then hydrate |
@@ -94,7 +102,8 @@ MINI_TERM_REMOTE_RUNTIME=0
 - Good: Startup probes an SSH worktree, migrates its saved layout to the
   authenticated `WorktreeId`, then creates/restores its terminal panes.
 - Good: The user edits SSH credentials while a probe is running; the late
-  completion is ignored because its fingerprint no longer matches.
+  completion is ignored and a forced replacement probe starts with the prior
+  hydration intent.
 - Base: An offline host enters compatibility fallback and existing remote file
   and terminal paths remain usable.
 - Bad: Hydrate a PTY under a provisional binding and change `WorktreeId` when
@@ -111,6 +120,9 @@ MINI_TERM_REMOTE_RUNTIME=0
   connection fingerprint and assert stale rejection.
 - Epoch tests assert exact equality is required, observations never regress, and
   exact eviction cannot clear a newer epoch.
+- Connection invalidation tests cover available-edit refresh, preservation of
+  `hydrate_after`, removal-time fallback hydration, and no spurious hydration
+  when no request was pending.
 - Rebind decision tests independently assert live PTY and open-document blocks.
 - Layout tests assert destination-wins migration and preservation of the prior
   worktree row.

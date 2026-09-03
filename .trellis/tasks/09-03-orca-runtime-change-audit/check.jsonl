@@ -1,0 +1,19 @@
+{"file": ".trellis/tasks/09-03-orca-runtime-change-audit/prd.md", "reason": "Verify scope discipline and every acceptance criterion"}
+{"file": ".trellis/tasks/09-03-orca-runtime-change-audit/design.md", "reason": "Verify domain coverage, triage, and robustness invariants"}
+{"file": ".trellis/tasks/09-03-orca-runtime-change-audit/implement.md", "reason": "Verify all review, repair, and release gates completed"}
+{"file": ".trellis/tasks/09-03-orca-runtime-change-audit/research/scope-inventory.md", "reason": "Confirm every finding is causal to the exact review range"}
+{"file": ".trellis/tasks/archive/2026-09/09-02-orca-project-worktree-runtime/validation.md", "reason": "Compare new results with the original parent integration evidence"}
+{"file": ".trellis/spec/mt-app/backend/workbench-identity-contract.md", "reason": "Check identity, persistence, and stale callback safety"}
+{"file": ".trellis/spec/mt-terminal-host/backend/terminal-host-contract.md", "reason": "Check terminal lifecycle, bounded history, and recovery"}
+{"file": ".trellis/spec/mt-ssh/backend/remote-runtime-contract.md", "reason": "Check authenticated transport, timeout, and lock reproducibility"}
+{"file": ".trellis/spec/mt-app/backend/remote-agent-reconciliation-contract.md", "reason": "Check remote Agent owner and generation fences"}
+{"file": ".trellis/spec/mt-app/backend/worktree-context-contract.md", "reason": "Check worktree-scoped contextual data and diagnostics"}
+{"file": ".trellis/spec/mt-app/backend/github-project-tasks-contract.md", "reason": "Check execution-host routing, auth, and cache fencing"}
+{"file": ".trellis/spec/mt-app/backend/global-agent-activity-contract.md", "reason": "Check overlay routing, identity, ordering, and rollback"}
+{"file": ".trellis/tasks/09-03-orca-runtime-change-audit/findings.md", "reason": "Verify all 28 findings have causal evidence, implemented dispositions, and explicit residual risk"}
+{"file": ".trellis/spec/mt-app/backend/release-staging-contract.md", "reason": "Check Actions-only build ownership, staging isolation, and installer proof"}
+{"file": ".github/workflows/ci.yml", "reason": "Check locked Linux and Windows quality gates and affected-package coverage"}
+{"file": ".github/workflows/release.yml", "reason": "Check tag release uses shared verified Windows packaging before upload"}
+{"file": ".github/workflows/windows-package.yml", "reason": "Check branch/manual Windows build, extraction, validation evidence, and artifact upload"}
+{"file": "scripts/build-windows-installer.ps1", "reason": "Check deterministic NSIS versioning and fallback behavior"}
+{"file": "scripts/verify-windows-installer.ps1", "reason": "Check exact extracted payload hashes, PE/resources/markers, and machine-readable evidence"}

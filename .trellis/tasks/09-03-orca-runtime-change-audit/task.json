@@ -1,0 +1,38 @@
+{
+  "id": "orca-runtime-change-audit",
+  "name": "orca-runtime-change-audit",
+  "title": "Audit Orca Runtime Task Changes",
+  "description": "Review only the changes introduced by the archived Orca Project Worktree Runtime parent task and its ten child tasks, then improve code quality and robustness without auditing unrelated pre-existing code.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "leo",
+  "assignee": "leo",
+  "createdAt": "2026-09-03",
+  "completedAt": null,
+  "branch": "feat/remote-file-management",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "review_baseline": "0bc6f28",
+    "review_target": "c644ae9",
+    "scope_policy": "introduced-changes-only",
+    "execution_policy": "github-actions-only",
+    "finding_count": 28,
+    "implemented_fix_count": 27,
+    "residual_findings": [
+      "TERM-08"
+    ],
+    "validation_status": "pending-github-actions",
+    "policy_updated_at": "2026-09-03"
+  }
+}

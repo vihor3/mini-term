@@ -1,0 +1,13 @@
+{"file": ".trellis/tasks/09-03-orca-runtime-change-audit/prd.md", "reason": "Audit boundary, requirements, and acceptance criteria"}
+{"file": ".trellis/tasks/09-03-orca-runtime-change-audit/design.md", "reason": "Differential review domains, finding contract, and fix flow"}
+{"file": ".trellis/tasks/09-03-orca-runtime-change-audit/implement.md", "reason": "Ordered review, repair, and GitHub Actions validation plan"}
+{"file": ".trellis/tasks/09-03-orca-runtime-change-audit/research/scope-inventory.md", "reason": "Exact commit range, work commits, and file distribution"}
+{"file": ".trellis/tasks/archive/2026-09/09-02-orca-project-worktree-runtime/prd.md", "reason": "Approved parent behavior and scope"}
+{"file": ".trellis/tasks/archive/2026-09/09-02-orca-project-worktree-runtime/design.md", "reason": "Cross-child identity, ownership, and rollback contracts"}
+{"file": ".trellis/spec/mt-app/backend/workbench-identity-contract.md", "reason": "Stable workbench identity and stale-result rules"}
+{"file": ".trellis/spec/mt-terminal-host/backend/terminal-host-contract.md", "reason": "Detached PTY lifecycle and recovery contract"}
+{"file": ".trellis/spec/mt-ssh/backend/remote-runtime-contract.md", "reason": "Authenticated remote identity and bounded transport"}
+{"file": ".trellis/spec/mt-app/backend/remote-agent-reconciliation-contract.md", "reason": "Remote Agent generation and ownership fencing"}
+{"file": ".trellis/spec/mt-app/backend/worktree-context-contract.md", "reason": "Files, Git, Sessions, and diagnostics scoping"}
+{"file": ".trellis/spec/mt-app/backend/github-project-tasks-contract.md", "reason": "Execution-host GitHub task and auth contract"}
+{"file": ".trellis/spec/mt-app/backend/global-agent-activity-contract.md", "reason": "Global Agent feed routing and ordering contract"}
