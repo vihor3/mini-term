@@ -2,7 +2,7 @@ name: Build & Release
 
 # 发布形态(GPUI 原生版,三平台矩阵参考旧 Tauri 流水线):
 # - Windows x64:NSIS 安装包(scripts/windows-installer.nsi,makensis 三级兜底取得
-#   —— 镜像自带 / choco / 官方便携包直下,见「Build NSIS installer」步骤的注释;
+#   —— 镜像自带 / choco / 官方便携包直下,见 scripts/build-windows-installer.ps1;
 #   身份对齐旧 Tauri NSIS —— HKCU Uninstall\Mini-Term 键 + 读旧 InstallLocation,
 #   老用户原地升级:装过就先弹框告知、再跑旧版卸载器,不是文件覆盖写;
 #   包内平铺 exe + 三个 sidecar + mt-terminal-host + portable-conpty/,
@@ -115,76 +115,62 @@ jobs:
             . -> target
             sidecars -> target
 
+      - name: Verify locked Cargo graphs
+        shell: bash
+        run: |
+          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          cargo metadata --manifest-path sidecars/Cargo.toml --locked --format-version 1 --no-deps > /dev/null
+
+      - name: Resolve Windows package version
+        if: matrix.platform == 'windows-latest'
+        id: windows-package-version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $metadataJson = cargo metadata --locked --format-version 1 --no-deps
+          if ($LASTEXITCODE -ne 0) { throw "cargo metadata exited with $LASTEXITCODE" }
+          $metadata = $metadataJson | ConvertFrom-Json
+          $app = @($metadata.packages | Where-Object name -eq 'mt-app')
+          if ($app.Count -ne 1) { throw "expected one mt-app Cargo package, found $($app.Count)" }
+          $version = ([string]$env:RELEASE_TAG).Trim()
+          if ($version.StartsWith('v', [StringComparison]::OrdinalIgnoreCase)) {
+            $version = $version.Substring(1)
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "app-version=$([string]$app[0].version)" >> $env:GITHUB_OUTPUT
+
       - name: Build & stage sidecars (+ portable ConPTY on Windows)
         run: node scripts/stage-sidecars.mjs --release --target ${{ matrix.target }}
 
       - name: Build GPUI app
-        run: cargo build --release --package mt-app
+        run: cargo build --locked --release --package mt-app
+
+      - name: Verify staged Windows payload
+        if: matrix.platform == 'windows-latest'
+        run: node scripts/stage-sidecars.mjs --verify-only --release --target ${{ matrix.target }}
 
       - name: Build NSIS installer (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.windows-package-version.outputs.version }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          $version = $tag.TrimStart('v')
-          # VIProductVersion 只收纯数字四段:剥掉预发布/构建元数据再补第四段
-          $versionNum = ($version -split '[-+]')[0] + '.0'
-          New-Item -ItemType Directory -Force dist | Out-Null
-          $src = (Resolve-Path 'target/release').Path
-          $ico = (Resolve-Path 'crates/mt-app/resources/icon.ico').Path
-          # 资产名沿用旧正式版(Tauri v2 bundler)那一套:`Mini-Term_<版本>_<arch>…`,
-          # 不带 v 前缀、不带 gpui 字样 —— 用户按名字认包,渲染层换了不该改名
-          $out = Join-Path (Resolve-Path 'dist').Path "Mini-Term_${version}_x64-setup.exe"
-          # makensis 定位:**三级兜底,每一级之后都重新解析路径**。
-          #
-          # 此前这里写死 'C:\Program Files (x86)\NSIS\makensis.exe' + choco 兜底,
-          # 两个前提在 v1.0.4-beta 那次发版上同时塌了:runner 镜像已经不再自带
-          # NSIS,而 choco 源连着两次 503/504。更糟的是 choco 装到的其实是
-          # C:\ProgramData\chocolatey\bin\makensis.exe,不是写死的那个路径 ——
-          # 就算源没挂,装完也照样撞「命令不存在」,而且要拖到最后一步才暴露。
-          function Resolve-MakeNsis {
-            $cmd = Get-Command makensis -ErrorAction SilentlyContinue
-            if ($cmd) { return $cmd.Source }
-            foreach ($p in @(
-              'C:\Program Files (x86)\NSIS\makensis.exe',
-              'C:\Program Files\NSIS\makensis.exe',
-              'C:\ProgramData\chocolatey\bin\makensis.exe'
-            )) { if (Test-Path $p) { return $p } }
-            return $null
-          }
-          $mk = Resolve-MakeNsis
-          if (-not $mk) {
-            Write-Host '::group::choco install nsis'
-            try { choco install nsis -y --no-progress } catch { Write-Host "choco 失败: $_" }
-            Write-Host '::endgroup::'
-            $mk = Resolve-MakeNsis
-          }
-          if (-not $mk) {
-            # choco 源挂掉时的最后一条路:官方便携包直下(自带 Stubs/Plugins,
-            # makensis 按自身所在目录找它们,解压即用)
-            Write-Host '::group::download portable NSIS'
-            $zip = Join-Path $env:RUNNER_TEMP 'nsis.zip'
-            $dir = Join-Path $env:RUNNER_TEMP 'nsis'
-            foreach ($url in @(
-              'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10.zip',
-              'https://cfhcable.dl.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10.zip'
-            )) {
-              try {
-                Invoke-WebRequest -Uri $url -OutFile $zip -MaximumRetryCount 3 -RetryIntervalSec 10
-                Expand-Archive -Path $zip -DestinationPath $dir -Force
-                $mk = (Get-ChildItem $dir -Recurse -Filter makensis.exe | Select-Object -First 1).FullName
-                if ($mk) { break }
-              } catch { Write-Host "$url 取不到: $_" }
-            }
-            Write-Host '::endgroup::'
-          }
-          if (-not $mk) { throw 'makensis 三级兜底全部失败(镜像自带 / choco / 官方便携包)' }
-          Write-Host "makensis: $mk"
-          & $mk /DVERSION=$version /DVERSION_NUM=$versionNum `
-            /DSOURCE_DIR=$src /DICON_FILE=$ico /DOUT_FILE=$out `
-            scripts/windows-installer.nsi
-          if ($LASTEXITCODE -ne 0) { throw "makensis 退出码 $LASTEXITCODE" }
-          Get-ChildItem dist
+          & ./scripts/build-windows-installer.ps1 -Version $env:PACKAGE_VERSION
+
+      - name: Extract and verify NSIS installer (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.windows-package-version.outputs.version }}
+          APP_VERSION: ${{ steps.windows-package-version.outputs.app-version }}
+        run: |
+          $installer = "dist/Mini-Term_$($env:PACKAGE_VERSION)_x64-setup.exe"
+          & ./scripts/verify-windows-installer.ps1 `
+            -Version $env:PACKAGE_VERSION `
+            -AppVersion $env:APP_VERSION `
+            -InstallerPath $installer `
+            -OutputPath dist/windows-package-validation.json
 
       - name: Assemble .app bundle + dmg (macOS)
         if: matrix.platform == 'macos-latest'
@@ -281,6 +267,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist/Mini-Term_*-setup.exe
+            dist/windows-package-validation.json
             dist/Mini-Term_*.dmg
             dist/Mini-Term_*.tar.gz
             dist/Mini-Term_*.deb

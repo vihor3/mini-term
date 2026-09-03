@@ -6,6 +6,11 @@ on:
       - 'dependabot/**'
     tags-ignore:
       - 'v*'
+    paths-ignore:
+      - '.agents/**'
+      - '.claude/**'
+      - '.trellis/**'
+      - 'AGENTS.md'
   pull_request:
   workflow_dispatch:
 
@@ -84,7 +89,7 @@ jobs:
           cache-on-failure: true
           workspaces: |
             . -> target
-            sidecars -> sidecars/target
+            sidecars -> target
 
       # The repository has historical rustfmt differences, including inside
       # files that new work may need to touch. Run rustfmt on changed files but
@@ -100,19 +105,29 @@ jobs:
           node crates/mt-i18n/tools/gen_from_ts.mjs
           git diff --exit-code -- crates/mt-i18n/src/dict.rs
 
+      - name: Test sidecar and ConPTY staging
+        run: node --test tests/stageSidecars.test.cjs tests/conptyBundle.test.cjs
+
+      - name: Verify locked Cargo graphs
+        run: |
+          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          cargo metadata --manifest-path sidecars/Cargo.toml --locked --format-version 1 --no-deps > /dev/null
+
       - name: Cargo check
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
 
       - name: Sidecar check
-        run: cargo check --manifest-path sidecars/Cargo.toml --all-targets
+        run: cargo check --manifest-path sidecars/Cargo.toml --locked --all-targets
 
       - name: Clippy affected packages
         shell: bash
         run: |
           base="${{ steps.diff-base.outputs.sha }}"
           set +e
-          cargo clippy --no-deps \
-            -p mt-project -p mt-ssh -p mt-config -p mt-app \
+          cargo clippy --locked --no-deps \
+            -p mt-ai -p mt-app -p mt-config -p mt-github \
+            -p mt-identity -p mt-layout -p mt-project -p mt-pty \
+            -p mt-ssh -p mt-terminal -p mt-terminal-host -p mt-ui \
             --all-targets --message-format=json \
             | tee /tmp/clippy-messages.jsonl
           clippy_status=${PIPESTATUS[0]}
@@ -124,7 +139,57 @@ jobs:
             "$base" /tmp/clippy-messages.jsonl
 
       - name: Cargo test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace --all-targets --no-fail-fast
+
+      - name: Sidecar test
+        run: cargo test --manifest-path sidecars/Cargo.toml --locked --all-targets
 
       - name: Whitespace check
         run: git diff --check "${{ steps.diff-base.outputs.sha }}" HEAD
+
+  windows-msvc:
+    name: Windows MSVC check
+    runs-on: windows-latest
+    timeout-minutes: 75
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            . -> target
+            sidecars -> target
+
+      - name: Verify locked Cargo graphs
+        shell: bash
+        run: |
+          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          cargo metadata --manifest-path sidecars/Cargo.toml --locked --format-version 1 --no-deps > /dev/null
+
+      - name: Check affected root packages
+        shell: bash
+        run: |
+          cargo check --locked --target x86_64-pc-windows-msvc --all-targets \
+            -p mt-ai \
+            -p mt-app \
+            -p mt-config \
+            -p mt-github \
+            -p mt-identity \
+            -p mt-layout \
+            -p mt-project \
+            -p mt-pty \
+            -p mt-ssh \
+            -p mt-terminal \
+            -p mt-terminal-host \
+            -p mt-ui
+
+      - name: Check sidecars
+        run: cargo check --manifest-path sidecars/Cargo.toml --locked --target x86_64-pc-windows-msvc --all-targets

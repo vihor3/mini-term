@@ -1,0 +1,150 @@
+name: Windows Package
+
+on:
+  push:
+    branches:
+      - '**'
+    tags-ignore:
+      - 'v*'
+    paths:
+      - '.github/workflows/windows-package.yml'
+      - '.github/workflows/release.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'relay-server/protocol/**'
+      - 'sidecars/**'
+      - 'scripts/build-windows-installer.ps1'
+      - 'scripts/stage-conpty.mjs'
+      - 'scripts/stage-sidecars.mjs'
+      - 'scripts/verify-windows-installer.ps1'
+      - 'scripts/windows-installer.nsi'
+      - 'tests/conptyBundle.test.cjs'
+      - 'tests/stageSidecars.test.cjs'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Optional SemVer package version (leading v is accepted)
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Build and verify Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      WINDOWS_TARGET: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            . -> target
+            sidecars -> target
+
+      - name: Verify locked Cargo graphs
+        shell: pwsh
+        run: |
+          cargo metadata --locked --format-version 1 --no-deps | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "root cargo metadata exited with $LASTEXITCODE" }
+          cargo metadata --manifest-path sidecars/Cargo.toml --locked --format-version 1 --no-deps | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "sidecar cargo metadata exited with $LASTEXITCODE" }
+
+      - name: Resolve package version
+        id: package-version
+        shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          $metadataJson = cargo metadata --locked --format-version 1 --no-deps
+          if ($LASTEXITCODE -ne 0) { throw "cargo metadata exited with $LASTEXITCODE" }
+          $metadata = $metadataJson | ConvertFrom-Json
+          $app = @($metadata.packages | Where-Object name -eq 'mt-app')
+          if ($app.Count -ne 1) { throw "expected one mt-app Cargo package, found $($app.Count)" }
+          $appVersion = [string]$app[0].version
+
+          $version = ([string]$env:REQUESTED_VERSION).Trim()
+          if ($version.StartsWith('v', [StringComparison]::OrdinalIgnoreCase)) {
+            $version = $version.Substring(1)
+          }
+          if (-not $version) {
+            $baseVersion = ($appVersion -split '\+', 2)[0]
+            if ($baseVersion.Contains('-')) {
+              $version = "$baseVersion.ci.$($env:RUN_NUMBER)"
+            } else {
+              $version = "$baseVersion-ci.$($env:RUN_NUMBER)"
+            }
+          }
+
+          $semver = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+          if ($version -notmatch $semver) { throw "package version is not valid SemVer: $version" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "app-version=$appVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Test sidecar and ConPTY staging
+        run: node --test tests/stageSidecars.test.cjs tests/conptyBundle.test.cjs
+
+      - name: Build and stage Windows sidecars
+        run: node scripts/stage-sidecars.mjs --release --target ${{ env.WINDOWS_TARGET }}
+
+      # Native windows-latest activates mt-app's cfg(windows) build dependency,
+      # embedding the application icon, version information, and manifest.
+      - name: Build GPUI app with Windows resources
+        run: cargo build --locked --release --package mt-app
+
+      - name: Verify complete staged payload
+        run: node scripts/stage-sidecars.mjs --verify-only --release --target ${{ env.WINDOWS_TARGET }}
+
+      - name: Build NSIS installer
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.package-version.outputs.version }}
+        run: |
+          & ./scripts/build-windows-installer.ps1 -Version $env:PACKAGE_VERSION
+
+      - name: Extract and verify NSIS installer
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.package-version.outputs.version }}
+          APP_VERSION: ${{ steps.package-version.outputs.app-version }}
+        run: |
+          $installer = "dist/Mini-Term_$($env:PACKAGE_VERSION)_x64-setup.exe"
+          & ./scripts/verify-windows-installer.ps1 `
+            -Version $env:PACKAGE_VERSION `
+            -AppVersion $env:APP_VERSION `
+            -InstallerPath $installer `
+            -OutputPath dist/windows-package-validation.json
+
+      - name: Upload verified Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mini-Term_${{ steps.package-version.outputs.version }}_windows-x64
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            dist/Mini-Term_${{ steps.package-version.outputs.version }}_x64-setup.exe
+            dist/windows-package-validation.json
