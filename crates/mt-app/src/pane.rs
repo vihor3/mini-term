@@ -461,6 +461,16 @@ fn start_hosted(
     }
 }
 
+// SSH panes intentionally use the in-process backend until remote PTY hosting exists.
+// Sessions already labels that recovery mode, so repeating it over terminal output is noise.
+fn compatibility_backend_notice(is_remote: bool) -> Option<String> {
+    if is_remote {
+        None
+    } else {
+        Some("Terminal host unavailable; using compatibility backend.".into())
+    }
+}
+
 // Keep legacy ownership explicit in the hosted-fallback and direct-launch branches.
 #[allow(clippy::too_many_arguments)]
 fn start_legacy(
@@ -566,11 +576,7 @@ impl TerminalPane {
                 ),
             }
         } else {
-            let notice = if remote.ssh_password.is_some() {
-                Some("Remote terminal uses the compatibility backend.".into())
-            } else {
-                Some("Terminal host unavailable; using compatibility backend.".into())
-            };
+            let notice = compatibility_backend_notice(legacy_incarnation_id.is_some());
             start_legacy(
                 spec,
                 user_env,
@@ -1271,6 +1277,16 @@ impl TerminalPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_compatibility_backend_does_not_create_persistent_notice() {
+        assert_eq!(compatibility_backend_notice(true), None);
+        assert_eq!(
+            compatibility_backend_notice(false).as_deref(),
+            Some("Terminal host unavailable; using compatibility backend."),
+            "local host fallback remains visible",
+        );
+    }
 
     fn conn(name: &str, group: Option<&str>) -> SshConnection {
         SshConnection {
