@@ -138,3 +138,43 @@ Added stable host, repository, worktree, tab, pane, terminal-session, and incarn
 ### Next Steps
 
 - Continue the parent runtime task with detached terminal ownership and warm reattachment.
+
+
+## Session 7: Orca Project Worktree Runtime 完整交付
+<!-- trellis-session: v=2 fp=224415168689428f -->
+
+**Date**: 2026-09-03
+**Task**: Orca Project Worktree Runtime 完整交付
+**Branch**: `feat/remote-file-management`
+
+### Summary
+
+完成十阶段 Orca Project -> Worktree 架构的父任务集成验收，修复 Docker 集成门禁和 sidecar 锁漂移，验证真实 OpenSSH 远程运行时，并生成最终 Windows 安装包。
+
+### Main Changes
+
+- 归档全部十个子任务与父任务，补齐可独立校验的 Trellis 上下文和验证记录。
+- 同步 sidecars/Cargo.lock，并把独立 sidecar 工作区的 locked release 约束写入 SSH runtime spec。
+- 生成并结构化验证 Mini-Term 1.2.2-orca-final-20260903 Windows x64 安装包。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `25430a0` | test: stabilize Docker integration gates |
+| `c644ae9` | fix: synchronize sidecar runtime lockfile |
+| `75ac3d1` | chore(task): complete Orca runtime integration |
+
+### Testing
+
+- [OK] Docker workspace tests: 1840 passed, 1 ignored；check、clippy 与 Windows xwin checks passed。
+- [OK] Docker sidecar locked metadata/check/test: 94 tests passed；Windows release sidecars passed。
+- [OK] 真实 OpenSSH 9.2 冒烟两次通过，覆盖认证、session 复用、exec、SFTP 与稳定远程身份。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 在真实 Windows 桌面安装并做最终 GPU/UI 视觉冒烟；当前 Linux/Wine 环境缺少 Windows 系统 DLL，未声明截图通过。
