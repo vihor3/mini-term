@@ -7,7 +7,9 @@
 Use this contract when remote project code needs verified execution-host,
 repository, worktree, or tool-capability facts. `mt-ssh` owns transport truth;
 callers must not infer authority from an SSH configuration ID, display name, or
-remote path alone.
+remote path alone. Because `mt-ssh` is also consumed through the independent
+`sidecars/` Cargo workspace, dependency-graph changes must keep both workspace
+lockfiles reproducible.
 
 ### 2. Signatures
 
@@ -90,6 +92,11 @@ Remote state path:
 - SFTP v3 lacks descriptor-relative `openat`/`O_NOFOLLOW`; leaf state is checked
   with `lstat` semantics and post-operation validation, but same-account path
   replacement remains a protocol limitation.
+- Any direct or transitive dependency change in `mt-ssh` must update both the
+  root `Cargo.lock` and `sidecars/Cargo.lock`. Release validation must run
+  `cargo metadata --manifest-path sidecars/Cargo.toml --locked`, a native
+  sidecar check/test, and the Windows `cargo xwin ... --manifest-path
+  sidecars/Cargo.toml --locked` build before packaging.
 
 ### 4. Validation & Error Matrix
 
@@ -108,6 +115,7 @@ Remote state path:
 | Output is truncated, non-UTF-8, duplicate, or schema-incomplete | Return non-retryable protocol error |
 | Exact cached transport fails | Evict only that session instance before one retry |
 | Snapshot session was replaced before return | Reject the snapshot; never publish its older epoch |
+| `sidecars/Cargo.lock` is stale after an `mt-ssh` dependency change | Stop the locked build; regenerate the sidecar lock in Docker, review the minimal dependency diff, then rerun native and Windows locked gates |
 
 ### 5. Good / Base / Bad Cases
 
@@ -121,6 +129,8 @@ Remote state path:
   edits and host-key changes would silently reuse the wrong workbench.
 - Bad: Overwrite a malformed install ID to make startup succeed; that destroys
   the only evidence that host identity changed or state was corrupted.
+- Bad: Update only the root lockfile after adding an `mt-ssh` dependency; the
+  independent sidecar release then fails only at the final `--locked` build.
 
 ### 6. Tests Required
 
@@ -135,6 +145,8 @@ Remote state path:
 - Timeout/truncation tests assert retry and retirement classification.
 - App facade tests assert only attempt zero may retry a retryable error.
 - Pool winner tests assert a replacement `Arc` makes the prior snapshot stale.
+- A dependency change runs locked metadata/check/test for `sidecars/Cargo.toml`
+  and a locked Windows sidecar build so lock drift is detected before packaging.
 
 ### 7. Wrong vs Correct
 
