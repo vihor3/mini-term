@@ -49,14 +49,14 @@ use anyhow::Context as _;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::future::BoxFuture;
+use gpui::http_client::{
+    AsyncBody, HttpClient, Request, Response, StatusCode, Url, http::HeaderValue,
+};
 use gpui::{
     App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable, ImageAssetLoader,
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Resource, ScrollHandle,
     StatefulInteractiveElement, Styled, StyledImage as _, Subscription, Task, Window, div, img,
     prelude::FluentBuilder as _, px,
-};
-use gpui::http_client::{
-    AsyncBody, HttpClient, Request, Response, StatusCode, Url, http::HeaderValue,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::WindowExt as _;
@@ -158,10 +158,7 @@ fn has_ext(path: &str, exts: &[&str]) -> bool {
 
 /// 路径的最后一段(两种分隔符都认 —— 远程/WSL 路径是 POSIX 的)。
 pub fn file_name_of(path: &str) -> &str {
-    let cut = path
-        .rfind(['/', '\\'])
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let cut = path.rfind(['/', '\\']).map(|i| i + 1).unwrap_or(0);
     &path[cut..]
 }
 
@@ -307,7 +304,12 @@ pub enum Branch {
 }
 
 /// `(是图片, 在读盘, 有错, 读到的结果)` → 画哪一支。
-pub fn branch_of(is_img: bool, loading: bool, has_error: bool, result: Option<&FileContentResult>) -> Branch {
+pub fn branch_of(
+    is_img: bool,
+    loading: bool,
+    has_error: bool,
+    result: Option<&FileContentResult>,
+) -> Branch {
     if is_img {
         return Branch::Image;
     }
@@ -1037,12 +1039,15 @@ fn inert_markdown_html_source(value: &str) -> String {
     escaped
 }
 
-fn collect_untrusted_markdown_replacements(
+fn collect_untrusted_markdown_replacements_with_policy(
     node: &MarkdownNode,
     replacements: &mut Vec<MarkdownReplacement>,
+    allow_external_links: bool,
 ) {
     match node {
-        MarkdownNode::Link(link) if !remote_markdown_url_allowed(&link.url) => {
+        MarkdownNode::Link(link)
+            if !allow_external_links || !remote_markdown_url_allowed(&link.url) =>
+        {
             let label = markdown_safe_plain_label(&markdown_plain_text(node), "link");
             if let Some(replacement) = markdown_replacement(node, label) {
                 replacements.push(replacement);
@@ -1063,7 +1068,9 @@ fn collect_untrusted_markdown_replacements(
             }
             return;
         }
-        MarkdownNode::Definition(definition) if !remote_markdown_url_allowed(&definition.url) => {
+        MarkdownNode::Definition(definition)
+            if !allow_external_links || !remote_markdown_url_allowed(&definition.url) =>
+        {
             if let Some(replacement) = markdown_replacement(node, String::new()) {
                 replacements.push(replacement);
             }
@@ -1082,9 +1089,21 @@ fn collect_untrusted_markdown_replacements(
 
     if let Some(children) = node.children() {
         for child in children {
-            collect_untrusted_markdown_replacements(child, replacements);
+            collect_untrusted_markdown_replacements_with_policy(
+                child,
+                replacements,
+                allow_external_links,
+            );
         }
     }
+}
+
+#[cfg(test)]
+fn collect_untrusted_markdown_replacements(
+    node: &MarkdownNode,
+    replacements: &mut Vec<MarkdownReplacement>,
+) {
+    collect_untrusted_markdown_replacements_with_policy(node, replacements, true);
 }
 
 #[cfg(test)]
@@ -1125,14 +1144,22 @@ fn apply_markdown_replacements(source: &str, mut replacements: Vec<MarkdownRepla
 /// sees no disallowed nodes. Escaping an HTML block can change the following
 /// indented block into active Markdown, so a single AST generation is not a
 /// sufficient security boundary.
-fn sanitize_untrusted_markdown_with_pass_limit(source: &str, pass_limit: usize) -> String {
+fn sanitize_untrusted_markdown_with_policy(
+    source: &str,
+    pass_limit: usize,
+    allow_external_links: bool,
+) -> String {
     let mut sanitized = source.to_string();
     for _ in 0..pass_limit {
         let Ok(ast) = markdown::to_mdast(&sanitized, &ParseOptions::gfm()) else {
             return markdown_as_indented_code(source);
         };
         let mut replacements = Vec::new();
-        collect_untrusted_markdown_replacements(&ast, &mut replacements);
+        collect_untrusted_markdown_replacements_with_policy(
+            &ast,
+            &mut replacements,
+            allow_external_links,
+        );
         if replacements.is_empty() {
             return sanitized;
         }
@@ -1143,6 +1170,10 @@ fn sanitize_untrusted_markdown_with_pass_limit(source: &str, pass_limit: usize) 
     // has no active replacements. If the bounded loop cannot establish that
     // fixed point, keep the original source visible as inert code.
     markdown_as_indented_code(source)
+}
+
+fn sanitize_untrusted_markdown_with_pass_limit(source: &str, pass_limit: usize) -> String {
+    sanitize_untrusted_markdown_with_policy(source, pass_limit, true)
 }
 
 fn sanitize_untrusted_markdown(source: &str) -> String {
@@ -1165,6 +1196,13 @@ fn sanitize_remote_markdown(source: &str) -> String {
 /// requests.
 pub fn sanitize_session_markdown(source: &str) -> String {
     sanitize_untrusted_markdown(source)
+}
+
+/// GitHub issue and pull-request bodies are rendered without any actionable
+/// links. The body remains formatted Markdown, but HTML, images, definitions,
+/// and every link target become visible inert text before reaching TextView.
+pub fn sanitize_github_markdown(source: &str) -> String {
+    sanitize_untrusted_markdown_with_policy(source, MAX_UNTRUSTED_MARKDOWN_SANITIZE_PASSES, false)
 }
 
 /// 把 HTML 源里 `src` / `href` / `poster` 的**本地**目标改写成 `file:///…`。
@@ -2861,9 +2899,9 @@ impl FileViewer {
                         };
                         el.child(if dirty && !saving {
                             ui::primary_button("file-viewer-save", label)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                    this.save(cx)
-                                }))
+                                .on_click(
+                                    cx.listener(|this, _: &ClickEvent, _window, cx| this.save(cx)),
+                                )
                                 .into_any_element()
                         } else {
                             // 干净 / 保存中 = 不可点(原版 `disabled={!dirty || saving}`)
@@ -2931,23 +2969,31 @@ impl FileViewer {
             .border_color(ui::border_default())
             .overflow_hidden()
             .child(
-                seg("file-viewer-preview", t("fileViewer", "preview").to_string(), preview)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                        // 切到预览时拍一份草稿快照:预览渲染的是「正在编辑的内容」,
-                        // 不是磁盘旧文;干净时置 None,直接用磁盘内容
-                        let draft = this.draft(cx);
-                        this.preview_draft = (draft != this.saved).then_some(draft);
-                        this.preview = true;
-                        cx.notify();
-                    })),
+                seg(
+                    "file-viewer-preview",
+                    t("fileViewer", "preview").to_string(),
+                    preview,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    // 切到预览时拍一份草稿快照:预览渲染的是「正在编辑的内容」,
+                    // 不是磁盘旧文;干净时置 None,直接用磁盘内容
+                    let draft = this.draft(cx);
+                    this.preview_draft = (draft != this.saved).then_some(draft);
+                    this.preview = true;
+                    cx.notify();
+                })),
             )
             .child(
-                seg("file-viewer-source", t("fileViewer", "source").to_string(), !preview)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.preview = false;
-                        this.focus_content(window, cx);
-                        cx.notify();
-                    })),
+                seg(
+                    "file-viewer-source",
+                    t("fileViewer", "source").to_string(),
+                    !preview,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.preview = false;
+                    this.focus_content(window, cx);
+                    cx.notify();
+                })),
             )
     }
 
@@ -3264,9 +3310,7 @@ impl FileViewer {
             // 外层链接(`[![alt](img)](link)`):点图开外链。只认 http(s) ——
             // 本地目标要走「页内跳转」,而那条路整条不做(见模块注释偏差 1)
             let el = match image.link.as_deref().map(str::trim) {
-                Some(link)
-                    if link.starts_with("http://") || link.starts_with("https://") =>
-                {
+                Some(link) if link.starts_with("http://") || link.starts_with("https://") => {
                     let url = link.to_string();
                     let tip = link.to_string();
                     div()
@@ -3354,12 +3398,9 @@ impl FileViewer {
         let uri = gpui::SharedUri::from(url.to_string());
         let resource = Resource::Uri(uri.clone());
         match window.use_asset::<ImageAssetLoader>(&resource, cx) {
-            None | Some(Err(_)) => md_image_placeholder(
-                id,
-                label,
-                Some(url.to_string()),
-                Some(url.to_string()),
-            ),
+            None | Some(Err(_)) => {
+                md_image_placeholder(id, label, Some(url.to_string()), Some(url.to_string()))
+            }
             Some(Ok(data)) => {
                 // 同一槽位换成另一份 RenderImage 时重置动画状态；同一资源跨帧的
                 // ImageId 保持稳定，因此 GIF/WebP 仍能连续播放。
@@ -3661,10 +3702,7 @@ impl FileViewer {
                 .render_center(t("fileViewer", "loading").to_string(), ui::text_muted())
                 .into_any_element(),
             Branch::Error => self
-                .render_center(
-                    self.error.clone().unwrap_or_default(),
-                    ui::color_error(),
-                )
+                .render_center(self.error.clone().unwrap_or_default(), ui::color_error())
                 .into_any_element(),
             Branch::Binary => self
                 .render_fallback(
@@ -3701,9 +3739,8 @@ impl FileViewer {
                         // 都吃 window.text_style(),包一层即全部生效。
                         let mut wrap = div().size_full();
                         let ts = wrap.text_style().get_or_insert_default();
-                        ts.font_family = Some(
-                            ui::ui_font_family().unwrap_or_else(|| "Cascadia Code".into()),
-                        );
+                        ts.font_family =
+                            Some(ui::ui_font_family().unwrap_or_else(|| "Cascadia Code".into()));
                         ts.font_fallbacks = Some(gpui::FontFallbacks::from_fonts(vec![
                             "Cascadia Mono".into(),
                             "Consolas".into(),
@@ -3713,8 +3750,13 @@ impl FileViewer {
                         ]));
                         ts.font_size = Some(px(13.0).into());
                         ts.line_height = Some(gpui::relative(1.6).into());
-                        wrap.child(Input::new(editor).h_full().appearance(false).bordered(false))
-                            .into_any_element()
+                        wrap.child(
+                            Input::new(editor)
+                                .h_full()
+                                .appearance(false)
+                                .bordered(false),
+                        )
+                        .into_any_element()
                     }
                     None => div().into_any_element(),
                 }

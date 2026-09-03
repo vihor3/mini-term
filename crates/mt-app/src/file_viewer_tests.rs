@@ -1344,3 +1344,16 @@ fn 保存走原子写且_crlf_全程不变() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn github_markdown_keeps_formatting_but_disables_links_images_and_html() {
+    let source = "# Title\n\n[external](https://example.com) ![pixel](https://example.com/p.png)\n\n<div onclick=\"alert(1)\">unsafe</div>";
+    let sanitized = sanitize_github_markdown(source);
+    let ast = markdown::to_mdast(&sanitized, &markdown::ParseOptions::gfm()).unwrap();
+    let mut replacements = Vec::new();
+    collect_untrusted_markdown_replacements_with_policy(&ast, &mut replacements, false);
+    assert!(replacements.is_empty());
+    assert!(sanitized.contains("# Title"));
+    assert!(sanitized.contains("external"));
+    assert!(sanitized.contains("pixel"));
+}

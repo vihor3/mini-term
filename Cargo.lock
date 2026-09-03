@@ -4262,6 +4262,7 @@ dependencies = [
  "mt-ai",
  "mt-config",
  "mt-core",
+ "mt-github",
  "mt-i18n",
  "mt-identity",
  "mt-layout",
@@ -4306,6 +4307,14 @@ name = "mt-core"
 version = "0.4.8"
 dependencies = [
  "dirs 6.0.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mt-github"
+version = "1.2.2"
+dependencies = [
  "serde",
  "serde_json",
 ]

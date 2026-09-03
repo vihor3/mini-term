@@ -18,6 +18,9 @@ use mt_ui::icons::FileIcon;
 use mt_ui::tooltip::Tooltip;
 
 use crate::file_viewer::{DocumentSource, FileViewer};
+use crate::github_tasks::{
+    GitHubTaskService, GitHubWorkItemTabKey, GitHubWorkItemViewer, OpenGitHubWorkItem,
+};
 use crate::i18n::t;
 use crate::prompt::{Confirm, show_alert};
 use crate::store::AppStore;
@@ -105,6 +108,7 @@ fn normalize_remote_document_path(path: &Path) -> String {
 enum WorkbenchPage {
     Terminal,
     Document(DocumentKey),
+    WorkItem(GitHubWorkItemTabKey),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,11 +135,32 @@ struct DocumentTab {
     state: DocumentTabState,
 }
 
+struct WorkItemTab {
+    key: GitHubWorkItemTabKey,
+    source_project_id: String,
+    title: String,
+    viewer: Entity<GitHubWorkItemViewer>,
+    state: DocumentTabState,
+}
+
 type RenderDocumentTab = (DocumentKey, String, Entity<FileViewer>, DocumentTabState);
-type ActiveWorkbenchSnapshot = (String, WorktreeId, WorkbenchPage, Vec<RenderDocumentTab>);
+type RenderWorkItemTab = (
+    GitHubWorkItemTabKey,
+    String,
+    Entity<GitHubWorkItemViewer>,
+    DocumentTabState,
+);
+type ActiveWorkbenchSnapshot = (
+    String,
+    WorktreeId,
+    WorkbenchPage,
+    Vec<RenderDocumentTab>,
+    Vec<RenderWorkItemTab>,
+);
 
 struct WorktreeDocuments {
     tabs: Vec<DocumentTab>,
+    work_items: Vec<WorkItemTab>,
     active: WorkbenchPage,
 }
 
@@ -143,6 +168,7 @@ impl Default for WorktreeDocuments {
     fn default() -> Self {
         Self {
             tabs: Vec::new(),
+            work_items: Vec::new(),
             active: WorkbenchPage::Terminal,
         }
     }
@@ -189,6 +215,50 @@ impl WorktreeDocuments {
         }
         Some(removed)
     }
+
+    fn work_item_index_of(&self, key: &GitHubWorkItemTabKey) -> Option<usize> {
+        self.work_items.iter().position(|tab| &tab.key == key)
+    }
+
+    fn insert_work_item_preview(&mut self, tab: WorkItemTab) {
+        insert_preview_tab(
+            &mut self.work_items,
+            tab,
+            |tab| tab.state,
+            |_| false,
+            |tab| tab.state.promote(),
+        );
+    }
+
+    fn promote_work_item(&mut self, key: &GitHubWorkItemTabKey) -> bool {
+        let Some(index) = self.work_item_index_of(key) else {
+            return false;
+        };
+        if self.work_items[index].state == DocumentTabState::Permanent {
+            return false;
+        }
+        self.work_items[index].state.promote();
+        true
+    }
+
+    fn close_work_item(
+        &mut self,
+        key: &GitHubWorkItemTabKey,
+    ) -> Option<Entity<GitHubWorkItemViewer>> {
+        let index = self.work_item_index_of(key)?;
+        let removed = self.work_items.remove(index).viewer;
+        if self.active == WorkbenchPage::WorkItem(key.clone()) {
+            let remaining = self
+                .work_items
+                .iter()
+                .map(|tab| tab.key.clone())
+                .collect::<Vec<_>>();
+            self.active = next_tab_after_close(&remaining, index)
+                .map(WorkbenchPage::WorkItem)
+                .unwrap_or(WorkbenchPage::Terminal);
+        }
+        Some(removed)
+    }
 }
 
 fn insert_preview_tab<T>(
@@ -214,10 +284,7 @@ fn insert_preview_tab<T>(
     tabs.len() - 1
 }
 
-fn next_document_after_close(
-    remaining: &[DocumentKey],
-    removed_index: usize,
-) -> Option<DocumentKey> {
+fn next_tab_after_close<T: Clone>(remaining: &[T], removed_index: usize) -> Option<T> {
     remaining
         .get(removed_index)
         .or_else(|| {
@@ -226,6 +293,13 @@ fn next_document_after_close(
                 .and_then(|index| remaining.get(index))
         })
         .cloned()
+}
+
+fn next_document_after_close(
+    remaining: &[DocumentKey],
+    removed_index: usize,
+) -> Option<DocumentKey> {
+    next_tab_after_close(remaining, removed_index)
 }
 
 fn project_binding_matches(
@@ -400,6 +474,21 @@ pub fn open_active_file(
     });
 }
 
+/// Open one exact GitHub work item in the active worktree's unified tab strip.
+pub fn open_github_work_item(
+    service: Entity<GitHubTaskService>,
+    request: OpenGitHubWorkItem,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(area) = global(cx) else {
+        return;
+    };
+    area.update(cx, |area, cx| {
+        area.open_work_item(service, request, window, cx)
+    });
+}
+
 /// 文件页内部的 Ctrl/Cmd+W 入口。延迟执行前先快照来源身份，避免用户在
 /// `window.defer` 落地前切换页签后误关新的活动页。
 pub fn close_document_source(
@@ -531,6 +620,21 @@ impl WorkbenchArea {
                 for key in stale_clean_keys {
                     documents.close(&key);
                 }
+                let stale_work_items = documents
+                    .work_items
+                    .iter()
+                    .filter(|tab| {
+                        !source_project_binding_matches(
+                            &project_bindings,
+                            &tab.source_project_id,
+                            &tab.key.worktree_id,
+                        )
+                    })
+                    .map(|tab| tab.key.clone())
+                    .collect::<Vec<_>>();
+                for key in stale_work_items {
+                    documents.close_work_item(&key);
+                }
             }
             let worktree_ids = project_bindings
                 .values()
@@ -653,6 +757,17 @@ impl WorkbenchArea {
                 .is_some_and(|documents| documents.active == WorkbenchPage::Document(key.clone()))
     }
 
+    fn work_item_binding_is_current(&self, key: &GitHubWorkItemTabKey, cx: &App) -> bool {
+        let Some(tab) = self.worktrees.get(&key.worktree_id).and_then(|documents| {
+            documents
+                .work_item_index_of(key)
+                .map(|index| &documents.work_items[index])
+        }) else {
+            return false;
+        };
+        self.project_binding_is_current(&tab.source_project_id, &key.worktree_id, cx)
+    }
+
     fn is_terminal_page_for_scope(
         &self,
         project_id: &str,
@@ -733,6 +848,74 @@ impl WorkbenchArea {
         cx.notify();
     }
 
+    fn open_work_item(
+        &mut self,
+        service: Entity<GitHubTaskService>,
+        request: OpenGitHubWorkItem,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let project_id = request.project_id.clone();
+        let worktree_id = request.worktree_id.clone();
+        if !self.active_scope_is_current(&project_id, &worktree_id, cx) {
+            return;
+        }
+        let key = request.tab_key();
+        let title = format!(
+            "{} #{}",
+            request.summary.kind.short_label(),
+            request.summary.number
+        );
+        let existing = self
+            .worktrees
+            .get(&worktree_id)
+            .and_then(|documents| documents.work_item_index_of(&key));
+        if let Some(index) = existing {
+            let matches = self.worktrees[&worktree_id].work_items[index]
+                .viewer
+                .read(cx)
+                .matches_request(&request);
+            if matches {
+                service.update(cx, |service, cx| service.ensure_detail(request.clone(), cx));
+                let documents = self
+                    .worktrees
+                    .get_mut(&worktree_id)
+                    .expect("worktree exists");
+                documents.active = WorkbenchPage::WorkItem(key);
+                cx.notify();
+                return;
+            }
+            let documents = self
+                .worktrees
+                .get_mut(&worktree_id)
+                .expect("worktree exists");
+            let state = documents.work_items[index].state;
+            let viewer = cx.new(|cx| GitHubWorkItemViewer::new(service, request, cx));
+            documents.work_items[index] = WorkItemTab {
+                key: key.clone(),
+                source_project_id: project_id,
+                title,
+                viewer,
+                state,
+            };
+            documents.active = WorkbenchPage::WorkItem(key);
+            cx.notify();
+            return;
+        }
+
+        let viewer = cx.new(|cx| GitHubWorkItemViewer::new(service, request, cx));
+        let documents = self.worktrees.entry(worktree_id).or_default();
+        documents.insert_work_item_preview(WorkItemTab {
+            key: key.clone(),
+            source_project_id: project_id,
+            title,
+            viewer,
+            state: DocumentTabState::Preview,
+        });
+        documents.active = WorkbenchPage::WorkItem(key);
+        cx.notify();
+    }
+
     pub fn activate_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let scope = {
             let store = self.store.read(cx);
@@ -775,6 +958,34 @@ impl WorkbenchArea {
             return false;
         };
         documents.promote(key)
+    }
+
+    fn promote_work_item(&mut self, key: &GitHubWorkItemTabKey) -> bool {
+        let Some(documents) = self.worktrees.get_mut(&key.worktree_id) else {
+            return false;
+        };
+        documents.promote_work_item(key)
+    }
+
+    fn activate_work_item(
+        &mut self,
+        project_id: &str,
+        key: &GitHubWorkItemTabKey,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.active_scope_is_current(project_id, &key.worktree_id, cx)
+            || !self.work_item_binding_is_current(key, cx)
+        {
+            return;
+        }
+        let Some(documents) = self.worktrees.get_mut(&key.worktree_id) else {
+            return;
+        };
+        if documents.work_item_index_of(key).is_none() {
+            return;
+        }
+        documents.active = WorkbenchPage::WorkItem(key.clone());
+        cx.notify();
     }
 
     fn activate_document(
@@ -854,6 +1065,7 @@ impl WorkbenchArea {
             WorkbenchPage::Document(key) => {
                 self.activate_document(expected_project_id, &key, window, cx)
             }
+            WorkbenchPage::WorkItem(key) => self.activate_work_item(expected_project_id, &key, cx),
         }
     }
 
@@ -981,6 +1193,61 @@ impl WorkbenchArea {
             WorkbenchPage::Document(next) => {
                 self.activate_document(&active_project_id, &next, window, cx)
             }
+            WorkbenchPage::WorkItem(next) => self.activate_work_item(&active_project_id, &next, cx),
+        }
+        cx.notify();
+    }
+
+    fn close_work_item(
+        &mut self,
+        project_id: &str,
+        key: &GitHubWorkItemTabKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.project_binding_is_current(project_id, &key.worktree_id, cx) {
+            return;
+        }
+        let (was_active, next_page) = {
+            let Some(documents) = self.worktrees.get_mut(&key.worktree_id) else {
+                return;
+            };
+            let was_active = documents.active == WorkbenchPage::WorkItem(key.clone());
+            if documents.close_work_item(key).is_none() {
+                return;
+            }
+            (was_active, documents.active.clone())
+        };
+        if !was_active {
+            cx.notify();
+            return;
+        }
+        let active_project_id = {
+            let store = self.store.read(cx);
+            store
+                .active_project_id
+                .as_deref()
+                .and_then(|active_project_id| {
+                    active_worktree_matches(
+                        store.active_worktree_id(),
+                        store.worktree_id_for_project(active_project_id),
+                        &key.worktree_id,
+                    )
+                    .then(|| active_project_id.to_string())
+                })
+        };
+        let Some(active_project_id) = active_project_id else {
+            cx.notify();
+            return;
+        };
+        match next_page {
+            WorkbenchPage::Terminal => {
+                self.activate_terminal_for_scope(&active_project_id, &key.worktree_id, window, cx)
+            }
+            WorkbenchPage::Document(next) => {
+                self.activate_document(&active_project_id, &next, window, cx)
+            }
+            WorkbenchPage::WorkItem(next) => self.activate_work_item(&active_project_id, &next, cx),
         }
         cx.notify();
     }
@@ -1021,13 +1288,30 @@ impl WorkbenchArea {
                     .collect()
             })
             .unwrap_or_default();
-        Some((project_id, worktree_id, active, tabs))
+        let work_items = documents
+            .map(|documents| {
+                documents
+                    .work_items
+                    .iter()
+                    .map(|tab| {
+                        (
+                            tab.key.clone(),
+                            tab.title.clone(),
+                            tab.viewer.clone(),
+                            tab.state,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((project_id, worktree_id, active, tabs, work_items))
     }
 }
 
 impl Render for WorkbenchArea {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some((project_id, worktree_id, active, tabs)) = self.active_snapshot(cx) else {
+        let Some((project_id, worktree_id, active, tabs, work_items)) = self.active_snapshot(cx)
+        else {
             self.last_rendered_project = None;
             self.last_rendered_worktree = None;
             self.last_rendered_page = None;
@@ -1080,11 +1364,12 @@ impl Render for WorkbenchArea {
                         });
                     }
                 }
+                WorkbenchPage::WorkItem(_) => {}
             }
         }
 
-        // 尚未打开文件时保持原终端区的尺寸与结构，一旦有文档才出现工作区页签条。
-        if tabs.is_empty() {
+        // 尚未打开文件或工作项时保持原终端区的尺寸与结构。
+        if tabs.is_empty() && work_items.is_empty() {
             return div().size_full().child(self.terminal_area.clone());
         }
 
@@ -1232,12 +1517,100 @@ impl Render for WorkbenchArea {
             );
         }
 
+        for (key, title, _viewer, state) in &work_items {
+            let selected = active == WorkbenchPage::WorkItem(key.clone());
+            let preview = *state == DocumentTabState::Preview;
+            let tab_key = key.clone();
+            let close_key = key.clone();
+            let click_project = project_id.clone();
+            let close_project = project_id.clone();
+            tab_bar = tab_bar.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "workbench-github-tab-{:016x}",
+                        stable_hash(key)
+                    )))
+                    .h_full()
+                    .min_w(px(120.0))
+                    .max_w(px(220.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .cursor_pointer()
+                    .text_size(ui::font_px(12.0))
+                    .when(selected, |el| {
+                        el.bg(ui::bg_document())
+                            .text_color(ui::text_primary())
+                            .border_t_2()
+                            .border_color(ui::accent())
+                    })
+                    .when(!selected, |el| {
+                        el.text_color(ui::text_muted())
+                            .border_t_2()
+                            .border_color(gpui::Hsla {
+                                a: 0.0,
+                                ..ui::accent()
+                            })
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(ui::font_px(10.0))
+                            .text_color(ui::color_success())
+                            .child("#"),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .when(preview, |el| el.opacity(0.76))
+                            .child(title.clone()),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "workbench-github-tab-close-{:016x}",
+                                stable_hash(key)
+                            )))
+                            .w(px(18.0))
+                            .h(px(18.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(3.0))
+                            .text_color(ui::text_muted())
+                            .hover(|el| el.bg(ui::border_subtle()).text_color(ui::text_primary()))
+                            .child("×")
+                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                cx.stop_propagation();
+                                this.close_work_item(&close_project, &close_key, window, cx);
+                            })),
+                    )
+                    .on_click(
+                        cx.listener(move |this, event: &gpui::ClickEvent, _window, cx| {
+                            if event.click_count() >= 2 {
+                                this.promote_work_item(&tab_key);
+                            }
+                            this.activate_work_item(&click_project, &tab_key, cx);
+                        }),
+                    ),
+            );
+        }
+
         let body = match &active {
             WorkbenchPage::Terminal => self.terminal_area.clone().into_any_element(),
             WorkbenchPage::Document(key) => tabs
                 .iter()
                 .find(|(candidate, _, _, _)| candidate == key)
                 .map(|(_, _, document, _)| document.clone().into_any_element())
+                .unwrap_or_else(|| self.terminal_area.clone().into_any_element()),
+            WorkbenchPage::WorkItem(key) => work_items
+                .iter()
+                .find(|(candidate, _, _, _)| candidate == key)
+                .map(|(_, _, viewer, _)| viewer.clone().into_any_element())
                 .unwrap_or_else(|| self.terminal_area.clone().into_any_element()),
         };
 
@@ -1251,7 +1624,7 @@ impl Render for WorkbenchArea {
     }
 }
 
-fn stable_hash(key: &DocumentKey) -> u64 {
+fn stable_hash<T: Hash>(key: &T) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut hasher);
     hasher.finish()

@@ -1,0 +1,7 @@
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Preserve worktree-scoped panel state and exact asynchronous ownership"}
+{"file":".trellis/spec/mt-app/backend/file-workbench-contract.md","reason":"Match existing preview, promotion, close, and focus semantics in the unified tab strip"}
+{"file":".trellis/spec/mt-app/backend/remote-runtime-reconciliation-contract.md","reason":"Reuse authenticated execution-host identity and connection generation fencing"}
+{"file":".trellis/spec/mt-ssh/backend/remote-runtime-contract.md","reason":"Reuse the pooled authenticated SSH runtime and bounded command behavior"}
+{"file":".trellis/spec/mt-project/backend/worktree-identity-contract.md","reason":"Resolve canonical host-qualified project and worktree identity"}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/operation-logic.md","reason":"Approved Tasks scope, auth remediation, cache, and interaction behavior"}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/orca-ui-ux-mapping.md","reason":"Approved Orca-aligned Tasks panel and internal detail-tab UX"}

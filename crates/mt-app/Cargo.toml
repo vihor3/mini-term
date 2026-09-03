@@ -42,6 +42,7 @@ mt-relay.workspace = true
 # 服务层在 `remote_ssh.rs`,自持一个小 tokio 运行时(见该模块的线程口径说明)。
 mt-ssh.workspace = true
 mt-core.workspace = true
+mt-github.workspace = true
 # `remote_ssh` 的 tokio 边界:russh / russh-sftp 的 IO 要 tokio driver,
 # gpui 的执行器喂不动。工作区里已有这一行(mt-relay 用同一份 feature 集),
 # 这里只是引用,**没有改根 Cargo.toml**。

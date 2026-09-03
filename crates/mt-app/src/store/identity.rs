@@ -4,7 +4,7 @@
 //! binding. UI callers remain project-ID based while persistence and deferred
 //! workbench routing use the stable worktree identity returned here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use gpui::Context;
@@ -16,6 +16,7 @@ use mt_layout::ProjectWorktreeBinding;
 use mt_project::worktree::{self, ResolvedWorktreeIdentity, WorktreeIdentitySource};
 use mt_ssh::RemoteRuntimeSnapshot;
 
+use crate::execution_host::{ExecutionBackend, ProjectExecutionSnapshot};
 use crate::persist;
 
 use super::AppStore;
@@ -126,7 +127,118 @@ pub(super) fn binding_from_resolved(
     }
 }
 
+fn root_project_id(projects: &[ProjectConfig], project_id: &str) -> String {
+    let mut current = project_id;
+    let mut visited = HashSet::new();
+    while visited.insert(current) {
+        let Some(project) = projects.iter().find(|project| project.id == current) else {
+            break;
+        };
+        let Some(parent) = project.parent_project_id.as_deref() else {
+            break;
+        };
+        if !projects.iter().any(|project| project.id == parent) {
+            break;
+        }
+        current = parent;
+    }
+    current.to_string()
+}
+
+fn host_path(project: &ProjectConfig, canonical: &str) -> String {
+    if project.ssh_connection_id.is_some() {
+        return canonical.to_string();
+    }
+    mt_core::parse_wsl_unc(&canonical.replace('/', "\\"))
+        .or_else(|| mt_core::parse_wsl_unc(&project.path.replace('/', "\\")))
+        .map(|path| path.unix_path)
+        .unwrap_or_else(|| canonical.to_string())
+}
+
 impl AppStore {
+    /// Immutable command-routing facts for one configured project/worktree.
+    /// The caller may move this snapshot to a background thread, but must
+    /// re-resolve and compare it before applying a completion.
+    pub fn project_execution_snapshot(
+        &self,
+        project_id: &str,
+    ) -> Result<ProjectExecutionSnapshot, String> {
+        let project = self
+            .project(project_id)
+            .ok_or_else(|| "project no longer exists".to_string())?;
+        let binding = self
+            .project_worktree_bindings
+            .get(project_id)
+            .ok_or_else(|| "project has no worktree identity".to_string())?;
+        let root_project_id = root_project_id(&self.config.projects, project_id);
+        let root_project = self
+            .project(&root_project_id)
+            .ok_or_else(|| "root project no longer exists".to_string())?;
+        let root_canonical = self
+            .project_worktree_bindings
+            .get(&root_project_id)
+            .and_then(|binding| binding.canonical_worktree_path.as_deref())
+            .unwrap_or(&root_project.path);
+        let root_source_path = host_path(root_project, root_canonical);
+        let canonical = binding
+            .canonical_worktree_path
+            .as_deref()
+            .unwrap_or(&project.path);
+
+        let (canonical_path, backend, host_label) =
+            if let Some(connection_id) = project.ssh_connection_id.as_deref() {
+                let connection = self
+                    .remote_connection_of(project_id)
+                    .ok_or_else(|| format!("SSH connection {connection_id} is unavailable"))?;
+                let connection_fingerprint = crate::remote_ssh::connection_fingerprint(&connection);
+                let connection_epoch = crate::remote_ssh::current_connection_epoch(&connection.id);
+                let summary = crate::ssh_conn::connection_summary(&connection);
+                let host_label = if connection.name.trim().is_empty() {
+                    summary
+                } else {
+                    format!("{} ({summary})", connection.name)
+                };
+                (
+                    canonical.to_string(),
+                    ExecutionBackend::Ssh {
+                        connection,
+                        connection_fingerprint,
+                        connection_epoch,
+                    },
+                    host_label,
+                )
+            } else if let Some(wsl) = mt_core::parse_wsl_unc(&canonical.replace('/', "\\"))
+                .or_else(|| mt_core::parse_wsl_unc(&project.path.replace('/', "\\")))
+            {
+                let host_label = format!("WSL ({})", wsl.distro);
+                (
+                    wsl.unix_path,
+                    ExecutionBackend::Wsl { distro: wsl.distro },
+                    host_label,
+                )
+            } else {
+                (
+                    canonical.to_string(),
+                    ExecutionBackend::Local,
+                    "Local machine".to_string(),
+                )
+            };
+        if canonical_path.is_empty() {
+            return Err("project worktree path is empty".into());
+        }
+
+        Ok(ProjectExecutionSnapshot {
+            project_id: project.id.clone(),
+            root_project_id,
+            worktree_id: binding.worktree_id.clone(),
+            execution_host_id: binding.execution_host_id.clone(),
+            canonical_path,
+            root_source_path,
+            backend,
+            host_label,
+        })
+    }
+
     pub fn active_worktree_id(&self) -> Option<&WorktreeId> {
         self.active_worktree_id.as_ref()
     }
@@ -432,5 +544,31 @@ mod tests {
             resolved[0].canonical_worktree_path,
             existing.canonical_worktree_path
         );
+    }
+
+    #[test]
+    fn linked_worktrees_resolve_to_one_root_project() {
+        let root = project("root", "/repo", None);
+        let mut child = project("child", "/repo-linked", None);
+        child.parent_project_id = Some("root".into());
+        let mut grandchild = project("grandchild", "/repo-linked-2", None);
+        grandchild.parent_project_id = Some("child".into());
+        let projects = vec![root, child, grandchild];
+
+        assert_eq!(root_project_id(&projects, "root"), "root");
+        assert_eq!(root_project_id(&projects, "child"), "root");
+        assert_eq!(root_project_id(&projects, "grandchild"), "root");
+    }
+
+    #[test]
+    fn host_path_converts_wsl_unc_without_changing_local_or_ssh_paths() {
+        let wsl = project("wsl", r"\\wsl$\Ubuntu\home\u\repo", None);
+        assert_eq!(host_path(&wsl, &wsl.path), "/home/u/repo");
+
+        let local = project("local", "/repo", None);
+        assert_eq!(host_path(&local, "/repo"), "/repo");
+
+        let ssh = project("ssh", "/srv/repo", Some("connection"));
+        assert_eq!(host_path(&ssh, "/srv/repo"), "/srv/repo");
     }
 }

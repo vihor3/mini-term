@@ -26,12 +26,13 @@
     "09-02-terminal-snapshot-cold-restore",
     "09-02-remote-runtime-foundation",
     "09-02-remote-agent-identity-status",
-    "09-03-worktree-context-sidebar"
+    "09-03-worktree-context-sidebar",
+    "09-03-github-project-tasks"
   ],
   "parent": null,
   "relatedFiles": [],
   "notes": "",
   "meta": {
-    "roadmap_progress": "8/10 phases complete; phase 9 GitHub Tasks next; phase 10 pending creation"
+    "roadmap_progress": "8/10 phases complete; phase 9 GitHub Tasks in progress; phase 10 pending creation"
   }
 }

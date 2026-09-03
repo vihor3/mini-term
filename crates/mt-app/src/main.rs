@@ -56,6 +56,7 @@ mod clipboard;
 mod date_picker;
 mod dnd;
 mod env_vars;
+mod execution_host;
 mod file_ops;
 mod file_tree;
 mod file_viewer;
@@ -70,6 +71,7 @@ mod git_history;
 mod git_panel;
 mod git_watch;
 mod git_worktree;
+mod github_tasks;
 mod hotkeys;
 mod i18n;
 mod markers;
@@ -138,6 +140,7 @@ use mt_ui::tooltip::Tooltip;
 use crate::ai::AiBridge;
 use crate::file_tree::FileTree;
 use crate::focus_nav::Direction;
+use crate::github_tasks::{GitHubTaskService, GitHubTasksPanel, github_project_tasks_enabled};
 use crate::i18n::{t, tr};
 use crate::orca_sidebar::{OrcaProjectSidebar, OrcaSidebarEvent};
 use crate::project_list::ProjectList;
@@ -431,6 +434,8 @@ struct Workspace {
     /// [`GitPanel::set_visible`](git_panel::GitPanel::set_visible) 闸住扫盘与
     /// pty 输出旁路。
     git_panel: Entity<git_panel::GitPanel>,
+    /// Project-shared GitHub data with worktree-scoped Tasks presentation.
+    github_tasks_panel: Entity<GitHubTasksPanel>,
     /// 用量面板惰性创建:它一开就跑账本同步,没打开过就不该有这笔开销。
     usage_panel: Option<Entity<UsagePanel>>,
     columns_state: Entity<ResizableState>,
@@ -514,6 +519,9 @@ impl Workspace {
         let terminals_panel = cx.new(|cx| terminals_panel::TerminalsPanel::new(store.clone(), cx));
         let session_panel = cx.new(|cx| SessionPanel::new(store.clone(), cx));
         let git_panel = cx.new(|cx| git_panel::GitPanel::new(store.clone(), window, cx));
+        let github_task_service = cx.new(|_| GitHubTaskService::new(store.clone()));
+        let github_tasks_panel =
+            cx.new(|cx| GitHubTasksPanel::new(store.clone(), github_task_service.clone(), cx));
         let columns_state = cx.new(|_| ResizableState::default());
         let middle_state = cx.new(|_| ResizableState::default());
 
@@ -530,6 +538,7 @@ impl Workspace {
         );
         session_panel.update(cx, |panel, cx| panel.set_visible(false, cx));
         git_panel.update(cx, |panel, cx| panel.set_visible(false, cx));
+        github_tasks_panel.update(cx, |panel, cx| panel.set_visible(false, cx));
 
         // 窗口聚焦状态:聚焦时完成的任务用户正看着,不计入「未读完成」
         let store_for_focus = store.clone();
@@ -659,6 +668,7 @@ impl Workspace {
             terminals_panel,
             session_panel,
             git_panel,
+            github_tasks_panel,
             usage_panel: None,
             columns_state,
             middle_state,
@@ -882,6 +892,12 @@ impl Workspace {
         self.git_panel.update(cx, |view, cx| {
             view.set_visible(panel == ContextPanel::Git, cx)
         });
+        self.github_tasks_panel.update(cx, |view, cx| {
+            view.set_visible(
+                panel == ContextPanel::Tasks && github_project_tasks_enabled(),
+                cx,
+            )
+        });
         cx.notify();
     }
 
@@ -1092,6 +1108,9 @@ impl Workspace {
         let content = match self.context_panel {
             ContextPanel::Files => self.file_tree.clone().into_any_element(),
             ContextPanel::Git => self.git_panel.clone().into_any_element(),
+            ContextPanel::Tasks if github_project_tasks_enabled() => {
+                self.github_tasks_panel.clone().into_any_element()
+            }
             ContextPanel::Tasks => self.render_tasks_placeholder(),
             ContextPanel::Sessions => self.session_panel.clone().into_any_element(),
         };

@@ -1,0 +1,6 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Verify background ownership, stale-result rejection, and Windows target checks"}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Verify project-shared data does not leak worktree presentation state"}
+{"file":".trellis/spec/mt-app/backend/file-workbench-contract.md","reason":"Verify work-item tabs do not regress document preview or dirty-state behavior"}
+{"file":".trellis/spec/mt-app/backend/remote-runtime-reconciliation-contract.md","reason":"Verify Local/WSL/SSH source identity and reconnect fencing"}
+{"file":".trellis/spec/mt-ssh/backend/error-handling.md","reason":"Verify bounded remote exec failures and transport retirement behavior"}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/operation-logic.md","reason":"Check auth UI, no-browser behavior, and cache ownership against approved decisions"}

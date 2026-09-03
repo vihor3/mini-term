@@ -1,0 +1,29 @@
+{
+  "id": "github-project-tasks",
+  "name": "github-project-tasks",
+  "title": "GitHub Project Tasks",
+  "description": "Add read-only GitHub Issues and Pull Requests through the project execution host's gh client, with worktree-scoped presentation, internal detail tabs, precise auth remediation, and stale-result fencing.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "leo",
+  "assignee": "leo",
+  "createdAt": "2026-09-03",
+  "completedAt": null,
+  "branch": "feat/remote-file-management",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "09-02-orca-project-worktree-runtime",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "implementation_progress": "9/9 steps complete; Docker Linux and Windows MSVC quality gates passed",
+    "phase": "3.4 commit"
+  }
+}

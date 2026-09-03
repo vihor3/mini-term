@@ -98,6 +98,7 @@ mt-config = { path = "crates/mt-config" }
 # mt-config 等上层 crate —— 它同时被三个 sidecar 二进制(miniterm-hook /
 # mt-ssh-mcp / mt-ssh-cli)与 mt-ssh 链接,加一层就把整套上层依赖拖进小二进制。
 mt-core = { path = "crates/mt-core" }
+mt-github = { path = "crates/mt-github" }
 mt-i18n = { path = "crates/mt-i18n" }
 mt-identity = { path = "crates/mt-identity" }
 # 界面布局持久化(layout.db)。从 config.json 里搬出来的理由见该 crate 的模块注释:

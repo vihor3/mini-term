@@ -56,8 +56,8 @@ use std::time::Duration;
 use mt_config::SshConnection;
 use mt_project::fs::{MAX_FILE_VIEW_SIZE, TextGitignore};
 use mt_ssh::{
-    CachedSession, RemoteAgentInventory, RemoteAgentRoute, RemoteRuntimeSnapshot, SftpHandle,
-    SshPool,
+    BoundedExecOutput, CachedSession, RemoteAgentInventory, RemoteAgentRoute,
+    RemoteRuntimeSnapshot, SftpHandle, SshPool, run_bounded_exec_on_session,
 };
 
 mod delete;
@@ -421,6 +421,48 @@ async fn remote_home(
         .map_err(|e| format!("获取远程 home 目录失败: {}", e.message()))?;
     lock(&st.home_cache).insert(conn_id.to_string(), home.clone());
     Ok(home)
+}
+
+/// Result of one read-only command on the exact authenticated pooled session.
+pub struct RemoteBoundedExecResult {
+    pub output: BoundedExecOutput,
+    pub connection_epoch: u64,
+}
+
+/// Execute a bounded command through the saved SSH project's authenticated
+/// pool. This facade never falls back to a local process or another connection.
+pub fn bounded_exec(
+    conn: &SshConnection,
+    remote_command: &str,
+    timeout: Duration,
+    output_cap: usize,
+) -> Result<RemoteBoundedExecResult, String> {
+    let conn = conn.clone();
+    let remote_command = remote_command.to_string();
+    let st = state();
+    st.block_on(async move {
+        let pool = st.pool();
+        let session = acquire_session(st, &pool, &conn).await?;
+        let output =
+            run_bounded_exec_on_session(session.as_ref(), &remote_command, timeout, output_cap)
+                .await;
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                evict_session_if_same(st, &pool, &conn.id, &session).await;
+                return Err(error);
+            }
+        };
+        if output.requires_session_retirement() {
+            evict_session_if_same(st, &pool, &conn.id, &session).await;
+        } else if !pool.is_current_session(&conn.id, &session).await {
+            return Err("SSH command result was superseded by a newer connection".into());
+        }
+        Ok(RemoteBoundedExecResult {
+            output,
+            connection_epoch: session.connection_epoch().get(),
+        })
+    })
 }
 
 /// Resolve authenticated execution-host and worktree identity over the same
