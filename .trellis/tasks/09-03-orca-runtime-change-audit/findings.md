@@ -6,8 +6,9 @@ task-owned audit remediation added to validate that range.
 
 Current tally: 29 confirmed findings (13 P1, 16 P2). Twenty-eight fixes are
 implemented; `TERM-08` remains a bounded residual risk. Executable verification is
-owned exclusively by GitHub Actions. Run `33795981213` passed for the preceding task
-state and is intermediate evidence only; final verification of the current tree is pending.
+owned exclusively by GitHub Actions. Final CI run `33799663655` and Windows package
+run `33799663753` passed for head `c3194a683264dbc5e448c6945c71097f2b4f2e22`.
+Run `33795981213` remains intermediate evidence for the preceding task state only.
 
 ## Identity, Layout, And Catalog
 
@@ -19,7 +20,7 @@ state and is intermediate evidence only; final verification of the current tree 
   strongest known identity; replacing it with a connection-ID-derived provisional ID can
   route the project to a different workbench and layout.
 - Proof: focused resolver regression using a persisted authoritative SSH binding.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### ID-02 / P1 / Cold authoritative rebind can retain the wrong runtime layout
 
@@ -28,7 +29,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: a project with no live terminal or open document must atomically adopt
   the authoritative worktree layout, even if provisional startup hydration populated panels.
 - Proof: cold provisional-to-authoritative rebind regression with non-empty hydrated state.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### ID-03 / P1 / Shared-worktree reconciliation depends on input order
 
@@ -38,7 +39,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: aliases of one `WorktreeId` must converge on one deterministic layout,
   independent of configuration order.
 - Proof: reverse-order reconciliation fixture with conflicting legacy candidates.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### ID-04 / P1 / Shared-worktree aliases can overwrite or delete live shared state
 
@@ -47,7 +48,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: aliases sharing one `WorktreeId` must share one runtime owner; a stale
   alias save/removal must not overwrite the active alias's layout row.
 - Proof: alias save/remove regression against a common worktree row.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### ID-05 / P1 / Persisted SSH authority lacks endpoint and path provenance
 
@@ -59,8 +60,8 @@ state and is intermediate evidence only; final verification of the current tree 
 - Proof: configured-alias preservation, changed-endpoint rejection, legacy-null-context,
   and public-only serialization regressions in `store/identity.rs`.
 - Disposition: fixed with nullable schema-v3 `identity_context`, exact provenance matching,
-  compatibility reads, and authenticated canonical-path preservation. GitHub Actions
-  verification pending.
+  compatibility reads, and authenticated canonical-path preservation. Final GitHub Actions
+  CI run `33799663655` passed.
 
 ### CAT-01 / P2 / Worktree Git output and timeout cleanup are unbounded
 
@@ -71,7 +72,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Proof: an over-limit output fixture plus a shell that leaves a child holding both pipes.
 - Disposition: fix implemented with 16 MiB per-stream capture, an end-to-end
   deadline, process-group cleanup, and bounded reader joins. Regression coverage is
-  committed; GitHub Actions verification pending.
+  committed; verified by final GitHub Actions CI run `33799663655`.
 
 ## Terminal Host, PTY, And History
 
@@ -84,7 +85,7 @@ state and is intermediate evidence only; final verification of the current tree 
   sequence before exactly one exit event; an attach cannot land between exit validation and
   subscription.
 - Proof: callback inversion and attach/exit race regressions.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### TERM-02 / P1 / Restore fencing compares dynamic descriptors and misses exited conflicts
 
@@ -94,7 +95,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: stable identity fields fence restore; dynamic output cannot invalidate a
   healthy restore, and an exited newer incarnation cannot be replaced by stale history.
 - Proof: output-between-restore-and-attach plus exited-incarnation conflict fixtures.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### TERM-03 / P1 / Disconnected and partially-created sessions retain unsafe capabilities
 
@@ -104,7 +105,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: a disconnected pane cannot enqueue writes; create-and-attach is cleanup-
   atomic from the caller's perspective.
 - Proof: disconnect-write and create-success/attach-failure regressions.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### TERM-04 / P2 / IPC reads, writes, and command queues are not fully bounded
 
@@ -114,7 +115,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: a local peer cannot grow memory without limit or pin a runtime task by
   withholding a newline/read; all request phases share one finite budget.
 - Proof: oversized-frame, stalled-reader, and queue-capacity fixtures.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### TERM-05 / P2 / Natural exit cannot be explicitly purged
 
@@ -123,7 +124,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: explicit close after natural exit must validate incarnation and remove
   registry/history even when there is no native process left to kill.
 - Proof: natural-exit then close regression.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### TERM-06 / P2 / History recovery can truncate corruption and race its size bound
 
@@ -132,7 +133,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: only a valid frame prefix may classify a tail as torn, and the bytes
   actually read must remain bounded if the file changes after metadata inspection.
 - Proof: short garbage-tail and concurrent-growth fixtures.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### TERM-07 / P2 / Spawned host child can become a zombie
 
@@ -140,7 +141,7 @@ state and is intermediate evidence only; final verification of the current tree 
   idle exit without a waiter.
 - Invariant/impact: every spawned OS child is eventually reaped.
 - Proof: fake host process exit/reaper fixture or deterministic waiter inspection.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### TERM-08 / P2 / Synchronous GPUI-side host RPC can stall interaction
 
@@ -151,7 +152,8 @@ state and is intermediate evidence only; final verification of the current tree 
 - Disposition: bounded residual accepted for this differential audit. Host RPC and
   cleanup paths now have finite budgets, but making pane construction fully asynchronous
   requires a broader cancellation/orphan-ownership redesign. That redesign is deferred
-  rather than introduced without proof; GitHub Actions verifies the bounded current path.
+  rather than introduced without proof. Final GitHub Actions CI run `33799663655`
+  verifies the bounded current path and its regression coverage.
 
 ## Remote Runtime, Agents, And GitHub
 
@@ -162,7 +164,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: linked worktrees with different worktree-local remotes must not share the
   wrong GitHub repository/account/task cache.
 - Proof: two worktrees under one root with distinct remote discovery results.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### REMOTE-02 / P2 / SSH identity edits invalidate but do not restart runtime discovery
 
@@ -171,7 +173,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: projects using an edited connection must leave stale authority and begin
   fresh runtime discovery without requiring a manual retry or app restart.
 - Proof: connection-edit fixture asserting new generation/request ownership.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### REMOTE-03 / P2 / Recreated poll state loses empty-inventory retirement history
 
@@ -180,7 +182,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: empty-confirmation hysteresis belongs to the route/run lifecycle, not one
   ephemeral poll-state allocation.
 - Proof: process-attested run, poll-state recreation, then confirmed empty inventories.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### REMOTE-04 / P2 / Local/WSL command timeout can hang on descendant-held pipes
 
@@ -189,7 +191,8 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: command timeout owns and terminates the complete process tree on Unix and
   Windows, with bounded output-reader cleanup.
 - Proof: Unix process-group and Windows Job Object/equivalent fixtures.
-- Disposition: fix implemented with cross-platform regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with cross-platform regression coverage; verified by
+  final GitHub Actions CI run `33799663655`.
 
 ### REMOTE-05 / P2 / Repeated connectivity observations create synthetic Agent events
 
@@ -202,7 +205,7 @@ state and is intermediate evidence only; final verification of the current tree 
   changed-connectivity, and empty-inventory hysteresis controls.
 - Disposition: fixed by requiring at least one changed active exact-route run before emitting
   connectivity and by allocating inventory sequences only after hysteresis accepts the
-  observation. GitHub Actions verification pending.
+  observation. Verified by final GitHub Actions CI run `33799663655`.
 
 ## Orca UI
 
@@ -213,7 +216,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: a same-signature rebind cannot retain or accept stale directory results
   from another worktree.
 - Proof: worktree-only rebind and stale completion regressions.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### UI-02 / P1 / Same-path aliases route catalog rows to the global first project
 
@@ -222,7 +225,8 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: a row matching the current project or one of its child worktrees routes
   to that exact configuration, independent of global configuration order.
 - Proof: main, linked, and current-parent-child same-path alias fixtures.
-- Disposition: fix implemented for main, linked, and child rows with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented for main, linked, and child rows with focused regression
+  coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### UI-03 / P2 / Shared-worktree Agent rows are duplicated and can route to an alias
 
@@ -231,7 +235,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: one `AgentRunId` renders once under its exact `project_id`, preserving its
   exact route.
 - Proof: shared-worktree aliases with duplicate run records.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### UI-04 / P2 / Same-WorktreeId alias switching clears presentation state
 
@@ -240,7 +244,7 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: aliases of the same worktree preserve selection, expansion, warnings, and
   scroll state while active requests/watchers are re-owned.
 - Proof: same-worktree alias state-swap fixture.
-- Disposition: fix implemented with focused regression coverage; GitHub Actions verification pending.
+- Disposition: fix implemented with focused regression coverage; verified by final GitHub Actions CI run `33799663655`.
 
 ### UI-05 / P1 / Shared-worktree Agent activation depends on project iteration order
 
@@ -251,8 +255,8 @@ state and is intermediate evidence only; final verification of the current tree 
   order; the receipt must retain that exact route owner.
 - Proof: active-alias and reversed-order deterministic selection regressions in
   `store/context.rs`.
-- Disposition: fixed with explicit candidate ranking and exact activation receipts. GitHub
-  Actions verification pending.
+- Disposition: fixed with explicit candidate ranking and exact activation receipts.
+  Final GitHub Actions CI run `33799663655` passed.
 
 ## GitHub Actions, Staging, And Release
 
@@ -264,8 +268,8 @@ state and is intermediate evidence only; final verification of the current tree 
   resolve a dependency graph different from committed root or sidecar lockfiles.
 - Proof: workflow command assertions and locked metadata/check/test/build gates for both
   workspaces.
-- Disposition: fix implemented in Actions workflows and staging commands; GitHub Actions
-  verification pending.
+- Disposition: fix implemented in Actions workflows and staging commands; verified by
+  final GitHub Actions CI run `33799663655`.
 
 ### REL-02 / P2 / The legacy local Docker harness and staging ownership disagree
 
@@ -277,8 +281,8 @@ state and is intermediate evidence only; final verification of the current tree 
   CI or packaging cannot silently fall back to a workstation-owned Docker path.
 - Proof: staging-plan path tests plus static Actions ownership and cache-root assertions.
 - Disposition: explicit build/stage/cache roots are implemented, and the task-added local
-  Docker CI harness is retired under the 2026-09-03 Actions-only policy. GitHub Actions
-  verification pending.
+  Docker CI harness is retired under the 2026-09-03 Actions-only policy. Final GitHub
+  Actions CI run `33799663655` passed.
 
 ### REL-03 / P2 / Windows dev staging relinks the live terminal host executable
 
@@ -287,7 +291,8 @@ state and is intermediate evidence only; final verification of the current tree 
 - Invariant/impact: dev builds link into an isolated directory and only copy into the live
   stage; a locked destination preserves the old runnable artifact without corrupting it.
 - Proof: isolated-plan and copy-failure regressions.
-- Disposition: fix implemented with isolated link namespaces and strict release copy behavior; GitHub Actions Windows package verification pending.
+- Disposition: fix implemented with isolated link namespaces and strict release copy
+  behavior; verified by final Windows package run `33799663753`.
 
 ### REL-04 / P2 / Wrong-architecture helpers can pollute a valid release stage
 
@@ -299,8 +304,8 @@ state and is intermediate evidence only; final verification of the current tree 
   directory so stale files cannot be packaged.
 - Proof: wrong-machine-before-copy, stale-stage cleanup, and complete-stage verification
   regressions in `tests/stageSidecars.test.cjs`.
-- Disposition: fixed with pre-copy build validation and failure cleanup. GitHub Actions
-  Windows package verification pending.
+- Disposition: fixed with pre-copy build validation and failure cleanup. Final Windows
+  package run `33799663753` passed.
 
 ### REL-05 / P2 / Task-owned artifact uploads use a deprecated action runtime
 
@@ -320,8 +325,10 @@ state and is intermediate evidence only; final verification of the current tree 
   and their existing `name`, `if-no-files-found`, and `retention-days` inputs unchanged,
   while matching assertions in `tests/stageSidecars.test.cjs` now require `@v7`.
 - Disposition: fix implemented by upgrading both task-owned uploads and their static
-  assertions to `actions/upload-artifact@v7`. Run `33795981213` remains intermediate
-  evidence; GitHub Actions verification of this correction is pending.
+  assertions to `actions/upload-artifact@v7`. Final package run `33799663753` uploaded
+  artifact `9911452864` successfully through the Node 24 action runtime, with no Node.js
+  20 deprecation or runtime-forcing warning. Run `33795981213` remains intermediate
+  evidence only.
 
 ## Rejected Or Out Of Scope
 

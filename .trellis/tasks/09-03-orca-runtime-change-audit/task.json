@@ -32,7 +32,47 @@
     "residual_findings": [
       "TERM-08"
     ],
-    "validation_status": "pending-github-actions",
-    "policy_updated_at": "2026-09-03"
+    "validation_status": "passed-github-actions",
+    "policy_updated_at": "2026-09-03",
+    "validated_at": "2026-09-03",
+    "validation_head_sha": "c3194a683264dbc5e448c6945c71097f2b4f2e22",
+    "ci_run": {
+      "id": "33799663655",
+      "url": "https://github.com/vihor3/mini-term/actions/runs/33799663655",
+      "conclusion": "success",
+      "rust_workspace_job_id": "100795747761",
+      "windows_msvc_job_id": "100795748072",
+      "root_tests_passed": 1916,
+      "root_tests_ignored": 1,
+      "sidecar_tests_passed": 94,
+      "node_staging_tests_passed": 10,
+      "annotations": 0
+    },
+    "windows_package_run": {
+      "id": "33799663753",
+      "url": "https://github.com/vihor3/mini-term/actions/runs/33799663753",
+      "conclusion": "success",
+      "job_id": "100795747471",
+      "annotations": 0,
+      "artifact": {
+        "id": "9911452864",
+        "name": "Mini-Term_1.2.2-ci.7_windows-x64",
+        "size_bytes": 18084660,
+        "digest": "sha256:47f03d33a3519d5353bc35c7369cdfc8a330be27b7126d5f76c49a510193a98a",
+        "expires_at": "2026-09-17T20:25:08Z",
+        "download_url": "https://github.com/vihor3/mini-term/actions/runs/33799663753/artifacts/9911452864"
+      },
+      "installer": {
+        "file": "Mini-Term_1.2.2-ci.7_x64-setup.exe",
+        "size_bytes": 18094115,
+        "sha256": "1521f8d234e1c1d161cc3889cb1047454cf6df2137e323d74497c193af9e8dd8",
+        "machine": "0x014c"
+      },
+      "payloads_verified": 8,
+      "feature_markers_verified": 7,
+      "extracted_files": 13,
+      "node20_deprecation_warning": false
+    },
+    "physical_windows_ui_smoke": "not-run-out-of-scope"
   }
 }

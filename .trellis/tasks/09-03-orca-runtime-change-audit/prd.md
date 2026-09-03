@@ -58,26 +58,26 @@ into a review or refactor of unrelated pre-existing code.
 
 ## Acceptance Criteria
 
-- [ ] Every non-Trellis file in `0bc6f28..c644ae9` is mapped to one review domain and
+- [x] Every non-Trellis file in `0bc6f28..c644ae9` is mapped to one review domain and
   reviewed at least once; high-risk cross-layer paths receive a second integration pass.
-- [ ] Findings include file/line evidence, severity, violated invariant, causal commit or
+- [x] Findings include file/line evidence, severity, violated invariant, causal commit or
   diff hunk, and disposition. No finding is filed solely against baseline code.
-- [ ] All confirmed in-scope correctness and robustness defects are fixed with focused
+- [x] All confirmed in-scope correctness and robustness defects are fixed with focused
   regression tests, or explicitly documented as residual risk with a concrete reason the
   scoped task cannot safely change them.
-- [ ] Stable host/repository/worktree/pane/terminal/Agent identities and generation fences
+- [x] Stable host/repository/worktree/pane/terminal/Agent identities and generation fences
   remain consistent across persistence, reconnect, detach/reattach, replay, and UI routing.
-- [ ] Terminal and remote operations remain bounded, cancellation-safe, leak-resistant,
+- [x] Terminal and remote operations remain bounded, cancellation-safe, leak-resistant,
   and precise about retry/fallback/session-retirement behavior.
-- [ ] GitHub Tasks and remote probes remain execution-host scoped, injection-resistant,
+- [x] GitHub Tasks and remote probes remain execution-host scoped, injection-resistant,
   secret-safe, and stale-result fenced.
-- [ ] Orca Project -> Worktree UI state, preview semantics, right-sidebar scope, and global
+- [x] Orca Project -> Worktree UI state, preview semantics, right-sidebar scope, and global
   Agent routing remain isolated by worktree and stable under rapid switching/closing.
-- [ ] GitHub Actions targeted tests plus full workspace test/check/Clippy gates pass;
+- [x] GitHub Actions targeted tests plus full workspace test/check/Clippy gates pass;
   sidecar locked gates and Windows checks pass for every affected release component.
-- [ ] GitHub Actions produces, extracts, hash-verifies, and uploads a rebuilt installer
+- [x] GitHub Actions produces, extracts, hash-verifies, and uploads a rebuilt installer
   when payload code changes; no local package is used as evidence.
-- [ ] Task-related paths are committed and archived without including unrelated dirty files.
+- [x] Task-related paths are committed and archived without including unrelated dirty files.
 
 ## Out Of Scope
 
