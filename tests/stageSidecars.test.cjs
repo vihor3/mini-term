@@ -347,7 +347,7 @@ test('Actions own locked verification and Windows package evidence', async () =>
     ciWorkflow,
     /path: \|\s*\n\s*changed-rustfmt\.patch\s*\n\s*full-rustfmt\.patch/,
   );
-  assert.match(ciWorkflow, /uses: actions\/upload-artifact@v4/);
+  assert.match(ciWorkflow, /uses: actions\/upload-artifact@v7/);
   assert.match(ciWorkflow, /cargo test --locked --workspace --all-targets/);
   assert.match(
     ciWorkflow,
@@ -396,7 +396,7 @@ test('Actions own locked verification and Windows package evidence', async () =>
   );
   assert.match(packageWorkflow, /scripts\/build-windows-installer\.ps1/);
   assert.match(packageWorkflow, /scripts\/verify-windows-installer\.ps1/);
-  assert.match(packageWorkflow, /uses: actions\/upload-artifact@v4/);
+  assert.match(packageWorkflow, /uses: actions\/upload-artifact@v7/);
   assert.match(packageWorkflow, /dist\/windows-package-validation\.json/);
   assert.doesNotMatch(packageWorkflow, /softprops\/action-gh-release/);
 

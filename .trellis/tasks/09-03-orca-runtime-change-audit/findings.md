@@ -1,11 +1,13 @@
 # Differential Findings Ledger
 
 Review range: `0bc6f28..c644ae9`. Line evidence refers to the target tree unless
-otherwise stated. Every item below intersects an introduced Orca task hunk.
+otherwise stated. Every item below intersects an introduced Orca task hunk or a
+task-owned audit remediation added to validate that range.
 
-Current tally: 28 confirmed findings (13 P1, 15 P2). Twenty-seven fixes are
+Current tally: 29 confirmed findings (13 P1, 16 P2). Twenty-eight fixes are
 implemented; `TERM-08` remains a bounded residual risk. Executable verification is
-owned exclusively by GitHub Actions and is pending until the task commits are pushed.
+owned exclusively by GitHub Actions. Run `33795981213` passed for the preceding task
+state and is intermediate evidence only; final verification of the current tree is pending.
 
 ## Identity, Layout, And Catalog
 
@@ -299,6 +301,27 @@ owned exclusively by GitHub Actions and is pending until the task commits are pu
   regressions in `tests/stageSidecars.test.cjs`.
 - Disposition: fixed with pre-copy build validation and failure cleanup. GitHub Actions
   Windows package verification pending.
+
+### REL-05 / P2 / Task-owned artifact uploads use a deprecated action runtime
+
+- Evidence: `4474c21` introduced `actions/upload-artifact@v4` in the CI workflow
+  (current task tree `.github/workflows/ci.yml:109`), and `54a9620` introduced the same
+  pin in the Windows package workflow (current task tree
+  `.github/workflows/windows-package.yml:143`). GitHub Actions run `33795981213`
+  completed successfully but warned that the action's deprecated Node.js 20 runtime was
+  being forced onto Node.js 24.
+- Invariant/impact: task-owned validation and release workflows must use an action that
+  runs natively on the supported runner runtime; relying on compatibility forcing leaves
+  diagnostic patches and verified installer evidence exposed to a future runner cutoff.
+- Proof: the runner warning establishes that `@v4` uses the deprecated runtime, and static
+  inspection locates the two task-owned pins. For this review, the supplied upstream facts
+  identify `v7.0.1` as the current release; its action metadata declares `node24`, and its
+  `archive` input defaults to `true`. The REL-05 diff leaves both multi-file `path` blocks
+  and their existing `name`, `if-no-files-found`, and `retention-days` inputs unchanged,
+  while matching assertions in `tests/stageSidecars.test.cjs` now require `@v7`.
+- Disposition: fix implemented by upgrading both task-owned uploads and their static
+  assertions to `actions/upload-artifact@v7`. Run `33795981213` remains intermediate
+  evidence; GitHub Actions verification of this correction is pending.
 
 ## Rejected Or Out Of Scope
 

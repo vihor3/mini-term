@@ -140,7 +140,7 @@ jobs:
             -OutputPath dist/windows-package-validation.json
 
       - name: Upload verified Windows package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Mini-Term_${{ steps.package-version.outputs.version }}_windows-x64
           if-no-files-found: error

@@ -27,8 +27,8 @@
     "review_target": "c644ae9",
     "scope_policy": "introduced-changes-only",
     "execution_policy": "github-actions-only",
-    "finding_count": 28,
-    "implemented_fix_count": 27,
+    "finding_count": 29,
+    "implemented_fix_count": 28,
     "residual_findings": [
       "TERM-08"
     ],
