@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/mt-app/backend/workbench-identity-contract.md", "reason": "Stable WorktreeId, tab, pane, terminal-session, and incarnation ownership contract"}
+{"file": ".trellis/spec/mt-app/backend/file-workbench-contract.md", "reason": "Existing per-worktree file preview, promotion, rename, and focus semantics"}
+{"file": ".trellis/spec/mt-app/backend/remote-agent-reconciliation-contract.md", "reason": "Exact-route agent reconciliation and stale completion fencing"}
+{"file": ".trellis/spec/mt-ai/backend/agent-runtime-contract.md", "reason": "Authoritative AgentRunId activity, connectivity, evidence, and ordering source"}
+{"file": ".trellis/spec/mt-ssh/backend/remote-agent-inventory-contract.md", "reason": "Remote process inventory and capability boundaries"}
+{"file": ".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/orca-ui-ux-mapping.md", "reason": "Approved Orca interaction and visual mapping"}
+{"file": ".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/orca-worktree-terminal-agent-architecture.md", "reason": "Normative Project-to-Worktree runtime architecture"}

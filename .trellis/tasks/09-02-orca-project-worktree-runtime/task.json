@@ -25,10 +25,13 @@
     "09-02-terminal-host-warm-reattach",
     "09-02-terminal-snapshot-cold-restore",
     "09-02-remote-runtime-foundation",
-    "09-02-remote-agent-identity-status"
+    "09-02-remote-agent-identity-status",
+    "09-03-worktree-context-sidebar"
   ],
   "parent": null,
   "relatedFiles": [],
   "notes": "",
-  "meta": {}
+  "meta": {
+    "roadmap_progress": "7/10 phases complete; phase 8 in progress; phases 9-10 pending creation"
+  }
 }

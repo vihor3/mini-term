@@ -798,6 +798,14 @@ impl TerminalPane {
         self.recovery
     }
 
+    pub fn backend_notice(&self) -> Option<&str> {
+        self.backend_notice.as_deref()
+    }
+
+    pub fn is_exited(&self) -> bool {
+        self.exited
+    }
+
     pub fn mark_agent_resumed(&mut self, cx: &mut Context<Self>) {
         if self.recovery.is_cold_restore() {
             self.backend_notice = Some("Agent resumed after restoring terminal history.".into());

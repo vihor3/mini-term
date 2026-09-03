@@ -17,6 +17,77 @@ fn 目录单击展开双击重命名() {
 }
 
 #[test]
+fn 同路径工作树恢复各自文件状态选择与滚动() {
+    let worktree = |hex: char| -> WorktreeId {
+        format!("worktree-v1:{}", hex.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    };
+    let worktree_a = worktree('a');
+    let worktree_b = worktree('b');
+    let root = PathBuf::from("/repo/shared");
+    let mut cache = HashMap::new();
+
+    let mut state_a = FileTreeScopeState::empty();
+    state_a.entries.insert(
+        root.clone(),
+        vec![entry("a.rs", "/repo/shared/a.rs", false, false)],
+    );
+    state_a.git_status.insert("a.rs".into(), "M".into());
+    state_a.selected_path = Some(PathBuf::from("/repo/shared/a.rs"));
+    state_a.root_error = Some("last known warning".into());
+    state_a.scroll.set_offset(gpui::point(px(0.0), px(-72.0)));
+
+    let (mut state_b, cached_b) =
+        swap_file_tree_scope(&mut cache, Some(&worktree_a), Some(&worktree_b), state_a);
+    assert!(!cached_b);
+    state_b.entries.insert(
+        root.clone(),
+        vec![entry("b.rs", "/repo/shared/b.rs", false, false)],
+    );
+    state_b.selected_path = Some(PathBuf::from("/repo/shared/b.rs"));
+    state_b.scroll.set_offset(gpui::point(px(0.0), px(-144.0)));
+
+    let (restored_a, cached_a) =
+        swap_file_tree_scope(&mut cache, Some(&worktree_b), Some(&worktree_a), state_b);
+    assert!(cached_a);
+    assert_eq!(restored_a.entries[&root][0].name, "a.rs");
+    assert_eq!(
+        restored_a.git_status.get("a.rs").map(String::as_str),
+        Some("M")
+    );
+    assert_eq!(
+        restored_a.selected_path.as_deref(),
+        Some(Path::new("/repo/shared/a.rs"))
+    );
+    assert_eq!(restored_a.root_error.as_deref(), Some("last known warning"));
+    assert_eq!(restored_a.scroll.offset().y, px(-72.0));
+}
+
+#[test]
+fn watcher事件同时校验注册来源与项目根() {
+    let root = Path::new("/repo/shared");
+    assert!(watcher_event_matches(
+        Some("project-a|/repo/shared|local"),
+        Some(root),
+        Some("project-a|/repo/shared|local"),
+        "/repo/shared",
+    ));
+    assert!(!watcher_event_matches(
+        Some("project-b|/repo/shared|local"),
+        Some(root),
+        Some("project-a|/repo/shared|local"),
+        "/repo/shared",
+    ));
+    assert!(!watcher_event_matches(
+        Some("project-a|/repo/shared|local"),
+        Some(root),
+        Some("project-a|/repo/shared|local"),
+        "/repo/other",
+    ));
+}
+
+#[test]
 fn 远程下载上下文要求项目根目录和连接身份完全一致() {
     let context = FileOperationContext {
         project_id: "project-a".into(),

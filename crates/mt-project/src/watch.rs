@@ -23,6 +23,9 @@ use parking_lot::Mutex;
 pub struct FsChange {
     /// 触发监听时登记的项目路径,用来把变更路由回对应项目的文件树。
     pub project_path: String,
+    /// Opaque registration-time owner used by callers to reject queued events
+    /// after a logical source switch. It is never interpreted by mt-project.
+    pub source_key: Option<String>,
     pub path: PathBuf,
     pub kind: String,
 }
@@ -70,6 +73,27 @@ impl FsWatcher {
     /// WSL UNC(`\\wsl.localhost\...`)项目走同一条路:文件树列目录本就每次
     /// 过这个校验,监听侧口径一致即可,不额外分叉。
     pub fn watch(&self, path: &Path, project_path: &str) -> Result<()> {
+        self.watch_with_source_key(path, project_path, None)
+    }
+
+    /// Register a watcher with an opaque owner snapshot. Queued notifications
+    /// retain this value even after the watcher is removed, allowing the caller
+    /// to reject events from a previous worktree/source generation.
+    pub fn watch_scoped(
+        &self,
+        path: &Path,
+        project_path: &str,
+        source_key: impl Into<String>,
+    ) -> Result<()> {
+        self.watch_with_source_key(path, project_path, Some(source_key.into()))
+    }
+
+    fn watch_with_source_key(
+        &self,
+        path: &Path,
+        project_path: &str,
+        source_key: Option<String>,
+    ) -> Result<()> {
         // 只做校验,**不拿返回的规范化路径当 key** —— unwatch 收到的是调用方
         // 手上的原始路径,两边 key 必须同形,否则引用计数对不上、watcher 摘不掉
         crate::fs::verify_under_project_root(Path::new(project_path), path, true)?;
@@ -91,6 +115,7 @@ impl FsWatcher {
                 for p in &event.paths {
                     sink(FsChange {
                         project_path: project_path.clone(),
+                        source_key: source_key.clone(),
                         path: p.clone(),
                         kind: format!("{:?}", event.kind),
                     });
@@ -196,7 +221,30 @@ mod tests {
         }
         let change = got.expect("10s 内未收到任何 fs 变更事件");
         assert_eq!(change.project_path, root);
+        assert_eq!(change.source_key, None);
         assert!(!change.kind.is_empty());
+
+        w.unwatch(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scoped_watch_preserves_registration_owner_in_queued_change() {
+        let dir = temp_dir("scoped-sink");
+        let (w, rx) = FsWatcher::with_channel();
+        let root = proj(&dir);
+        w.watch_scoped(&dir, &root, "worktree-a:generation-7")
+            .unwrap();
+
+        std::fs::write(dir.join("scoped.txt"), "hello").unwrap();
+        let change = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("10s 内未收到 scoped fs 变更事件");
+        assert_eq!(change.project_path, root);
+        assert_eq!(
+            change.source_key.as_deref(),
+            Some("worktree-a:generation-7")
+        );
 
         w.unwatch(&dir);
         std::fs::remove_dir_all(&dir).ok();

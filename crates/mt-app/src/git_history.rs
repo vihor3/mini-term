@@ -18,39 +18,83 @@
 //! ⚠️ 行高必须恒为 [`GRAPH_ROW_HEIGHT`](crate::git_graph::GRAPH_ROW_HEIGHT) = 48px,
 //! 否则连线跨行接不上。
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Element, Entity,
-    EventEmitter, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement,
-    LayoutId, MouseButton, MouseDownEvent, ParentElement, PathBuilder, Pixels, Point, Render,
-    SharedString, StatefulInteractiveElement, Style, Styled, Window, div,
-    point, px, uniform_list,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Element, Entity, EventEmitter,
+    GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, ParentElement, PathBuilder, Pixels, Point, Render, SharedString,
+    StatefulInteractiveElement, Style, Styled, UniformListScrollHandle, Window, div, point, px,
+    uniform_list,
 };
+use mt_identity::WorktreeId;
 use mt_project::git::{BranchInfo, GitCommitInfo};
 
 use crate::git_graph::{
     self, GRAPH_ROW_HEIGHT, GraphLayout, GraphRow, SegPath, palette_color, segment_path,
 };
+use crate::git_panel::{GitScope, swap_worktree_scope};
 use crate::i18n::{t, tr};
 use crate::menu;
 use crate::store::AppStore;
-use crate::{git_diff, git_watch};
 use crate::ui;
+use crate::{git_diff, git_watch};
 
 /// 每页条数(`GitHistoryContent.tsx:244`)。
 const PAGE_SIZE: usize = 30;
 
 /// 往上冒的事件。
-pub enum GitHistoryEvent {
+pub(crate) enum GitHistoryEvent {
     /// pty-output 嗅探命中 → 容器要重新发现仓库(原版的 `refreshRepos()`)。
-    RefreshRepos,
+    RefreshRepos(GitScope),
+}
+
+struct GitHistoryScopeState {
+    repo_path: String,
+    branches: Vec<BranchInfo>,
+    view_branch: Option<String>,
+    commits: Vec<GitCommitInfo>,
+    graph: GraphLayout,
+    has_more: bool,
+    scroll: UniformListScrollHandle,
+    refresh_needed: bool,
+}
+
+impl GitHistoryScopeState {
+    fn empty() -> Self {
+        Self {
+            repo_path: String::new(),
+            branches: Vec::new(),
+            view_branch: None,
+            commits: Vec::new(),
+            graph: git_graph::compute(&[]),
+            has_more: false,
+            scroll: UniformListScrollHandle::new(),
+            refresh_needed: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GitHistoryOwner {
+    scope: GitScope,
+    route_generation: u64,
+    repo_path: String,
+    view_branch: Option<String>,
+}
+
+fn git_history_owner_matches(request: &GitHistoryOwner, current: &GitHistoryOwner) -> bool {
+    request == current
 }
 
 pub struct GitHistoryContent {
     store: Entity<AppStore>,
     /// 空串 = 无仓库。
     repo_path: String,
+    scope: GitScope,
+    scope_cache: HashMap<WorktreeId, GitHistoryScopeState>,
+    route_generation: u64,
     /// 只用来给提交行标注分支胶囊。
     branches: Vec<BranchInfo>,
     /// 正在查看(未 checkout)的分支;`None` = 跟随 HEAD。
@@ -59,6 +103,7 @@ pub struct GitHistoryContent {
     graph: GraphLayout,
     loading: bool,
     has_more: bool,
+    scroll: UniformListScrollHandle,
     /// 请求令牌:换仓库 / 换分支后的迟到响应丢弃。
     request: u64,
     /// pty-output 嗅探的 500ms 去抖终点(与「更改」区各算各的)。
@@ -72,41 +117,118 @@ impl GitHistoryContent {
         Self {
             store,
             repo_path: String::new(),
+            scope: GitScope::unbound(),
+            scope_cache: HashMap::new(),
+            route_generation: 0,
             branches: Vec::new(),
             view_branch: None,
             commits: Vec::new(),
             graph: git_graph::compute(&[]),
             loading: false,
             has_more: false,
+            scroll: UniformListScrollHandle::new(),
             request: 0,
             debounce_until: None,
         }
     }
 
+    fn current_owner(&self) -> GitHistoryOwner {
+        GitHistoryOwner {
+            scope: self.scope.clone(),
+            route_generation: self.route_generation,
+            repo_path: self.repo_path.clone(),
+            view_branch: self.view_branch.clone(),
+        }
+    }
+
+    fn owner_matches(&self, owner: &GitHistoryOwner) -> bool {
+        git_history_owner_matches(owner, &self.current_owner())
+    }
+
+    fn take_scope_state(&mut self) -> GitHistoryScopeState {
+        GitHistoryScopeState {
+            repo_path: std::mem::take(&mut self.repo_path),
+            branches: std::mem::take(&mut self.branches),
+            view_branch: self.view_branch.take(),
+            commits: std::mem::take(&mut self.commits),
+            graph: std::mem::replace(&mut self.graph, git_graph::compute(&[])),
+            has_more: self.has_more,
+            scroll: std::mem::replace(&mut self.scroll, UniformListScrollHandle::new()),
+            refresh_needed: self.loading,
+        }
+    }
+
+    fn install_scope_state(&mut self, state: GitHistoryScopeState) -> bool {
+        self.repo_path = state.repo_path;
+        self.branches = state.branches;
+        self.view_branch = state.view_branch;
+        self.commits = state.commits;
+        self.graph = state.graph;
+        self.has_more = state.has_more;
+        self.scroll = state.scroll;
+        state.refresh_needed
+    }
+
     /// 容器把仓库 / 分支列表 / 查看分支一起透下来。任一变化都重头拉第一页
     /// (原版靠 `key={historyRefreshKey}` 与 effect 依赖达到同样效果)。
-    pub fn sync(
+    pub(crate) fn sync(
         &mut self,
+        scope: GitScope,
         repo_path: &str,
         branches: &[BranchInfo],
         view_branch: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        let scope_changed = self.scope != scope;
+        let mut restored = true;
+        let mut refresh_needed = false;
+        if scope_changed {
+            self.request = self.request.wrapping_add(1);
+            let current_key = self.scope.cache_key().cloned();
+            let next_key = scope.cache_key().cloned();
+            if current_key.is_some() || next_key.is_some() {
+                let current_state = self.take_scope_state();
+                let (state, was_cached) = swap_worktree_scope(
+                    &mut self.scope_cache,
+                    current_key.as_ref(),
+                    next_key.as_ref(),
+                    current_state,
+                    GitHistoryScopeState::empty,
+                );
+                restored = was_cached;
+                refresh_needed = self.install_scope_state(state);
+            } else {
+                self.scope_cache.clear();
+            }
+            self.scope = scope;
+            self.route_generation = self.route_generation.wrapping_add(1);
+            self.loading = false;
+            self.debounce_until = None;
+        }
+
         let branches_changed = self.branches.len() != branches.len()
-            || self
-                .branches
-                .iter()
-                .zip(branches)
-                .any(|(a, b)| a.name != b.name || a.is_head != b.is_head);
-        let reload = self.repo_path != repo_path || self.view_branch.as_deref() != view_branch;
+            || self.branches.iter().zip(branches).any(|(a, b)| {
+                a.name != b.name
+                    || a.is_head != b.is_head
+                    || a.is_remote != b.is_remote
+                    || a.commit_hash != b.commit_hash
+            });
+        let route_changed =
+            self.repo_path != repo_path || self.view_branch.as_deref() != view_branch;
         self.repo_path = repo_path.to_string();
         self.view_branch = view_branch.map(str::to_string);
         if branches_changed {
             self.branches = branches.to_vec();
             cx.notify();
         }
-        if reload {
+        if route_changed {
+            self.route_generation = self.route_generation.wrapping_add(1);
+            self.debounce_until = None;
             self.reload(cx);
+        } else if scope_changed && (!restored || refresh_needed) && !self.repo_path.is_empty() {
+            self.refresh(cx);
+        } else if scope_changed {
+            cx.notify();
         }
     }
 
@@ -118,12 +240,19 @@ impl GitHistoryContent {
         self.commits.clear();
         self.graph = git_graph::compute(&[]);
         self.has_more = false;
-        self.request += 1;
+        self.scroll = UniformListScrollHandle::new();
+        self.request = self.request.wrapping_add(1);
         // ⚠️ loading 必须复位:令牌已 +1,在途响应注定被丢弃,而丢弃分支
         // 不会走到 `loading = false` —— 不复位的话这次 load_page 被 loading
         // 闸挡掉,历史区就永远停在旧仓库的内容上再也不刷
         self.loading = false;
-        self.load_page(true, cx);
+        self.load_page(true, false, cx);
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.request = self.request.wrapping_add(1);
+        self.loading = false;
+        self.load_page(true, true, cx);
     }
 
     /// 容器的 pty-output 嗅探命中了。
@@ -136,17 +265,18 @@ impl GitHistoryContent {
         if self.debounce_until.is_some_and(|at| Instant::now() >= at) {
             self.debounce_until = None;
             // 原版去抖回调里做两件事:refreshRepos() + load()
-            cx.emit(GitHistoryEvent::RefreshRepos);
+            cx.emit(GitHistoryEvent::RefreshRepos(self.scope.clone()));
             self.reload(cx);
         }
     }
 
-    fn load_page(&mut self, first: bool, cx: &mut Context<Self>) {
+    fn load_page(&mut self, first: bool, replace: bool, cx: &mut Context<Self>) {
         if self.repo_path.is_empty() || self.loading {
             return;
         }
         self.loading = true;
         let req = self.request;
+        let owner = self.current_owner();
         let repo = std::path::PathBuf::from(&self.repo_path);
         // 首页带 branch;续页从上一页末尾 commit 的 parent 续走,不需要 branch
         let branch = if first {
@@ -172,12 +302,19 @@ impl GitHistoryContent {
                 })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
-                if this.request != req {
+                if this.request != req || !this.owner_matches(&owner) {
                     return;
                 }
                 this.loading = false;
                 match result {
-                    Ok(page) => this.merge_page(page),
+                    Ok(page) => {
+                        if replace {
+                            this.commits.clear();
+                            this.graph = git_graph::compute(&[]);
+                            this.has_more = false;
+                        }
+                        this.merge_page(page);
+                    }
                     Err(err) => eprintln!("[git] 取提交历史失败: {err:#}"),
                 }
                 cx.notify();
@@ -204,28 +341,33 @@ impl GitHistoryContent {
     /// 触底:再要一页。
     fn load_more(&mut self, cx: &mut Context<Self>) {
         if self.has_more && !self.loading {
-            self.load_page(false, cx);
+            self.load_page(false, false, cx);
         }
     }
 
     /// 双击行 / 右键「查看变更」:先取文件列表,再开 CommitDiffModal。
-    fn view_commit(&self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(commit) = self.commits.get(index) else {
+    fn view_commit(
+        &self,
+        owner: GitHistoryOwner,
+        hash: String,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.owner_matches(&owner) {
             return;
-        };
+        }
         let repo = self.repo_path.clone();
-        let hash = commit.hash.clone();
-        let message = commit.message.clone();
         let store = self.store.clone();
         let repo_for_task = std::path::PathBuf::from(&repo);
         let hash_for_task = hash.clone();
-        cx.spawn_in(window, async move |_this, cx| {
-            let files = cx
-                .background_executor()
-                .spawn(async move {
-                    mt_project::git::get_commit_files(&repo_for_task, &hash_for_task)
-                })
-                .await;
+        cx.spawn_in(window, async move |this, cx| {
+            let files =
+                cx.background_executor()
+                    .spawn(async move {
+                        mt_project::git::get_commit_files(&repo_for_task, &hash_for_task)
+                    })
+                    .await;
             let files = match files {
                 Ok(files) => files,
                 Err(err) => {
@@ -234,7 +376,10 @@ impl GitHistoryContent {
                     return;
                 }
             };
-            let _ = cx.update(|window, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
+                if !this.owner_matches(&owner) {
+                    return;
+                }
                 git_diff::open_commit_diff(store, repo, hash, message, files, window, cx);
             });
         })
@@ -301,20 +446,25 @@ impl Render for GitHistoryContent {
         }
 
         if self.commits.is_empty() {
-            return div().size_full().flex().flex_col().bg(ui::bg_surface()).child(
-                body.child(hint(
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(ui::bg_surface())
+                .child(body.child(hint(
                     if self.loading {
                         t("gitHistoryContent", "loading")
                     } else {
                         t("gitHistoryContent", "noCommits")
                     },
                     11.0,
-                )),
-            );
+                )));
         }
 
         let count = self.commits.len();
         let this = cx.entity();
+        let owner = self.current_owner();
+        let request = self.request;
         let list = uniform_list(
             "git-commit-list",
             count,
@@ -323,9 +473,12 @@ impl Render for GitHistoryContent {
                 // 直接 update 自己会与正在进行的渲染打架。
                 if range.end >= count {
                     let this = this.clone();
+                    let owner = owner.clone();
                     cx.spawn(async move |cx| {
                         let _ = this.update(cx, |this: &mut GitHistoryContent, cx| {
-                            this.load_more(cx)
+                            if this.request == request && this.owner_matches(&owner) {
+                                this.load_more(cx);
+                            }
                         });
                     })
                     .detach();
@@ -336,7 +489,8 @@ impl Render for GitHistoryContent {
                     .collect::<Vec<_>>()
             },
         )
-        .size_full();
+        .size_full()
+        .track_scroll(self.scroll.clone());
 
         body = body.child(list);
         div()
@@ -372,6 +526,13 @@ impl GitHistoryContent {
         let short_hash = commit.short_hash.clone();
         let author = commit.author.clone();
         let message = commit.message.clone();
+        let owner = self.current_owner();
+        let open_owner = owner.clone();
+        let menu_owner = owner;
+        let open_hash = hash_full.clone();
+        let open_message = message.clone();
+        let menu_hash = hash_full.clone();
+        let menu_message = message.clone();
         let relative = format_relative_time(commit.timestamp, now);
 
         let mut first_line = div()
@@ -444,7 +605,13 @@ impl GitHistoryContent {
             // ⚠️ 是**双击**不是单击(`GitHistoryContent.tsx:105`)
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if event.click_count() >= 2 {
-                    this.view_commit(index, window, cx);
+                    this.view_commit(
+                        open_owner.clone(),
+                        open_hash.clone(),
+                        open_message.clone(),
+                        window,
+                        cx,
+                    );
                 }
             }))
             .on_mouse_down(
@@ -453,6 +620,9 @@ impl GitHistoryContent {
                     cx.stop_propagation();
                     let entity = cx.entity();
                     let hash = hash_full.clone();
+                    let owner = menu_owner.clone();
+                    let view_hash = menu_hash.clone();
+                    let view_message = menu_message.clone();
                     let entries = vec![
                         menu::item(
                             t("gitHistoryContent", "copyCommitHash"),
@@ -463,7 +633,12 @@ impl GitHistoryContent {
                         ),
                         menu::separator(),
                         menu::item(t("gitHistoryContent", "viewChanges"), move |window, cx| {
-                            entity.update(cx, |this, cx| this.view_commit(index, window, cx));
+                            let owner = owner.clone();
+                            let hash = view_hash.clone();
+                            let message = view_message.clone();
+                            entity.update(cx, |this, cx| {
+                                this.view_commit(owner, hash, message, window, cx)
+                            });
                         }),
                     ];
                     menu::show(event.position, entries, window, cx);
@@ -516,12 +691,7 @@ fn sample(path: &SegPath, t: f32) -> (f32, f32) {
         SegPath::Line { x, y0, y1 } => (*x, y0 + (y1 - y0) * t),
         SegPath::Cubic { p0, c1, c2, p1 } => {
             let u = 1.0 - t;
-            let (b0, b1, b2, b3) = (
-                u * u * u,
-                3.0 * u * u * t,
-                3.0 * u * t * t,
-                t * t * t,
-            );
+            let (b0, b1, b2, b3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
             (
                 b0 * p0.0 + b1 * c1.0 + b2 * c2.0 + b3 * p1.0,
                 b0 * p0.1 + b1 * c1.1 + b2 * c2.1 + b3 * p1.1,
@@ -578,9 +748,8 @@ impl Element for GraphCell {
         _cx: &mut App,
     ) {
         let origin = bounds.origin;
-        let map = |(x, y): (f32, f32)| -> Point<Pixels> {
-            point(origin.x + px(x), origin.y + px(y))
-        };
+        let map =
+            |(x, y): (f32, f32)| -> Point<Pixels> { point(origin.x + px(x), origin.y + px(y)) };
 
         for seg in &self.row.segments {
             let Some(path) = segment_path(seg, self.row.lane) else {
@@ -679,6 +848,97 @@ fn paint_circle(
 mod tests {
     use super::*;
     use crate::git_graph::test_commit;
+
+    fn worktree_id(hex: char) -> WorktreeId {
+        format!("worktree-v1:{}", hex.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn 同路径工作树恢复各自的历史分支与滚动() {
+        let worktree_a = worktree_id('a');
+        let worktree_b = worktree_id('b');
+        let mut cache = HashMap::new();
+
+        let mut state_a = GitHistoryScopeState::empty();
+        state_a.repo_path = "/repo/shared".into();
+        state_a.view_branch = Some("feature-a".into());
+        state_a.commits = vec![test_commit("a1", &[])];
+        state_a.graph = git_graph::compute(&state_a.commits);
+        state_a.has_more = true;
+        state_a
+            .scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(-144.0)));
+
+        let (mut state_b, cached_b) = swap_worktree_scope(
+            &mut cache,
+            Some(&worktree_a),
+            Some(&worktree_b),
+            state_a,
+            GitHistoryScopeState::empty,
+        );
+        assert!(!cached_b);
+        state_b.repo_path = "/repo/shared".into();
+        state_b.view_branch = Some("feature-b".into());
+        state_b.commits = vec![test_commit("b1", &[])];
+        state_b.graph = git_graph::compute(&state_b.commits);
+        state_b
+            .scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(-240.0)));
+
+        let (restored_a, cached_a) = swap_worktree_scope(
+            &mut cache,
+            Some(&worktree_b),
+            Some(&worktree_a),
+            state_b,
+            GitHistoryScopeState::empty,
+        );
+        assert!(cached_a);
+        assert_eq!(restored_a.repo_path, "/repo/shared");
+        assert_eq!(restored_a.view_branch.as_deref(), Some("feature-a"));
+        assert_eq!(restored_a.commits[0].hash, "a1");
+        assert!(restored_a.has_more);
+        assert_eq!(
+            restored_a.scroll.0.borrow().base_handle.offset().y,
+            px(-144.0)
+        );
+    }
+
+    #[test]
+    fn 历史请求拒绝旧工作树旧代次与旧分支() {
+        let worktree_a = worktree_id('a');
+        let worktree_b = worktree_id('b');
+        let current = GitHistoryOwner {
+            scope: GitScope::new(Some(worktree_a.clone()), 8, true),
+            route_generation: 13,
+            repo_path: "/repo/shared".into(),
+            view_branch: Some("main".into()),
+        };
+        assert!(git_history_owner_matches(&current, &current));
+
+        let mut stale = current.clone();
+        stale.scope = GitScope::new(Some(worktree_b), 8, true);
+        assert!(!git_history_owner_matches(&stale, &current));
+
+        let mut stale = current.clone();
+        stale.scope = GitScope::new(Some(worktree_a), 7, true);
+        assert!(!git_history_owner_matches(&stale, &current));
+
+        let mut stale = current.clone();
+        stale.route_generation = 12;
+        assert!(!git_history_owner_matches(&stale, &current));
+
+        let mut stale = current.clone();
+        stale.view_branch = Some("release".into());
+        assert!(!git_history_owner_matches(&stale, &current));
+    }
 
     /// 去重:有分支时续页会带回已加载的 commit,重复 hash 必须丢掉,
     /// 否则拓扑图连线会算错。

@@ -45,11 +45,13 @@ use futures::channel::mpsc;
 use gpui::{
     AnyElement, App, Context, DragMoveEvent, Entity, ExternalPaths, Global, Hsla,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder,
-    px,
+    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Task, Window, div,
+    prelude::FluentBuilder, px,
 };
+use gpui_component::scroll::Scrollbar;
+use mt_identity::WorktreeId;
 use mt_project::fs::FileEntry;
-use mt_project::watch::FsWatcher;
+use mt_project::watch::{FsChange, FsWatcher};
 use mt_ui::icons::FileIcon;
 use mt_ui::icons::vector::{Geom, Ink, Shape, VectorIcon};
 use mt_ui::tooltip::Tooltip;
@@ -59,7 +61,7 @@ use crate::fs_ops;
 use crate::git_watch;
 use crate::i18n::{t, tr};
 use crate::menu::MenuEntry;
-use crate::store::AppStore;
+use crate::store::{AppStore, orca_worktree_context_enabled};
 use crate::ui;
 
 mod menu;
@@ -160,6 +162,47 @@ pub fn download_remote_file(
     start_download(tree, context, vec![path], window, cx);
 }
 
+struct FileTreeScopeState {
+    entries: HashMap<PathBuf, Vec<FileEntry>>,
+    git_status: HashMap<String, String>,
+    chain_owner: HashMap<PathBuf, PathBuf>,
+    root_loading: bool,
+    root_error: Option<String>,
+    row_focus: HashMap<PathBuf, gpui::FocusHandle>,
+    selected_path: Option<PathBuf>,
+    scroll: ScrollHandle,
+}
+
+impl FileTreeScopeState {
+    fn empty() -> Self {
+        Self {
+            entries: HashMap::new(),
+            git_status: HashMap::new(),
+            chain_owner: HashMap::new(),
+            root_loading: false,
+            root_error: None,
+            row_focus: HashMap::new(),
+            selected_path: None,
+            scroll: ScrollHandle::new(),
+        }
+    }
+}
+
+fn swap_file_tree_scope(
+    cache: &mut HashMap<WorktreeId, FileTreeScopeState>,
+    current_worktree: Option<&WorktreeId>,
+    next_worktree: Option<&WorktreeId>,
+    current_state: FileTreeScopeState,
+) -> (FileTreeScopeState, bool) {
+    if let Some(worktree_id) = current_worktree {
+        cache.insert(worktree_id.clone(), current_state);
+    }
+    match next_worktree.and_then(|worktree_id| cache.remove(worktree_id)) {
+        Some(state) => (state, true),
+        None => (FileTreeScopeState::empty(), false),
+    }
+}
+
 pub struct FileTree {
     store: Entity<AppStore>,
     /// 已列出的目录 → 子项。
@@ -176,6 +219,11 @@ pub struct FileTree {
     watched: HashSet<PathBuf>,
     /// 当前挂着的项目;换项目时整表作废。
     current_project: Option<String>,
+    /// Orca context ownership is stable-worktree scoped, not project-path scoped.
+    current_worktree: Option<WorktreeId>,
+    scope_cache: HashMap<WorktreeId, FileTreeScopeState>,
+    selected_path: Option<PathBuf>,
+    scroll: ScrollHandle,
     /// 项目 + 根路径 + 后端/连接配置的身份签名。连接配置原地修改时也会变化。
     source_signature: Option<String>,
     /// 每次 source signature 变化递增，后台结果回写前必须对号。
@@ -254,21 +302,28 @@ impl FileTree {
 
         // 丢过去的是**变动文件的完整路径**:重列只要它的父目录,但技术栈缓存的
         // 失效判据要看文件名本身(`Cargo.toml` / `package.json` 之类)
-        let (tx, mut rx) = mpsc::unbounded::<PathBuf>();
+        let (tx, mut rx) = mpsc::unbounded::<FsChange>();
         let watcher = Arc::new(FsWatcher::new(move |change| {
-            // notify 自己的线程:只把「什么变了」丢过去,重列在主线程排。
-            let _ = tx.unbounded_send(change.path);
+            // notify 自己的线程:把变更与注册时的 source owner 一起排回主线程。
+            let _ = tx.unbounded_send(change);
         }));
 
         let fs_task = cx.spawn(async move |this, cx| {
-            while let Some(path) = rx.next().await {
+            while let Some(change) = rx.next().await {
+                let path = change.path;
                 let dir = match path.parent() {
                     Some(parent) => parent.to_path_buf(),
                     None => path.clone(),
                 };
                 if this
                     .update(cx, |tree: &mut FileTree, cx| {
-                        if tree.path_is_suppressed(&path) {
+                        if !watcher_event_matches(
+                            tree.source_signature.as_deref(),
+                            tree.project_root(cx).as_deref(),
+                            change.source_key.as_deref(),
+                            &change.project_path,
+                        ) || tree.path_is_suppressed(&path)
+                        {
                             return;
                         }
                         tree.invalidate(&dir, cx);
@@ -310,6 +365,10 @@ impl FileTree {
             watcher,
             watched: HashSet::new(),
             current_project: None,
+            current_worktree: None,
+            scope_cache: HashMap::new(),
+            selected_path: None,
+            scroll: ScrollHandle::new(),
             source_signature: None,
             source_generation: 0,
             file_clipboard: None,
@@ -389,34 +448,74 @@ impl FileTree {
         .detach();
     }
 
-    /// 活动项目变了:清空缓存与监听,重列根目录。
+    fn take_scope_state(&mut self) -> FileTreeScopeState {
+        FileTreeScopeState {
+            entries: std::mem::take(&mut self.entries),
+            git_status: std::mem::take(&mut self.git_status),
+            chain_owner: std::mem::take(&mut self.chain_owner),
+            root_loading: self.root_loading,
+            root_error: self.root_error.take(),
+            row_focus: std::mem::take(&mut self.row_focus),
+            selected_path: self.selected_path.take(),
+            scroll: std::mem::replace(&mut self.scroll, ScrollHandle::new()),
+        }
+    }
+
+    fn install_scope_state(&mut self, state: FileTreeScopeState) {
+        self.entries = state.entries;
+        self.git_status = state.git_status;
+        self.chain_owner = state.chain_owner;
+        self.root_loading = state.root_loading;
+        self.root_error = state.root_error;
+        self.row_focus = state.row_focus;
+        self.selected_path = state.selected_path;
+        self.scroll = state.scroll;
+    }
+
+    fn clear_scope(&mut self) {
+        self.entries.clear();
+        self.git_status.clear();
+        self.chain_owner.clear();
+        self.root_loading = false;
+        self.root_error = None;
+        self.row_focus.clear();
+        self.selected_path = None;
+        self.scroll = ScrollHandle::new();
+    }
+
+    /// 活动项目变了:清空活跃请求/监听，按 worktree 恢复展示缓存，再重列根目录。
     fn sync_project(&mut self, cx: &mut Context<Self>) {
-        let (project_id, root, remote, broken, signature) = {
+        let (project_id, worktree_id, root, remote, broken, signature) = {
             let store = self.store.read(cx);
             match store.active_project() {
                 Some(p) => {
                     let is_remote = store.is_remote_project(&p.id);
                     let conn = store.remote_connection_of(&p.id);
+                    let path = store
+                        .canonical_worktree_path_for_project(&p.id)
+                        .unwrap_or(&p.path)
+                        .to_string();
                     let signature = match &conn {
                         Some(conn) => format!(
                             "{}|{}|ssh:{:016x}",
                             p.id,
-                            p.path,
+                            path,
                             crate::remote_ssh::connection_fingerprint(conn)
                         ),
-                        None if is_remote => format!("{}|{}|ssh:broken", p.id, p.path),
-                        None => format!("{}|{}|local", p.id, p.path),
+                        None if is_remote => format!("{}|{}|ssh:broken", p.id, path),
+                        None => format!("{}|{}|local", p.id, path),
                     };
                     (
                         Some(p.id.clone()),
-                        Some(PathBuf::from(&p.path)),
+                        store.worktree_id_for_project(&p.id).cloned(),
+                        Some(PathBuf::from(path)),
                         conn.is_some(),
                         // 断链 = 是远程项目但连接查不到
                         is_remote && conn.is_none(),
                         Some(signature),
                     )
                 }
-                None => (None, None, false, false, None),
+                None => (None, None, None, false, false, None),
             }
         };
         if signature == self.source_signature {
@@ -425,15 +524,29 @@ impl FileTree {
         for dir in std::mem::take(&mut self.watched) {
             self.watcher.unwatch(&dir);
         }
-        self.entries.clear();
+        let scope_changed = worktree_id != self.current_worktree;
+        if orca_worktree_context_enabled() && scope_changed {
+            let current_worktree = self.current_worktree.clone();
+            let current_state = self.take_scope_state();
+            let (state, _) = swap_file_tree_scope(
+                &mut self.scope_cache,
+                current_worktree.as_ref(),
+                worktree_id.as_ref(),
+                current_state,
+            );
+            self.install_scope_state(state);
+        } else {
+            self.clear_scope();
+            if !orca_worktree_context_enabled() {
+                self.scope_cache.clear();
+            }
+        }
         self.loading.clear();
         self.dir_request_ids.clear();
         self.pending_reload.clear();
-        self.chain_owner.clear();
-        self.git_status.clear();
         self.git_refresh_at = None;
-        self.root_error = None;
         self.current_project = project_id;
+        self.current_worktree = worktree_id;
         self.source_signature = signature;
         self.source_generation = self.source_generation.wrapping_add(1);
         self.suppressed_subtrees.clear();
@@ -449,7 +562,6 @@ impl FileTree {
         }
         self.external_drop_target = None;
         self.remote_broken = broken;
-        self.git_status.clear();
         // 没有项目 / 远程项目都把旁路那一份关掉:远程不拉 git 状态,
         // reader 线程上那道总闸能少开一个人是一个
         git_watch::set_enabled_for(
@@ -485,10 +597,13 @@ impl FileTree {
     }
 
     fn project_root(&self, cx: &App) -> Option<PathBuf> {
-        self.store
-            .read(cx)
-            .active_project()
-            .map(|p| PathBuf::from(&p.path))
+        let store = self.store.read(cx);
+        let project = store.active_project()?;
+        Some(PathBuf::from(
+            store
+                .canonical_worktree_path_for_project(&project.id)
+                .unwrap_or(&project.path),
+        ))
     }
 
     fn operation_context(&self, cx: &App) -> Option<FileOperationContext> {
@@ -507,7 +622,11 @@ impl FileTree {
         };
         Some(FileOperationContext {
             project_id: project.id.clone(),
-            root: PathBuf::from(&project.path),
+            root: PathBuf::from(
+                store
+                    .canonical_worktree_path_for_project(&project.id)
+                    .unwrap_or(&project.path),
+            ),
             backend,
             generation: self.source_generation,
         })
@@ -556,7 +675,11 @@ impl FileTree {
         let remote = self.remote_conn(cx);
         if remote.is_none()
             && self.watched.insert(dir.clone())
-            && let Err(err) = self.watcher.watch(&dir, root.to_string_lossy().as_ref())
+            && let Err(err) = self.watcher.watch_scoped(
+                &dir,
+                root.to_string_lossy().as_ref(),
+                self.source_signature.clone().unwrap_or_default(),
+            )
         {
             eprintln!("[files] 监听 {} 失败: {err:#}", dir.display());
         }
@@ -631,9 +754,11 @@ impl FileTree {
                                     // NonRecursive,中段新增文件否则无人上报,
                                     // 压缩前提破了也不知道
                                     if tree.watched.insert(segment.clone())
-                                        && let Err(err) = tree
-                                            .watcher
-                                            .watch(segment, root.to_string_lossy().as_ref())
+                                        && let Err(err) = tree.watcher.watch_scoped(
+                                            segment,
+                                            root.to_string_lossy().as_ref(),
+                                            tree.source_signature.clone().unwrap_or_default(),
+                                        )
                                     {
                                         eprintln!(
                                             "[files] 监听 {} 失败: {err:#}",
@@ -945,6 +1070,15 @@ impl FileTree {
             }
         }
     }
+}
+
+fn watcher_event_matches(
+    current_source_key: Option<&str>,
+    current_root: Option<&Path>,
+    event_source_key: Option<&str>,
+    event_project_path: &str,
+) -> bool {
+    current_source_key == event_source_key && current_root == Some(Path::new(event_project_path))
 }
 
 fn same_file_source(left: &FileOperationContext, right: &FileOperationContext) -> bool {
@@ -1716,12 +1850,7 @@ impl Render for FileTree {
                 .child(body);
         }
 
-        let mut list = div()
-            .id("file-tree-list")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .overflow_y_scroll();
+        let mut list = div().id("file-tree-list").flex().flex_col().flex_1();
         for row in rows {
             list = list.child(self.render_row(row, cx));
         }
@@ -1793,6 +1922,16 @@ impl Render for FileTree {
                     ))
                 }),
         );
+        let list = list.track_scroll(&self.scroll).overflow_y_scroll();
+        let scroll_shell = div().relative().flex_1().min_h_0().child(list).child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .child(Scrollbar::vertical(&self.scroll).id("file-tree-scrollbar")),
+        );
 
         div()
             .size_full()
@@ -1823,7 +1962,7 @@ impl Render for FileTree {
                         .child(label),
                 )
             })
-            .child(list)
+            .child(scroll_shell)
     }
 }
 
@@ -2013,10 +2152,14 @@ impl FileTree {
                 MouseButton::Left,
                 cx.listener({
                     let path = row.path.clone();
-                    move |this, _event: &MouseDownEvent, window, _cx| {
+                    move |this, _event: &MouseDownEvent, window, cx| {
                         // 浏览器点 `tabIndex=0` 的行就会聚焦,←→ 折叠展开靠这一条才够得着
                         if let Some(focus) = this.row_focus.get(&path) {
                             window.focus(focus);
+                        }
+                        if this.selected_path.as_ref() != Some(&path) {
+                            this.selected_path = Some(path.clone());
+                            cx.notify();
                         }
                     }
                 }),
@@ -2031,6 +2174,9 @@ impl FileTree {
             .text_size(ui::font_px(12.0))
             .text_color(color)
             .hover(|el| el.bg(ui::bg_overlay()))
+            .when(self.selected_path.as_ref() == Some(&row.path), |el| {
+                el.bg(ui::accent_subtle())
+            })
             .when(drop_highlight, |el| {
                 el.bg(ui::with_alpha(ui::accent(), 0.18))
             })

@@ -1,0 +1,29 @@
+{
+  "id": "worktree-context-sidebar",
+  "name": "worktree-context-sidebar",
+  "title": "Worktree Context Sidebar",
+  "description": "Make the Orca-style Files/Git/Sessions context sidebar fully WorktreeId-scoped, merge authoritative live agent and terminal recovery diagnostics, and fence stale panel results while preserving the global tab selection.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "leo",
+  "assignee": "leo",
+  "createdAt": "2026-09-03",
+  "completedAt": null,
+  "branch": "feat/remote-file-management",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "09-02-orca-project-worktree-runtime",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "implementation_progress": "8/8 steps complete; Docker Linux and Windows MSVC quality gates passed",
+    "phase": "3.4 commit"
+  }
+}

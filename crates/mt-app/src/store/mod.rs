@@ -58,6 +58,7 @@ use crate::tree::{PaneState, PaneStatus, ProjectPanel, SplitNode};
 
 mod ai;
 mod config_writer;
+mod context;
 mod identity;
 mod layout;
 mod panes;
@@ -69,6 +70,8 @@ mod remote_runtime;
 mod ssh;
 
 use config_writer::ConfigWriter;
+
+pub use context::{AgentTargetView, TerminalDiagnosticView, orca_worktree_context_enabled};
 
 // 纯函数与它们的类型原本就住在 store.rs 顶层;拆进 `pure` 后原样再导出,
 // `crate::store::Xxx` 这条对外路径一字不变(全仓其它文件零改动的前提)。

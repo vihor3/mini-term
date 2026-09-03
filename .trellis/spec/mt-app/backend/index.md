@@ -21,6 +21,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
 | [File Workbench Contract](./file-workbench-contract.md) | Local/remote document identity, focus, search, and rich-text safety | Active |
 | [Workbench Identity Contract](./workbench-identity-contract.md) | Stable worktree, pane, terminal-session, and incarnation routing | Active |
+| [Worktree Context Contract](./worktree-context-contract.md) | Worktree-scoped Files/Git/Sessions state, exact Agent targets, and runtime diagnostics | Active |
 | [Remote Runtime Reconciliation Contract](./remote-runtime-reconciliation-contract.md) | Project-scoped remote probing, stale-result fencing, and authoritative rebind | Active |
 | [Remote Agent Reconciliation Contract](./remote-agent-reconciliation-contract.md) | Exact-route SSH agent probes, epoch fencing, and legacy projection | Active |
 

@@ -1,0 +1,491 @@
+//! Worktree-scoped immutable projections for contextual UI surfaces.
+//!
+//! This module is the only UI-facing boundary that joins stable worktree,
+//! terminal, and Agent identities. Callers receive display models and route
+//! actions; they never reconstruct ownership from paths or runtime PTY ids.
+
+use std::cmp::Ordering;
+use std::ffi::OsStr;
+
+use gpui::{App, Context, Window};
+use mt_ai::{AgentActivity, AgentConnectivity, AgentEvidence, AgentProvider, AgentRoute};
+use mt_identity::{
+    AgentRunId, ExecutionHostId, PaneKey, TabId, TerminalIncarnationId, TerminalSessionId,
+    WorktreeId,
+};
+
+use crate::pane::TerminalRecovery;
+
+use super::{AppStore, RemoteAgentProbeCapability};
+
+const DIAGNOSTIC_TEXT_LIMIT: usize = 512;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentTargetView {
+    pub run_id: AgentRunId,
+    pub project_id: String,
+    pub project_name: String,
+    pub pane_id: String,
+    pub pane_label: String,
+    pub route: AgentRoute,
+    pub provider: AgentProvider,
+    pub provider_session_id: Option<String>,
+    pub activity: AgentActivity,
+    pub connectivity: AgentConnectivity,
+    pub evidence: AgentEvidence,
+    pub received_at_unix_ms: i64,
+    pub attention: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteAgentDiagnosticView {
+    pub capability: RemoteAgentProbeCapability,
+    pub connectivity: AgentConnectivity,
+    pub process_count: usize,
+    pub connection_epoch: u64,
+    pub last_error: Option<String>,
+    pub updated_at_unix_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalDiagnosticView {
+    pub project_id: String,
+    pub pane_id: String,
+    pub pane_label: String,
+    pub route: Option<AgentRoute>,
+    pub recovery: TerminalRecovery,
+    pub exited: bool,
+    pub backend_notice: Option<String>,
+    pub agent: Option<AgentTargetView>,
+    pub remote_agent: Option<RemoteAgentDiagnosticView>,
+}
+
+/// Rollback gate for the Orca worktree-context ownership model.
+///
+/// Only the exact value `0` disables it. Missing and all other values keep the
+/// verified path active, matching the existing shell rollout convention.
+pub fn orca_worktree_context_enabled() -> bool {
+    orca_worktree_context_enabled_for(
+        std::env::var_os("MINI_TERM_ORCA_WORKTREE_CONTEXT").as_deref(),
+    )
+}
+
+fn orca_worktree_context_enabled_for(value: Option<&OsStr>) -> bool {
+    value.is_none_or(|value| value != "0")
+}
+
+fn bounded_text(value: &str) -> String {
+    value.chars().take(DIAGNOSTIC_TEXT_LIMIT).collect()
+}
+
+fn activity_rank(activity: AgentActivity, attention: bool) -> u8 {
+    if attention || matches!(activity, AgentActivity::Blocked | AgentActivity::Failed) {
+        0
+    } else if matches!(activity, AgentActivity::Starting | AgentActivity::Working) {
+        1
+    } else if matches!(activity, AgentActivity::Done | AgentActivity::Waiting) {
+        2
+    } else {
+        3
+    }
+}
+
+fn compare_agent_targets(left: &AgentTargetView, right: &AgentTargetView) -> Ordering {
+    activity_rank(left.activity, left.attention)
+        .cmp(&activity_rank(right.activity, right.attention))
+        .then_with(|| right.received_at_unix_ms.cmp(&left.received_at_unix_ms))
+        .then_with(|| left.provider.cmp(&right.provider))
+        .then_with(|| left.run_id.cmp(&right.run_id))
+}
+
+fn route_matches_terminal(
+    route: &AgentRoute,
+    execution_host_id: &ExecutionHostId,
+    worktree_id: &WorktreeId,
+    tab_id: &TabId,
+    pane_key: &PaneKey,
+    terminal_session_id: &TerminalSessionId,
+    terminal_incarnation_id: Option<&TerminalIncarnationId>,
+) -> bool {
+    &route.execution_host_id == execution_host_id
+        && &route.worktree_id == worktree_id
+        && &route.tab_id == tab_id
+        && &route.pane_key == pane_key
+        && &route.terminal_session_id == terminal_session_id
+        && terminal_incarnation_id == Some(&route.terminal_incarnation_id)
+}
+
+fn exact_terminal_route<'a>(
+    route: Option<&'a AgentRoute>,
+    execution_host_id: &ExecutionHostId,
+    worktree_id: &WorktreeId,
+    tab_id: &TabId,
+    pane_key: &PaneKey,
+    terminal_session_id: &TerminalSessionId,
+    terminal_incarnation_id: Option<&TerminalIncarnationId>,
+) -> Option<&'a AgentRoute> {
+    route.filter(|route| {
+        route_matches_terminal(
+            route,
+            execution_host_id,
+            worktree_id,
+            tab_id,
+            pane_key,
+            terminal_session_id,
+            terminal_incarnation_id,
+        )
+    })
+}
+
+impl AppStore {
+    /// Canonical path from the stable binding. The configured path is only a
+    /// compatibility fallback when no canonical value has been persisted yet.
+    pub fn canonical_worktree_path_for_project(&self, project_id: &str) -> Option<&str> {
+        self.project_worktree_bindings
+            .get(project_id)
+            .and_then(|binding| binding.canonical_worktree_path.as_deref())
+            .or_else(|| {
+                self.project(project_id)
+                    .map(|project| project.path.as_str())
+            })
+    }
+
+    fn resolve_agent_target(&self, run_id: &AgentRunId) -> Option<AgentTargetView> {
+        let run = self.agent_runtime.run(run_id)?;
+        for project in &self.config.projects {
+            let Some(binding) = self.project_worktree_bindings.get(&project.id) else {
+                continue;
+            };
+            if binding.worktree_id != run.route.worktree_id
+                || binding.execution_host_id != run.route.execution_host_id
+            {
+                continue;
+            }
+            let Some(state) = self.project_states.get(&project.id) else {
+                continue;
+            };
+            let Some(panel) = state
+                .panels
+                .iter()
+                .find(|panel| panel.tab_id == run.route.tab_id)
+            else {
+                continue;
+            };
+            let Some(pane) = panel.layout.pane(run.route.pane_key.as_str()) else {
+                continue;
+            };
+            if !route_matches_terminal(
+                &run.route,
+                &binding.execution_host_id,
+                &binding.worktree_id,
+                &panel.tab_id,
+                &pane.pane_key,
+                &pane.terminal_session_id,
+                pane.terminal_incarnation_id.as_ref(),
+            ) {
+                continue;
+            }
+            let Some(pty_id) = pane.pty_id else {
+                continue;
+            };
+            if self.terminal_routes.get(&pty_id) != Some(&run.route) {
+                continue;
+            }
+
+            return Some(AgentTargetView {
+                run_id: run.run_id.clone(),
+                project_id: project.id.clone(),
+                project_name: project.name.clone(),
+                pane_id: pane.id.clone(),
+                pane_label: self.pane_display_label(&project.id, pane),
+                route: run.route.clone(),
+                provider: run.provider.clone(),
+                provider_session_id: run.provider_session_id.clone(),
+                activity: run.activity,
+                connectivity: run.connectivity,
+                evidence: run.evidence,
+                received_at_unix_ms: run.received_at_unix_ms,
+                attention: pane.attention,
+            });
+        }
+        None
+    }
+
+    pub fn agent_target_views(&self) -> Vec<AgentTargetView> {
+        let mut targets: Vec<_> = self
+            .agent_runtime
+            .runs()
+            .filter_map(|run| self.resolve_agent_target(&run.run_id))
+            .collect();
+        targets.sort_by(compare_agent_targets);
+        targets
+    }
+
+    pub fn agent_target_views_for_worktree(
+        &self,
+        worktree_id: &WorktreeId,
+    ) -> Vec<AgentTargetView> {
+        let mut targets: Vec<_> = self
+            .agent_runtime
+            .runs_for_worktree(worktree_id)
+            .filter_map(|run| self.resolve_agent_target(&run.run_id))
+            .collect();
+        targets.sort_by(compare_agent_targets);
+        targets
+    }
+
+    /// Revalidates every stable identity immediately before switching. A stale
+    /// run is inert: this action never creates or resumes a terminal.
+    pub fn activate_agent_run(
+        &mut self,
+        run_id: &AgentRunId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(target) = self.resolve_agent_target(run_id) else {
+            return false;
+        };
+        self.set_active_project(&target.project_id, cx);
+        let Some(current) = self.resolve_agent_target(run_id) else {
+            return false;
+        };
+        self.activate_pane(&current.project_id, &current.pane_id, window, cx);
+        true
+    }
+
+    pub fn terminal_diagnostics_for_worktree(
+        &self,
+        worktree_id: &WorktreeId,
+        cx: &App,
+    ) -> Vec<TerminalDiagnosticView> {
+        let mut diagnostics = Vec::new();
+        for project in &self.config.projects {
+            let Some(binding) = self.project_worktree_bindings.get(&project.id) else {
+                continue;
+            };
+            if &binding.worktree_id != worktree_id {
+                continue;
+            }
+            let Some(state) = self.project_states.get(&project.id) else {
+                continue;
+            };
+            for panel in &state.panels {
+                for pane in panel.layout.panes() {
+                    let pty_id = pane.pty_id;
+                    let route = pty_id
+                        .and_then(|pty_id| self.terminal_routes.get(&pty_id))
+                        .and_then(|route| {
+                            exact_terminal_route(
+                                Some(route),
+                                &binding.execution_host_id,
+                                &binding.worktree_id,
+                                &panel.tab_id,
+                                &pane.pane_key,
+                                &pane.terminal_session_id,
+                                pane.terminal_incarnation_id.as_ref(),
+                            )
+                        })
+                        .cloned();
+                    let (recovery, backend_notice, terminal_exited) = pty_id
+                        .and_then(|pty_id| self.terminals.get(&pty_id))
+                        .map(|terminal| {
+                            let terminal = terminal.read(cx);
+                            (
+                                terminal.recovery(),
+                                terminal.backend_notice().map(bounded_text),
+                                terminal.is_exited(),
+                            )
+                        })
+                        .unwrap_or((TerminalRecovery::Unavailable, None, false));
+                    let agent = route
+                        .as_ref()
+                        .and_then(|route| self.agent_runtime.active_run_for_route(route))
+                        .and_then(|run| self.resolve_agent_target(&run.run_id));
+                    let remote_agent = pty_id
+                        .and_then(|pty_id| self.remote_agent_polls.get(&pty_id))
+                        .filter(|poll| route.as_ref() == Some(poll.route()))
+                        .map(|poll| RemoteAgentDiagnosticView {
+                            capability: poll.capability,
+                            connectivity: poll.connectivity,
+                            process_count: poll.process_count,
+                            connection_epoch: poll.connection_epoch,
+                            last_error: poll.last_error.as_deref().map(bounded_text),
+                            updated_at_unix_ms: poll.updated_at_unix_ms,
+                        });
+                    diagnostics.push(TerminalDiagnosticView {
+                        project_id: project.id.clone(),
+                        pane_id: pane.id.clone(),
+                        pane_label: self.pane_display_label(&project.id, pane),
+                        route,
+                        recovery,
+                        exited: terminal_exited
+                            || pty_id.is_some_and(|pty_id| self.is_pty_exited(pty_id)),
+                        backend_notice,
+                        agent,
+                        remote_agent,
+                    });
+                }
+            }
+        }
+        diagnostics
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mt_identity::{ExecutionHostId, HostInstallId, RepoId};
+
+    fn route() -> AgentRoute {
+        let install = HostInstallId::new();
+        AgentRoute {
+            execution_host_id: ExecutionHostId::derive("test-host", &install),
+            worktree_id: WorktreeId::derive(
+                &RepoId::derive(
+                    &ExecutionHostId::derive("test-host", &install),
+                    "/repo/.git",
+                ),
+                "/repo",
+                None,
+            ),
+            tab_id: TabId::new(),
+            pane_key: PaneKey::new(),
+            terminal_session_id: TerminalSessionId::new(),
+            terminal_incarnation_id: TerminalIncarnationId::new(),
+        }
+    }
+
+    #[test]
+    fn exact_terminal_route_rejects_every_reused_identity_boundary() {
+        let route = route();
+        let matches = |execution_host_id: &ExecutionHostId,
+                       worktree_id: &WorktreeId,
+                       tab_id: &TabId,
+                       pane_key: &PaneKey,
+                       terminal_session_id: &TerminalSessionId,
+                       terminal_incarnation_id: &TerminalIncarnationId| {
+            route_matches_terminal(
+                &route,
+                execution_host_id,
+                worktree_id,
+                tab_id,
+                pane_key,
+                terminal_session_id,
+                Some(terminal_incarnation_id),
+            )
+        };
+        assert!(matches(
+            &route.execution_host_id,
+            &route.worktree_id,
+            &route.tab_id,
+            &route.pane_key,
+            &route.terminal_session_id,
+            &route.terminal_incarnation_id,
+        ));
+        let other_host = ExecutionHostId::derive("other-host", &HostInstallId::new());
+        let other_worktree = WorktreeId::derive(
+            &RepoId::derive(&route.execution_host_id, "/other/.git"),
+            "/other",
+            None,
+        );
+        assert!(!matches(
+            &other_host,
+            &route.worktree_id,
+            &route.tab_id,
+            &route.pane_key,
+            &route.terminal_session_id,
+            &route.terminal_incarnation_id,
+        ));
+        assert!(!matches(
+            &route.execution_host_id,
+            &other_worktree,
+            &route.tab_id,
+            &route.pane_key,
+            &route.terminal_session_id,
+            &route.terminal_incarnation_id,
+        ));
+        assert!(!matches(
+            &route.execution_host_id,
+            &route.worktree_id,
+            &TabId::new(),
+            &route.pane_key,
+            &route.terminal_session_id,
+            &route.terminal_incarnation_id,
+        ));
+        assert!(!matches(
+            &route.execution_host_id,
+            &route.worktree_id,
+            &route.tab_id,
+            &PaneKey::new(),
+            &route.terminal_session_id,
+            &route.terminal_incarnation_id,
+        ));
+        assert!(!matches(
+            &route.execution_host_id,
+            &route.worktree_id,
+            &route.tab_id,
+            &route.pane_key,
+            &TerminalSessionId::new(),
+            &route.terminal_incarnation_id,
+        ));
+        assert!(!matches(
+            &route.execution_host_id,
+            &route.worktree_id,
+            &route.tab_id,
+            &route.pane_key,
+            &route.terminal_session_id,
+            &TerminalIncarnationId::new(),
+        ));
+    }
+
+    #[test]
+    fn diagnostics_accept_only_an_exact_current_terminal_route() {
+        let route = route();
+        assert_eq!(
+            exact_terminal_route(
+                Some(&route),
+                &route.execution_host_id,
+                &route.worktree_id,
+                &route.tab_id,
+                &route.pane_key,
+                &route.terminal_session_id,
+                Some(&route.terminal_incarnation_id),
+            ),
+            Some(&route)
+        );
+        assert!(
+            exact_terminal_route(
+                Some(&route),
+                &route.execution_host_id,
+                &route.worktree_id,
+                &route.tab_id,
+                &route.pane_key,
+                &route.terminal_session_id,
+                None,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn worktree_context_rollback_only_accepts_exact_zero() {
+        assert!(orca_worktree_context_enabled_for(None));
+        assert!(!orca_worktree_context_enabled_for(Some(OsStr::new("0"))));
+        assert!(orca_worktree_context_enabled_for(Some(OsStr::new("false"))));
+        assert!(orca_worktree_context_enabled_for(Some(OsStr::new("1"))));
+    }
+
+    #[test]
+    fn agent_activity_order_keeps_connectivity_out_of_the_activity_axis() {
+        assert_eq!(activity_rank(AgentActivity::Waiting, true), 0);
+        assert_eq!(activity_rank(AgentActivity::Working, false), 1);
+        assert_eq!(activity_rank(AgentActivity::Done, false), 2);
+        assert_eq!(activity_rank(AgentActivity::Unknown, false), 3);
+    }
+
+    #[test]
+    fn diagnostic_text_is_unicode_safe_and_bounded() {
+        let text = "状".repeat(DIAGNOSTIC_TEXT_LIMIT + 10);
+        assert_eq!(bounded_text(&text).chars().count(), DIAGNOSTIC_TEXT_LIMIT);
+    }
+}

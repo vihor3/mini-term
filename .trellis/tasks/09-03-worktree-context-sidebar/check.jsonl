@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/mt-app/backend/quality-guidelines.md", "reason": "Package quality gates and Docker-only verification rules"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer identity and stale-result review checklist"}
+{"file": ".trellis/spec/mt-app/backend/workbench-identity-contract.md", "reason": "Verify stable worktree and terminal ownership boundaries"}
+{"file": ".trellis/spec/mt-app/backend/file-workbench-contract.md", "reason": "Verify preview, rename, and focus behavior remains unchanged"}
+{"file": ".trellis/spec/mt-app/backend/remote-agent-reconciliation-contract.md", "reason": "Verify exact route and generation fences"}
+{"file": ".trellis/spec/mt-ai/backend/agent-runtime-contract.md", "reason": "Verify history never becomes live Agent evidence"}
+{"file": ".trellis/spec/mt-ssh/backend/remote-agent-inventory-contract.md", "reason": "Verify remote capability/connectivity projection"}

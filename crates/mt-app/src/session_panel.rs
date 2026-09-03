@@ -45,22 +45,33 @@
 //! 的是纯逻辑([`crate::session_branch`])与节点点击行为([`jump_to_session`])
 //! —— 点同一种节点必须有同一种行为。
 
+use std::collections::HashMap;
+
 use gpui::{
-    AnyElement, App, Context, Entity, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Task,
+    AnyElement, App, Context, Entity, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
+    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Task,
     Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::ActiveTheme as _;
+use gpui_component::scroll::Scrollbar;
 use gpui_component::text::{TextView, TextViewStyle};
-use mt_ui::tooltip::Tooltip;
-use mt_ai::sessions::{AiSession, AiSessionMessage, LineageEdge};
+use mt_ai::{
+    AgentActivity, AgentConnectivity, AgentProvider,
+    sessions::{AiSession, AiSessionMessage, LineageEdge},
+};
+use mt_identity::WorktreeId;
 use mt_ui::icons::{AiVendor, BrandIcon, StatusDot, StatusKind};
+use mt_ui::tooltip::Tooltip;
 
 use crate::i18n::{t, tr};
 use crate::menu;
 use crate::notify::ToastKind;
+use crate::pane::TerminalRecovery;
 use crate::session_branch::{build_session_tree, flatten_session_tree, merge_lineage_edges};
-use crate::store::AppStore;
+use crate::store::{
+    AgentTargetView, AppStore, RemoteAgentProbeCapability, TerminalDiagnosticView,
+    orca_worktree_context_enabled,
+};
 use crate::toast;
 use crate::tree::{AiSessionRef, PaneStatus};
 use crate::ui;
@@ -118,7 +129,27 @@ pub(crate) fn jump_to_session(
     window: &mut Window,
     cx: &mut App,
 ) -> Task<()> {
-    if let Some((project_id, pane_id, _)) = store.read(cx).find_live_session_pane(&session.id) {
+    if orca_worktree_context_enabled() {
+        let run_id = {
+            let store = store.read(cx);
+            store.active_worktree_id().and_then(|worktree_id| {
+                let targets = store.agent_target_views_for_worktree(worktree_id);
+                session_agent_target(&session.session_type, &session.id, &targets)
+                    .map(|target| target.run_id.clone())
+            })
+        };
+        if let Some(run_id) = run_id {
+            let activated = store.update(cx, |store, cx| {
+                store.activate_agent_run(&run_id, window, cx)
+            });
+            if activated {
+                crate::workbench_area::activate_terminal_page(window, cx);
+            }
+            return Task::ready(());
+        }
+    } else if let Some((project_id, pane_id, _)) =
+        store.read(cx).find_live_session_pane(&session.id)
+    {
         store.update(cx, |store, cx| {
             store.set_active_project(&project_id, cx);
             store.activate_pane(&project_id, &pane_id, window, cx);
@@ -220,6 +251,110 @@ fn status_kind(status: PaneStatus) -> StatusKind {
     }
 }
 
+fn agent_vendor(provider: &AgentProvider) -> Option<AiVendor> {
+    match provider.as_str() {
+        AgentProvider::CODEX => Some(AiVendor::OpenAi),
+        other => AiVendor::from_session_type(other).or_else(|| AiVendor::infer(Some(other), None)),
+    }
+}
+
+fn agent_activity_label(activity: AgentActivity) -> &'static str {
+    match activity {
+        AgentActivity::Starting => "Starting",
+        AgentActivity::Working => "Working",
+        AgentActivity::Blocked => "Needs you",
+        AgentActivity::Waiting => "Waiting",
+        AgentActivity::Done => "Done",
+        AgentActivity::Failed => "Failed",
+        AgentActivity::Interrupted => "Interrupted",
+        AgentActivity::Exited => "Exited",
+        AgentActivity::Unknown => "Unknown",
+    }
+}
+
+fn agent_activity_color(activity: AgentActivity, attention: bool) -> gpui::Hsla {
+    if attention || matches!(activity, AgentActivity::Blocked | AgentActivity::Failed) {
+        ui::color_warning()
+    } else if matches!(activity, AgentActivity::Starting | AgentActivity::Working) {
+        ui::accent()
+    } else if matches!(activity, AgentActivity::Done | AgentActivity::Waiting) {
+        ui::color_success()
+    } else {
+        ui::text_muted()
+    }
+}
+
+fn agent_connectivity_label(connectivity: AgentConnectivity) -> &'static str {
+    match connectivity {
+        AgentConnectivity::Live => "Live",
+        AgentConnectivity::Stale => "Stale",
+        AgentConnectivity::Disconnected => "Offline",
+    }
+}
+
+fn agent_connectivity_color(connectivity: AgentConnectivity) -> gpui::Hsla {
+    match connectivity {
+        AgentConnectivity::Live => ui::color_success(),
+        AgentConnectivity::Stale => ui::color_warning(),
+        AgentConnectivity::Disconnected => ui::text_muted(),
+    }
+}
+
+fn terminal_recovery_label(recovery: TerminalRecovery) -> &'static str {
+    match recovery {
+        TerminalRecovery::Fresh => "Fresh",
+        TerminalRecovery::Reattached => "Warm reattach",
+        TerminalRecovery::RestoredHistory => "Restored history",
+        TerminalRecovery::Compatibility => "Compatibility",
+        TerminalRecovery::Unavailable => "Unavailable",
+    }
+}
+
+fn terminal_recovery_color(recovery: TerminalRecovery) -> gpui::Hsla {
+    match recovery {
+        TerminalRecovery::Fresh => ui::text_muted(),
+        TerminalRecovery::Reattached => ui::color_success(),
+        TerminalRecovery::RestoredHistory => ui::color_info(),
+        TerminalRecovery::Compatibility => ui::color_warning(),
+        TerminalRecovery::Unavailable => ui::color_error(),
+    }
+}
+
+fn remote_probe_label(capability: RemoteAgentProbeCapability, process_count: usize) -> String {
+    match capability {
+        RemoteAgentProbeCapability::Unknown => "Detecting".to_string(),
+        RemoteAgentProbeCapability::LinuxProc => format!("Linux probe · {process_count}"),
+        RemoteAgentProbeCapability::Unsupported => "Unsupported".to_string(),
+    }
+}
+
+fn agent_session_identity_matches(
+    provider: &AgentProvider,
+    provider_session_id: Option<&str>,
+    session_type: &str,
+    session_id: &str,
+) -> bool {
+    let Ok(session_provider) = session_type.parse::<AgentProvider>() else {
+        return false;
+    };
+    provider == &session_provider && provider_session_id == Some(session_id)
+}
+
+fn session_agent_target<'a>(
+    session_type: &str,
+    session_id: &str,
+    targets: &'a [AgentTargetView],
+) -> Option<&'a AgentTargetView> {
+    targets.iter().find(|target| {
+        agent_session_identity_matches(
+            &target.provider,
+            target.provider_session_id.as_deref(),
+            session_type,
+            session_id,
+        )
+    })
+}
+
 /// ISO 8601 → 「刚刚 / n 分钟前 / n 小时前 / n 天前 / 月-日」。
 fn format_time(iso: &str) -> String {
     let Ok(ts) = chrono::DateTime::parse_from_rfc3339(iso) else {
@@ -304,6 +439,8 @@ struct Preview {
     /// element id —— 光按序号编的话,换一个会话看会命中上一个会话同序号那条
     /// 的缓存状态,首帧显示的是别人的正文。
     session_id: String,
+    session_type: String,
+    wsl_distro: Option<String>,
     title: String,
     loading: bool,
     error: Option<String>,
@@ -314,6 +451,7 @@ struct Preview {
     shown: usize,
     /// 可复制的 resume 命令(拼不出来则为 None)。
     command: Option<String>,
+    scroll: ScrollHandle,
 }
 
 impl Preview {
@@ -326,7 +464,11 @@ impl Preview {
         self.messages
             .iter()
             .map(|m| {
-                let role = if m.role == "user" { "User" } else { "Assistant" };
+                let role = if m.role == "user" {
+                    "User"
+                } else {
+                    "Assistant"
+                };
                 match format_message_time(&m.timestamp) {
                     Some(time) => format!("{role} · {time}\n{}", m.content),
                     None => format!("{role}\n{}", m.content),
@@ -360,10 +502,80 @@ impl ViewMode {
     }
 }
 
+fn session_source_signature(
+    project_id: &str,
+    path: &str,
+    wsl_distro: Option<&str>,
+    source: &crate::ssh_conn::SessionSource,
+) -> String {
+    match source {
+        crate::ssh_conn::SessionSource::Local => format!(
+            "{project_id}|{path}|local|wsl:{}",
+            wsl_distro.unwrap_or_default()
+        ),
+        crate::ssh_conn::SessionSource::BrokenRemote => {
+            format!("{project_id}|{path}|ssh:broken")
+        }
+        crate::ssh_conn::SessionSource::Remote(connection) => format!(
+            "{project_id}|{path}|ssh:{}:{:016x}",
+            connection.id,
+            crate::remote_ssh::connection_fingerprint(connection)
+        ),
+    }
+}
+
+fn session_scope_changed(
+    cache_enabled: bool,
+    current_worktree: Option<&WorktreeId>,
+    next_worktree: Option<&WorktreeId>,
+    current_path: Option<&str>,
+    next_path: Option<&str>,
+    current_source: Option<&str>,
+    next_source: Option<&str>,
+) -> bool {
+    current_path != next_path
+        || (cache_enabled && (current_worktree != next_worktree || current_source != next_source))
+}
+
+fn session_scope_request_matches(
+    request_generation: u64,
+    current_generation: u64,
+    request_worktree: Option<&WorktreeId>,
+    current_worktree: Option<&WorktreeId>,
+    request_source: Option<&str>,
+    current_source: Option<&str>,
+) -> bool {
+    request_generation == current_generation
+        && request_worktree == current_worktree
+        && request_source == current_source
+}
+
+fn loading_preview_needs_restart(preview: Option<&Preview>) -> bool {
+    preview.is_some_and(|preview| preview.loading)
+}
+
+struct SessionScopeState {
+    host: Vec<AiSession>,
+    wsl: Vec<AiSession>,
+    lineage: Vec<LineageEdge>,
+    bookkept: Vec<LineageEdge>,
+    display_count: usize,
+    view: ViewMode,
+    remote: bool,
+    remote_broken: bool,
+    preview: Option<Preview>,
+    preview_refresh_needed: bool,
+    list_scroll: ScrollHandle,
+}
+
 pub struct SessionPanel {
     store: Entity<AppStore>,
-    /// 上次拉取用的项目路径 —— 项目切换时据此重拉。
+    /// 上次拉取用的 canonical worktree 路径。
     project_path: Option<String>,
+    current_worktree: Option<WorktreeId>,
+    source_signature: Option<String>,
+    scope_cache: HashMap<WorktreeId, SessionScopeState>,
+    scope_generation: u64,
     host: Vec<AiSession>,
     wsl: Vec<AiSession>,
     /// 磁盘扫描出来的分支边。树视图的数据面,平铺不消费。
@@ -390,15 +602,26 @@ pub struct SessionPanel {
     /// 断链的远程项目:列表恒空,头部给一句断链提示。
     remote_broken: bool,
     preview: Option<Preview>,
+    preview_request: u64,
+    preview_refresh_pending: bool,
+    list_scroll: ScrollHandle,
     _tasks: Vec<Task<()>>,
 }
 
 impl SessionPanel {
     pub fn new(store: Entity<AppStore>, cx: &mut Context<Self>) -> Self {
         cx.observe(&store, |this: &mut Self, _, cx| {
-            // 项目切了才重拉;别的 store 变化(状态灯之类)只重画
-            let path = this.store.read(cx).active_project().map(|p| p.path.clone());
-            if path != this.project_path {
+            let (worktree_id, path, source_signature) = this.active_scope(cx);
+            if session_scope_changed(
+                orca_worktree_context_enabled(),
+                this.current_worktree.as_ref(),
+                worktree_id.as_ref(),
+                this.project_path.as_deref(),
+                path.as_deref(),
+                this.source_signature.as_deref(),
+                source_signature.as_deref(),
+            ) {
+                this.switch_scope(worktree_id, path, source_signature, cx);
                 if this.visible {
                     this.refresh(false, cx);
                 } else {
@@ -417,6 +640,10 @@ impl SessionPanel {
         Self {
             store,
             project_path: None,
+            current_worktree: None,
+            source_signature: None,
+            scope_cache: HashMap::new(),
+            scope_generation: 0,
             host: Vec::new(),
             wsl: Vec::new(),
             lineage: Vec::new(),
@@ -431,8 +658,128 @@ impl SessionPanel {
             remote: false,
             remote_broken: false,
             preview: None,
+            preview_request: 0,
+            preview_refresh_pending: false,
+            list_scroll: ScrollHandle::new(),
             _tasks: Vec::new(),
         }
+    }
+
+    fn active_scope(&self, cx: &App) -> (Option<WorktreeId>, Option<String>, Option<String>) {
+        let store = self.store.read(cx);
+        let Some(project) = store.active_project() else {
+            return (None, None, None);
+        };
+        let path = store
+            .canonical_worktree_path_for_project(&project.id)
+            .unwrap_or(&project.path)
+            .to_string();
+        let source = crate::ssh_conn::session_source(project, store.ssh_connections());
+        let signature = session_source_signature(
+            &project.id,
+            &path,
+            project.wsl_sessions_distro.as_deref(),
+            &source,
+        );
+        (
+            store.active_worktree_id().cloned(),
+            Some(path),
+            Some(signature),
+        )
+    }
+
+    fn default_view(&self, cx: &App) -> ViewMode {
+        match self.store.read(cx).session_list_view() {
+            "tree" => ViewMode::Tree,
+            _ => ViewMode::Flat,
+        }
+    }
+
+    fn save_scope(&mut self) {
+        let Some(worktree_id) = self.current_worktree.clone() else {
+            return;
+        };
+        let preview_refresh_needed =
+            self.preview_refresh_pending || loading_preview_needs_restart(self.preview.as_ref());
+        self.scope_cache.insert(
+            worktree_id,
+            SessionScopeState {
+                host: std::mem::take(&mut self.host),
+                wsl: std::mem::take(&mut self.wsl),
+                lineage: std::mem::take(&mut self.lineage),
+                bookkept: std::mem::take(&mut self.bookkept),
+                display_count: self.display_count,
+                view: self.view,
+                remote: self.remote,
+                remote_broken: self.remote_broken,
+                preview: self.preview.take(),
+                preview_refresh_needed,
+                list_scroll: std::mem::replace(&mut self.list_scroll, ScrollHandle::new()),
+            },
+        );
+    }
+
+    fn restore_scope(&mut self, worktree_id: Option<&WorktreeId>, default_view: ViewMode) -> bool {
+        let preview_refresh_needed = if let Some(state) =
+            worktree_id.and_then(|worktree_id| self.scope_cache.remove(worktree_id))
+        {
+            self.host = state.host;
+            self.wsl = state.wsl;
+            self.lineage = state.lineage;
+            self.bookkept = state.bookkept;
+            self.display_count = state.display_count;
+            self.view = state.view;
+            self.remote = state.remote;
+            self.remote_broken = state.remote_broken;
+            self.preview = state.preview;
+            self.list_scroll = state.list_scroll;
+            state.preview_refresh_needed
+        } else {
+            self.host.clear();
+            self.wsl.clear();
+            self.lineage.clear();
+            self.bookkept.clear();
+            self.display_count = PAGE_SIZE;
+            self.view = default_view;
+            self.remote = false;
+            self.remote_broken = false;
+            self.preview = None;
+            self.list_scroll = ScrollHandle::new();
+            false
+        };
+        self.loading = false;
+        self.wsl_loading = false;
+        preview_refresh_needed
+    }
+
+    fn switch_scope(
+        &mut self,
+        worktree_id: Option<WorktreeId>,
+        path: Option<String>,
+        source_signature: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let default_view = self.default_view(cx);
+        let source_changed_in_place =
+            self.current_worktree == worktree_id && self.source_signature != source_signature;
+        let preview_refresh_needed = if orca_worktree_context_enabled() {
+            self.save_scope();
+            self.restore_scope(worktree_id.as_ref(), default_view)
+        } else {
+            self.scope_cache.clear();
+            self.restore_scope(None, default_view);
+            false
+        };
+        self.scope_generation = self.scope_generation.wrapping_add(1);
+        self.request_id = self.request_id.wrapping_add(1);
+        self.preview_request = self.preview_request.wrapping_add(1);
+        self._tasks.clear();
+        self.current_worktree = worktree_id;
+        self.project_path = path;
+        self.source_signature = source_signature;
+        self.stale = true;
+        self.preview_refresh_pending =
+            preview_refresh_needed || (source_changed_in_place && self.preview.is_some());
     }
 
     fn toggle_view(&mut self, cx: &mut Context<Self>) {
@@ -445,6 +792,18 @@ impl SessionPanel {
 
     /// 抽屉开合。第一次展开(或关着的时候项目切过)在这里补拉。
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        let (worktree_id, path, source_signature) = self.active_scope(cx);
+        if session_scope_changed(
+            orca_worktree_context_enabled(),
+            self.current_worktree.as_ref(),
+            worktree_id.as_ref(),
+            self.project_path.as_deref(),
+            path.as_deref(),
+            self.source_signature.as_deref(),
+            source_signature.as_deref(),
+        ) {
+            self.switch_scope(worktree_id, path, source_signature, cx);
+        }
         if self.visible == visible {
             return;
         }
@@ -463,14 +822,20 @@ impl SessionPanel {
     pub fn refresh(&mut self, force: bool, cx: &mut Context<Self>) {
         let (project, source) = {
             let store = self.store.read(cx);
-            let project = store
-                .active_project()
-                .map(|p| (p.path.clone(), p.wsl_sessions_distro.clone()));
+            let project = store.active_project().map(|project| {
+                (
+                    store
+                        .canonical_worktree_path_for_project(&project.id)
+                        .unwrap_or(&project.path)
+                        .to_string(),
+                    project.wsl_sessions_distro.clone(),
+                )
+            });
             // **唯一的来源分流开关**(见模块注释):三条并发请求与远程那一条
             // 不会同时发出
-            let source = store.active_project().map(|p| {
-                crate::ssh_conn::session_source(p, store.ssh_connections())
-            });
+            let source = store
+                .active_project()
+                .map(|p| crate::ssh_conn::session_source(p, store.ssh_connections()));
             (project, source)
         };
         // 自记账边:mini-term 自己发起的 fork 当场记下的 child→parent。
@@ -498,18 +863,24 @@ impl SessionPanel {
                 branch_title: None,
             })
             .collect();
-        self.request_id += 1;
+        self.request_id = self.request_id.wrapping_add(1);
         let req = self.request_id;
+        let generation = self.scope_generation;
+        let worktree_id = self.current_worktree.clone();
+        let source_signature = self.source_signature.clone();
+        let restart_preview =
+            self.preview_refresh_pending || loading_preview_needs_restart(self.preview.as_ref());
+        self.preview_refresh_pending = false;
         self.stale = false;
-        self.host.clear();
-        self.wsl.clear();
-        self.lineage.clear();
-        self.display_count = PAGE_SIZE;
-        self.preview = None;
         self._tasks.clear();
 
         let Some((path, distro)) = project else {
             self.project_path = None;
+            self.host.clear();
+            self.wsl.clear();
+            self.lineage.clear();
+            self.bookkept.clear();
+            self.preview = None;
             self.loading = false;
             self.wsl_loading = false;
             self.remote = false;
@@ -519,6 +890,9 @@ impl SessionPanel {
         };
         self.project_path = Some(path.clone());
         self.loading = true;
+        if restart_preview && self.preview.is_some() {
+            self.load_preview(cx);
+        }
 
         // ── SSH 远程项目:**只**取远程来源 ────────────────────────
         match source {
@@ -527,6 +901,9 @@ impl SessionPanel {
                 // 同路径的会话贴到这个远程项目上(见 `ssh_conn::SessionSource`)
                 self.remote = true;
                 self.remote_broken = true;
+                self.host.clear();
+                self.wsl.clear();
+                self.lineage.clear();
                 self.loading = false;
                 self.wsl_loading = false;
                 cx.notify();
@@ -535,19 +912,30 @@ impl SessionPanel {
             Some(crate::ssh_conn::SessionSource::Remote(conn)) => {
                 self.remote = true;
                 self.remote_broken = false;
+                self.wsl.clear();
+                self.lineage.clear();
                 self.wsl_loading = false;
                 let remote_path = path.clone();
+                let remote_source_signature = source_signature.clone();
                 self._tasks.push(cx.spawn(async move |this, cx| {
                     // [后台] SFTP 往返,秒级;`ai_sessions` 永不返 Err
                     // (失败静默降级为空表,与原版同)
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move {
-                            crate::remote_ssh::ai_sessions(&conn, &remote_path, force)
-                        })
-                        .await;
+                    let result =
+                        cx.background_executor()
+                            .spawn(async move {
+                                crate::remote_ssh::ai_sessions(&conn, &remote_path, force)
+                            })
+                            .await;
                     let _ = this.update(cx, |this: &mut Self, cx| {
-                        if this.request_id != req {
+                        if !session_scope_request_matches(
+                            generation,
+                            this.scope_generation,
+                            worktree_id.as_ref(),
+                            this.current_worktree.as_ref(),
+                            remote_source_signature.as_deref(),
+                            this.source_signature.as_deref(),
+                        ) || this.request_id != req
+                        {
                             return;
                         }
                         this.host = result.unwrap_or_default();
@@ -566,13 +954,23 @@ impl SessionPanel {
 
         // 宿主来源:秒出,先显示
         let host_path = path.clone();
+        let host_worktree_id = worktree_id.clone();
+        let host_source_signature = source_signature.clone();
         self._tasks.push(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { mt_ai::sessions::get_ai_sessions(host_path) })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
-                if this.request_id != req {
+                if !session_scope_request_matches(
+                    generation,
+                    this.scope_generation,
+                    host_worktree_id.as_ref(),
+                    this.current_worktree.as_ref(),
+                    host_source_signature.as_deref(),
+                    this.source_signature.as_deref(),
+                ) || this.request_id != req
+                {
                     return;
                 }
                 this.host = result.unwrap_or_default();
@@ -584,6 +982,8 @@ impl SessionPanel {
         // 分支边:与会话列表**并行**拉取(只读文件头,同量级),同一个请求序号守卫;
         // 失败按无分支处理,不影响会话列表
         let lineage_path = path.clone();
+        let lineage_worktree_id = worktree_id.clone();
+        let lineage_source_signature = source_signature.clone();
         self._tasks.push(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -592,7 +992,15 @@ impl SessionPanel {
                 })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
-                if this.request_id != req {
+                if !session_scope_request_matches(
+                    generation,
+                    this.scope_generation,
+                    lineage_worktree_id.as_ref(),
+                    this.current_worktree.as_ref(),
+                    lineage_source_signature.as_deref(),
+                    this.source_signature.as_deref(),
+                ) || this.request_id != req
+                {
                     return;
                 }
                 // 扫描永远返回 Vec(内部逐文件容错),失败 = 空表 = 按无分支处理
@@ -604,6 +1012,8 @@ impl SessionPanel {
         // WSL 来源:并行请求,到达后合并(不阻塞宿主显示)
         if has_wsl_source(&path, distro.as_deref()) {
             self.wsl_loading = true;
+            let wsl_worktree_id = worktree_id.clone();
+            let wsl_source_signature = source_signature;
             self._tasks.push(cx.spawn(async move |this, cx| {
                 let result = cx
                     .background_executor()
@@ -612,7 +1022,15 @@ impl SessionPanel {
                     })
                     .await;
                 let _ = this.update(cx, |this: &mut Self, cx| {
-                    if this.request_id != req {
+                    if !session_scope_request_matches(
+                        generation,
+                        this.scope_generation,
+                        wsl_worktree_id.as_ref(),
+                        this.current_worktree.as_ref(),
+                        wsl_source_signature.as_deref(),
+                        this.source_signature.as_deref(),
+                    ) || this.request_id != req
+                    {
                         return;
                     }
                     this.wsl = result.unwrap_or_default();
@@ -621,6 +1039,7 @@ impl SessionPanel {
                 });
             }));
         } else {
+            self.wsl.clear();
             self.wsl_loading = false;
         }
         cx.notify();
@@ -676,7 +1095,13 @@ impl SessionPanel {
     }
 
     /// 在当前活动 pane 里恢复会话。没有终端时退化成「开一个新的再恢复」。
-    fn resume(&mut self, command: String, new_tab: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn resume(
+        &mut self,
+        command: String,
+        new_tab: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(project_id) = self.store.read(cx).active_project_id.clone() else {
             return;
         };
@@ -750,47 +1175,237 @@ impl SessionPanel {
         entries
     }
 
+    fn render_runtime_row(
+        &self,
+        diagnostic: TerminalDiagnosticView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let recovery_label = terminal_recovery_label(diagnostic.recovery);
+        let recovery_color = terminal_recovery_color(diagnostic.recovery);
+        let agent = diagnostic.agent.clone();
+        let activity = agent
+            .as_ref()
+            .map(|agent| agent_activity_label(agent.activity));
+        let activity_color = agent
+            .as_ref()
+            .map(|agent| agent_activity_color(agent.activity, agent.attention));
+        let connectivity = agent.as_ref().map(|agent| agent.connectivity).or_else(|| {
+            diagnostic
+                .remote_agent
+                .as_ref()
+                .map(|probe| probe.connectivity)
+        });
+        let remote_probe = diagnostic
+            .remote_agent
+            .as_ref()
+            .map(|probe| remote_probe_label(probe.capability, probe.process_count));
+        let detail = diagnostic.backend_notice.clone().or_else(|| {
+            diagnostic
+                .remote_agent
+                .as_ref()
+                .and_then(|probe| probe.last_error.clone())
+        });
+        let tooltip = detail
+            .clone()
+            .unwrap_or_else(|| format!("{} · {recovery_label}", diagnostic.pane_label));
+        let run_id = agent.as_ref().map(|agent| agent.run_id.clone());
+        let vendor = agent
+            .as_ref()
+            .and_then(|agent| agent_vendor(&agent.provider));
+        let pane_label = diagnostic.pane_label.clone();
+        let exited = diagnostic.exited;
+
+        div()
+            .id(SharedString::from(format!(
+                "session-runtime-{}-{}",
+                diagnostic.project_id, diagnostic.pane_id
+            )))
+            .flex()
+            .items_start()
+            .gap(px(8.0))
+            .px(px(10.0))
+            .py(px(6.0))
+            .text_size(ui::font_px(10.5))
+            .hover(|row| row.bg(ui::border_subtle()))
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .when_some(run_id, |row, run_id| {
+                row.cursor_pointer()
+                    .on_click(cx.listener(move |this: &mut Self, _, window, cx| {
+                        let activated = this.store.update(cx, |store, cx| {
+                            store.activate_agent_run(&run_id, window, cx)
+                        });
+                        if activated {
+                            crate::workbench_area::activate_terminal_page(window, cx);
+                        }
+                    }))
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .mt(px(1.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when_some(vendor, |icon, vendor| {
+                        icon.child(
+                            BrandIcon::new(Some(vendor))
+                                .size(px(13.0))
+                                .color(ui::text_secondary()),
+                        )
+                    })
+                    .when(vendor.is_none(), |icon| {
+                        icon.child(
+                            div()
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded_full()
+                                .bg(recovery_color),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(ui::text_secondary())
+                                    .child(pane_label),
+                            )
+                            .when_some(activity.zip(activity_color), |line, (label, color)| {
+                                line.child(
+                                    div()
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
+                                        .text_color(color)
+                                        .child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(color))
+                                        .child(label),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .mt(px(2.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .text_size(ui::font_px(9.0))
+                            .text_color(ui::text_muted())
+                            .child(
+                                div()
+                                    .w(px(5.0))
+                                    .h(px(5.0))
+                                    .rounded_full()
+                                    .bg(recovery_color),
+                            )
+                            .child(recovery_label)
+                            .when(exited, |line| {
+                                line.child("·")
+                                    .child(div().text_color(ui::color_error()).child("Exited"))
+                            })
+                            .when_some(remote_probe, |line, label| line.child("·").child(label))
+                            .child(div().flex_1())
+                            .when_some(connectivity, |line, connectivity| {
+                                let color = agent_connectivity_color(connectivity);
+                                line.child(
+                                    div()
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
+                                        .child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(color))
+                                        .child(agent_connectivity_label(connectivity)),
+                                )
+                            }),
+                    )
+                    .when_some(detail, |body, detail| {
+                        body.child(
+                            div()
+                                .mt(px(2.0))
+                                .truncate()
+                                .text_size(ui::font_px(9.0))
+                                .text_color(ui::text_muted())
+                                .child(detail),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
     fn open_preview(&mut self, session: &AiSession, cx: &mut Context<Self>) {
-        let Some(project_path) = self.project_path.clone() else {
-            return;
-        };
+        self.preview_refresh_pending = false;
         self.preview = Some(Preview {
             session_id: session.id.clone(),
+            session_type: session.session_type.clone(),
+            wsl_distro: session.wsl_distro.clone(),
             title: session.title.clone(),
-            loading: true,
+            loading: false,
             error: None,
             messages: Vec::new(),
             rendered_messages: Vec::new(),
             shown: PREVIEW_PAGE_SIZE,
             command: build_resume_command(&session.session_type, &session.id),
+            scroll: ScrollHandle::new(),
         });
-        let session_type = session.session_type.clone();
-        let session_id = session.id.clone();
-        let distro = session.wsl_distro.clone();
-        // 远程会话的正文在**另一台机器**上,只能走 SFTP 读(`ai_session_content`);
-        // 连接从主线程取好再传进后台(`remote_ssh` 的线程口径)
-        let remote = {
+        self.load_preview(cx);
+        cx.notify();
+    }
+
+    fn load_preview(&mut self, cx: &mut Context<Self>) {
+        self.preview_refresh_pending = false;
+        let Some(project_path) = self.project_path.clone() else {
+            return;
+        };
+        let Some(preview) = self.preview.as_mut() else {
+            return;
+        };
+        preview.loading = true;
+        preview.error = None;
+        let expected_session_id = preview.session_id.clone();
+        let session_type = preview.session_type.clone();
+        let distro = preview.wsl_distro.clone();
+        self.preview_request = self.preview_request.wrapping_add(1);
+        let request = self.preview_request;
+        let generation = self.scope_generation;
+        let worktree_id = self.current_worktree.clone();
+        let source_signature = self.source_signature.clone();
+        let source = {
             let store = self.store.read(cx);
             store
-                .active_project_id
-                .as_deref()
-                .and_then(|id| store.remote_connection_of(id))
+                .active_project()
+                .map(|project| crate::ssh_conn::session_source(project, store.ssh_connections()))
         };
+        let session_id = expected_session_id.clone();
         self._tasks.push(cx.spawn(async move |this, cx| {
-            // 正文可能几 MB + WSL 9P / SFTP 往返,雷打不动丢后台
+            // 正文可能几 MB + WSL 9P / SFTP 往返,雷打不动丢后台。
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let result = match remote {
-                        // 循环续读到文件末尾:单次 SFTP 读封顶 8 MB,只读一段的话
-                        // 大会话后半截会被静默丢掉(前进保证与总量护栏在 all 里)
-                        Some(conn) => crate::remote_ssh::ai_session_content_all(
-                            &conn,
-                            &session_type,
-                            &session_id,
-                            &project_path,
-                        ),
-                        None => mt_ai::sessions::get_ai_session_content(
+                    let result = match source {
+                        Some(crate::ssh_conn::SessionSource::Remote(connection)) => {
+                            crate::remote_ssh::ai_session_content_all(
+                                &connection,
+                                &session_type,
+                                &session_id,
+                                &project_path,
+                            )
+                        }
+                        Some(crate::ssh_conn::SessionSource::BrokenRemote) => {
+                            Err("SSH connection is unavailable".to_string())
+                        }
+                        _ => mt_ai::sessions::get_ai_session_content(
                             session_type,
                             session_id,
                             project_path,
@@ -809,9 +1424,23 @@ impl SessionPanel {
                 })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
+                if !session_scope_request_matches(
+                    generation,
+                    this.scope_generation,
+                    worktree_id.as_ref(),
+                    this.current_worktree.as_ref(),
+                    source_signature.as_deref(),
+                    this.source_signature.as_deref(),
+                ) || this.preview_request != request
+                {
+                    return;
+                }
                 let Some(preview) = this.preview.as_mut() else {
                     return;
                 };
+                if preview.session_id != expected_session_id {
+                    return;
+                }
                 preview.loading = false;
                 match result {
                     Ok((messages, rendered_messages)) => {
@@ -823,7 +1452,6 @@ impl SessionPanel {
                 cx.notify();
             });
         }));
-        cx.notify();
     }
 
     /// 会话正文预览。
@@ -852,11 +1480,13 @@ impl SessionPanel {
         let shown = preview.shown.min(total);
         let has_messages = total > 0;
         let text_style = preview_text_style(cx);
+        let preview_scroll = preview.scroll.clone();
 
         let mut body = div()
             .id("session-preview-body")
             .flex_1()
             .overflow_y_scroll()
+            .track_scroll(&preview_scroll)
             .px(px(10.0))
             .flex()
             .flex_col()
@@ -990,10 +1620,14 @@ impl SessionPanel {
                             "session-preview-back",
                             format!("‹ {}", t("fileViewer", "back")),
                         )
-                        .on_click(cx.listener(|this: &mut Self, _, _window, cx| {
-                            this.preview = None;
-                            cx.notify();
-                        })),
+                        .on_click(cx.listener(
+                            |this: &mut Self, _, _window, cx| {
+                                this.preview = None;
+                                this.preview_refresh_pending = false;
+                                this.preview_request = this.preview_request.wrapping_add(1);
+                                cx.notify();
+                            },
+                        )),
                     )
                     .child(
                         div()
@@ -1007,8 +1641,12 @@ impl SessionPanel {
                         el.child(
                             ui::ghost_button("session-copy-all", t("sessionViewer", "copyAll"))
                                 .tooltip(move |window, cx| {
-                                    Tooltip::new(tr!("sessionViewer", "messageCount", count = total))
-                                        .build(window, cx)
+                                    Tooltip::new(tr!(
+                                        "sessionViewer",
+                                        "messageCount",
+                                        count = total
+                                    ))
+                                    .build(window, cx)
                                 })
                                 .on_click(cx.listener(|this: &mut Self, _, _window, cx| {
                                     let Some(preview) = this.preview.as_ref() else {
@@ -1034,7 +1672,19 @@ impl SessionPanel {
                         )
                     }),
             )
-            .child(body)
+            .child(
+                div().relative().flex_1().min_h_0().child(body).child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .child(
+                            Scrollbar::vertical(&preview_scroll).id("session-preview-scrollbar"),
+                        ),
+                ),
+            )
             .into_any_element()
     }
 }
@@ -1056,6 +1706,31 @@ impl Render for SessionPanel {
 
         let rows = self.rows();
         let sessions: Vec<AiSession> = rows.iter().map(|(s, _, _)| s.clone()).collect();
+        let worktree_context = orca_worktree_context_enabled();
+        let (agent_targets, terminal_diagnostics) = if worktree_context {
+            self.current_worktree
+                .as_ref()
+                .map(|worktree_id| {
+                    let store = self.store.read(cx);
+                    (
+                        store.agent_target_views_for_worktree(worktree_id),
+                        store.terminal_diagnostics_for_worktree(worktree_id, cx),
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let session_targets: Vec<Option<AgentTargetView>> = sessions
+            .iter()
+            .map(|session| {
+                session_agent_target(&session.session_type, &session.id, &agent_targets).cloned()
+            })
+            .collect();
+        let runtime_rows: Vec<AnyElement> = terminal_diagnostics
+            .into_iter()
+            .map(|diagnostic| self.render_runtime_row(diagnostic, cx))
+            .collect();
         let total = self.host.len() + self.wsl.len();
         let has_more = self.display_count < total;
         let loading = self.loading;
@@ -1078,15 +1753,15 @@ impl Render for SessionPanel {
                     .unwrap_or_else(|| "SSH".to_string()),
             )
         };
-        // 树模式的在跑徽章要对 pane 状态保持反应性 —— 面板已经 observe 了 store,
-        // 这里逐行现查即可(跨项目遍历,规模是 pane 数)
-        let live_of: Vec<Option<(String, PaneStatus)>> = if tree {
+        // 回滚时保留旧的 pane 会话嗅探。新路径只认 AgentRuntimeRegistry
+        // 的精确 run，历史记录本身不创建 live 状态。
+        let legacy_live_of: Vec<Option<(String, PaneStatus)>> = if !worktree_context && tree {
             sessions
                 .iter()
-                .map(|s| {
+                .map(|session| {
                     self.store
                         .read(cx)
-                        .find_live_session_pane(&s.id)
+                        .find_live_session_pane(&session.id)
                         .map(|(project_id, _, status)| (project_id, status))
                 })
                 .collect()
@@ -1106,10 +1781,31 @@ impl Render for SessionPanel {
         let mut list = div()
             .id("session-list")
             .flex_1()
-            .overflow_y_scroll()
             .px(px(6.0))
             .flex()
             .flex_col();
+
+        if !runtime_rows.is_empty() {
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .pb(px(5.0))
+                    .mb(px(3.0))
+                    .border_b_1()
+                    .border_color(ui::border_subtle())
+                    .child(
+                        div()
+                            .px(px(10.0))
+                            .pt(px(8.0))
+                            .pb(px(3.0))
+                            .text_size(ui::font_px(9.0))
+                            .text_color(ui::text_muted())
+                            .child("Runtime"),
+                    )
+                    .children(runtime_rows),
+            );
+        }
 
         if remote_broken {
             // 断链:列表恒空 + 一句明确提示(原版是静默空表,见模块注释)
@@ -1162,20 +1858,35 @@ impl Render for SessionPanel {
                 AiVendor::for_session(&session.session_type, session.model.as_deref())
             } else {
                 // 平铺的缺省是 claude(原版 `TYPE_VENDOR[...] ?? 'claude'`)
-                AiVendor::from_session_type(&session.session_type)
-                    .or(Some(AiVendor::Claude))
+                AiVendor::from_session_type(&session.session_type).or(Some(AiVendor::Claude))
             };
             let wsl_badge = session.wsl_distro.clone();
-            let live = live_of.get(i).cloned().flatten();
-            let live_project = live
+            let agent_target = session_targets.get(i).cloned().flatten();
+            let legacy_live = legacy_live_of.get(i).cloned().flatten();
+            let live_project = agent_target
                 .as_ref()
-                .map(|(project_id, _)| project_name_of(project_id));
-            // tooltip:树模式区分 live / 非 live,平铺恒是会话标题
-            let tip: SharedString = if tree {
+                .map(|target| target.project_name.clone())
+                .or_else(|| {
+                    legacy_live
+                        .as_ref()
+                        .map(|(project_id, _)| project_name_of(project_id))
+                });
+            let tip: SharedString = if let Some(target) = agent_target.as_ref() {
+                format!(
+                    "{display_title}\n{} · {} · {}",
+                    target.provider,
+                    agent_activity_label(target.activity),
+                    agent_connectivity_label(target.connectivity)
+                )
+                .into()
+            } else if tree {
                 match &live_project {
-                    Some(name) => {
-                        tr!("sessionList", "branchTree.runningIn", project = name.clone()).into()
-                    }
+                    Some(name) => tr!(
+                        "sessionList",
+                        "branchTree.runningIn",
+                        project = name.clone()
+                    )
+                    .into(),
                     None => format!(
                         "{display_title}\n{}",
                         t("sessionList", "branchTree.clickToResume")
@@ -1187,6 +1898,8 @@ impl Render for SessionPanel {
             };
             let session_for_menu = session.clone();
             let session_for_click = session.clone();
+            let target_run_id = agent_target.as_ref().map(|target| target.run_id.clone());
+            let has_target = target_run_id.is_some();
 
             list = list.child(
                 div()
@@ -1199,10 +1912,19 @@ impl Render for SessionPanel {
                     .rounded(px(4.0))
                     .text_size(ui::font_px(12.0))
                     .hover(|el| el.bg(ui::border_subtle()))
-                    // 树模式整行可点(跳转 / 恢复),平铺不可点
-                    .when(tree, |el| el.cursor_pointer())
+                    .when(tree || has_target, |el| el.cursor_pointer())
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                    .when(tree, |el| {
+                    .when_some(target_run_id, |el, run_id| {
+                        el.on_click(cx.listener(move |this: &mut Self, _, window, cx| {
+                            let activated = this.store.update(cx, |store, cx| {
+                                store.activate_agent_run(&run_id, window, cx)
+                            });
+                            if activated {
+                                crate::workbench_area::activate_terminal_page(window, cx);
+                            }
+                        }))
+                    })
+                    .when(tree && !has_target, |el| {
                         el.on_click(cx.listener(move |this: &mut Self, _, window, cx| {
                             let task =
                                 jump_to_session(&this.store, session_for_click.clone(), window, cx);
@@ -1255,14 +1977,15 @@ impl Render for SessionPanel {
                                     .flex()
                                     .items_center()
                                     .gap(px(6.0))
-                                    // 在跑状态点
-                                    .when_some(live.as_ref(), |el, (_, status)| {
-                                        el.child(
-                                            StatusDot::new(status_kind(*status))
-                                                .size(px(11.0))
-                                                .color(ui::status_color(*status))
-                                                .contrast(ui::bg_surface()),
-                                        )
+                                    .when(agent_target.is_none(), |line| {
+                                        line.when_some(legacy_live.as_ref(), |line, (_, status)| {
+                                            line.child(
+                                                StatusDot::new(status_kind(*status))
+                                                    .size(px(11.0))
+                                                    .color(ui::status_color(*status))
+                                                    .contrast(ui::bg_surface()),
+                                            )
+                                        })
                                     })
                                     .child(
                                         div()
@@ -1271,23 +1994,66 @@ impl Render for SessionPanel {
                                             .truncate()
                                             .text_color(ui::text_secondary())
                                             .child(display_title.clone()),
-                                    ),
+                                    )
+                                    .when_some(agent_target.as_ref(), |line, target| {
+                                        let color =
+                                            agent_activity_color(target.activity, target.attention);
+                                        line.child(
+                                            div()
+                                                .flex_none()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(4.0))
+                                                .text_size(ui::font_px(9.0))
+                                                .text_color(color)
+                                                .child(
+                                                    div()
+                                                        .w(px(5.0))
+                                                        .h(px(5.0))
+                                                        .rounded_full()
+                                                        .bg(color),
+                                                )
+                                                .child(agent_activity_label(target.activity)),
+                                        )
+                                    }),
                             )
                             .child(
                                 div()
-                                    // 时间/徽章行不覆盖字号 —— 原版
-                                    // (`SessionList.tsx:423`)与行同为 `text-xs`,
-                                    // 靠 `--text-muted` 拉开层次
                                     .mt(px(2.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
                                     .text_color(ui::text_muted())
-                                    .child(match (wsl_badge, remote_badge) {
-                                        (Some(distro), _) => format!(
-                                            "{time} · {}·{distro}",
-                                            t("sessionList", "wslBadge")
-                                        ),
-                                        // 远程会话标识:显示来源连接名
-                                        (None, Some(name)) => format!("{time} · {name}"),
-                                        (None, None) => time,
+                                    .child(div().flex_1().min_w_0().truncate().child(
+                                        match (wsl_badge, remote_badge) {
+                                            (Some(distro), _) => format!(
+                                                "{time} · {}·{distro}",
+                                                t("sessionList", "wslBadge")
+                                            ),
+                                            (None, Some(name)) => format!("{time} · {name}"),
+                                            (None, None) => time,
+                                        },
+                                    ))
+                                    .when_some(agent_target.as_ref(), |line, target| {
+                                        let color = agent_connectivity_color(target.connectivity);
+                                        line.child(
+                                            div()
+                                                .flex_none()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(4.0))
+                                                .text_size(ui::font_px(9.0))
+                                                .child(
+                                                    div()
+                                                        .w(px(5.0))
+                                                        .h(px(5.0))
+                                                        .rounded_full()
+                                                        .bg(color),
+                                                )
+                                                .child(agent_connectivity_label(
+                                                    target.connectivity,
+                                                )),
+                                        )
                                     }),
                             ),
                     ),
@@ -1311,6 +2077,17 @@ impl Render for SessionPanel {
                     .child(tr!("sessionList", "loadMore", n = remaining)),
             );
         }
+
+        let list = list.track_scroll(&self.list_scroll).overflow_y_scroll();
+        let list_shell = div().relative().flex_1().min_h_0().child(list).child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .child(Scrollbar::vertical(&self.list_scroll).id("session-list-scrollbar")),
+        );
 
         container
             .child(
@@ -1412,13 +2189,19 @@ impl Render for SessionPanel {
                             ),
                     ),
             )
-            .child(list)
+            .child(list_shell)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn worktree_id(hex: char) -> WorktreeId {
+        format!("worktree-v1:{}", hex.to_string().repeat(64))
+            .parse()
+            .unwrap()
+    }
 
     /// resume 命令按 agent 分派,id 过白名单。
     #[test]
@@ -1505,6 +2288,8 @@ mod tests {
         };
         let preview = Preview {
             session_id: "s1".into(),
+            session_type: "claude".into(),
+            wsl_distro: None,
             title: "t".into(),
             loading: false,
             error: None,
@@ -1515,6 +2300,7 @@ mod tests {
             rendered_messages: vec!["问题".into(), "回答".into()],
             shown: PREVIEW_PAGE_SIZE,
             command: None,
+            scroll: ScrollHandle::new(),
         };
         let text = preview.all_text();
         assert!(text.contains("User · "), "{text}");
@@ -1537,6 +2323,8 @@ mod tests {
             .collect();
         let preview = Preview {
             session_id: "s1".into(),
+            session_type: "claude".into(),
+            wsl_distro: None,
             title: "t".into(),
             loading: false,
             error: None,
@@ -1547,8 +2335,185 @@ mod tests {
             messages,
             shown: PREVIEW_PAGE_SIZE,
             command: None,
+            scroll: ScrollHandle::new(),
         };
         let text = preview.all_text();
         assert!(text.contains(&format!("第{}条", PREVIEW_PAGE_SIZE + 4)));
+    }
+    #[test]
+    fn session_scope_request_rejects_old_generation_and_worktree() {
+        use mt_identity::{ExecutionHostId, HostInstallId, RepoId};
+
+        let install = HostInstallId::new();
+        let host = ExecutionHostId::derive("session-panel", &install);
+        let repo = RepoId::derive(&host, "/repo/.git");
+        let first = WorktreeId::derive(&repo, "/repo/first", None);
+        let second = WorktreeId::derive(&repo, "/repo/second", None);
+
+        assert!(session_scope_request_matches(
+            7,
+            7,
+            Some(&first),
+            Some(&first),
+            Some("source-a"),
+            Some("source-a"),
+        ));
+        assert!(!session_scope_request_matches(
+            6,
+            7,
+            Some(&first),
+            Some(&first),
+            Some("source-a"),
+            Some("source-a"),
+        ));
+        assert!(!session_scope_request_matches(
+            7,
+            7,
+            Some(&first),
+            Some(&second),
+            Some("source-a"),
+            Some("source-a"),
+        ));
+        assert!(!session_scope_request_matches(
+            7,
+            7,
+            Some(&first),
+            None,
+            Some("source-a"),
+            Some("source-a"),
+        ));
+        assert!(!session_scope_request_matches(
+            7,
+            7,
+            Some(&first),
+            Some(&first),
+            Some("source-a"),
+            Some("source-b"),
+        ));
+    }
+
+    #[test]
+    fn scope_gate_keeps_legacy_path_only_comparison() {
+        let first = worktree_id('a');
+        let second = worktree_id('b');
+        assert!(session_scope_changed(
+            true,
+            Some(&first),
+            Some(&second),
+            Some("/repo/shared"),
+            Some("/repo/shared"),
+            Some("local-a"),
+            Some("local-b"),
+        ));
+        assert!(!session_scope_changed(
+            false,
+            Some(&first),
+            Some(&second),
+            Some("/repo/shared"),
+            Some("/repo/shared"),
+            Some("local-a"),
+            Some("local-b"),
+        ));
+        assert!(session_scope_changed(
+            false,
+            Some(&first),
+            Some(&first),
+            Some("/repo/a"),
+            Some("/repo/b"),
+            Some("local-a"),
+            Some("local-a"),
+        ));
+    }
+
+    #[test]
+    fn loading_preview_is_restarted_after_scope_restore() {
+        let mut preview = Preview {
+            session_id: "session-1".into(),
+            session_type: "claude".into(),
+            wsl_distro: None,
+            title: "Preview".into(),
+            loading: false,
+            error: None,
+            messages: Vec::new(),
+            rendered_messages: Vec::new(),
+            shown: PREVIEW_PAGE_SIZE,
+            command: None,
+            scroll: ScrollHandle::new(),
+        };
+        assert!(!loading_preview_needs_restart(Some(&preview)));
+        preview.loading = true;
+        assert!(loading_preview_needs_restart(Some(&preview)));
+        assert!(!loading_preview_needs_restart(None));
+    }
+
+    #[test]
+    fn runtime_labels_keep_recovery_activity_and_connectivity_separate() {
+        assert_eq!(terminal_recovery_label(TerminalRecovery::Fresh), "Fresh");
+        assert_eq!(
+            terminal_recovery_label(TerminalRecovery::Reattached),
+            "Warm reattach"
+        );
+        assert_eq!(
+            terminal_recovery_label(TerminalRecovery::RestoredHistory),
+            "Restored history"
+        );
+        assert_eq!(
+            terminal_recovery_label(TerminalRecovery::Compatibility),
+            "Compatibility"
+        );
+        assert_eq!(
+            terminal_recovery_label(TerminalRecovery::Unavailable),
+            "Unavailable"
+        );
+        assert_eq!(agent_activity_label(AgentActivity::Working), "Working");
+        assert_eq!(
+            agent_connectivity_label(AgentConnectivity::Disconnected),
+            "Offline"
+        );
+    }
+
+    #[test]
+    fn remote_probe_labels_cover_capability_states() {
+        assert_eq!(
+            remote_probe_label(RemoteAgentProbeCapability::Unknown, 0),
+            "Detecting"
+        );
+        assert_eq!(
+            remote_probe_label(RemoteAgentProbeCapability::LinuxProc, 3),
+            "Linux probe · 3"
+        );
+        assert_eq!(
+            remote_probe_label(RemoteAgentProbeCapability::Unsupported, 0),
+            "Unsupported"
+        );
+    }
+
+    #[test]
+    fn history_only_matches_exact_provider_session_identity() {
+        let provider = "claude-code".parse::<AgentProvider>().unwrap();
+        assert!(agent_session_identity_matches(
+            &provider,
+            Some("session-1"),
+            "claude",
+            "session-1"
+        ));
+        assert!(!agent_session_identity_matches(
+            &provider,
+            Some("session-1"),
+            "codex",
+            "session-1"
+        ));
+        assert!(!agent_session_identity_matches(
+            &provider,
+            Some("session-2"),
+            "claude",
+            "session-1"
+        ));
+        assert!(!agent_session_identity_matches(
+            &provider,
+            None,
+            "claude",
+            "session-1"
+        ));
     }
 }

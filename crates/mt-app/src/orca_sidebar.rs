@@ -12,15 +12,16 @@ use gpui::{
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div,
     prelude::FluentBuilder as _, px,
 };
+use mt_ai::{AgentActivity, AgentConnectivity};
 use mt_config::{ProjectConfig, ProjectTreeItem};
 use mt_project::worktree::{WorktreeFact, WorktreePathState, WorktreeScan};
-use mt_ui::icons::FileIcon;
 use mt_ui::icons::vector::{Geom, Ink, Shape, VectorIcon};
+use mt_ui::icons::{AiVendor, BrandIcon, FileIcon};
 use mt_ui::tooltip::Tooltip;
 
 use crate::i18n::t;
 use crate::menu;
-use crate::store::AppStore;
+use crate::store::{AgentTargetView, AppStore, orca_worktree_context_enabled};
 use crate::tree::PaneStatus;
 use crate::ui;
 
@@ -992,6 +993,122 @@ impl OrcaProjectSidebar {
             )
     }
 
+    fn render_agent_row(
+        &self,
+        agent: &AgentTargetView,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let run_id = agent.run_id.clone();
+        let provider = agent.provider.as_str();
+        let vendor = match provider {
+            "codex" => Some(AiVendor::OpenAi),
+            other => {
+                AiVendor::from_session_type(other).or_else(|| AiVendor::infer(Some(other), None))
+            }
+        };
+        let activity = match agent.activity {
+            AgentActivity::Starting => "Starting",
+            AgentActivity::Working => "Working",
+            AgentActivity::Blocked => "Needs you",
+            AgentActivity::Waiting => "Waiting",
+            AgentActivity::Done => "Done",
+            AgentActivity::Failed => "Failed",
+            AgentActivity::Interrupted => "Interrupted",
+            AgentActivity::Exited => "Exited",
+            AgentActivity::Unknown => "Unknown",
+        };
+        let activity_color = if agent.attention
+            || matches!(
+                agent.activity,
+                AgentActivity::Blocked | AgentActivity::Failed
+            ) {
+            ui::color_warning()
+        } else if matches!(
+            agent.activity,
+            AgentActivity::Starting | AgentActivity::Working
+        ) {
+            ui::accent()
+        } else if matches!(agent.activity, AgentActivity::Done | AgentActivity::Waiting) {
+            ui::color_success()
+        } else {
+            ui::text_muted()
+        };
+        let connectivity = match agent.connectivity {
+            AgentConnectivity::Live => "Live",
+            AgentConnectivity::Stale => "Stale",
+            AgentConnectivity::Disconnected => "Offline",
+        };
+        let connectivity_color = match agent.connectivity {
+            AgentConnectivity::Live => ui::color_success(),
+            AgentConnectivity::Stale => ui::color_warning(),
+            AgentConnectivity::Disconnected => ui::text_muted(),
+        };
+        let tooltip = format!(
+            "{} · {} · {}",
+            agent.provider, agent.pane_label, connectivity
+        );
+
+        div()
+            .id(SharedString::from(format!("orca-agent-{}", agent.run_id)))
+            .h(px(30.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .pl(px(50.0))
+            .pr(px(9.0))
+            .cursor_pointer()
+            .text_size(ui::font_px(10.5))
+            .text_color(ui::text_secondary())
+            .hover(|row| row.bg(ui::border_subtle()).text_color(ui::text_primary()))
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .on_click(cx.listener(move |_this, _event, window, cx| {
+                let activated = AppStore::global(cx).update(cx, |store, cx| {
+                    store.activate_agent_run(&run_id, window, cx)
+                });
+                if activated {
+                    crate::workbench_area::activate_terminal_page(window, cx);
+                }
+            }))
+            .child(
+                BrandIcon::new(vendor)
+                    .size(px(13.0))
+                    .color(ui::text_secondary()),
+            )
+            .child(
+                div()
+                    .w(px(6.0))
+                    .h(px(6.0))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(activity_color),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(agent.pane_label.clone()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .text_size(ui::font_px(9.0))
+                    .text_color(ui::text_muted())
+                    .child(
+                        div()
+                            .w(px(5.0))
+                            .h(px(5.0))
+                            .rounded_full()
+                            .bg(connectivity_color),
+                    )
+                    .child(activity),
+            )
+    }
+
     fn render_footer(&self, cx: &mut Context<Self>) -> gpui::Div {
         div()
             .flex_none()
@@ -1030,8 +1147,23 @@ impl OrcaProjectSidebar {
 
 impl Render for OrcaProjectSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (projects, active_project_id) = {
+        let (projects, active_project_id, agents_by_project) = {
             let store = self.store.read(cx);
+            let agents_by_project = if orca_worktree_context_enabled() {
+                store
+                    .projects()
+                    .iter()
+                    .filter_map(|project| {
+                        let worktree_id = store.worktree_id_for_project(&project.id)?;
+                        Some((
+                            project.id.clone(),
+                            store.agent_target_views_for_worktree(worktree_id),
+                        ))
+                    })
+                    .collect::<HashMap<_, _>>()
+            } else {
+                HashMap::new()
+            };
             (
                 build_project_rows(
                     store.projects(),
@@ -1039,6 +1171,7 @@ impl Render for OrcaProjectSidebar {
                     &self.snapshots,
                 ),
                 store.active_project_id.clone(),
+                agents_by_project,
             )
         };
 
@@ -1058,6 +1191,13 @@ impl Render for OrcaProjectSidebar {
                         active_project_id.as_deref(),
                         cx,
                     ));
+                    if let Some(project_id) = worktree.configured_project_id.as_deref()
+                        && let Some(agents) = agents_by_project.get(project_id)
+                    {
+                        for agent in agents {
+                            rows = rows.child(self.render_agent_row(agent, cx));
+                        }
+                    }
                 }
             }
         }

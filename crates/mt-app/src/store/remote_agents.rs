@@ -73,6 +73,10 @@ struct RemoteAgentCandidate {
 }
 
 impl RemoteAgentPollState {
+    pub(super) fn route(&self) -> &AgentRoute {
+        &self.route
+    }
+
     fn from_request(request: &RemoteAgentPollRequest) -> Self {
         Self {
             capability: RemoteAgentProbeCapability::Unknown,
