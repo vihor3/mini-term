@@ -516,11 +516,14 @@ pub fn close_document_source(
 /// terminal pane (toast, session list, title bar, tray). Activating a hidden
 /// pane without switching the workbench page would leave focus in an invisible
 /// PTY while the document page remains on screen.
-pub fn activate_terminal_page(window: &mut Window, cx: &mut App) {
+pub fn activate_terminal_page(window: &mut Window, cx: &mut App) -> bool {
     let Some(area) = global(cx) else {
-        return;
+        return false;
     };
-    area.update(cx, |area, cx| area.activate_terminal(window, cx));
+    area.update(cx, |area, cx| {
+        area.activate_terminal(window, cx);
+        area.is_terminal_active(cx)
+    })
 }
 
 /// 文档异步读盘完成时用来判断是否可以接管焦点。后台页签或其它项目的迟到结果

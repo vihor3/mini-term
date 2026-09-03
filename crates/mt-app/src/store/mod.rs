@@ -41,7 +41,7 @@ use std::sync::Arc;
 use gpui::{App, Context, Entity, Global, Subscription, Task};
 use mt_ai::AgentRuntimeRegistry;
 use mt_config::{AppConfig, ConfigStore, ProjectConfig};
-use mt_identity::{HostInstallId, WorktreeId};
+use mt_identity::{AgentEventId, AgentRunId, HostInstallId, WorktreeId};
 use mt_layout::ProjectWorktreeBinding;
 use mt_relay::MobileRelayStatusPayload;
 use mt_terminal_host::{TerminalHostClient, terminal_host_enabled};
@@ -375,6 +375,9 @@ pub struct AppStore {
     terminal_routes: HashMap<u32, identity::TerminalRoute>,
     /// Rich agent state consumed by worktree cards and the global Agents feed.
     agent_runtime: AgentRuntimeRegistry,
+    /// Process-local acknowledgement watermark for the global exact-run feed.
+    /// This is deliberately separate from the legacy pane-level `DoneTracker`.
+    agent_feed_acknowledged: HashMap<AgentRunId, AgentEventId>,
     /// 每个 pane 的退出订阅,与 terminals 同生命周期。
     pane_subs: HashMap<u32, Subscription>,
     /// 当前拿着键盘焦点的 pane(旧版靠 DOM `activeElement` 推,这里显式维护)。
@@ -702,6 +705,7 @@ impl AppStore {
             terminal_host,
             terminal_routes: HashMap::new(),
             agent_runtime: AgentRuntimeRegistry::default(),
+            agent_feed_acknowledged: HashMap::new(),
             pane_subs: HashMap::new(),
             focused_pane_id: None,
             mobile_relay_status: None,

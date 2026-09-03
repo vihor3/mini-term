@@ -111,19 +111,42 @@ impl AppStore {
     /// 切过去才起 PTY(与切项目同一懒创建时机);最大化态只对上一个面板有意义,
     /// 一并清掉;活动下标随布局落盘。
     pub fn set_active_panel(&mut self, project_id: &str, panel_id: &str, cx: &mut Context<Self>) {
+        self.set_active_panel_inner(project_id, panel_id, true, cx);
+    }
+
+    pub(super) fn set_active_panel_without_hydration(
+        &mut self,
+        project_id: &str,
+        panel_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.set_active_panel_inner(project_id, panel_id, false, cx)
+    }
+
+    fn set_active_panel_inner(
+        &mut self,
+        project_id: &str,
+        panel_id: &str,
+        hydrate: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(state) = self.project_states.get_mut(project_id) else {
-            return;
+            return false;
         };
-        if !state.panels.iter().any(|p| p.id == panel_id)
-            || state.active_panel_id.as_deref() == Some(panel_id)
-        {
-            return;
+        if !state.panels.iter().any(|panel| panel.id == panel_id) {
+            return false;
+        }
+        if state.active_panel_id.as_deref() == Some(panel_id) {
+            return true;
         }
         state.active_panel_id = Some(panel_id.to_string());
         state.maximized_pane_id = None;
-        self.hydrate_project(project_id, cx);
+        if hydrate {
+            self.hydrate_project(project_id, cx);
+        }
         self.save_project_layout_soon(project_id, cx);
         cx.notify();
+        true
     }
 
     /// 换活动面板并把键盘焦点交给它当前激活的 pane(竖条点击的落点)。

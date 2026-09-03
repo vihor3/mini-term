@@ -455,26 +455,65 @@ impl AppStore {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.activate_pane_inner(project_id, pane_id, true, window, cx);
+    }
+
+    /// Focuses only an already-attached pane. Unlike ordinary navigation, this
+    /// path cannot hydrate another dormant pane while routing a live Agent.
+    pub(super) fn activate_existing_pane(
+        &mut self,
+        project_id: &str,
+        pane_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.activate_pane_inner(project_id, pane_id, false, window, cx)
+    }
+
+    fn activate_pane_inner(
+        &mut self,
+        project_id: &str,
+        pane_id: &str,
+        hydrate: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         // 切走之前把上一个 pane 的 IME 预编辑串收掉,否则组合中失焦会在画面上
         // 留一串下划线残影(而且那次组合的候选框还挂在旧位置)。
         self.clear_preedit_of_focused(cx);
         // 目标 pane 可能在别的面板上(跳待办/会话跳转/未读完成都按 pane 定位)——
         // 先把那个面板切成活动的,否则「跳过去了但画面没变」
-        let owner_panel = self
+        let Some(owner_panel) = self
             .project_states
             .get(project_id)
-            .and_then(|s| s.panel_id_of_pane(pane_id))
-            .map(str::to_string);
-        if let Some(panel_id) = owner_panel {
-            self.set_active_panel(project_id, &panel_id, cx);
+            .and_then(|state| state.panel_id_of_pane(pane_id))
+            .map(str::to_string)
+        else {
+            return false;
+        };
+        let panel_ready = if hydrate {
+            self.set_active_panel(project_id, &owner_panel, cx);
+            true
+        } else {
+            self.set_active_panel_without_hydration(project_id, &owner_panel, cx)
+        };
+        if !panel_ready {
+            return false;
         }
-        if let Some(state) = self.project_states.get_mut(project_id)
-            && let Some(layout) = state.layout_of_pane_mut(pane_id)
-        {
-            layout.activate_pane(pane_id);
+        let Some(layout) = self
+            .project_states
+            .get_mut(project_id)
+            .and_then(|state| state.layout_of_pane_mut(pane_id))
+        else {
+            return false;
+        };
+        if layout.pane(pane_id).is_none() {
+            return false;
         }
+        layout.activate_pane(pane_id);
         self.focus_pane(project_id, pane_id, window, cx);
         self.save_project_layout_soon(project_id, cx);
+        true
     }
 
     /// 叶内环形切 tab(Ctrl+Tab / Ctrl+Shift+Tab)。只有一个 tab 时什么也不做。

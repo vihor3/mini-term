@@ -239,8 +239,8 @@ impl AppStore {
         // 退出登记同理:留着会让复用同一编号的新 PTY 一开就顶着「已断开」遮罩
         self.exited_ptys.remove(&pty_id);
         self.remove_remote_agent_terminal(pty_id);
-        if kill && let Some(route) = self.terminal_routes.get(&pty_id) {
-            self.agent_runtime.remove_route(route);
+        if kill && let Some(route) = self.terminal_routes.get(&pty_id).cloned() {
+            self.remove_agent_runtime_route(&route);
         }
         self.terminal_routes.remove(&pty_id);
         if let Some(entity) = self.terminals.remove(&pty_id) {

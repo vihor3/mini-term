@@ -26,10 +26,10 @@ pub fn agent_target_views_for_worktree(
 ) -> Vec<AgentTargetView>;
 
 pub fn activate_agent_run(
-    &mut self,
+    store: &Entity<AppStore>,
     run_id: &AgentRunId,
     window: &mut Window,
-    cx: &mut Context<Self>,
+    cx: &mut App,
 ) -> bool;
 
 pub fn terminal_diagnostics_for_worktree(
@@ -99,8 +99,11 @@ or provider session ID.
   normalized provider plus exact provider session ID.
 - Agent activation starts from `AgentRunId`, re-resolves the current route, and
   verifies execution host, worktree, tab, pane, terminal session, incarnation,
-  and current PTY route before focus. Failure is inert and never creates or
-  resumes a terminal.
+  current PTY route, and terminal entity before focus. Exact live navigation
+  switches project/panel without hydration, reveals the terminal workbench, then
+  acknowledges the selected event. A stale target is inert and never creates or
+  resumes a terminal. Feed grouping and watermark details are normative in
+  `global-agent-activity-contract.md`.
 - Terminal recovery, Agent activity, and Agent connectivity are independent
   axes. `RestoredHistory` is not `Reattached`; `Disconnected` does not imply
   `Done`; an exited terminal is displayed separately from both.

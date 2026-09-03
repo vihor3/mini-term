@@ -71,6 +71,19 @@ impl AppStore {
     // === 项目 ===
 
     pub fn set_active_project(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.set_active_project_inner(id, true, cx);
+    }
+
+    /// Exact live-runtime navigation must not hydrate unrelated dormant panes.
+    pub(super) fn set_active_project_without_hydration(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_active_project_inner(id, false, cx);
+    }
+
+    fn set_active_project_inner(&mut self, id: &str, hydrate: bool, cx: &mut Context<Self>) {
         if self.active_project_id.as_deref() == Some(id) {
             return;
         }
@@ -80,8 +93,11 @@ impl AppStore {
             state.needs_attention = false;
         }
         self.config.last_active_project_id = Some(id.to_string());
-        // 切过去才起 PTY:恢复出来的布局在这一刻补齐(旧版的懒创建时机)
-        self.hydrate_project(id, cx);
+        // Ordinary project navigation keeps lazy hydration. Exact live-runtime
+        // navigation already owns a terminal entity and deliberately skips it.
+        if hydrate {
+            self.hydrate_project(id, cx);
+        }
         self.save_config_soon(cx);
         cx.notify();
     }

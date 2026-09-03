@@ -1,0 +1,7 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Verify focus preservation, stale callback ownership, and Docker quality gates"}
+{"file":".trellis/spec/mt-ai/backend/agent-runtime-contract.md","reason":"Verify history never becomes live evidence and events remain deduplicated"}
+{"file":".trellis/spec/mt-app/backend/remote-agent-reconciliation-contract.md","reason":"Verify connectivity stays separate from activity and remote epochs stay exact"}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Verify feed rows use only authoritative exact target projections"}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Verify successful activation focuses the exact route and failed activation creates nothing"}
+{"file":".trellis/spec/mt-ssh/backend/remote-agent-inventory-contract.md","reason":"Verify the global feed does not broaden remote inventory claims"}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/orca-worktree-terminal-agent-architecture.md","reason":"Check parent architecture and Project-to-Worktree ownership against the final phase"}

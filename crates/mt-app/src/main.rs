@@ -50,6 +50,7 @@
 //! 状态形状与操作语义对照 `src/store.ts`,见 [`store`] 与 [`tree`] 两个模块的注释。
 
 mod activity_bar;
+mod agent_activity;
 mod ai;
 mod branch_family;
 mod clipboard;
@@ -134,9 +135,13 @@ use gpui::{
 use gpui::StyledImage as _;
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_component::{Root, WindowExt as _};
+use mt_ai::{AgentActivity, AgentConnectivity};
 use mt_identity::WorktreeId;
 use mt_ui::tooltip::Tooltip;
 
+use crate::agent_activity::{
+    AGENT_ACTIVITY_RECENT_LIMIT, build_agent_activity_feed, global_agent_activity_enabled,
+};
 use crate::ai::AiBridge;
 use crate::file_tree::FileTree;
 use crate::focus_nav::Direction;
@@ -145,7 +150,7 @@ use crate::i18n::{t, tr};
 use crate::orca_sidebar::{OrcaProjectSidebar, OrcaSidebarEvent};
 use crate::project_list::ProjectList;
 use crate::session_panel::SessionPanel;
-use crate::store::{AiProjectKind, AppStore, DoneScope, PendingAlert};
+use crate::store::{AgentTargetView, AppStore, DoneScope, PendingAlert};
 use crate::terminal_area::TerminalArea;
 use crate::title_bar::TitleBar;
 use crate::tray::{Tray, TrayEvent};
@@ -329,6 +334,67 @@ fn agents_overlay_horizontal_geometry(viewport_width: f32) -> (f32, f32) {
     let left = preferred_left.min(max_left.max(ORCA_AGENTS_MARGIN));
     let width = (viewport_width - left - ORCA_AGENTS_MARGIN).clamp(0.0, ORCA_AGENTS_MAX_WIDTH);
     (left, width)
+}
+
+fn agent_activity_label(activity: AgentActivity) -> &'static str {
+    match activity {
+        AgentActivity::Starting => "Starting",
+        AgentActivity::Working => "Working",
+        AgentActivity::Blocked => "Needs you",
+        AgentActivity::Waiting => "Waiting",
+        AgentActivity::Done => "Done",
+        AgentActivity::Failed => "Failed",
+        AgentActivity::Interrupted => "Interrupted",
+        AgentActivity::Exited => "Exited",
+        AgentActivity::Unknown => "Unknown",
+    }
+}
+
+fn agent_activity_color(target: &AgentTargetView) -> gpui::Hsla {
+    if target.attention
+        || matches!(
+            target.activity,
+            AgentActivity::Blocked | AgentActivity::Failed
+        )
+    {
+        ui::color_warning()
+    } else if matches!(
+        target.activity,
+        AgentActivity::Starting | AgentActivity::Working
+    ) {
+        ui::accent()
+    } else if matches!(
+        target.activity,
+        AgentActivity::Done | AgentActivity::Waiting
+    ) {
+        ui::color_success()
+    } else {
+        ui::text_muted()
+    }
+}
+
+fn agent_connectivity_label(connectivity: AgentConnectivity) -> &'static str {
+    match connectivity {
+        AgentConnectivity::Live => "Live",
+        AgentConnectivity::Stale => "Stale",
+        AgentConnectivity::Disconnected => "Offline",
+    }
+}
+
+fn agent_connectivity_color(connectivity: AgentConnectivity) -> gpui::Hsla {
+    match connectivity {
+        AgentConnectivity::Live => ui::color_success(),
+        AgentConnectivity::Stale => ui::color_warning(),
+        AgentConnectivity::Disconnected => ui::text_muted(),
+    }
+}
+
+fn agent_project_worktree_label(target: &AgentTargetView) -> String {
+    if target.root_project_name == target.worktree_name {
+        target.root_project_name.clone()
+    } else {
+        format!("{} / {}", target.root_project_name, target.worktree_name)
+    }
 }
 
 #[derive(Clone)]
@@ -902,6 +968,12 @@ impl Workspace {
     }
 
     fn toggle_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !global_agent_activity_enabled() {
+            if self.agents_open {
+                self.close_agents(true, window, cx);
+            }
+            return;
+        }
         if self.agents_open {
             self.close_agents(true, window, cx);
             return;
@@ -1164,7 +1236,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if !self.agents_open {
+        if !self.agents_open || !global_agent_activity_enabled() {
             return None;
         }
         let viewport = window.viewport_size();
@@ -1175,7 +1247,19 @@ impl Workspace {
         } else {
             available_height.min(560.0)
         };
-        let activity = self.store.read(cx).ai_projects(DoneScope::All);
+        let feed = build_agent_activity_feed(
+            self.store.read(cx).agent_target_views(),
+            AGENT_ACTIVITY_RECENT_LIMIT,
+        );
+        let needs_you_count = feed.needs_you.len();
+        let working_count = feed.working.len();
+        let empty = feed.is_empty();
+        let sections = [
+            ("Needs You", feed.needs_you),
+            ("Working", feed.working),
+            ("Recent", feed.recent),
+        ];
+        let now = chrono::Utc::now().timestamp();
         let mut list = div()
             .id("orca-agents-list")
             .flex_1()
@@ -1183,7 +1267,7 @@ impl Workspace {
             .overflow_y_scroll()
             .px(px(8.0))
             .py(px(6.0));
-        if activity.entries.is_empty() {
+        if empty {
             list = list.child(
                 div()
                     .py(px(28.0))
@@ -1193,75 +1277,144 @@ impl Workspace {
                     .child("No live agent activity"),
             );
         }
-        let mut previous_group = None;
-        for entry in activity.entries {
-            let project_id = entry.id.clone();
-            let (group, label) = match entry.kind {
-                AiProjectKind::Attention => ("Needs You", "Needs You"),
-                AiProjectKind::Working => ("Working", "Working"),
-                AiProjectKind::Done => ("Recent", "Recent"),
-                AiProjectKind::Idle => ("Recent", "Idle"),
-            };
-            if previous_group != Some(group) {
-                previous_group = Some(group);
-                list = list.child(
-                    div()
-                        .px(px(9.0))
-                        .pt(px(8.0))
-                        .pb(px(4.0))
-                        .text_size(ui::font_px(9.5))
-                        .text_color(ui::text_muted())
-                        .child(group),
-                );
+        for (section, targets) in sections {
+            if targets.is_empty() {
+                continue;
             }
             list = list.child(
                 div()
-                    .id(SharedString::from(format!("orca-agent-row-{}", entry.id)))
+                    .px(px(9.0))
+                    .pt(px(8.0))
+                    .pb(px(4.0))
                     .flex()
                     .items_center()
-                    .gap(px(9.0))
-                    .px(px(9.0))
-                    .py(px(8.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .hover(|el| el.bg(ui::border_subtle()))
-                    .child(
-                        div()
-                            .w(px(8.0))
-                            .h(px(8.0))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(crate::title_bar::kind_color(entry.kind)),
-                    )
-                    .child(div().flex_1().min_w(px(0.0)).truncate().child(entry.name))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(ui::font_px(10.0))
-                            .text_color(ui::text_muted())
-                            .child(label),
-                    )
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        let focused = this.focus_attention_target(Some(&project_id), window, cx);
-                        if !focused && this.store.read(cx).project(&project_id).is_some() {
-                            let worktree_id = this.store.update(cx, |store, cx| {
-                                store.set_active_project(&project_id, cx);
-                                let worktree_id = store.active_worktree_id()?.clone();
-                                (store.worktree_id_for_project(&project_id) == Some(&worktree_id))
-                                    .then_some(worktree_id)
-                            });
-                            if let Some(worktree_id) = worktree_id {
-                                crate::workbench_area::reactivate_active_page(
-                                    &project_id,
-                                    &worktree_id,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        }
-                        this.close_agents(false, window, cx);
-                    })),
+                    .justify_between()
+                    .text_size(ui::font_px(9.5))
+                    .text_color(ui::text_muted())
+                    .child(section)
+                    .child(targets.len().to_string()),
             );
+            for target in targets {
+                let run_id = target.run_id.clone();
+                let title = agent_project_worktree_label(&target);
+                let activity = agent_activity_label(target.activity);
+                let activity_color = agent_activity_color(&target);
+                let connectivity = agent_connectivity_label(target.connectivity);
+                let connectivity_color = agent_connectivity_color(target.connectivity);
+                let detail = format!(
+                    "{} · {} · {}",
+                    target.provider, target.host_label, target.pane_label
+                );
+                let receipt = crate::git_history::format_relative_time(
+                    target.received_at_unix_ms.div_euclid(1000),
+                    now,
+                );
+                let tooltip = format!(
+                    "{}\n{}\n{} · {}\n{} · {}",
+                    title,
+                    target.provider,
+                    target.host_label,
+                    target.pane_label,
+                    activity,
+                    connectivity,
+                );
+                let unread = target.unread;
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "orca-agent-row-{}",
+                            target.run_id
+                        )))
+                        .w_full()
+                        .h(px(54.0))
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .gap(px(4.0))
+                        .px(px(9.0))
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .when(unread, |row| row.bg(ui::accent_subtle()))
+                        .hover(|row| row.bg(ui::border_subtle()))
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                        .on_click(cx.listener(move |this, _event, window, cx| {
+                            if AppStore::activate_agent_run(&this.store, &run_id, window, cx) {
+                                this.close_agents(false, window, cx);
+                            }
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .truncate()
+                                        .text_size(ui::font_px(11.0))
+                                        .text_color(ui::text_primary())
+                                        .child(title),
+                                )
+                                .when(unread, |line| {
+                                    line.child(
+                                        div()
+                                            .w(px(5.0))
+                                            .h(px(5.0))
+                                            .flex_none()
+                                            .rounded_full()
+                                            .bg(ui::accent()),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(ui::font_px(9.0))
+                                        .text_color(ui::text_muted())
+                                        .child(receipt),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.0))
+                                .text_size(ui::font_px(9.0))
+                                .text_color(ui::text_muted())
+                                .child(
+                                    div()
+                                        .w(px(6.0))
+                                        .h(px(6.0))
+                                        .flex_none()
+                                        .rounded_full()
+                                        .bg(activity_color),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(ui::text_secondary())
+                                        .child(activity),
+                                )
+                                .child(div().flex_1().min_w(px(0.0)).truncate().child(detail))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
+                                        .child(
+                                            div()
+                                                .w(px(5.0))
+                                                .h(px(5.0))
+                                                .rounded_full()
+                                                .bg(connectivity_color),
+                                        )
+                                        .child(connectivity),
+                                ),
+                        ),
+                );
+            }
         }
         Some(
             div()
@@ -1307,6 +1460,7 @@ impl Workspace {
                                     div()
                                         .flex()
                                         .flex_col()
+                                        .min_w(px(0.0))
                                         .child(
                                             div()
                                                 .text_size(ui::font_px(13.0))
@@ -1315,9 +1469,12 @@ impl Workspace {
                                         )
                                         .child(
                                             div()
+                                                .truncate()
                                                 .text_size(ui::font_px(9.5))
                                                 .text_color(ui::text_muted())
-                                                .child("Live activity"),
+                                                .child(format!(
+                                                    "{needs_you_count} need you · {working_count} working"
+                                                )),
                                         ),
                                 )
                                 .child(
@@ -1325,6 +1482,7 @@ impl Workspace {
                                         .id("orca-agents-close")
                                         .w(px(24.0))
                                         .h(px(24.0))
+                                        .flex_none()
                                         .flex()
                                         .items_center()
                                         .justify_center()

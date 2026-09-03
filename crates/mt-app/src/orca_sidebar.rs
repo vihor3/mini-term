@@ -19,6 +19,7 @@ use mt_ui::icons::vector::{Geom, Ink, Shape, VectorIcon};
 use mt_ui::icons::{AiVendor, BrandIcon, FileIcon};
 use mt_ui::tooltip::Tooltip;
 
+use crate::agent_activity::{agent_target_needs_user, global_agent_activity_enabled};
 use crate::i18n::t;
 use crate::menu;
 use crate::store::{AgentTargetView, AppStore, orca_worktree_context_enabled};
@@ -635,15 +636,44 @@ impl OrcaProjectSidebar {
 
     fn render_top_actions(&self, cx: &mut Context<Self>) -> gpui::Div {
         let store_for_search = self.store.clone();
-        let agents_status = self.store.read(cx).global_ai_status();
+        let activity_enabled = global_agent_activity_enabled();
+        let needs_you_count = if activity_enabled {
+            self.store
+                .read(cx)
+                .agent_target_views()
+                .iter()
+                .filter(|target| agent_target_needs_user(target))
+                .count()
+        } else {
+            0
+        };
+        let badge = if needs_you_count > 99 {
+            "99+".to_string()
+        } else {
+            needs_you_count.to_string()
+        };
         let agents_lane = div()
-            .w(px(18.0))
+            .w(px(28.0))
+            .h(px(18.0))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .when(agents_status != PaneStatus::Idle, |lane| {
-                lane.child(ui::status_dot(agents_status))
+            .when(needs_you_count > 0, |lane| {
+                lane.child(
+                    div()
+                        .min_w(px(18.0))
+                        .h(px(16.0))
+                        .px(px(4.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(3.0))
+                        .bg(ui::accent_subtle())
+                        .text_size(ui::font_px(9.0))
+                        .text_color(ui::color_warning())
+                        .child(badge),
+                )
             });
 
         div()
@@ -666,19 +696,21 @@ impl OrcaProjectSidebar {
                     crate::search_modal::open(store_for_search.clone(), window, cx);
                 }),
             )
-            .child(
-                nav_row(
-                    "orca-agents",
-                    "Agents",
-                    VectorIcon::new(crate::activity_bar::SESSIONS, px(NAV_ICON_SIZE))
-                        .ink(ui::text_muted())
-                        .into_any_element(),
+            .when(activity_enabled, |actions| {
+                actions.child(
+                    nav_row(
+                        "orca-agents",
+                        "Agents",
+                        VectorIcon::new(crate::activity_bar::SESSIONS, px(NAV_ICON_SIZE))
+                            .ink(ui::text_muted())
+                            .into_any_element(),
+                    )
+                    .child(agents_lane)
+                    .on_click(cx.listener(|_this, _event, _window, cx| {
+                        cx.emit(OrcaSidebarEvent::ToggleAgents);
+                    })),
                 )
-                .child(agents_lane)
-                .on_click(cx.listener(|_this, _event, _window, cx| {
-                    cx.emit(OrcaSidebarEvent::ToggleAgents);
-                })),
-            )
+            })
     }
 
     fn render_projects_header(&self, _cx: &mut Context<Self>) -> gpui::Div {
@@ -999,6 +1031,7 @@ impl OrcaProjectSidebar {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let run_id = agent.run_id.clone();
+        let store = self.store.clone();
         let provider = agent.provider.as_str();
         let vendor = match provider {
             "codex" => Some(AiVendor::OpenAi),
@@ -1063,12 +1096,7 @@ impl OrcaProjectSidebar {
             .hover(|row| row.bg(ui::border_subtle()).text_color(ui::text_primary()))
             .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .on_click(cx.listener(move |_this, _event, window, cx| {
-                let activated = AppStore::global(cx).update(cx, |store, cx| {
-                    store.activate_agent_run(&run_id, window, cx)
-                });
-                if activated {
-                    crate::workbench_area::activate_terminal_page(window, cx);
-                }
+                AppStore::activate_agent_run(&store, &run_id, window, cx);
             }))
             .child(
                 BrandIcon::new(vendor)

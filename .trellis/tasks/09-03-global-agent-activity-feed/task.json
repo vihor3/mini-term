@@ -1,0 +1,29 @@
+{
+  "id": "global-agent-activity-feed",
+  "name": "global-agent-activity-feed",
+  "title": "Global Agent Activity Feed",
+  "description": "Replace the global Agents overlay with an exact-run, acknowledgement-aware Needs You / Working / Recent feed that activates only live Agent routes and preserves workbench focus and state.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "leo",
+  "assignee": "leo",
+  "createdAt": "2026-09-03",
+  "completedAt": null,
+  "branch": "feat/remote-file-management",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "09-02-orca-project-worktree-runtime",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "implementation_progress": "8/8 steps complete; Docker quality gates and Windows check pass",
+    "phase": "3.4 commit and archive"
+  }
+}

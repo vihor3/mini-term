@@ -139,12 +139,7 @@ pub(crate) fn jump_to_session(
             })
         };
         if let Some(run_id) = run_id {
-            let activated = store.update(cx, |store, cx| {
-                store.activate_agent_run(&run_id, window, cx)
-            });
-            if activated {
-                crate::workbench_area::activate_terminal_page(window, cx);
-            }
+            AppStore::activate_agent_run(store, &run_id, window, cx);
             return Task::ready(());
         }
     } else if let Some((project_id, pane_id, _)) =
@@ -1231,12 +1226,7 @@ impl SessionPanel {
             .when_some(run_id, |row, run_id| {
                 row.cursor_pointer()
                     .on_click(cx.listener(move |this: &mut Self, _, window, cx| {
-                        let activated = this.store.update(cx, |store, cx| {
-                            store.activate_agent_run(&run_id, window, cx)
-                        });
-                        if activated {
-                            crate::workbench_area::activate_terminal_page(window, cx);
-                        }
+                        AppStore::activate_agent_run(&this.store, &run_id, window, cx);
                     }))
             })
             .child(
@@ -1916,12 +1906,7 @@ impl Render for SessionPanel {
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                     .when_some(target_run_id, |el, run_id| {
                         el.on_click(cx.listener(move |this: &mut Self, _, window, cx| {
-                            let activated = this.store.update(cx, |store, cx| {
-                                store.activate_agent_run(&run_id, window, cx)
-                            });
-                            if activated {
-                                crate::workbench_area::activate_terminal_page(window, cx);
-                            }
+                            AppStore::activate_agent_run(&this.store, &run_id, window, cx);
                         }))
                     })
                     .when(tree && !has_target, |el| {

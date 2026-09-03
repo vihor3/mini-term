@@ -1,0 +1,7 @@
+{"file":".trellis/spec/mt-ai/backend/agent-runtime-contract.md","reason":"Use authoritative AgentRunId events, activity, connectivity, and ordering only"}
+{"file":".trellis/spec/mt-app/backend/remote-agent-reconciliation-contract.md","reason":"Preserve exact remote route and connection-epoch fencing"}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Reuse exact AgentTargetView projection and WorktreeId-scoped activation"}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Preserve tab, pane, terminal-session, incarnation, and focus ownership"}
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Apply async ownership, stale-route rejection, and Windows target gates"}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/operation-logic.md","reason":"Follow the approved fixed overlay, exact activation, and non-modal interaction model"}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/orca-ui-ux-mapping.md","reason":"Match the approved Orca-aligned Agents feed visual hierarchy"}
