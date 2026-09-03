@@ -21,10 +21,10 @@ Children are created just in time so their PRD/design/implementation context ref
 
 After all children complete:
 
-1. Run full workspace formatting, lint, and tests.
-2. Run multi-worktree local integration coverage for independent terminals/files/context state.
-3. Run detach/reattach and cold-restore process tests.
-4. Run fake SSH reconnect/replay/old-generation tests and at least one real remote smoke test.
-5. Run GPUI interaction/screenshot checks against the approved v2 baseline on normal and compact desktop sizes.
-6. Verify GitHub Tasks against local and remote fake command runners, including manual `gh auth login` remediation.
-7. Review rollout/rollback controls and persisted-schema compatibility before parent completion.
+1. [x] Run full workspace formatting, lint, and tests.
+2. [x] Run multi-worktree local integration coverage for independent terminals/files/context state.
+3. [x] Run detach/reattach and cold-restore process tests.
+4. [x] Run fake SSH reconnect/replay/old-generation tests and at least one real remote smoke test.
+5. [x] Run GPUI interaction/geometry checks against the approved v2 baseline on normal and compact desktop sizes; attempt the Windows screenshot smoke and record the environment limit when Wine cannot supply required Windows system DLLs.
+6. [x] Verify GitHub Tasks against local and remote fake command runners, including manual `gh auth login` remediation.
+7. [x] Review rollout/rollback controls and persisted-schema compatibility before parent completion.

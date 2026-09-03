@@ -3,7 +3,7 @@
   "name": "orca-project-worktree-runtime",
   "title": "Orca Project Worktree Runtime",
   "description": "Implement the approved Orca-aligned Project -> Worktree architecture across catalog identity, workbench state, detached terminal recovery, remote runtime/agent status, contextual sidebar, GitHub Tasks, and global Agents feed.",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -12,7 +12,7 @@
   "assignee": "leo",
   "createdAt": "2026-09-02",
   "completedAt": null,
-  "branch": null,
+  "branch": "feat/remote-file-management",
   "base_branch": "main",
   "worktree_path": null,
   "commit": null,
@@ -27,12 +27,16 @@
     "09-02-remote-runtime-foundation",
     "09-02-remote-agent-identity-status",
     "09-03-worktree-context-sidebar",
-    "09-03-github-project-tasks"
+    "09-03-github-project-tasks",
+    "09-03-global-agent-activity-feed"
   ],
   "parent": null,
   "relatedFiles": [],
   "notes": "",
   "meta": {
-    "roadmap_progress": "9/10 phases complete; phase 10 global Agent activity feed next"
+    "roadmap_progress": "10/10 phases complete; parent integration verified and Windows installer packaged",
+    "integration_phase": "complete",
+    "release_artifact": "dist/Mini-Term_1.2.2-orca-final-20260903_x64-setup.exe",
+    "release_sha256": "fb49b7178be98c852cddbd397b7bb4c92c993f125daf0ced31bde52f547f9778"
   }
 }

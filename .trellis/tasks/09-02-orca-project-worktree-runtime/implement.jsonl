@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/09-02-orca-project-worktree-runtime/prd.md", "reason": "Parent acceptance criteria and source decisions"}
+{"file": ".trellis/tasks/09-02-orca-project-worktree-runtime/design.md", "reason": "Cross-child identity, ownership, and release contracts"}
+{"file": ".trellis/tasks/09-02-orca-project-worktree-runtime/implement.md", "reason": "Ordered parent integration gates"}
+{"file": ".trellis/spec/mt-ssh/backend/remote-runtime-contract.md", "reason": "Authenticated remote identity and independent sidecar lock contract"}

@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/09-02-orca-project-worktree-runtime/prd.md", "reason": "Verify every parent acceptance criterion"}
+{"file": ".trellis/tasks/09-02-orca-project-worktree-runtime/design.md", "reason": "Verify cross-child boundaries and rollback guarantees"}
+{"file": ".trellis/tasks/09-02-orca-project-worktree-runtime/implement.md", "reason": "Verify every integration gate has evidence"}
+{"file": ".trellis/tasks/09-02-orca-project-worktree-runtime/validation.md", "reason": "Final Docker, remote smoke, and Windows installer evidence"}
+{"file": ".trellis/spec/mt-ssh/backend/remote-runtime-contract.md", "reason": "Verify remote transport and sidecar release reproducibility"}

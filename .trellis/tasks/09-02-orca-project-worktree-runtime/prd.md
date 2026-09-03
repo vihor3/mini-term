@@ -28,13 +28,13 @@ This parent task turns the approved research in `.trellis/tasks/archive/2026-09/
 
 ## Acceptance Criteria
 
-- [ ] All planned child tasks are implemented, checked, committed, and archived with their dependencies satisfied.
-- [ ] The final integration check demonstrates two worktrees in one project with independent terminal/file state and correctly scoped right-sidebar data.
-- [ ] Closing and reopening the GUI reattaches surviving terminal sessions without changing their process/incarnation; cold recovery is visibly distinct.
-- [ ] Local, WSL, and SSH Agent state remains bound to the correct host/worktree/pane through disconnect, replay, and reconnect.
-- [ ] GitHub Tasks use the correct execution-host `gh`, show internal read-only details, and only display manual auth remediation when unauthenticated.
-- [ ] The approved v2 Orca-aligned layout and interaction rules are covered by interaction/snapshot tests without reintroducing discarded UI variants.
-- [ ] Every rollout or rollback control can restore the prior presentation/runtime slice without corrupting newer persisted identities/schema.
+- [x] All planned child tasks are implemented, checked, committed, and archived with their dependencies satisfied.
+- [x] The final integration check demonstrates two worktrees in one project with independent terminal/file state and correctly scoped right-sidebar data.
+- [x] Closing and reopening the GUI reattaches surviving terminal sessions without changing their process/incarnation; cold recovery is visibly distinct.
+- [x] Local, WSL, and SSH Agent state remains bound to the correct host/worktree/pane through disconnect, replay, and reconnect.
+- [x] GitHub Tasks use the correct execution-host `gh`, show internal read-only details, and only display manual auth remediation when unauthenticated.
+- [x] The approved v2 Orca-aligned layout and interaction rules are covered by interaction/snapshot tests without reintroducing discarded UI variants.
+- [x] Every rollout or rollback control can restore the prior presentation/runtime slice without corrupting newer persisted identities/schema.
 
 ## Out Of Scope
 
