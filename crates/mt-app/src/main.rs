@@ -473,6 +473,7 @@ struct Workspace {
     /// 启动版本自检的那条任务(丢了句柄它就被取消)。
     _update_check: Task<()>,
     _ai_pump: Task<()>,
+    _remote_agent_pump: Task<()>,
     /// 移动端中转桥(泵 + store 观察者 + 去抖同步靠它的生命周期保活,
     /// 与 [`Self::_ai_pump`] 同一种分工)。见 [`mobile_relay`]。
     _relay: Entity<mobile_relay::RelayBridge>,
@@ -575,6 +576,24 @@ impl Workspace {
             }
         });
 
+        // Authenticated remote agent inventory pump. The store owns all route,
+        // generation, connection configuration, and epoch fences; this task
+        // only supplies a stable cadence and stays alive with the workspace.
+        let remote_agent_store = store.clone();
+        let remote_agent_pump = cx.spawn(async move |_this, cx| {
+            loop {
+                if remote_agent_store
+                    .update(cx, |store, cx| store.poll_remote_agents(cx))
+                    .is_err()
+                {
+                    return;
+                }
+                cx.background_executor()
+                    .timer(store::REMOTE_AGENT_POLL_INTERVAL)
+                    .await;
+            }
+        });
+
         // 移动端中转:建桥 + 登记全局 + 按配置建连一次。放在这里(而不是 `main`)
         // 是因为泵要 `spawn_in` 拿窗口 —— 移动端发起会话得建 pane、弹 toast。
         let relay = mobile_relay::install(store.clone(), window, cx);
@@ -660,6 +679,7 @@ impl Workspace {
             tray,
             _update_check: update_check,
             _ai_pump: ai_pump,
+            _remote_agent_pump: remote_agent_pump,
             _relay: relay,
             _tray_pump: tray_pump,
             _orca_sidebar_events: orca_sidebar_events,

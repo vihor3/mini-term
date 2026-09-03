@@ -22,6 +22,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [File Workbench Contract](./file-workbench-contract.md) | Local/remote document identity, focus, search, and rich-text safety | Active |
 | [Workbench Identity Contract](./workbench-identity-contract.md) | Stable worktree, pane, terminal-session, and incarnation routing | Active |
 | [Remote Runtime Reconciliation Contract](./remote-runtime-reconciliation-contract.md) | Project-scoped remote probing, stale-result fencing, and authoritative rebind | Active |
+| [Remote Agent Reconciliation Contract](./remote-agent-reconciliation-contract.md) | Exact-route SSH agent probes, epoch fencing, and legacy projection | Active |
 
 ---
 

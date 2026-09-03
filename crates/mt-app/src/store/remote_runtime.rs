@@ -61,7 +61,7 @@ fn request_facts_match(
         && current_connection_fingerprint == Some(request.connection_fingerprint)
 }
 
-fn allocate_generation(counter: &mut u64) -> Option<u64> {
+pub(super) fn allocate_generation(counter: &mut u64) -> Option<u64> {
     let next = counter.checked_add(1)?;
     *counter = next;
     Some(next)
@@ -98,6 +98,7 @@ impl AppStore {
     }
 
     pub(super) fn invalidate_remote_runtime_connection(&mut self, connection_id: &str) {
+        self.invalidate_remote_agent_connection(connection_id);
         let affected = self
             .config
             .projects
@@ -111,7 +112,16 @@ impl AppStore {
     }
 
     pub(super) fn remove_remote_runtime_project(&mut self, project_id: &str) {
+        self.remove_remote_agent_project(project_id);
         self.remote_runtime_projects.remove(project_id);
+    }
+
+    pub(super) fn refresh_remote_runtime_for_agents(
+        &mut self,
+        project_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.request_remote_runtime(project_id, false, true, cx);
     }
 
     fn request_remote_runtime(

@@ -182,9 +182,10 @@ impl EventEmitter<PaneEvent> for TerminalPane {}
 /// 起 pane 时的 SSH 远程附加项(本地 pane 传 [`Default::default()`])。
 ///
 /// 单独一个结构体是为了不让 [`TerminalPane::new`] 的参数列表再长两格 ——
-/// 两项都只在「项目是 SSH 远程项目」时才非空。
+/// 字段都只在「项目是 SSH 远程项目」时才非空。
 #[derive(Default)]
 pub struct RemoteLaunchExtras {
+    pub legacy_incarnation_id: Option<TerminalIncarnationId>,
     /// SSH 登录密码。spawn 成功后**立刻**注册 autofill。
     ///
     /// ⚠️ 装机版是在 `openpty` 之后、`spawn_command` 之前 arm 的(那里 PTY 与
@@ -466,8 +467,9 @@ fn start_legacy(
     ai: &AiBridge,
     tx: &mpsc::UnboundedSender<PaneSignal>,
     backend_notice: Option<String>,
+    supplied_incarnation_id: Option<TerminalIncarnationId>,
 ) -> anyhow::Result<LaunchOutcome> {
-    let terminal_incarnation_id = TerminalIncarnationId::new();
+    let terminal_incarnation_id = supplied_incarnation_id.unwrap_or_default();
     spec.env
         .retain(|(key, _)| key != "MINITERM_TERMINAL_INCARNATION_ID");
     spec.env.push((
@@ -528,6 +530,10 @@ impl TerminalPane {
         let persisted_incarnation = hosted
             .as_ref()
             .and_then(|launch| launch.expected_incarnation_id.clone());
+        let legacy_incarnation_id = remote.legacy_incarnation_id.clone();
+        let fallback_incarnation = persisted_incarnation
+            .clone()
+            .or_else(|| legacy_incarnation_id.clone());
         let launch = if let Some(error) = remote.preflight_error.clone() {
             Err(anyhow::anyhow!(error))
         } else if let Some(hosted) = hosted {
@@ -552,6 +558,7 @@ impl TerminalPane {
                     Some(format!(
                         "Terminal host unavailable; using compatibility backend: {error}"
                     )),
+                    legacy_incarnation_id.clone(),
                 ),
             }
         } else {
@@ -560,7 +567,16 @@ impl TerminalPane {
             } else {
                 Some("Terminal host unavailable; using compatibility backend.".into())
             };
-            start_legacy(spec, user_env, pty_id, &emulator, &ai, &tx, notice)
+            start_legacy(
+                spec,
+                user_env,
+                pty_id,
+                &emulator,
+                &ai,
+                &tx,
+                notice,
+                legacy_incarnation_id,
+            )
         };
 
         let (transport, terminal_incarnation_id, recovery, backend_notice, spawn_error) =
@@ -577,7 +593,7 @@ impl TerminalPane {
                     eprintln!("[pane {pty_id}] PTY 启动失败: {msg}");
                     (
                         None,
-                        persisted_incarnation.unwrap_or_default(),
+                        fallback_incarnation.unwrap_or_default(),
                         TerminalRecovery::Unavailable,
                         None,
                         Some(msg),
@@ -738,8 +754,6 @@ impl TerminalPane {
                 })
             })
         };
-
-        ai.add_pane(pty_id);
 
         Self {
             pty_id,

@@ -4237,6 +4237,7 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "mt-core",
+ "mt-identity",
  "parking_lot",
  "regex",
  "serde",

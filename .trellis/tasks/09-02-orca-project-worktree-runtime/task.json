@@ -24,7 +24,8 @@
     "09-02-stable-worktree-workbench-identity",
     "09-02-terminal-host-warm-reattach",
     "09-02-terminal-snapshot-cold-restore",
-    "09-02-remote-runtime-foundation"
+    "09-02-remote-runtime-foundation",
+    "09-02-remote-agent-identity-status"
   ],
   "parent": null,
   "relatedFiles": [],

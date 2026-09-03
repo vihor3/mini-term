@@ -10,8 +10,7 @@ use std::path::Path;
 use gpui::Context;
 use mt_config::ProjectConfig;
 use mt_identity::{
-    ExecutionHostId, HostInstallId, PaneKey, TabId, TerminalIncarnationId, TerminalSessionId,
-    WorktreeId,
+    HostInstallId, PaneKey, TabId, TerminalIncarnationId, TerminalSessionId, WorktreeId,
 };
 use mt_layout::ProjectWorktreeBinding;
 use mt_project::worktree::{self, ResolvedWorktreeIdentity, WorktreeIdentitySource};
@@ -21,15 +20,7 @@ use crate::persist;
 
 use super::AppStore;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct TerminalRoute {
-    pub execution_host_id: ExecutionHostId,
-    pub worktree_id: WorktreeId,
-    pub tab_id: TabId,
-    pub pane_key: PaneKey,
-    pub terminal_session_id: TerminalSessionId,
-    pub terminal_incarnation_id: TerminalIncarnationId,
-}
+pub(super) type TerminalRoute = mt_ai::AgentRoute;
 
 pub(super) enum AuthoritativeBindingInstall {
     Installed,
@@ -356,6 +347,7 @@ impl AppStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mt_identity::ExecutionHostId;
 
     fn project(id: &str, path: &str, ssh_connection_id: Option<&str>) -> ProjectConfig {
         ProjectConfig {

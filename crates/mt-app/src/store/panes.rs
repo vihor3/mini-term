@@ -863,6 +863,33 @@ impl AppStore {
             ));
             env.push(("MINITERM_WORKTREE_ID".to_string(), worktree_id.to_string()));
         }
+        let is_remote = project.ssh_connection_id.is_some();
+        let remote_incarnation_id = is_remote.then(TerminalIncarnationId::new);
+        let remote_terminal_route = route_identity
+            .as_ref()
+            .zip(remote_incarnation_id.as_ref())
+            .map(
+                |((execution_host_id, worktree_id), terminal_incarnation_id)| TerminalRoute {
+                    execution_host_id: execution_host_id.clone(),
+                    worktree_id: worktree_id.clone(),
+                    tab_id: tab_id.clone(),
+                    pane_key: pane_key.clone(),
+                    terminal_session_id: terminal_session_id.clone(),
+                    terminal_incarnation_id: terminal_incarnation_id.clone(),
+                },
+            );
+        let remote_terminal_env = crate::ai::remote_agent_status_enabled()
+            .then_some(remote_terminal_route.as_ref())
+            .flatten()
+            .map(|route| mt_pty::ssh::RemoteTerminalEnv {
+                protocol_version: mt_ai::AGENT_RUNTIME_PROTOCOL_VERSION,
+                execution_host_id: route.execution_host_id.to_string(),
+                worktree_id: route.worktree_id.to_string(),
+                tab_id: route.tab_id.to_string(),
+                pane_key: route.pane_key.to_string(),
+                terminal_session_id: route.terminal_session_id.to_string(),
+                terminal_incarnation_id: route.terminal_incarnation_id.to_string(),
+            });
 
         let hook_port = self.ai.hook_port();
         if hook_port > 0 {
@@ -880,8 +907,15 @@ impl AppStore {
         // 项目级环境变量对远程 pane **不注入**(装机版同款:那些变量属于本地
         // 机器,注给本地 ssh 客户端毫无意义)。
         let remote = project.ssh_connection_id.as_deref().map(|conn_id| {
-            crate::remote_ssh::find_connection(&self.config.ssh_connections, conn_id)
-                .and_then(|conn| crate::remote_ssh::prepare_remote_launch(&conn, &cwd))
+            crate::remote_ssh::find_connection(&self.config.ssh_connections, conn_id).and_then(
+                |conn| {
+                    if let Some(route) = remote_terminal_env.as_ref() {
+                        crate::remote_ssh::prepare_remote_launch_with_env(&conn, &cwd, Some(route))
+                    } else {
+                        crate::remote_ssh::prepare_remote_launch(&conn, &cwd)
+                    }
+                },
+            )
         });
         let (spec, extras) = match remote {
             None => (
@@ -905,6 +939,7 @@ impl AppStore {
                     cols: mt_pty::INITIAL_PTY_COLS,
                 },
                 crate::pane::RemoteLaunchExtras {
+                    legacy_incarnation_id: remote_incarnation_id.clone(),
                     ssh_password: launch.password,
                     preflight_error: None,
                 },
@@ -921,12 +956,12 @@ impl AppStore {
                     cols: mt_pty::INITIAL_PTY_COLS,
                 },
                 crate::pane::RemoteLaunchExtras {
+                    legacy_incarnation_id: remote_incarnation_id.clone(),
                     ssh_password: None,
                     preflight_error: Some(err),
                 },
             ),
         };
-        let is_remote = project.ssh_connection_id.is_some();
         // 项目级环境变量走 user_env —— 它会被 `MINITERM_` 前缀过滤挡一道,
         // 用户手改配置(现在是 config.db)也覆盖不掉内部协议变量。
         // 远程 pane 不注入(见上方分支注释)。
@@ -984,6 +1019,7 @@ impl AppStore {
         if let Some(route) = terminal_route.as_ref() {
             self.terminal_routes.insert(pty_id, route.clone());
         }
+        self.ai.add_pane(pty_id, terminal_route.clone());
 
         // 子进程退出 → pane 状态 error(与旧版 pty-exit 同语义);
         // 用户键入 → 清 attention 黄灯(与旧版 clearPaneAttentionByPty 同语义)

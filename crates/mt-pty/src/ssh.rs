@@ -87,15 +87,71 @@ pub fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// Public, non-secret route identifiers exported into an SSH login shell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteTerminalEnv {
+    pub protocol_version: u32,
+    pub execution_host_id: String,
+    pub worktree_id: String,
+    pub tab_id: String,
+    pub pane_key: String,
+    pub terminal_session_id: String,
+    pub terminal_incarnation_id: String,
+}
+
+impl RemoteTerminalEnv {
+    fn pairs(&self) -> [(&'static str, String); 7] {
+        [
+            (
+                "MINITERM_AGENT_PROTOCOL_VERSION",
+                self.protocol_version.to_string(),
+            ),
+            ("MINITERM_EXECUTION_HOST_ID", self.execution_host_id.clone()),
+            ("MINITERM_WORKTREE_ID", self.worktree_id.clone()),
+            ("MINITERM_TAB_ID", self.tab_id.clone()),
+            ("MINITERM_PANE_KEY", self.pane_key.clone()),
+            (
+                "MINITERM_TERMINAL_SESSION_ID",
+                self.terminal_session_id.clone(),
+            ),
+            (
+                "MINITERM_TERMINAL_INCARNATION_ID",
+                self.terminal_incarnation_id.clone(),
+            ),
+        ]
+    }
+}
+
 /// 拼 ssh 的远端命令:`cd '<path>' 2>/dev/null; exec $SHELL -l`。
 /// `$SHELL` 保持字面量 —— 本地不经过 shell(portable-pty 直接 spawn ssh,
 /// 参数按 argv 传递),它由远程 sshd 用登录 shell 执行时才展开,
 /// 从而落在用户自己的默认 shell 上。路径失效时忽略 `cd` 错误并从登录目录启动。
 pub fn build_remote_login_command(remote_path: &str) -> String {
-    format!(
-        "cd {} 2>/dev/null; exec $SHELL -l",
-        shell_single_quote(remote_path)
-    )
+    build_remote_login_command_with_env(remote_path, None)
+}
+
+/// Builds the login command with an optional stable terminal route.
+///
+/// Every value is quoted independently. The route contains no credentials,
+/// local PTY handle, Hook endpoint, or user-provided environment variables.
+pub fn build_remote_login_command_with_env(
+    remote_path: &str,
+    route: Option<&RemoteTerminalEnv>,
+) -> String {
+    let prefix = format!("cd {} 2>/dev/null; ", shell_single_quote(remote_path));
+    let Some(route) = route else {
+        return format!("{prefix}exec $SHELL -l");
+    };
+
+    let mut command = format!("{prefix}exec env");
+    for (key, value) in route.pairs() {
+        command.push(' ');
+        command.push_str(key);
+        command.push('=');
+        command.push_str(&shell_single_quote(&value));
+    }
+    command.push_str(" \"$SHELL\" -l");
+    command
 }
 
 /// 拼直接 spawn `ssh` 作 PTY 子进程的参数列表(不经本地 shell,
@@ -111,6 +167,17 @@ pub fn build_ssh_launcher_args(
     identity: Option<&str>,
     remote_path: &str,
 ) -> Vec<String> {
+    build_ssh_launcher_args_with_env(host, port, user, identity, remote_path, None)
+}
+
+pub fn build_ssh_launcher_args_with_env(
+    host: &str,
+    port: u16,
+    user: &str,
+    identity: Option<&str>,
+    remote_path: &str,
+    route: Option<&RemoteTerminalEnv>,
+) -> Vec<String> {
     let mut args: Vec<String> = vec!["-t".to_string()];
     if port != 0 && port != 22 {
         args.push("-p".to_string());
@@ -121,7 +188,7 @@ pub fn build_ssh_launcher_args(
         args.push(key.to_string());
     }
     args.push(format!("{user}@{host}"));
-    args.push(build_remote_login_command(remote_path));
+    args.push(build_remote_login_command_with_env(remote_path, route));
     args
 }
 
@@ -257,6 +324,35 @@ mod tests {
         assert_eq!(cmd, "cd '/home/u/my proj' 2>/dev/null; exec $SHELL -l");
         // $SHELL 必须保持字面量,由远程登录 shell 展开
         assert!(cmd.contains("$SHELL"));
+    }
+
+    #[test]
+    fn route_env_is_complete_and_shell_quoted() {
+        let route = RemoteTerminalEnv {
+            protocol_version: 1,
+            execution_host_id: "host-v1:abc'def".into(),
+            worktree_id: "worktree-v1:w".into(),
+            tab_id: "tab-v1:t".into(),
+            pane_key: "pane-v1:p".into(),
+            terminal_session_id: "terminal-v1:s".into(),
+            terminal_incarnation_id: "incarnation-v1:i".into(),
+        };
+        let command = build_remote_login_command_with_env("/srv/project", Some(&route));
+        assert!(command.starts_with("cd '/srv/project' 2>/dev/null; exec env "));
+        assert!(command.ends_with(" \"$SHELL\" -l"));
+        for key in [
+            "MINITERM_AGENT_PROTOCOL_VERSION='1'",
+            "MINITERM_WORKTREE_ID='worktree-v1:w'",
+            "MINITERM_TAB_ID='tab-v1:t'",
+            "MINITERM_PANE_KEY='pane-v1:p'",
+            "MINITERM_TERMINAL_SESSION_ID='terminal-v1:s'",
+            "MINITERM_TERMINAL_INCARNATION_ID='incarnation-v1:i'",
+        ] {
+            assert!(command.contains(key), "missing {key}: {command}");
+        }
+        assert!(command.contains(r"MINITERM_EXECUTION_HOST_ID='host-v1:abc'\''def'"));
+        assert!(!command.contains("MINITERM_PTY_ID"));
+        assert!(!command.contains("MINITERM_HOOK_PORT"));
     }
 
     #[test]

@@ -44,6 +44,7 @@
 //!   本 crate 不依赖 mt-pty,也不依赖 gpui。
 //! - 原先经 Tauri 解析的路径(`app_data_dir` 下的端口文件)改为显式参数传入。
 
+pub mod agent_runtime;
 pub mod detect;
 pub mod hook_registry;
 pub mod hook_server;
@@ -53,9 +54,16 @@ pub mod sessions;
 pub mod tracker;
 mod util;
 
-pub use detect::{interactive_ai_command_name, is_interactive_ai_command, AI_COMMANDS};
-pub use hook_server::{is_attention_cause, HookState, HookStatusInfo};
+pub use agent_runtime::{
+    AGENT_RUNTIME_PROTOCOL_VERSION, AgentActivity, AgentApplyOutcome, AgentConfirmation,
+    AgentConnectivity, AgentConnectivityObservation, AgentEvidence, AgentObservation,
+    AgentObservationIgnored, AgentProcessIdentity, AgentProcessInventoryObservation,
+    AgentProcessObservation, AgentProvider, AgentRoute, AgentRuntimeRegistry, AgentRuntimeState,
+    activity_from_legacy_status,
+};
+pub use detect::{AI_COMMANDS, interactive_ai_command_name, is_interactive_ai_command};
+pub use hook_server::{HookState, HookStatusInfo, is_attention_cause};
 pub use monitor::{SessionIdentity, StatusChange, StatusEmitter, StatusSink};
 pub use perception::AiPerception;
-pub use sessions::{agent_has_session_log, AiSession, AiSessionMessage, LineageEdge};
+pub use sessions::{AiSession, AiSessionMessage, LineageEdge, agent_has_session_log};
 pub use tracker::{SessionTracker, UserSubmit};

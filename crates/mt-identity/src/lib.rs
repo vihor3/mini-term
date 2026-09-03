@@ -227,12 +227,26 @@ define_identity!(
     "incarnation-v1:<uuid-v4>",
     is_canonical_uuid_v4
 );
+define_identity!(
+    AgentRunId,
+    "agent-run-v1:",
+    "agent-run-v1:<uuid-v4>",
+    is_canonical_uuid_v4
+);
+define_identity!(
+    AgentEventId,
+    "agent-event-v1:",
+    "agent-event-v1:<uuid-v4>",
+    is_canonical_uuid_v4
+);
 
 impl_random_identity!(HostInstallId);
 impl_random_identity!(TabId);
 impl_random_identity!(PaneKey);
 impl_random_identity!(TerminalSessionId);
 impl_random_identity!(TerminalIncarnationId);
+impl_random_identity!(AgentRunId);
+impl_random_identity!(AgentEventId);
 
 impl ExecutionHostId {
     pub fn derive(host_fingerprint: &str, install: &HostInstallId) -> Self {
@@ -295,6 +309,8 @@ mod tests {
         let pane = PaneKey::new();
         let session = TerminalSessionId::new();
         let incarnation = TerminalIncarnationId::new();
+        let agent_run = AgentRunId::new();
+        let agent_event = AgentEventId::new();
 
         assert!(is_canonical_uuid_v4(
             install.as_str(),
@@ -309,6 +325,11 @@ mod tests {
         assert!(is_canonical_uuid_v4(
             incarnation.as_str(),
             TerminalIncarnationId::PREFIX
+        ));
+        assert!(is_canonical_uuid_v4(agent_run.as_str(), AgentRunId::PREFIX));
+        assert!(is_canonical_uuid_v4(
+            agent_event.as_str(),
+            AgentEventId::PREFIX
         ));
         assert_ne!(PaneKey::new(), PaneKey::new());
     }
@@ -380,6 +401,18 @@ mod tests {
                 .is_err()
         );
         assert!(serde_json::from_str::<RepoId>("\"repo-v1:not-a-digest\"").is_err());
+        assert!(
+            "agent-run-v1:123e4567-e89b-12d3-a456-426614174000"
+                .parse::<AgentRunId>()
+                .is_err()
+        );
+        let event: AgentEventId = "agent-event-v1:123e4567-e89b-42d3-a456-426614174000"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentEventId>(&serde_json::to_string(&event).unwrap()).unwrap(),
+            event
+        );
     }
 
     #[test]

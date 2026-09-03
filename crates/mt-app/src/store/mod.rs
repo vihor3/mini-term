@@ -39,6 +39,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gpui::{App, Context, Entity, Global, Subscription, Task};
+use mt_ai::AgentRuntimeRegistry;
 use mt_config::{AppConfig, ConfigStore, ProjectConfig};
 use mt_identity::{HostInstallId, WorktreeId};
 use mt_layout::ProjectWorktreeBinding;
@@ -63,6 +64,7 @@ mod panes;
 mod prefs;
 mod projects;
 mod pure;
+mod remote_agents;
 mod remote_runtime;
 mod ssh;
 
@@ -71,6 +73,9 @@ use config_writer::ConfigWriter;
 // 纯函数与它们的类型原本就住在 store.rs 顶层;拆进 `pure` 后原样再导出,
 // `crate::store::Xxx` 这条对外路径一字不变(全仓其它文件零改动的前提)。
 pub use pure::*;
+pub use remote_agents::{
+    REMOTE_AGENT_POLL_INTERVAL, RemoteAgentPollState, RemoteAgentProbeCapability,
+};
 pub use remote_runtime::RemoteRuntimeProjectState;
 
 /// 单个项目的运行时状态(对应 `types.ts` 的 `ProjectState`)。
@@ -340,6 +345,10 @@ pub struct AppStore {
     remote_runtime_projects: HashMap<String, RemoteRuntimeProjectState>,
     /// Unique generations fence project removal and connection/path edits.
     next_remote_runtime_generation: u64,
+    /// Per-terminal scheduling diagnostics for authenticated remote probes.
+    remote_agent_polls: HashMap<u32, RemoteAgentPollState>,
+    /// Unique generations fence terminal reuse and stale probe completions.
+    next_remote_agent_generation: u64,
     /// 窗口几何(退出时的大小/位置/最大化态)。config 里没有对应字段 ——
     /// 这是 GPUI 版新补的能力,只住在 `layout.db` 与这里。
     window_geometry: Option<mt_layout::WindowGeometry>,
@@ -361,6 +370,8 @@ pub struct AppStore {
     terminals: HashMap<u32, Entity<TerminalPane>>,
     /// Process-local PTY attachments fenced by their stable route.
     terminal_routes: HashMap<u32, identity::TerminalRoute>,
+    /// Rich agent state consumed by worktree cards and the global Agents feed.
+    agent_runtime: AgentRuntimeRegistry,
     /// 每个 pane 的退出订阅,与 terminals 同生命周期。
     pane_subs: HashMap<u32, Subscription>,
     /// 当前拿着键盘焦点的 pane(旧版靠 DOM `activeElement` 推,这里显式维护)。
@@ -673,6 +684,8 @@ impl AppStore {
             active_worktree_id,
             remote_runtime_projects: HashMap::new(),
             next_remote_runtime_generation: 0,
+            remote_agent_polls: HashMap::new(),
+            next_remote_agent_generation: 0,
             window_geometry,
             // 缺省展开:面板是发现型入口,收着的话没人知道它存在
             terminals_panel_visible: terminals_panel_visible.unwrap_or(true),
@@ -685,6 +698,7 @@ impl AppStore {
             terminals: HashMap::new(),
             terminal_host,
             terminal_routes: HashMap::new(),
+            agent_runtime: AgentRuntimeRegistry::default(),
             pane_subs: HashMap::new(),
             focused_pane_id: None,
             mobile_relay_status: None,

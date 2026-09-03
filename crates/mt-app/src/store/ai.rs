@@ -7,17 +7,35 @@
 //! 它做的正是「清 AI 感知痕迹」,原文件里也紧挨着标记段。
 
 use gpui::Context;
+use mt_ai::{
+    AgentActivity, AgentConfirmation, AgentConnectivity, AgentEvidence, AgentObservation,
+    AgentProvider, AgentRuntimeState,
+};
+use mt_identity::{AgentEventId, WorktreeId};
 
 use crate::ai::AiEvent;
 use crate::markers::{self, AiMarker, MarkerBatch};
 use crate::notify::{NotifyPrefs, PaneRef, StatusTransition};
 use crate::tree::{AiSessionRef, PaneStatus};
 
+use super::identity::TerminalRoute;
 use super::pure::{
     AiProjects, DoneScope, PendingFork, TitleBarLight, collect_ai_projects,
     compute_title_bar_light, push_lineage_edge, resolve_fork_edge,
 };
+use super::remote_runtime::RemoteRuntimePhase;
 use super::{AppStore, PendingAlert};
+
+fn captured_route_matches(
+    captured: Option<&TerminalRoute>,
+    current: Option<&TerminalRoute>,
+) -> bool {
+    match (captured, current) {
+        (Some(captured), Some(current)) => captured == current,
+        (None, None) => true,
+        _ => false,
+    }
+}
 
 impl AppStore {
     // === AI 任务标记(⚑)===
@@ -220,6 +238,10 @@ impl AppStore {
         self.clear_pending_fork(pty_id);
         // 退出登记同理:留着会让复用同一编号的新 PTY 一开就顶着「已断开」遮罩
         self.exited_ptys.remove(&pty_id);
+        self.remove_remote_agent_terminal(pty_id);
+        if kill && let Some(route) = self.terminal_routes.get(&pty_id) {
+            self.agent_runtime.remove_route(route);
+        }
         self.terminal_routes.remove(&pty_id);
         if let Some(entity) = self.terminals.remove(&pty_id) {
             // 组合中关 pane:先把预编辑收掉,免得 IME 还挂在一个即将消失的
@@ -278,6 +300,126 @@ impl AppStore {
 
     // === AI 事件 ===
 
+    fn current_agent_connection_epoch(
+        &self,
+        project_id: &str,
+        route: &TerminalRoute,
+    ) -> Option<u64> {
+        let project = self.project(project_id)?;
+        project.ssh_connection_id.as_ref()?;
+        let state = self.remote_runtime_projects.get(project_id)?;
+        if state.phase != RemoteRuntimePhase::Ready {
+            return None;
+        }
+        let snapshot = state.snapshot.as_ref()?;
+        (snapshot.identity.execution_host_id == route.execution_host_id
+            && snapshot.worktree_id == route.worktree_id)
+            .then_some(snapshot.identity.connection_epoch)
+    }
+
+    fn observe_agent_status(
+        &mut self,
+        project_id: &str,
+        route: Option<TerminalRoute>,
+        event_id: AgentEventId,
+        sequence: u64,
+        change: &mt_ai::StatusChange,
+    ) {
+        let Some(route) = route else { return };
+        let Some(activity) =
+            mt_ai::activity_from_legacy_status(&change.status, change.cause.as_deref())
+        else {
+            return;
+        };
+        let provider = change
+            .agent
+            .as_deref()
+            .and_then(|provider| provider.parse::<AgentProvider>().ok())
+            .or_else(|| {
+                self.agent_runtime
+                    .active_run_for_route(&route)
+                    .map(|state| state.provider.clone())
+            })
+            .or_else(|| {
+                self.ai
+                    .perception()
+                    .tracker()
+                    .ai_session_agent(change.pty_id)
+                    .and_then(|provider| provider.parse().ok())
+            });
+        let Some(provider) = provider else { return };
+        let evidence = if change.cause.is_some()
+            || self.ai.perception().hooks().is_hook_enabled(change.pty_id)
+        {
+            AgentEvidence::Hook
+        } else {
+            AgentEvidence::PtyActivity
+        };
+        let connection_epoch = self.current_agent_connection_epoch(project_id, &route);
+        let _ = self.agent_runtime.observe(AgentObservation {
+            event_id,
+            route,
+            sequence,
+            connection_epoch,
+            provider,
+            provider_session_id: None,
+            process: None,
+            activity,
+            connectivity: AgentConnectivity::Live,
+            confirmation: AgentConfirmation::LiveConfirmed,
+            evidence,
+            received_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+        });
+    }
+
+    fn observe_agent_session(
+        &mut self,
+        project_id: Option<&str>,
+        route: Option<TerminalRoute>,
+        event_id: AgentEventId,
+        sequence: u64,
+        identity: &mt_ai::SessionIdentity,
+    ) {
+        let Some(route) = route else { return };
+        let existing = self.agent_runtime.active_run_for_route(&route);
+        let provider = identity
+            .agent
+            .as_deref()
+            .and_then(|provider| provider.parse::<AgentProvider>().ok())
+            .or_else(|| existing.map(|state| state.provider.clone()))
+            .unwrap_or_else(|| AgentProvider::CLAUDE.parse().expect("known provider"));
+        let activity = existing
+            .map(|state| state.activity)
+            .unwrap_or(AgentActivity::Starting);
+        let connection_epoch = project_id
+            .and_then(|project_id| self.current_agent_connection_epoch(project_id, &route));
+        let _ = self.agent_runtime.observe(AgentObservation {
+            event_id,
+            route,
+            sequence,
+            connection_epoch,
+            provider,
+            provider_session_id: Some(identity.session_id.clone()),
+            process: None,
+            activity,
+            connectivity: AgentConnectivity::Live,
+            confirmation: AgentConfirmation::LiveConfirmed,
+            evidence: AgentEvidence::Hook,
+            received_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+        });
+    }
+
+    pub fn agent_runs(&self) -> impl Iterator<Item = &AgentRuntimeState> {
+        self.agent_runtime.runs()
+    }
+
+    pub fn agent_runs_for_worktree(
+        &self,
+        worktree_id: &WorktreeId,
+    ) -> impl Iterator<Item = &AgentRuntimeState> {
+        self.agent_runtime.runs_for_worktree(worktree_id)
+    }
+
     /// 后台线程送上来的 AI 事件(见 `ai.rs` 的接线图)。
     ///
     /// 返回值是要执行的提醒动作(提示音 / 任务栏闪烁 / toast),由调用方在持有
@@ -288,14 +430,50 @@ impl AppStore {
         cx: &mut Context<Self>,
     ) -> Option<PendingAlert> {
         match event {
-            AiEvent::Status(change) => {
+            AiEvent::Status {
+                change,
+                route,
+                event_id,
+                sequence,
+            } => {
+                if !captured_route_matches(route.as_ref(), self.terminal_routes.get(&change.pty_id))
+                {
+                    return None;
+                }
                 let status = PaneStatus::from_str(&change.status)?;
+                let hook_enabled = self.ai.perception().hooks().is_hook_enabled(change.pty_id);
+                let preserved_process = route
+                    .as_ref()
+                    .and_then(|route| self.agent_runtime.active_run_for_route(route))
+                    .filter(|state| {
+                        state.evidence == AgentEvidence::ProcessAttested
+                            && !state.activity.is_ended()
+                            && state.connectivity != AgentConnectivity::Disconnected
+                            && crate::ai::remote_agent_status_enabled()
+                            && !hook_enabled
+                            && change.cause.is_none()
+                            && matches!(status, PaneStatus::Idle | PaneStatus::Error)
+                    })
+                    .map(|state| {
+                        (
+                            PaneStatus::from_str(state.activity.legacy_status())
+                                .expect("agent activity has a legacy projection"),
+                            state.provider.as_str().to_string(),
+                        )
+                    });
+                let projected_status = preserved_process
+                    .as_ref()
+                    .map_or(status, |(status, _)| *status);
+                let projected_agent = preserved_process
+                    .as_ref()
+                    .map(|(_, provider)| provider.as_str())
+                    .or(change.agent.as_deref());
                 // Git 面板的 pty-output 嗅探要跳过 AI pane 的输出。判据与
                 // `App.tsx:284` 的 `markAiPty(ptyId, status === 'ai-working' ||
                 // status === 'ai-idle')` 一字不差(见 `git_watch` 模块注释)。
                 crate::git_watch::set_ai_pane(
                     change.pty_id,
-                    matches!(status, PaneStatus::AiWorking | PaneStatus::AiIdle),
+                    matches!(projected_status, PaneStatus::AiWorking | PaneStatus::AiIdle),
                 );
                 // attention 与状态解耦:codex 的 PermissionRequest 状态是 ai-working
                 // 但同样要点黄灯。判定按事件名,与旧版 isAttentionCause 同一张表。
@@ -321,9 +499,9 @@ impl AppStore {
                         pane_id = pane.id.clone();
                         layout.update_status_by_pty(
                             change.pty_id,
-                            status,
+                            projected_status,
                             attention,
-                            change.agent.as_deref(),
+                            projected_agent,
                         );
                         hit = true;
                         break;
@@ -335,13 +513,14 @@ impl AppStore {
                     }
                 }
                 let owner = owner?;
+                self.observe_agent_status(&owner, route, event_id, sequence, &change);
                 let project_active = self.active_project_id.as_deref() == Some(owner.as_str());
 
                 let plan = self.done.apply(
                     &StatusTransition {
                         pane_id: &pane_id,
                         old_status,
-                        new_status: status,
+                        new_status: projected_status,
                         old_attention,
                         cause: change.cause.as_deref(),
                         window_focused: self.window_focused,
@@ -369,7 +548,18 @@ impl AppStore {
                     sound_path: self.config.ai_completion_sound_path.clone(),
                 })
             }
-            AiEvent::Session(identity) => {
+            AiEvent::Session {
+                identity,
+                route,
+                event_id,
+                sequence,
+            } => {
+                if !captured_route_matches(
+                    route.as_ref(),
+                    self.terminal_routes.get(&identity.pty_id),
+                ) {
+                    return None;
+                }
                 let mut owner: Option<String> = None;
                 let session = AiSessionRef {
                     agent: identity.agent.clone(),
@@ -384,10 +574,11 @@ impl AppStore {
                     }
                 }
                 // 会话身份随布局落盘 —— 重启后据此续接
-                if let Some(owner) = owner {
-                    self.save_project_layout_soon(&owner, cx);
+                if let Some(owner) = owner.as_deref() {
+                    self.save_project_layout_soon(owner, cx);
                     cx.notify();
                 }
+                self.observe_agent_session(owner.as_deref(), route, event_id, sequence, &identity);
                 // 分支自记账:这个 pane 是 fork 出来的话,新身份到手即落边。
                 // **必须在这里**而不是等 pane 变 ai-working —— 身份只上报一次,
                 // 错过就再没有第二次机会把 child→parent 记下来。
@@ -396,7 +587,6 @@ impl AppStore {
             }
         }
     }
-
     fn notify_prefs(&self) -> NotifyPrefs {
         NotifyPrefs {
             sound: self.config.ai_completion_sound,
@@ -652,5 +842,39 @@ impl AppStore {
         if push_lineage_edge(&mut self.config.session_lineage, edge) {
             self.save_config_soon(cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use mt_identity::{
+        ExecutionHostId, HostInstallId, PaneKey, RepoId, TabId, TerminalIncarnationId,
+        TerminalSessionId,
+    };
+
+    fn route() -> TerminalRoute {
+        let host = ExecutionHostId::derive("local", &HostInstallId::new());
+        let repo = RepoId::derive(&host, "/repo/.git");
+        TerminalRoute {
+            execution_host_id: host,
+            worktree_id: WorktreeId::derive(&repo, "/repo", None),
+            tab_id: TabId::new(),
+            pane_key: PaneKey::new(),
+            terminal_session_id: TerminalSessionId::new(),
+            terminal_incarnation_id: TerminalIncarnationId::new(),
+        }
+    }
+
+    #[test]
+    fn captured_route_rejects_reused_pty_and_missing_identity() {
+        let captured = route();
+        let mut current = captured.clone();
+        assert!(captured_route_matches(Some(&captured), Some(&current)));
+        current.terminal_incarnation_id = TerminalIncarnationId::new();
+        assert!(!captured_route_matches(Some(&captured), Some(&current)));
+        assert!(!captured_route_matches(Some(&captured), None));
+        assert!(!captured_route_matches(None, Some(&current)));
+        assert!(captured_route_matches(None, None));
     }
 }

@@ -10,6 +10,7 @@
 //! spec/backend/rust-crypto-on-windows-msvc.md);ssh-key / rsa 精确锁定(见
 //! Cargo.toml 注释与 spec/backend/russh-rsa-key-loading.md),不要动。
 
+pub mod agent;
 pub mod pool;
 pub mod runtime;
 pub mod sftp;
@@ -19,14 +20,17 @@ pub mod sftp;
 /// 统一从 `mt_ssh::russh` 取,避免各消费方自行声明 russh 依赖后版本漂移。
 pub use russh;
 
+pub use agent::{
+    RemoteAgentCapability, RemoteAgentInventory, RemoteAgentProbeError, RemoteAgentProcess,
+    RemoteAgentProvider, RemoteAgentRoute, inspect_remote_agents,
+};
 pub use pool::{
-    run_bounded_exec_on_session, run_sftp_download_on_session, run_sftp_upload_on_session,
     BoundedExecOutput, BoundedExecState, CachedSession, ConnectionEpoch, MtClient, PoolConfig,
-    SftpTransferError, SshPool,
+    SftpTransferError, SshPool, run_bounded_exec_on_session, run_sftp_download_on_session,
+    run_sftp_upload_on_session,
 };
 pub use runtime::{
-    inspect_remote_runtime, remote_runtime_heartbeat, RemoteRuntimeCapabilities,
-    RemoteRuntimeError, RemoteRuntimeIdentity, RemoteRuntimeSnapshot,
-    REMOTE_RUNTIME_PROTOCOL_VERSION,
+    REMOTE_RUNTIME_PROTOCOL_VERSION, RemoteRuntimeCapabilities, RemoteRuntimeError,
+    RemoteRuntimeIdentity, RemoteRuntimeSnapshot, inspect_remote_runtime, remote_runtime_heartbeat,
 };
 pub use sftp::{SftpDirEntry, SftpHandle, SftpNodeKind};

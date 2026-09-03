@@ -55,7 +55,10 @@ use std::time::Duration;
 
 use mt_config::SshConnection;
 use mt_project::fs::{MAX_FILE_VIEW_SIZE, TextGitignore};
-use mt_ssh::{CachedSession, RemoteRuntimeSnapshot, SftpHandle, SshPool};
+use mt_ssh::{
+    CachedSession, RemoteAgentInventory, RemoteAgentRoute, RemoteRuntimeSnapshot, SftpHandle,
+    SshPool,
+};
 
 mod delete;
 mod dirs;
@@ -80,6 +83,7 @@ const REMOTE_DOCUMENT_TOO_LARGE_SAVE_ERROR: &str =
     "远程文件已超过 1MB，请重新下载或使用外部工具处理";
 const REMOTE_DELETE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_RUNTIME_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const REMOTE_AGENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_DELETE_EXEC_TIMEOUT: Duration = Duration::from_secs(70);
 const REMOTE_DELETE_SERVER_TIMEOUT_SECS: u64 = 60;
 const REMOTE_DELETE_OUTPUT_CAP: usize = 16 * 1024;
@@ -467,6 +471,74 @@ pub fn runtime_snapshot(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteAgentInventoryError {
+    pub message: String,
+    pub disconnected: bool,
+}
+
+/// Inspect agents belonging to one exact terminal route over the currently
+/// authenticated pooled session. The caller must run this blocking facade on
+/// GPUI's background executor.
+pub fn remote_agent_inventory(
+    conn: &SshConnection,
+    route: &RemoteAgentRoute,
+) -> Result<RemoteAgentInventory, RemoteAgentInventoryError> {
+    let conn = conn.clone();
+    let route = route.clone();
+    let st = state();
+    let rt = st.runtime().map_err(|message| RemoteAgentInventoryError {
+        message,
+        disconnected: true,
+    })?;
+
+    rt.block_on(async move {
+        let pool = st.pool();
+        let mut attempt = 0usize;
+        loop {
+            let session = acquire_session(st, &pool, &conn).await.map_err(|message| {
+                RemoteAgentInventoryError {
+                    message,
+                    disconnected: true,
+                }
+            })?;
+            match mt_ssh::inspect_remote_agents(
+                session.clone(),
+                &route,
+                REMOTE_AGENT_REQUEST_TIMEOUT,
+            )
+            .await
+            {
+                Ok(inventory)
+                    if pool.is_current_session(&conn.id, &session).await
+                        && st.connection_epoch_is_current(&conn.id, inventory.connection_epoch) =>
+                {
+                    return Ok(inventory);
+                }
+                Ok(_) => {
+                    return Err(RemoteAgentInventoryError {
+                        message: "remote agent result was superseded by a newer SSH connection"
+                            .into(),
+                        disconnected: true,
+                    });
+                }
+                Err(error) if should_retry_runtime(attempt, error.should_retry()) => {
+                    if error.requires_session_retirement() {
+                        evict_session_if_same(st, &pool, &conn.id, &session).await;
+                    }
+                    attempt += 1;
+                }
+                Err(error) => {
+                    return Err(RemoteAgentInventoryError {
+                        message: error.message().to_string(),
+                        disconnected: error.is_transport(),
+                    });
+                }
+            }
+        }
+    })
+}
+
 fn should_retry_runtime(attempt: usize, retryable: bool) -> bool {
     attempt == 0 && retryable
 }
@@ -500,6 +572,14 @@ pub fn prepare_remote_launch(
     conn: &SshConnection,
     remote_path: &str,
 ) -> Result<RemoteLaunch, String> {
+    prepare_remote_launch_with_env(conn, remote_path, None)
+}
+
+pub fn prepare_remote_launch_with_env(
+    conn: &SshConnection,
+    remote_path: &str,
+    route: Option<&mt_pty::ssh::RemoteTerminalEnv>,
+) -> Result<RemoteLaunch, String> {
     let ssh_program = mt_pty::ssh::find_ssh_client().ok_or_else(|| {
         "未找到 ssh 客户端(OpenSSH)。Windows 10+ 可在「设置 → 系统 → 可选功能」中安装 \
         「OpenSSH 客户端」后重试"
@@ -518,12 +598,13 @@ pub fn prepare_remote_launch(
         None => None,
     };
 
-    let args = mt_pty::ssh::build_ssh_launcher_args(
+    let args = mt_pty::ssh::build_ssh_launcher_args_with_env(
         &conn.host,
         conn.port,
         &conn.user,
         identity.as_deref(),
         remote_path,
+        route,
     );
 
     Ok(RemoteLaunch {
