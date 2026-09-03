@@ -26,7 +26,6 @@ RemoteAgentPollState = {
 
 ```rust
 pub fn remote_agent_status_enabled() -> bool;
-pub fn remote_agent_poll_state(&self, pty_id: u32) -> Option<&RemoteAgentPollState>;
 ```
 
 Rollback environment:

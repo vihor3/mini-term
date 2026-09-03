@@ -247,6 +247,7 @@ fn unix_to_iso(secs: u64) -> String {
 /// `*_message_chunk` 行(流式落盘)。必须攒到边界才成一条消息,否则镜像里
 /// 一句回答会碎成几十条。边界 = 任何非同角色分片的行(工具调用、回合收尾、
 /// 对方开口),与 grok 自身的会话重放口径一致。
+#[derive(Default)]
 pub struct GrokUpdateParser {
     role: Option<&'static str>,
     buf: String,

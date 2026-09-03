@@ -338,6 +338,8 @@ fn host_spawn_spec(
     }
 }
 
+// Keep launch state explicit across the hosted-to-legacy fallback.
+#[allow(clippy::too_many_arguments)]
 fn start_hosted(
     launch: HostedLaunch,
     spec: &PtySpawn,
@@ -459,6 +461,8 @@ fn start_hosted(
     }
 }
 
+// Keep legacy ownership explicit in the hosted-fallback and direct-launch branches.
+#[allow(clippy::too_many_arguments)]
 fn start_legacy(
     mut spec: PtySpawn,
     user_env: Vec<(String, String)>,

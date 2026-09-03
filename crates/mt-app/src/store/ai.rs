@@ -9,9 +9,9 @@
 use gpui::Context;
 use mt_ai::{
     AgentActivity, AgentConfirmation, AgentConnectivity, AgentEvidence, AgentObservation,
-    AgentProvider, AgentRuntimeState,
+    AgentProvider,
 };
-use mt_identity::{AgentEventId, WorktreeId};
+use mt_identity::AgentEventId;
 
 use crate::ai::AiEvent;
 use crate::markers::{self, AiMarker, MarkerBatch};
@@ -407,17 +407,6 @@ impl AppStore {
             evidence: AgentEvidence::Hook,
             received_at_unix_ms: chrono::Utc::now().timestamp_millis(),
         });
-    }
-
-    pub fn agent_runs(&self) -> impl Iterator<Item = &AgentRuntimeState> {
-        self.agent_runtime.runs()
-    }
-
-    pub fn agent_runs_for_worktree(
-        &self,
-        worktree_id: &WorktreeId,
-    ) -> impl Iterator<Item = &AgentRuntimeState> {
-        self.agent_runtime.runs_for_worktree(worktree_id)
     }
 
     /// 后台线程送上来的 AI 事件(见 `ai.rs` 的接线图)。
@@ -850,7 +839,7 @@ mod route_tests {
     use super::*;
     use mt_identity::{
         ExecutionHostId, HostInstallId, PaneKey, RepoId, TabId, TerminalIncarnationId,
-        TerminalSessionId,
+        TerminalSessionId, WorktreeId,
     };
 
     fn route() -> TerminalRoute {

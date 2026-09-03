@@ -115,12 +115,11 @@ pub fn agent_has_session_log(agent: &str) -> bool {
 /// 前部行可能是无 cwd 的 summary/meta,逐行找到即止;非 JSON 行忽略。
 fn extract_session_cwd(jsonl: &str) -> Option<String> {
     for line in jsonl.lines() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(cwd) = v.get("cwd").and_then(|c| c.as_str()) {
-                if !cwd.is_empty() {
-                    return Some(cwd.to_string());
-                }
-            }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+            && let Some(cwd) = v.get("cwd").and_then(|c| c.as_str())
+            && !cwd.is_empty()
+        {
+            return Some(cwd.to_string());
         }
     }
     None
@@ -296,10 +295,10 @@ fn dir_matches_project(dir: &Path, normalized_project: &str, style: PathStyle) -
                 Ok(l) => l,
                 Err(_) => continue,
             };
-            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
-                if let Some(cwd) = obj.get("cwd").and_then(|v| v.as_str()) {
-                    return style.normalize(cwd) == normalized_project;
-                }
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line)
+                && let Some(cwd) = obj.get("cwd").and_then(|v| v.as_str())
+            {
+                return style.normalize(cwd) == normalized_project;
             }
         }
     }
@@ -708,10 +707,10 @@ pub fn get_ai_sessions(project_path: String) -> Result<Vec<AiSession>, String> {
         let cache = session_cache()
             .lock()
             .map_err(|_| "session cache lock poisoned".to_string())?;
-        if let Some(cached) = cache.get(&cache_key) {
-            if cached.loaded_at.elapsed() < SESSION_CACHE_TTL {
-                return Ok(cached.sessions.clone());
-            }
+        if let Some(cached) = cache.get(&cache_key)
+            && cached.loaded_at.elapsed() < SESSION_CACHE_TTL
+        {
+            return Ok(cached.sessions.clone());
         }
         // 扫描期间不持锁:三家会话目录全量扫盘可能秒级,别把 WSL 侧
         // get_wsl_ai_sessions 与其它项目的查询一起卡住(与下方 WSL 侧同一口径)
@@ -749,6 +748,7 @@ pub fn get_ai_sessions(project_path: String) -> Result<Vec<AiSession>, String> {
 /// - WSL 根项目(UNC 路径):distro 从路径推导,忽略入参;
 /// - WSL 关联项目(Windows 路径):按入参 distro + /mnt 映射;
 /// - 无法推导来源 / 一切 IO 失败:静默返回空列表。
+///
 /// `force` 绕过缓存,供手动刷新使用。
 /// 标注 async:9P 扫描 + 可能的 VM 冷启动是秒级操作,不能阻塞主线程。
 pub fn get_wsl_ai_sessions(
@@ -771,10 +771,10 @@ pub fn get_wsl_ai_sessions(
         let cache = session_cache()
             .lock()
             .map_err(|_| "session cache lock poisoned".to_string())?;
-        if let Some(cached) = cache.get(&cache_key) {
-            if cached.loaded_at.elapsed() < WSL_SESSION_CACHE_TTL {
-                return Ok(cached.sessions.clone());
-            }
+        if let Some(cached) = cache.get(&cache_key)
+            && cached.loaded_at.elapsed() < WSL_SESSION_CACHE_TTL
+        {
+            return Ok(cached.sessions.clone());
         }
         // 扫描期间不持锁:9P IO 可能秒级,别把 Windows 侧 get_ai_sessions 一起卡住
     }

@@ -218,10 +218,6 @@ fn should_apply_process_inventory(
 }
 
 impl AppStore {
-    pub fn remote_agent_poll_state(&self, pty_id: u32) -> Option<&RemoteAgentPollState> {
-        self.remote_agent_polls.get(&pty_id)
-    }
-
     pub(super) fn invalidate_remote_agent_connection(&mut self, connection_id: &str) {
         self.remote_agent_polls
             .retain(|_, state| state.connection_id != connection_id);

@@ -304,7 +304,7 @@ fn discover_repo_limited(project_path: &Path) -> Option<Repository> {
 /// (libgit2 的 ceiling 排他,故取第 N+1 级)。
 fn open_repo_within(start: &Path, anchor: &Path) -> Option<Repository> {
     let ceiling = nth_parent(anchor, MAX_DISCOVER_PARENTS + 1);
-    Repository::open_ext(start, RepositoryOpenFlags::empty(), &[&ceiling]).ok()
+    Repository::open_ext(start, RepositoryOpenFlags::empty(), [&ceiling]).ok()
 }
 
 /// `path` 往上 `n` 级的祖先;不够 `n` 级就停在根(或相对路径的顶层)。

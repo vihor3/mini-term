@@ -78,13 +78,13 @@ pub fn load_codex_thread_names(codex_dir: &Path) -> HashMap<String, String> {
 
     let reader = BufReader::new(file);
     for line in reader.lines().map_while(Result::ok) {
-        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
-            if let (Some(id), Some(name)) = (
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line)
+            && let (Some(id), Some(name)) = (
                 obj.get("id").and_then(|v| v.as_str()),
                 obj.get("thread_name").and_then(|v| v.as_str()),
-            ) {
-                map.insert(id.to_string(), name.to_string());
-            }
+            )
+        {
+            map.insert(id.to_string(), name.to_string());
         }
     }
 
@@ -269,10 +269,10 @@ fn is_codex_session_match(path: &Path, session_id: &str) -> bool {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if obj.get("type").and_then(|t| t.as_str()) == Some("session_meta") {
-            if let Some(id) = obj.pointer("/payload/id").and_then(|v| v.as_str()) {
-                return id == session_id;
-            }
+        if obj.get("type").and_then(|t| t.as_str()) == Some("session_meta")
+            && let Some(id) = obj.pointer("/payload/id").and_then(|v| v.as_str())
+        {
+            return id == session_id;
         }
     }
     false

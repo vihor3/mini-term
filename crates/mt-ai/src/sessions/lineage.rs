@@ -192,10 +192,11 @@ pub fn latest_model_from_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> 
             .pointer("/message/model")
             .or_else(|| obj.pointer("/payload/model"))
             .and_then(|v| v.as_str());
-        if let Some(m) = m {
-            if !m.is_empty() && !m.starts_with('<') {
-                model = Some(m.to_string());
-            }
+        if let Some(m) = m
+            && !m.is_empty()
+            && !m.starts_with('<')
+        {
+            model = Some(m.to_string());
         }
     }
     model
@@ -329,18 +330,18 @@ fn scan_codex_lineage(project_path: &str) -> Vec<LineageEdge> {
             let Some(meta) = codex_meta_from_line(&line) else {
                 continue;
             };
-            if PathStyle::Windows.normalize(&meta.cwd) == normalized_project {
-                if let Some(mut edge) = codex_fork_edge_from_meta_line(&line) {
-                    // 分支标题:父会话用户消息序列做前缀比对,首条对不上的即
-                    // 分叉后第一问(父文件已清理时拿不到,回落会话标题)
-                    edge.branch_title =
-                        find_codex_session_file(&sessions_dir, &edge.parent_session_id)
-                            .map(|pp| codex_user_texts(&pp, 300))
-                            .and_then(|pt| {
-                                branch_title_from_texts(&pt, &codex_user_texts(&path, 300))
-                            });
-                    edges.push(edge);
-                }
+            if PathStyle::Windows.normalize(&meta.cwd) == normalized_project
+                && let Some(mut edge) = codex_fork_edge_from_meta_line(&line)
+            {
+                // 分支标题:父会话用户消息序列做前缀比对,首条对不上的即
+                // 分叉后第一问(父文件已清理时拿不到,回落会话标题)
+                edge.branch_title =
+                    find_codex_session_file(&sessions_dir, &edge.parent_session_id)
+                        .map(|pp| codex_user_texts(&pp, 300))
+                        .and_then(|pt| {
+                            branch_title_from_texts(&pt, &codex_user_texts(&path, 300))
+                        });
+                edges.push(edge);
             }
             break;
         }
