@@ -341,6 +341,9 @@ test('Actions own locked verification and Windows package evidence', async () =>
     );
   }
 
+  assert.match(ciWorkflow, /RUSTFMT_PATCH_PATH: changed-rustfmt\.patch/);
+  assert.match(ciWorkflow, /name: changed-rustfmt-\$\{\{ github\.run_id \}\}/);
+  assert.match(ciWorkflow, /uses: actions\/upload-artifact@v4/);
   assert.match(ciWorkflow, /cargo test --locked --workspace --all-targets/);
   assert.match(
     ciWorkflow,

@@ -142,6 +142,23 @@ try {
 console.log(
   `rustfmt baseline ignored outside changed lines: ${ignoredBaseline}; changed-line formatting hunks: ${relevant.length}`,
 );
+const patchPath = process.env.RUSTFMT_PATCH_PATH;
+if (patchPath && relevant.length > 0) {
+  const byFile = new Map();
+  for (const hunk of relevant) {
+    const hunks = byFile.get(hunk.file) ?? [];
+    hunks.push(hunk.text);
+    byFile.set(hunk.file, hunks);
+  }
+  const patch = [...byFile.entries()]
+    .map(
+      ([file, hunks]) =>
+        [`--- a/${file}`, `+++ b/${file}`, ...hunks].join("\n"),
+    )
+    .join("\n");
+  fs.writeFileSync(patchPath, `${patch}\n`);
+  console.error(`wrote changed-line rustfmt patch to ${patchPath}`);
+}
 if (relevant.length > 0) {
   for (const hunk of relevant) {
     console.error(`Formatting differs in ${hunk.file}:\n${hunk.text}`);
