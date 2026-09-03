@@ -75,6 +75,7 @@ if (changed.status !== 0) {
 const files = changed.stdout.split("\0").filter(Boolean);
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mini-term-rustfmt-"));
 const relevant = [];
+const fullDiffs = [];
 let ignoredBaseline = 0;
 
 try {
@@ -127,12 +128,31 @@ try {
       process.exit(diff.status ?? 1);
     }
 
+    let fileHasRelevantHunk = false;
     for (const hunk of formattingHunks(diff.stdout)) {
       if (sourceRanges.some((sourceRange) => intersects(sourceRange, hunk.range))) {
         relevant.push({ file, text: hunk.lines.join("\n") });
+        fileHasRelevantHunk = true;
       } else {
         ignoredBaseline += 1;
       }
+    }
+
+    if (fileHasRelevantHunk) {
+      const fullDiff = run("diff", [
+        "-U3",
+        "--label",
+        `a/${file}`,
+        "--label",
+        `b/${file}`,
+        file,
+        formattedPath,
+      ]);
+      if (fullDiff.status !== 0 && fullDiff.status !== 1) {
+        process.stderr.write(fullDiff.stderr);
+        process.exit(fullDiff.status ?? 1);
+      }
+      fullDiffs.push(fullDiff.stdout);
     }
   }
 } finally {
@@ -158,6 +178,11 @@ if (patchPath && relevant.length > 0) {
     .join("\n");
   fs.writeFileSync(patchPath, `${patch}\n`);
   console.error(`wrote changed-line rustfmt patch to ${patchPath}`);
+}
+const fullPatchPath = process.env.RUSTFMT_FULL_PATCH_PATH;
+if (fullPatchPath && fullDiffs.length > 0) {
+  fs.writeFileSync(fullPatchPath, fullDiffs.join(""));
+  console.error(`wrote full-context rustfmt diagnostic patch to ${fullPatchPath}`);
 }
 if (relevant.length > 0) {
   for (const hunk of relevant) {
