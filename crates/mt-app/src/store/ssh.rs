@@ -6,7 +6,7 @@ use mt_config::SshConnection;
 
 use crate::tree::{PaneState, PaneStatus};
 
-use super::{AppStore, ProjectState, SshAssocOutcome};
+use super::{AppStore, SshAssocOutcome};
 
 // ===========================================================================
 // SSH(audit #28,BB-a 批)
