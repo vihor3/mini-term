@@ -440,10 +440,7 @@ impl AppStore {
                 .reconcile_worktree_layouts(std::slice::from_ref(&binding), now_ms)
                 .map_err(|error| format!("could not persist project identity: {error:#}"))?;
             restored_layout = reconciled.layouts.remove(&project.id);
-            reconciled
-                .bindings
-                .remove(&project.id)
-                .unwrap_or(binding)
+            reconciled.bindings.remove(&project.id).unwrap_or(binding)
         } else {
             binding
         };

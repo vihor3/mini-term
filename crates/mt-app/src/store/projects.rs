@@ -564,10 +564,9 @@ impl AppStore {
             .map(|project| project.id.clone());
         if let Some(project_id) = existing_id {
             if self.worktree_id_for_project(&project_id).is_none() {
-                let project = self
-                    .project(&project_id)
-                    .cloned()
-                    .ok_or_else(|| "existing project disappeared during registration".to_string())?;
+                let project = self.project(&project_id).cloned().ok_or_else(|| {
+                    "existing project disappeared during registration".to_string()
+                })?;
                 let prepared = self.prepare_project_identity(&project)?;
                 self.install_prepared_project_identity(&project_id, prepared);
             }
@@ -632,7 +631,9 @@ impl AppStore {
         let tree = self.config.project_tree.get_or_insert_with(Vec::new);
         crate::project_tree::insert_into_tree(
             tree,
-            requested_group.as_ref().map(|(group_id, _)| group_id.as_str()),
+            requested_group
+                .as_ref()
+                .map(|(group_id, _)| group_id.as_str()),
             mt_config::ProjectTreeItem::ProjectId(id.clone()),
             None,
         );
@@ -790,10 +791,9 @@ mod project_onboarding_tests {
         canonical_path: &str,
         connection: &SshConnection,
     ) -> ProjectWorktreeBinding {
-        let remote_install: HostInstallId =
-            "install-v1:123e4567-e89b-42d3-a456-426614174001"
-                .parse()
-                .unwrap();
+        let remote_install: HostInstallId = "install-v1:123e4567-e89b-42d3-a456-426614174001"
+            .parse()
+            .unwrap();
         let execution_host_id = ExecutionHostId::derive("SHA256:verified-host", &remote_install);
         let repo_id = RepoId::derive(&execution_host_id, &format!("{canonical_path}/.git"));
         let identity_context = serde_json::to_string(&(
@@ -843,8 +843,7 @@ mod project_onboarding_tests {
                 .join("mt-app-project-registration-test")
                 .join("config.json"),
         ));
-        let config_writer =
-            crate::store::config_writer::ConfigWriter::spawn(config_store.clone());
+        let config_writer = crate::store::config_writer::ConfigWriter::spawn(config_store.clone());
 
         AppStore {
             config,
@@ -905,11 +904,13 @@ mod project_onboarding_tests {
             .iter()
             .map(|item| match item {
                 ProjectTreeItem::ProjectId(id) => {
-                    if id == project_id { 1 } else { 0 }
+                    if id == project_id {
+                        1
+                    } else {
+                        0
+                    }
                 }
-                ProjectTreeItem::Group(group) => {
-                    project_occurrences(&group.children, project_id)
-                }
+                ProjectTreeItem::Group(group) => project_occurrences(&group.children, project_id),
             })
             .sum()
     }
@@ -951,8 +952,9 @@ mod project_onboarding_tests {
         assert!(
             validate_registration_location(
                 &ProjectLocationKey::Local {
-                    normalized_canonical_path:
-                        mt_project::worktree::normalize_path_for_comparison(relative),
+                    normalized_canonical_path: mt_project::worktree::normalize_path_for_comparison(
+                        relative
+                    ),
                 },
                 relative,
             )
@@ -1063,7 +1065,10 @@ mod project_onboarding_tests {
                     Some(&first.worktree_id)
                 );
                 assert_eq!(store.active_worktree_id(), Some(&first.worktree_id));
-                assert_eq!(store.active_project_id.as_deref(), Some(first.project_id.as_str()));
+                assert_eq!(
+                    store.active_project_id.as_deref(),
+                    Some(first.project_id.as_str())
+                );
                 assert_eq!(
                     store.config.last_active_project_id.as_deref(),
                     Some(first.project_id.as_str())
@@ -1097,7 +1102,10 @@ mod project_onboarding_tests {
                         cx,
                     )
                     .unwrap();
-                assert_eq!(store.active_project_id.as_deref(), Some(second.project_id.as_str()));
+                assert_eq!(
+                    store.active_project_id.as_deref(),
+                    Some(second.project_id.as_str())
+                );
                 let projects_before_duplicate = store.config.projects.len();
                 let tree_records_before_duplicate =
                     tree_project_count(store.config.project_tree.as_deref().unwrap());
@@ -1138,7 +1146,10 @@ mod project_onboarding_tests {
                         .count(),
                     1
                 );
-                assert_eq!(store.active_project_id.as_deref(), Some(first.project_id.as_str()));
+                assert_eq!(
+                    store.active_project_id.as_deref(),
+                    Some(first.project_id.as_str())
+                );
                 assert_eq!(store.active_worktree_id(), Some(&first.worktree_id));
 
                 let projects_before_ssh = store.config.projects.len();

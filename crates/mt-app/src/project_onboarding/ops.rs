@@ -48,19 +48,18 @@ pub trait ProjectHostOps {
         inspect_git: bool,
     ) -> Result<HostPathProbe, OnboardingError>;
 
-    fn probe_target(&self, canonical_parent: &str, name: &str)
-    -> Result<TargetState, OnboardingError>;
+    fn probe_target(
+        &self,
+        canonical_parent: &str,
+        name: &str,
+    ) -> Result<TargetState, OnboardingError>;
 
-    fn create_directory_exclusive(&self, canonical_target: &str)
-    -> Result<(), OnboardingError>;
+    fn create_directory_exclusive(&self, canonical_target: &str) -> Result<(), OnboardingError>;
 
     fn remove_empty_directory(&self, canonical_target: &str) -> Result<(), OnboardingError>;
 
-    fn run_git(
-        &self,
-        cwd: &str,
-        plan: &CommandPlan,
-    ) -> Result<HostCommandOutcome, OnboardingError>;
+    fn run_git(&self, cwd: &str, plan: &CommandPlan)
+    -> Result<HostCommandOutcome, OnboardingError>;
 
     fn probe_after_uncertain_dispatch(
         &self,
@@ -116,10 +115,7 @@ pub fn clone_from_url(
         }
     }
 
-    let command = CommandPlan::new(
-        "git",
-        ["clone", "--", git_url, target_name],
-    );
+    let command = CommandPlan::new("git", ["clone", "--", git_url, target_name]);
     let outcome = match host.run_git(&parent.canonical_path, &command) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -169,13 +165,18 @@ pub fn clone_from_url(
         ));
     }
 
-    let probe = host.probe_existing_directory(&target, true, true).map_err(|error| {
-        OnboardingError::new(
-            OnboardingErrorKind::PostconditionFailed,
-            format!("clone completed but target verification failed at {target}: {}", error.message),
-        )
-        .with_cleanup(format!("target was preserved for inspection: {target}"))
-    })?;
+    let probe = host
+        .probe_existing_directory(&target, true, true)
+        .map_err(|error| {
+            OnboardingError::new(
+                OnboardingErrorKind::PostconditionFailed,
+                format!(
+                    "clone completed but target verification failed at {target}: {}",
+                    error.message
+                ),
+            )
+            .with_cleanup(format!("target was preserved for inspection: {target}"))
+        })?;
     require_exact_repository_root(&probe, "clone").map_err(|error| {
         error.with_cleanup(format!("target was preserved for inspection: {target}"))
     })?;
@@ -204,7 +205,11 @@ pub fn create_new_project(
         Ok(outcome) => outcome,
         Err(error) if error_proves_safe_before_dispatch(&error) => {
             return Err(cleanup_owned_empty_target(
-                host, &parent.canonical_path, project_name, &target, error,
+                host,
+                &parent.canonical_path,
+                project_name,
+                &target,
+                error,
             ));
         }
         Err(error) => return Err(preserve_unclassified_command_target(error, &target)),
@@ -233,17 +238,26 @@ pub fn create_new_project(
         }
         let error = command_failure("git init", "", &target, &outcome);
         return Err(cleanup_owned_empty_target(
-            host, &parent.canonical_path, project_name, &target, error,
+            host,
+            &parent.canonical_path,
+            project_name,
+            &target,
+            error,
         ));
     }
 
-    let probe = host.probe_existing_directory(&target, true, true).map_err(|error| {
-        OnboardingError::new(
-            OnboardingErrorKind::PostconditionFailed,
-            format!("git init completed but target verification failed at {target}: {}", error.message),
-        )
-        .with_cleanup(format!("target was preserved for inspection: {target}"))
-    })?;
+    let probe = host
+        .probe_existing_directory(&target, true, true)
+        .map_err(|error| {
+            OnboardingError::new(
+                OnboardingErrorKind::PostconditionFailed,
+                format!(
+                    "git init completed but target verification failed at {target}: {}",
+                    error.message
+                ),
+            )
+            .with_cleanup(format!("target was preserved for inspection: {target}"))
+        })?;
     require_exact_repository_root(&probe, "git init").map_err(|error| {
         error.with_cleanup(format!("target was preserved for inspection: {target}"))
     })?;
@@ -257,7 +271,11 @@ pub fn initialize_existing_folder(
     let initial = host.probe_existing_directory(selected_path, false, true)?;
     match &initial.git {
         GitRelationship::RepositoryRoot { .. } => {
-            return ready_to_register(host, &initial.canonical_path, initial.observed_connection_epoch);
+            return ready_to_register(
+                host,
+                &initial.canonical_path,
+                initial.observed_connection_epoch,
+            );
         }
         GitRelationship::NestedInRepository {
             top_level,
@@ -267,9 +285,7 @@ pub fn initialize_existing_folder(
                 selected_path: initial.canonical_path,
                 repository_root: top_level.clone(),
                 common_dir: common_dir.clone(),
-                authority: OperationResultAuthority::normal(
-                    initial.observed_connection_epoch,
-                ),
+                authority: OperationResultAuthority::normal(initial.observed_connection_epoch),
             });
         }
         GitRelationship::NotGit => {}
@@ -341,12 +357,13 @@ pub fn infer_clone_folder_name(url: &str) -> Result<String, OnboardingError> {
 }
 
 pub fn validate_portable_basename(name: &str) -> Result<(), OnboardingError> {
-    let invalid_windows = name
-        .chars()
-        .any(|character| {
-            character.is_control()
-                || matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
-        });
+    let invalid_windows = name.chars().any(|character| {
+        character.is_control()
+            || matches!(
+                character,
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+            )
+    });
     let windows_stem = name
         .split('.')
         .next()
@@ -354,9 +371,28 @@ pub fn validate_portable_basename(name: &str) -> Result<(), OnboardingError> {
         .to_ascii_uppercase();
     let reserved_windows_name = matches!(
         windows_stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL"
-            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
-            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
     );
     if name.is_empty()
         || name == "."
@@ -588,10 +624,7 @@ fn error_proves_safe_before_dispatch(error: &OnboardingError) -> bool {
     )
 }
 
-fn preserve_unclassified_command_target(
-    error: OnboardingError,
-    target: &str,
-) -> OnboardingError {
+fn preserve_unclassified_command_target(error: OnboardingError, target: &str) -> OnboardingError {
     error.with_cleanup(format!(
         "skipped because command completion was not proven; target was preserved for inspection: {target}"
     ))
@@ -664,10 +697,7 @@ fn command_failure(
     } else {
         format!("; {detail}")
     };
-    OnboardingError::new(
-        kind,
-        format!("{operation} {status} for {target}{detail}"),
-    )
+    OnboardingError::new(kind, format!("{operation} {status} for {target}{detail}"))
 }
 
 fn redact_git_diagnostic(mut detail: String, secret_url: &str) -> String {
@@ -759,11 +789,7 @@ mod tests {
             self.probes.borrow_mut().pop_front().unwrap()
         }
 
-        fn probe_target(
-            &self,
-            parent: &str,
-            name: &str,
-        ) -> Result<TargetState, OnboardingError> {
+        fn probe_target(&self, parent: &str, name: &str) -> Result<TargetState, OnboardingError> {
             self.calls
                 .borrow_mut()
                 .push(format!("target:{parent}:{name}"));
@@ -785,10 +811,9 @@ mod tests {
             cwd: &str,
             plan: &CommandPlan,
         ) -> Result<HostCommandOutcome, OnboardingError> {
-            self.calls.borrow_mut().push(format!(
-                "git:{cwd}:{}",
-                plan.display_argv().join("|")
-            ));
+            self.calls
+                .borrow_mut()
+                .push(format!("git:{cwd}:{}", plan.display_argv().join("|")));
             self.commands.borrow_mut().pop_front().unwrap()
         }
 
@@ -873,11 +898,9 @@ mod tests {
                 Some(false),
             )),
         ]);
-        host.targets
-            .borrow_mut()
-            .push_back(Ok(TargetState::Absent {
-                canonical_target: "/parent/repo".into(),
-            }));
+        host.targets.borrow_mut().push_back(Ok(TargetState::Absent {
+            canonical_target: "/parent/repo".into(),
+        }));
         host.commands.borrow_mut().push_back(Ok(success()));
         clone_from_url(
             &host,
@@ -912,8 +935,8 @@ mod tests {
                 canonical_target: "/parent/repo".into(),
             }));
 
-        let error = clone_from_url(&host, "https://example.com/o/repo.git", "/parent", "repo")
-            .unwrap_err();
+        let error =
+            clone_from_url(&host, "https://example.com/o/repo.git", "/parent", "repo").unwrap_err();
 
         assert_eq!(error.kind, OnboardingErrorKind::Collision);
         assert_eq!(
@@ -1010,23 +1033,16 @@ mod tests {
                 Some(false),
             )),
         ]);
-        host.targets
-            .borrow_mut()
-            .push_back(Ok(TargetState::Absent {
-                canonical_target: "/parent/repo".into(),
-            }));
+        host.targets.borrow_mut().push_back(Ok(TargetState::Absent {
+            canonical_target: "/parent/repo".into(),
+        }));
         host.commands.borrow_mut().push_back(Ok(failure(
             HostCommandDispatch::OutcomeUncertain,
             "SSH reply was lost",
         )));
 
-        let result = clone_from_url(
-            &host,
-            "ssh://git@example.com/o/repo.git",
-            "/parent",
-            "repo",
-        )
-        .unwrap();
+        let result =
+            clone_from_url(&host, "ssh://git@example.com/o/repo.git", "/parent", "repo").unwrap();
 
         assert!(matches!(
             result,
@@ -1039,7 +1055,13 @@ mod tests {
                 ..
             })
         ));
-        assert!(!host.calls.borrow().iter().any(|call| call.starts_with("remove:")));
+        assert!(
+            !host
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call.starts_with("remove:"))
+        );
     }
 
     #[test]
@@ -1053,11 +1075,9 @@ mod tests {
                 Some(true),
             )),
         ]);
-        host.targets
-            .borrow_mut()
-            .push_back(Ok(TargetState::Absent {
-                canonical_target: "/parent/repo".into(),
-            }));
+        host.targets.borrow_mut().push_back(Ok(TargetState::Absent {
+            canonical_target: "/parent/repo".into(),
+        }));
         host.commands.borrow_mut().push_back(Ok(failure(
             HostCommandDispatch::OutcomeUncertain,
             "SSH exec reply was lost",
@@ -1072,7 +1092,13 @@ mod tests {
             error.authority.map(|authority| authority.provenance),
             Some(OperationResultProvenance::PostconditionVerifiedAfterUncertainDispatch)
         );
-        assert!(!host.calls.borrow().iter().any(|call| call.starts_with("remove:")));
+        assert!(
+            !host
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call.starts_with("remove:"))
+        );
     }
 
     #[test]
@@ -1084,27 +1110,20 @@ mod tests {
                 OnboardingErrorKind::GitFailure,
                 "repository probe failed on the current recovery session",
             )
-            .with_authority(OperationResultAuthority::verified_after_uncertain_dispatch(
-                Some(13),
-            ))),
+            .with_authority(
+                OperationResultAuthority::verified_after_uncertain_dispatch(Some(13)),
+            )),
         ]);
-        host.targets
-            .borrow_mut()
-            .push_back(Ok(TargetState::Absent {
-                canonical_target: "/parent/repo".into(),
-            }));
+        host.targets.borrow_mut().push_back(Ok(TargetState::Absent {
+            canonical_target: "/parent/repo".into(),
+        }));
         host.commands.borrow_mut().push_back(Ok(failure(
             HostCommandDispatch::OutcomeUncertain,
             "SSH exec reply was lost",
         )));
 
-        let error = clone_from_url(
-            &host,
-            "ssh://git@example.com/o/repo.git",
-            "/parent",
-            "repo",
-        )
-        .unwrap_err();
+        let error = clone_from_url(&host, "ssh://git@example.com/o/repo.git", "/parent", "repo")
+            .unwrap_err();
 
         assert_eq!(error.kind, OnboardingErrorKind::RemoteOutcomeUncertain);
         assert_eq!(
@@ -1127,11 +1146,9 @@ mod tests {
                 Some(true),
             )),
         ]);
-        host.targets
-            .borrow_mut()
-            .push_back(Ok(TargetState::Absent {
-                canonical_target: "/parent/repo".into(),
-            }));
+        host.targets.borrow_mut().push_back(Ok(TargetState::Absent {
+            canonical_target: "/parent/repo".into(),
+        }));
         host.commands.borrow_mut().push_back(Ok(failure(
             HostCommandDispatch::OutcomeUncertain,
             "channel state is uncertain",
@@ -1144,7 +1161,13 @@ mod tests {
             error.authority.map(|authority| authority.provenance),
             Some(OperationResultProvenance::PostconditionVerifiedAfterUncertainDispatch)
         );
-        assert!(!host.calls.borrow().iter().any(|call| call.starts_with("remove:")));
+        assert!(
+            !host
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call.starts_with("remove:"))
+        );
     }
 
     #[test]
@@ -1176,7 +1199,11 @@ mod tests {
         let error = create_new_project(&host, "/parent", "repo").unwrap_err();
 
         assert_eq!(error.kind, OnboardingErrorKind::GitFailure);
-        assert!(host.calls.borrow().contains(&"remove:/parent/repo".to_string()));
+        assert!(
+            host.calls
+                .borrow()
+                .contains(&"remove:/parent/repo".to_string())
+        );
     }
 
     #[test]
@@ -1205,11 +1232,17 @@ mod tests {
             observed_connection_epoch: None,
         }));
 
-        let error = clone_from_url(&host, "https://example.com/o/repo.git", "/parent", "repo")
-            .unwrap_err();
+        let error =
+            clone_from_url(&host, "https://example.com/o/repo.git", "/parent", "repo").unwrap_err();
 
         assert!(error.message.contains("clone target was preserved"));
-        assert!(!host.calls.borrow().iter().any(|call| call.starts_with("remove:")));
+        assert!(
+            !host
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call.starts_with("remove:"))
+        );
     }
 
     #[test]
@@ -1238,11 +1271,17 @@ mod tests {
             observed_connection_epoch: None,
         }));
 
-        let error = clone_from_url(&host, "https://example.com/o/repo.git", "/parent", "repo")
-            .unwrap_err();
+        let error =
+            clone_from_url(&host, "https://example.com/o/repo.git", "/parent", "repo").unwrap_err();
 
         assert!(error.message.contains("clone target was preserved"));
-        assert!(!host.calls.borrow().iter().any(|call| call.starts_with("remove:")));
+        assert!(
+            !host
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call.starts_with("remove:"))
+        );
     }
 
     #[test]
@@ -1261,17 +1300,25 @@ mod tests {
                 canonical_target: "/parent/repo".into(),
             }),
         ]);
-        host.commands.borrow_mut().push_back(Err(OnboardingError::new(
-            OnboardingErrorKind::GitFailure,
-            "process status failed after dispatch",
-        )));
+        host.commands
+            .borrow_mut()
+            .push_back(Err(OnboardingError::new(
+                OnboardingErrorKind::GitFailure,
+                "process status failed after dispatch",
+            )));
 
-        let error = clone_from_url(&host, "https://example.com/o/repo.git", "/parent", "repo")
-            .unwrap_err();
+        let error =
+            clone_from_url(&host, "https://example.com/o/repo.git", "/parent", "repo").unwrap_err();
 
         assert_eq!(error.kind, OnboardingErrorKind::GitFailure);
         assert!(error.message.contains("completion was not proven"));
-        assert!(!host.calls.borrow().iter().any(|call| call.starts_with("remove:")));
+        assert!(
+            !host
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call.starts_with("remove:"))
+        );
     }
 
     #[test]
@@ -1282,22 +1329,26 @@ mod tests {
             GitRelationship::NotGit,
             None,
         )));
-        host.targets
-            .borrow_mut()
-            .push_back(Ok(TargetState::Absent {
-                canonical_target: "/parent/repo".into(),
-            }));
+        host.targets.borrow_mut().push_back(Ok(TargetState::Absent {
+            canonical_target: "/parent/repo".into(),
+        }));
         host.commands.borrow_mut().push_back(Ok(failure(
             HostCommandDispatch::SafeBeforeDispatchFailure,
             "command was rejected before dispatch",
         )));
 
-        let error = clone_from_url(&host, "https://example.com/o/repo.git", "/parent", "repo")
-            .unwrap_err();
+        let error =
+            clone_from_url(&host, "https://example.com/o/repo.git", "/parent", "repo").unwrap_err();
 
         assert_eq!(error.kind, OnboardingErrorKind::DisconnectedBeforeDispatch);
         assert!(error.message.contains("target was preserved"));
-        assert!(!host.calls.borrow().iter().any(|call| call.starts_with("remove:")));
+        assert!(
+            !host
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call.starts_with("remove:"))
+        );
     }
 
     #[test]
@@ -1308,21 +1359,27 @@ mod tests {
             GitRelationship::NotGit,
             None,
         )));
-        host.targets
+        host.targets.borrow_mut().push_back(Ok(TargetState::Absent {
+            canonical_target: "/parent/repo".into(),
+        }));
+        host.commands
             .borrow_mut()
-            .push_back(Ok(TargetState::Absent {
-                canonical_target: "/parent/repo".into(),
-            }));
-        host.commands.borrow_mut().push_back(Err(OnboardingError::new(
-            OnboardingErrorKind::GitFailure,
-            "process cleanup failed after dispatch",
-        )));
+            .push_back(Err(OnboardingError::new(
+                OnboardingErrorKind::GitFailure,
+                "process cleanup failed after dispatch",
+            )));
 
         let error = create_new_project(&host, "/parent", "repo").unwrap_err();
 
         assert_eq!(error.kind, OnboardingErrorKind::GitFailure);
         assert!(error.message.contains("completion was not proven"));
-        assert!(!host.calls.borrow().iter().any(|call| call.starts_with("remove:")));
+        assert!(
+            !host
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call.starts_with("remove:"))
+        );
     }
 
     #[test]
@@ -1350,10 +1407,12 @@ mod tests {
             stderr: b"primary failure".to_vec(),
             observed_connection_epoch: None,
         }));
-        host.removals.borrow_mut().push_back(Err(OnboardingError::new(
-            OnboardingErrorKind::PostconditionFailed,
-            "directory became non-empty",
-        )));
+        host.removals
+            .borrow_mut()
+            .push_back(Err(OnboardingError::new(
+                OnboardingErrorKind::PostconditionFailed,
+                "directory became non-empty",
+            )));
 
         let error = create_new_project(&host, "/parent", "repo").unwrap_err();
 
@@ -1512,7 +1571,6 @@ mod tests {
         );
         assert_eq!(stale.authority, None);
     }
-
 }
 
 impl ProjectHostOps for crate::remote_ssh::RemoteProjectContext {
@@ -1522,8 +1580,9 @@ impl ProjectHostOps for crate::remote_ssh::RemoteProjectContext {
         include_empty: bool,
         inspect_git: bool,
     ) -> Result<HostPathProbe, OnboardingError> {
-        let probe = crate::remote_ssh::probe_existing_directory(self, path, include_empty, inspect_git)
-            .map_err(remote_error)?;
+        let probe =
+            crate::remote_ssh::probe_existing_directory(self, path, include_empty, inspect_git)
+                .map_err(remote_error)?;
         if probe.provenance != crate::remote_ssh::RemoteProbeProvenance::OperationEpoch {
             return Err(OnboardingError::new(
                 OnboardingErrorKind::StaleOperation,
@@ -1563,7 +1622,11 @@ impl ProjectHostOps for crate::remote_ssh::RemoteProjectContext {
             .map_err(remote_error)
     }
 
-    fn run_git(&self, cwd: &str, plan: &CommandPlan) -> Result<HostCommandOutcome, OnboardingError> {
+    fn run_git(
+        &self,
+        cwd: &str,
+        plan: &CommandPlan,
+    ) -> Result<HostCommandOutcome, OnboardingError> {
         let result = crate::remote_ssh::run_git(self, cwd, plan).map_err(remote_error)?;
         Ok(remote_mutation_outcome(result))
     }
@@ -1705,9 +1768,7 @@ fn remote_recovery_error(
     error
 }
 
-fn remote_mutation_outcome(
-    result: crate::remote_ssh::RemoteMutationOutcome,
-) -> HostCommandOutcome {
+fn remote_mutation_outcome(result: crate::remote_ssh::RemoteMutationOutcome) -> HostCommandOutcome {
     let crate::remote_ssh::RemoteMutationOutcome {
         output,
         transport_error,

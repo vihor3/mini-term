@@ -2357,19 +2357,11 @@ impl ProjectList {
             .gap(px(6.0))
             .p(px(8.0))
             .child(
-                dashed_button(
-                    "add-project",
-                    t("projectList", "addProject").into(),
-                    true,
-                )
-                .on_click(move |_event, window, cx| {
-                    crate::project_onboarding::open(
-                        store_for_add.clone(),
-                        None,
-                        window,
-                        cx,
-                    );
-                }),
+                dashed_button("add-project", t("projectList", "addProject").into(), true).on_click(
+                    move |_event, window, cx| {
+                        crate::project_onboarding::open(store_for_add.clone(), None, window, cx);
+                    },
+                ),
             )
             .child(
                 dashed_button("new-group", "+".into(), false)

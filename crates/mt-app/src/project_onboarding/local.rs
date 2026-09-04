@@ -43,7 +43,10 @@ impl LocalProjectOps {
             .map_err(|error| {
                 OnboardingError::new(
                     OnboardingErrorKind::Validation,
-                    format!("local directory cannot be inspected: {}: {error}", canonical.display()),
+                    format!(
+                        "local directory cannot be inspected: {}: {error}",
+                        canonical.display()
+                    ),
                 )
             })?
             .is_dir()
@@ -60,7 +63,10 @@ impl LocalProjectOps {
         let mut entries = fs::read_dir(path).map_err(|error| {
             OnboardingError::new(
                 OnboardingErrorKind::Validation,
-                format!("local directory cannot be read: {}: {error}", path.display()),
+                format!(
+                    "local directory cannot be read: {}: {error}",
+                    path.display()
+                ),
             )
         })?;
         Ok(entries.next().is_none())
@@ -68,8 +74,8 @@ impl LocalProjectOps {
 
     fn git_relationship(canonical: &Path) -> Result<GitRelationship, OnboardingError> {
         let canonical_string = canonical.to_string_lossy().to_string();
-        let context = PreProjectLocalContext::from_host_path(&canonical_string)
-            .map_err(map_command_error)?;
+        let context =
+            PreProjectLocalContext::from_host_path(&canonical_string).map_err(map_command_error)?;
         let marker_present = git_marker_present(canonical)?;
         let modern = CommandPlan::new(
             "git",
@@ -80,13 +86,9 @@ impl LocalProjectOps {
                 "--git-common-dir",
             ],
         );
-        let mut output = execute_pre_project_local_command(
-            &context,
-            &modern,
-            GIT_PROBE_TIMEOUT,
-            GIT_OUTPUT_CAP,
-        )
-        .map_err(map_command_error)?;
+        let mut output =
+            execute_pre_project_local_command(&context, &modern, GIT_PROBE_TIMEOUT, GIT_OUTPUT_CAP)
+                .map_err(map_command_error)?;
         let legacy = !output.timed_out
             && !output.stdout_truncated
             && !output.stderr_truncated
@@ -95,10 +97,7 @@ impl LocalProjectOps {
         if legacy {
             output = execute_pre_project_local_command(
                 &context,
-                &CommandPlan::new(
-                    "git",
-                    ["rev-parse", "--show-toplevel", "--git-common-dir"],
-                ),
+                &CommandPlan::new("git", ["rev-parse", "--show-toplevel", "--git-common-dir"]),
                 GIT_PROBE_TIMEOUT,
                 GIT_OUTPUT_CAP,
             )
@@ -119,13 +118,8 @@ impl LocalProjectOps {
             );
         }
         let (top_level, common_dir) = parse_git_paths(&output.stdout)?;
-        let (top_level, common_dir) = canonicalize_git_paths(
-            &context,
-            &canonical_string,
-            top_level,
-            common_dir,
-            legacy,
-        )?;
+        let (top_level, common_dir) =
+            canonicalize_git_paths(&context, &canonical_string, top_level, common_dir, legacy)?;
         if mt_project::worktree::normalize_path_for_comparison(&canonical_string)
             == mt_project::worktree::normalize_path_for_comparison(&top_level)
         {
@@ -150,7 +144,9 @@ impl ProjectHostOps for LocalProjectOps {
         inspect_git: bool,
     ) -> Result<HostPathProbe, OnboardingError> {
         let canonical = Self::canonical_directory(path)?;
-        let directory_empty = include_empty.then(|| Self::directory_empty(&canonical)).transpose()?;
+        let directory_empty = include_empty
+            .then(|| Self::directory_empty(&canonical))
+            .transpose()?;
         let git = if inspect_git {
             Self::git_relationship(&canonical)?
         } else {
@@ -211,15 +207,15 @@ impl ProjectHostOps for LocalProjectOps {
         })
     }
 
-    fn run_git(&self, cwd: &str, plan: &CommandPlan) -> Result<HostCommandOutcome, OnboardingError> {
+    fn run_git(
+        &self,
+        cwd: &str,
+        plan: &CommandPlan,
+    ) -> Result<HostCommandOutcome, OnboardingError> {
         let context = PreProjectLocalContext::from_host_path(cwd).map_err(map_command_error)?;
-        let output = execute_pre_project_local_command(
-            &context,
-            plan,
-            GIT_MUTATION_TIMEOUT,
-            GIT_OUTPUT_CAP,
-        )
-        .map_err(map_command_error)?;
+        let output =
+            execute_pre_project_local_command(&context, plan, GIT_MUTATION_TIMEOUT, GIT_OUTPUT_CAP)
+                .map_err(map_command_error)?;
         Ok(local_command_outcome(output))
     }
 
@@ -294,17 +290,27 @@ fn git_marker_present(canonical_path: &Path) -> Result<bool, OnboardingError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(OnboardingError::new(
             OnboardingErrorKind::GitFailure,
-            format!("Git marker cannot be inspected at {}: {error}", marker.display()),
+            format!(
+                "Git marker cannot be inspected at {}: {error}",
+                marker.display()
+            ),
         )),
     }
 }
 
 fn parse_git_paths(stdout: &[u8]) -> Result<(&str, &str), OnboardingError> {
     let stdout = std::str::from_utf8(stdout).map_err(|_| {
-        OnboardingError::new(OnboardingErrorKind::GitFailure, "Git returned non-UTF-8 paths")
+        OnboardingError::new(
+            OnboardingErrorKind::GitFailure,
+            "Git returned non-UTF-8 paths",
+        )
     })?;
     let lines: Vec<&str> = stdout.lines().collect();
-    if lines.len() != 2 || lines.iter().any(|line| line.is_empty() || line.contains('\0')) {
+    if lines.len() != 2
+        || lines
+            .iter()
+            .any(|line| line.is_empty() || line.contains('\0'))
+    {
         return Err(OnboardingError::new(
             OnboardingErrorKind::GitFailure,
             "Git repository probe returned an ambiguous path set",
@@ -327,7 +333,10 @@ fn canonicalize_git_paths(
             } else {
                 PathBuf::from(common)
             };
-            Ok((canonicalize_git_path(Path::new(top))?, canonicalize_git_path(&common)?))
+            Ok((
+                canonicalize_git_path(Path::new(top))?,
+                canonicalize_git_path(&common)?,
+            ))
         }
         PreProjectLocalContext::Wsl { distro, cwd } => {
             let common = if legacy && !common.starts_with('/') {
@@ -347,7 +356,10 @@ fn canonicalize_git_path(path: &Path) -> Result<String, OnboardingError> {
         .map_err(|error| {
             OnboardingError::new(
                 OnboardingErrorKind::GitFailure,
-                format!("Git path cannot be canonicalized: {}: {error}", path.display()),
+                format!(
+                    "Git path cannot be canonicalized: {}: {error}",
+                    path.display()
+                ),
             )
         })
 }

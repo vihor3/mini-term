@@ -811,9 +811,9 @@ fn save_form(state: &Entity<SshPanel>, window: &mut Window, cx: &mut App) {
     let conn_for_store = conn.clone();
     let on_created = state.update(cx, |panel, cx| {
         panel.form = None;
-        panel
-            .store
-            .update(cx, |store, cx| store.upsert_ssh_connection(conn_for_store, cx));
+        panel.store.update(cx, |store, cx| {
+            store.upsert_ssh_connection(conn_for_store, cx)
+        });
         cx.notify();
         if created {
             panel.on_connection_created.take()

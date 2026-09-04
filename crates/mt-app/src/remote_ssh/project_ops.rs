@@ -7,11 +7,11 @@ use mt_ssh::{BoundedExecOutput, CachedSession, SftpHandle, SftpNodeKind};
 
 use crate::execution_host::serialize_posix_argv;
 
+use super::paths::{expand_tilde, join_posix, normalize_absolute_posix, valid_remote_name};
 use super::{
     RemoteSshState, acquire_session, connection_fingerprint, evict_session_if_same,
     open_sftp_with_session, remote_home, state,
 };
-use super::paths::{expand_tilde, join_posix, normalize_absolute_posix, valid_remote_name};
 
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_MUTATION_TIMEOUT: Duration = Duration::from_secs(180);
@@ -58,8 +58,14 @@ pub enum RemoteProbeProvenance {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteGitRelationship {
     NotGit,
-    RepositoryRoot { top_level: String, common_dir: String },
-    NestedInRepository { top_level: String, common_dir: String },
+    RepositoryRoot {
+        top_level: String,
+        common_dir: String,
+    },
+    NestedInRepository {
+        top_level: String,
+        common_dir: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,45 +131,61 @@ pub fn probe_existing_directory_after_uncertain_dispatch(
     include_empty: bool,
     inspect_git: bool,
 ) -> Result<RemotePathProbe, RemoteRecoveryProbeError> {
-    context.validate().map_err(|message| RemoteRecoveryProbeError {
-        message,
-        connection_epoch: None,
-        connection_fingerprint: context.connection_fingerprint,
-    })?;
-    let st = state();
-    st.block_on(async {
-        let (session, sftp) = open_sftp_with_session(st, &context.connection)
-            .await
-            .map_err(|message| RemoteRecoveryProbeError {
-                message,
-                connection_epoch: None,
-                connection_fingerprint: context.connection_fingerprint,
-            })?;
-        let result = probe_on_session(
-            st,
-            context,
-            &session,
-            &sftp,
-            path,
-            include_empty,
-            inspect_git,
-            RemoteProbeProvenance::PostconditionVerifiedAfterUncertainDispatch,
-        )
-        .await;
-        let failure_epoch = if result.is_err()
-            && ensure_current(st, &context.connection, &session).await.is_ok()
-        {
-            Some(session.connection_epoch().get())
-        } else {
-            None
-        };
-        sftp.close().await;
-        result.map_err(|message| RemoteRecoveryProbeError {
+    context
+        .validate()
+        .map_err(|message| RemoteRecoveryProbeError {
             message,
-            connection_epoch: failure_epoch,
+            connection_epoch: None,
             connection_fingerprint: context.connection_fingerprint,
-        })
-    })
+        })?;
+    let st = state();
+    let result = st.block_on(async {
+        let recovery = async {
+            let (session, sftp) = open_sftp_with_session(st, &context.connection)
+                .await
+                .map_err(|message| RemoteRecoveryProbeError {
+                    message,
+                    connection_epoch: None,
+                    connection_fingerprint: context.connection_fingerprint,
+                })?;
+            let result = probe_on_session(
+                st,
+                context,
+                &session,
+                &sftp,
+                path,
+                include_empty,
+                inspect_git,
+                RemoteProbeProvenance::PostconditionVerifiedAfterUncertainDispatch,
+            )
+            .await;
+            let failure_epoch = if result.is_err()
+                && ensure_current(st, &context.connection, &session)
+                    .await
+                    .is_ok()
+            {
+                Some(session.connection_epoch().get())
+            } else {
+                None
+            };
+            sftp.close().await;
+            result.map_err(|message| RemoteRecoveryProbeError {
+                message,
+                connection_epoch: failure_epoch,
+                connection_fingerprint: context.connection_fingerprint,
+            })
+        }
+        .await;
+        Ok(recovery)
+    });
+    match result {
+        Ok(recovery) => recovery,
+        Err(message) => Err(RemoteRecoveryProbeError {
+            message,
+            connection_epoch: None,
+            connection_fingerprint: context.connection_fingerprint,
+        }),
+    }
 }
 
 fn probe_existing_directory_with_provenance(
@@ -262,7 +284,9 @@ pub fn create_directory_exclusive(
                 .map_err(|error| error.message().to_string())?
                 .is_some()
             {
-                return Err(format!("remote project target already exists: {canonical_target}"));
+                return Err(format!(
+                    "remote project target already exists: {canonical_target}"
+                ));
             }
             ensure_operation_session(st, context, &session).await?;
             sftp.create_dir(canonical_target)
@@ -293,7 +317,9 @@ pub fn remove_empty_directory(
                 .map_err(|error| error.message().to_string())?
                 != SftpNodeKind::Directory
             {
-                return Err(format!("remote cleanup target is not a directory: {canonical_target}"));
+                return Err(format!(
+                    "remote cleanup target is not a directory: {canonical_target}"
+                ));
             }
             ensure_operation_session(st, context, &session).await?;
             if !sftp
@@ -302,7 +328,9 @@ pub fn remove_empty_directory(
                 .map_err(|error| error.message().to_string())?
                 .is_empty()
             {
-                return Err(format!("remote cleanup target is not empty: {canonical_target}"));
+                return Err(format!(
+                    "remote cleanup target is not empty: {canonical_target}"
+                ));
             }
             ensure_operation_session(st, context, &session).await?;
             sftp.remove_dir(canonical_target)
@@ -381,7 +409,8 @@ async fn probe_on_session(
     provenance: RemoteProbeProvenance,
 ) -> Result<RemotePathProbe, String> {
     ensure_probe_session(st, context, session, provenance).await?;
-    let requested = if path.trim().is_empty() || path.trim() == "~" || path.trim().starts_with("~/") {
+    let requested = if path.trim().is_empty() || path.trim() == "~" || path.trim().starts_with("~/")
+    {
         ensure_probe_session(st, context, session, provenance).await?;
         let home = remote_home(st, sftp, &context.connection.id).await?;
         expand_tilde(path.trim(), &home)
@@ -537,9 +566,9 @@ async fn ensure_operation_session(
     context: &RemoteProjectContext,
     session: &Arc<CachedSession>,
 ) -> Result<(), String> {
-    let expected_epoch = context
-        .expected_connection_epoch
-        .ok_or_else(|| "SSH onboarding operation has no authenticated connection epoch".to_string())?;
+    let expected_epoch = context.expected_connection_epoch.ok_or_else(|| {
+        "SSH onboarding operation has no authenticated connection epoch".to_string()
+    })?;
     let actual_epoch = session.connection_epoch().get();
     if !operation_epoch_matches(Some(expected_epoch), actual_epoch) {
         return Err(format!(
@@ -582,7 +611,11 @@ fn parse_git_paths(stdout: &[u8]) -> Result<(&str, &str), String> {
     let stdout = std::str::from_utf8(stdout)
         .map_err(|_| "SSH Git probe returned non-UTF-8 paths".to_string())?;
     let lines: Vec<&str> = stdout.lines().collect();
-    if lines.len() != 2 || lines.iter().any(|line| line.is_empty() || line.contains('\0')) {
+    if lines.len() != 2
+        || lines
+            .iter()
+            .any(|line| line.is_empty() || line.contains('\0'))
+    {
         return Err("SSH Git probe returned an ambiguous path set".into());
     }
     Ok((lines[0], lines[1]))
@@ -600,10 +633,8 @@ fn classify_git_probe_failure(
     {
         return Ok(RemoteGitRelationship::NotGit);
     }
-    let detail = crate::project_onboarding::ops::bounded_lossy_diagnostic(
-        stderr,
-        GIT_ERROR_DETAIL_LIMIT,
-    );
+    let detail =
+        crate::project_onboarding::ops::bounded_lossy_diagnostic(stderr, GIT_ERROR_DETAIL_LIMIT);
     let detail = if detail.is_empty() {
         String::new()
     } else {

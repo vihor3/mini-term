@@ -157,9 +157,7 @@ impl OperationResultAuthority {
         }
     }
 
-    pub const fn verified_after_uncertain_dispatch(
-        observed_connection_epoch: Option<u64>,
-    ) -> Self {
+    pub const fn verified_after_uncertain_dispatch(observed_connection_epoch: Option<u64>) -> Self {
         Self {
             observed_connection_epoch,
             provenance: OperationResultProvenance::PostconditionVerifiedAfterUncertainDispatch,
@@ -274,7 +272,9 @@ impl OnboardingState {
             OnboardingErrorKind::GenerationOverflow,
             "onboarding form identity overflowed; restart the application",
         ));
-        let phase = terminal_failure.clone().map_or(OperationPhase::Idle, OperationPhase::Failure);
+        let phase = terminal_failure
+            .clone()
+            .map_or(OperationPhase::Idle, OperationPhase::Failure);
         Self {
             form_instance_id,
             host_generation: 0,
@@ -435,11 +435,7 @@ impl OnboardingState {
         self.owns(owner, observed_connection_epoch)
     }
 
-    pub fn owns(
-        &self,
-        owner: &OperationOwner,
-        observed_connection_epoch: Option<u64>,
-    ) -> bool {
+    pub fn owns(&self, owner: &OperationOwner, observed_connection_epoch: Option<u64>) -> bool {
         self.owns_context(owner)
             && match &owner.host_signature {
                 HostSignature::Local => observed_connection_epoch.is_none(),

@@ -14,8 +14,8 @@ use super::{
     CreateMode, GitRelationship, HostPathProbe, HostSignature, HostStatus, LocalProjectOps,
     OnboardingError, OnboardingErrorKind, OnboardingOperationResult, OnboardingPage,
     OnboardingState, OperationOwner, OperationPhase, OperationResultAuthority, ProjectHostOps,
-    ProjectHostSelection, VerifiedProjectLocation, add_existing_folder, clone_from_url,
-    create_new_project, checked_next, infer_clone_folder_name, initialize_existing_folder,
+    ProjectHostSelection, VerifiedProjectLocation, add_existing_folder, checked_next,
+    clone_from_url, create_new_project, infer_clone_folder_name, initialize_existing_folder,
     validate_portable_basename,
 };
 use crate::i18n::{t, tr};
@@ -151,15 +151,24 @@ struct HostProbeOwner {
 
 #[derive(Clone, Debug)]
 enum PendingOperation {
-    AddExisting { path: String },
+    AddExisting {
+        path: String,
+    },
     Clone {
         url: String,
         parent: String,
         name: String,
     },
-    CreateNew { parent: String, name: String },
-    InitializeExisting { path: String },
-    ClassifyExisting { path: String },
+    CreateNew {
+        parent: String,
+        name: String,
+    },
+    InitializeExisting {
+        path: String,
+    },
+    ClassifyExisting {
+        path: String,
+    },
 }
 
 enum BackgroundCompletion {
@@ -209,7 +218,8 @@ impl ProjectOnboardingView {
                 .placeholder(t("projectOnboarding", "clone.folderNamePlaceholder"))
         });
         let create_name = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(t("projectOnboarding", "create.namePlaceholder"))
+            InputState::new(window, cx)
+                .placeholder(t("projectOnboarding", "create.namePlaceholder"))
         });
         let create_parent = cx.new(|cx| InputState::new(window, cx));
         let existing_path = cx.new(|cx| InputState::new(window, cx));
@@ -295,8 +305,7 @@ impl ProjectOnboardingView {
                 HostSignature::Local => owner.expected_connection_epoch.is_none(),
                 HostSignature::Ssh { .. } => {
                     owner.expected_connection_epoch.is_some()
-                        && self.flow.host_status.observed_epoch()
-                            == owner.expected_connection_epoch
+                        && self.flow.host_status.observed_epoch() == owner.expected_connection_epoch
                 }
             }
     }
@@ -332,12 +341,7 @@ pub fn open(
         move |dialog, window, cx| {
             let viewport = window.viewport_size();
             let width = ui::clamp_dialog_width(px(DIALOG_WIDTH), viewport);
-            let height = ui::clamp_dialog_body_height(
-                px(DIALOG_HEIGHT),
-                viewport,
-                0.82,
-                px(0.0),
-            );
+            let height = ui::clamp_dialog_body_height(px(DIALOG_HEIGHT), viewport, 0.82, px(0.0));
             dialog
                 .p_0()
                 .close_button(false)
@@ -420,7 +424,10 @@ fn switch_create_mode(
             CreateMode::NewFolder => (Some(view.create_name.clone()), None),
             CreateMode::InitializeExisting => {
                 let path = view.existing_path.read(cx).value().trim().to_string();
-                (Some(view.existing_path.clone()), (!path.is_empty()).then_some(path))
+                (
+                    Some(view.existing_path.clone()),
+                    (!path.is_empty()).then_some(path),
+                )
             }
         }
     });
@@ -428,7 +435,12 @@ fn switch_create_mode(
         crate::prompt::autofocus(&input, window, cx);
     }
     if let Some(path) = existing_path {
-        start_operation(state, PendingOperation::ClassifyExisting { path }, window, cx);
+        start_operation(
+            state,
+            PendingOperation::ClassifyExisting { path },
+            window,
+            cx,
+        );
     }
 }
 
@@ -485,14 +497,11 @@ fn select_host(
     }
 }
 
-fn connect_selected_host(
-    state: &Entity<ProjectOnboardingView>,
-    window: &mut Window,
-    cx: &mut App,
-) {
+fn connect_selected_host(state: &Entity<ProjectOnboardingView>, window: &mut Window, cx: &mut App) {
     let Some((owner, connection)) = state.update(cx, |view, cx| {
-        let ProjectHostSelection::Ssh { connection, .. } = &view.flow.host else {
-            return None;
+        let connection = match &view.flow.host {
+            ProjectHostSelection::Ssh { connection, .. } => connection.clone(),
+            _ => return None,
         };
         view.flow.set_host_status(HostStatus::Connecting);
         let owner = HostProbeOwner {
@@ -501,7 +510,7 @@ fn connect_selected_host(
             host_signature: view.flow.host.signature(),
         };
         cx.notify();
-        Some((owner, connection.clone()))
+        Some((owner, connection))
     }) else {
         return;
     };
@@ -569,16 +578,12 @@ fn complete_host_probe(
                     view.flow.set_host_status(HostStatus::Ready {
                         observed_epoch: Some(epoch),
                     });
-                    let clone_parent = matches!(
-                        view.clone_parent.read(cx).value().trim(),
-                        "" | "~"
-                    )
-                    .then(|| view.clone_parent.clone());
-                    let create_parent = matches!(
-                        view.create_parent.read(cx).value().trim(),
-                        "" | "~"
-                    )
-                    .then(|| view.create_parent.clone());
+                    let clone_parent =
+                        matches!(view.clone_parent.read(cx).value().trim(), "" | "~")
+                            .then(|| view.clone_parent.clone());
+                    let create_parent =
+                        matches!(view.create_parent.read(cx).value().trim(), "" | "~")
+                            .then(|| view.create_parent.clone());
                     Some((home, clone_parent, create_parent))
                 }
                 None => {
@@ -633,12 +638,7 @@ fn open_host_menu(
         MenuItem::new(t("projectOnboarding", "localHost"))
             .shortcut(t("projectOnboarding", "hostStatus.ready"))
             .on_click(move |window, cx| {
-                select_host(
-                    &local_state,
-                    ProjectHostSelection::Local,
-                    window,
-                    cx,
-                );
+                select_host(&local_state, ProjectHostSelection::Local, window, cx);
             })
             .into(),
     );
@@ -791,14 +791,7 @@ fn open_directory_picker(
                     };
                     let selected = path.to_string_lossy().to_string();
                     let _ = cx.update(|window, cx| {
-                        apply_picker_selection(
-                            &picker_state,
-                            &owner,
-                            target,
-                            selected,
-                            window,
-                            cx,
-                        );
+                        apply_picker_selection(&picker_state, &owner, target, selected, window, cx);
                     });
                 })
                 .detach();
@@ -827,14 +820,7 @@ fn open_directory_picker(
                     initial_path
                 },
                 move |selected, window, cx| {
-                    apply_picker_selection(
-                        &picker_state,
-                        &owner,
-                        target,
-                        selected,
-                        window,
-                        cx,
-                    );
+                    apply_picker_selection(&picker_state, &owner, target, selected, window, cx);
                 },
                 window,
                 cx,
@@ -907,8 +893,7 @@ fn apply_picker_selection(
             .cloned();
         let epoch = match (
             current.as_ref().is_some_and(|connection| {
-                crate::remote_ssh::connection_fingerprint(connection)
-                    == *connection_fingerprint
+                crate::remote_ssh::connection_fingerprint(connection) == *connection_fingerprint
             }),
             crate::remote_ssh::current_connection_epoch(connection_id)
                 .filter(|epoch| Some(*epoch) == owner.expected_connection_epoch),
@@ -968,7 +953,9 @@ fn apply_picker_selection(
         }
         PickerTarget::InitializeExisting => {
             let input = state.read(cx).existing_path.clone();
-            input.update(cx, |input, cx| input.set_value(selected.clone(), window, cx));
+            input.update(cx, |input, cx| {
+                input.set_value(selected.clone(), window, cx)
+            });
             start_operation(
                 state,
                 PendingOperation::ClassifyExisting { path: selected },
@@ -1051,12 +1038,12 @@ fn start_operation(
         let completion_state = task_state.clone();
         window
             .spawn(cx, async move |cx| {
-                let completion = cx
-                    .background_executor()
-                    .spawn(async move {
-                        execute_operation(host, expected_connection_epoch, operation)
-                    })
-                    .await;
+                let completion =
+                    cx.background_executor()
+                        .spawn(async move {
+                            execute_operation(host, expected_connection_epoch, operation)
+                        })
+                        .await;
                 let _ = cx.update(|window, cx| {
                     complete_operation(&completion_state, &owner, completion, window, cx);
                 });
@@ -1123,8 +1110,9 @@ fn complete_operation(
     let failure = match &completion {
         BackgroundCompletion::Operation(Err(error)) => Some((error.clone(), false)),
         BackgroundCompletion::Classification(Err(error)) => Some((error.clone(), true)),
-        BackgroundCompletion::Operation(Ok(_))
-        | BackgroundCompletion::Classification(Ok(_)) => None,
+        BackgroundCompletion::Operation(Ok(_)) | BackgroundCompletion::Classification(Ok(_)) => {
+            None
+        }
     };
     if let Some((error, classification)) = failure {
         let (failure_owner, failure_epoch) = if let Some(authority) = error.authority {
@@ -1172,8 +1160,9 @@ fn complete_operation(
         BackgroundCompletion::Classification(Ok(probe)) => {
             OperationResultAuthority::normal(probe.observed_connection_epoch)
         }
-        BackgroundCompletion::Operation(Err(_))
-        | BackgroundCompletion::Classification(Err(_)) => unreachable!(),
+        BackgroundCompletion::Operation(Err(_)) | BackgroundCompletion::Classification(Err(_)) => {
+            unreachable!()
+        }
     };
     let observed_epoch = authority.observed_connection_epoch;
     let Some(owner) = reconcile_success_owner(state, owner, authority, cx) else {
@@ -1187,14 +1176,7 @@ fn complete_operation(
 
     match completion {
         BackgroundCompletion::Classification(Ok(probe)) => {
-            complete_classification(
-                state,
-                &owner,
-                observed_epoch,
-                Ok(probe),
-                window,
-                cx,
-            );
+            complete_classification(state, &owner, observed_epoch, Ok(probe), window, cx);
         }
         BackgroundCompletion::Operation(Ok(OnboardingOperationResult::NestedRepository {
             selected_path,
@@ -1224,8 +1206,9 @@ fn complete_operation(
         BackgroundCompletion::Operation(Ok(OnboardingOperationResult::ReadyToRegister(
             location,
         ))) => register_completed_project(state, &owner, location, window, cx),
-        BackgroundCompletion::Operation(Err(_))
-        | BackgroundCompletion::Classification(Err(_)) => unreachable!(),
+        BackgroundCompletion::Operation(Err(_)) | BackgroundCompletion::Classification(Err(_)) => {
+            unreachable!()
+        }
     }
 }
 
@@ -1264,8 +1247,7 @@ fn failure_owner_identity_is_current(
                 .iter()
                 .find(|connection| connection.id == *connection_id)
                 .is_some_and(|connection| {
-                    crate::remote_ssh::connection_fingerprint(connection)
-                        == *connection_fingerprint
+                    crate::remote_ssh::connection_fingerprint(connection) == *connection_fingerprint
                 })
         }
     }
@@ -1279,10 +1261,7 @@ fn reconcile_success_owner(
 ) -> Option<OperationOwner> {
     let (current_connection_fingerprint, current_connection_epoch) = match &owner.host_signature {
         HostSignature::Local => (None, None),
-        HostSignature::Ssh {
-            connection_id,
-            ..
-        } => {
+        HostSignature::Ssh { connection_id, .. } => {
             let fingerprint = state
                 .read(cx)
                 .store
@@ -1375,8 +1354,7 @@ fn completion_authority_is_current(
                 .iter()
                 .find(|connection| connection.id == *connection_id)
                 .is_some_and(|connection| {
-                    crate::remote_ssh::connection_fingerprint(connection)
-                        == *connection_fingerprint
+                    crate::remote_ssh::connection_fingerprint(connection) == *connection_fingerprint
                 })
         }
     }
@@ -1428,8 +1406,8 @@ fn invalidate_changed_remote_authority(
         ))
     });
     if let Some((clone_parent, create_parent, existing_path)) = inputs {
-        clone_parent.update(cx, |input, cx| input.set_value("~".into(), window, cx));
-        create_parent.update(cx, |input, cx| input.set_value("~".into(), window, cx));
+        clone_parent.update(cx, |input, cx| input.set_value("~", window, cx));
+        create_parent.update(cx, |input, cx| input.set_value("~", window, cx));
         existing_path.update(cx, |input, cx| input.set_value(String::new(), window, cx));
     }
 }
@@ -1514,6 +1492,7 @@ fn render_shell(
         .child(render_header(state, page, cx))
         .child(
             div()
+                .id("project-onboarding-body-scroll")
                 .flex_1()
                 .min_h(px(0.0))
                 .overflow_y_scroll()
@@ -1583,30 +1562,25 @@ fn render_header(
                 .child(title),
         )
         .child(
-            div()
-                .w(px(86.0))
-                .flex_none()
-                .flex()
-                .justify_end()
-                .child(
-                    div()
-                        .id("project-onboarding-close")
-                        .w(px(28.0))
-                        .h(px(28.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.0))
-                        .cursor_pointer()
-                        .hover(|el| el.bg(ui::bg_overlay()))
-                        .tooltip(|window, cx| {
-                            Tooltip::new(t("projectOnboarding", "close")).build(window, cx)
-                        })
-                        .child(VectorIcon::new(CLOSE_ICON, px(13.0)).ink(ui::text_muted()))
-                        .on_click(move |_: &ClickEvent, window, cx| {
-                            close_modal(&close_state, window, cx);
-                        }),
-                ),
+            div().w(px(86.0)).flex_none().flex().justify_end().child(
+                div()
+                    .id("project-onboarding-close")
+                    .w(px(28.0))
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(ui::bg_overlay()))
+                    .tooltip(|window, cx| {
+                        Tooltip::new(t("projectOnboarding", "close")).build(window, cx)
+                    })
+                    .child(VectorIcon::new(CLOSE_ICON, px(13.0)).ink(ui::text_muted()))
+                    .on_click(move |_: &ClickEvent, window, cx| {
+                        close_modal(&close_state, window, cx);
+                    }),
+            ),
         )
         .into_any_element()
 }
@@ -1667,12 +1641,7 @@ fn render_home(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> AnyElemen
                 }
             }),
         )
-        .child(
-            div()
-                .h(px(1.0))
-                .mx(px(8.0))
-                .bg(ui::border_subtle()),
-        )
+        .child(div().h(px(1.0)).mx(px(8.0)).bg(ui::border_subtle()))
         .child(
             onboarding_action_row(
                 "project-onboarding-clone",
@@ -1742,9 +1711,8 @@ fn onboarding_action_row(
         })
         .opacity(if enabled { 1.0 } else { 0.45 })
         .when(enabled, |el| {
-            el.cursor_pointer().hover(|el| {
-                el.border_color(ui::accent()).bg(ui::bg_overlay())
-            })
+            el.cursor_pointer()
+                .hover(|el| el.border_color(ui::accent()).bg(ui::bg_overlay()))
         })
         .child(
             div()
@@ -1781,7 +1749,11 @@ fn onboarding_action_row(
                         .child(description.into()),
                 ),
         )
-        .child(VectorIcon::new(BACK_ICON, px(13.0)).ink(ui::text_muted()).rotation(0.5))
+        .child(
+            VectorIcon::new(BACK_ICON, px(13.0))
+                .ink(ui::text_muted())
+                .rotation(0.5),
+        )
 }
 
 fn render_clone_page(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> AnyElement {
@@ -1804,10 +1776,7 @@ fn render_clone_page(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> Any
     } else {
         typed_name.clone()
     };
-    let suggested_name = typed_name
-        .is_empty()
-        .then(|| inferred.clone())
-        .flatten();
+    let suggested_name = typed_name.is_empty().then(|| inferred.clone()).flatten();
     let url_error = (!url.is_empty() && inferred.is_none())
         .then_some(t("projectOnboarding", "error.invalidUrl").to_string());
     let name_error = (!effective_name.is_empty()
@@ -1870,22 +1839,15 @@ fn render_clone_page(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> Any
                     .when(!blocked, |el| {
                         el.cursor_pointer().hover(|el| el.bg(ui::accent_subtle()))
                     })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .truncate()
-                            .child(tr!(
-                                "projectOnboarding",
-                                "clone.useSuggestedName",
-                                name = suggested_name
-                            )),
-                    )
+                    .child(div().flex_1().min_w(px(0.0)).truncate().child(tr!(
+                        "projectOnboarding",
+                        "clone.useSuggestedName",
+                        name = suggested_name
+                    )))
                     .on_click(move |_: &ClickEvent, window, cx| {
                         if !blocked {
-                            suggested_input.update(cx, |input, cx| {
-                                input.set_value(value.clone(), window, cx)
-                            });
+                            suggested_input
+                                .update(cx, |input, cx| input.set_value(value.clone(), window, cx));
                         }
                     }),
             )
@@ -1895,31 +1857,28 @@ fn render_clone_page(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> Any
             target,
         ))
         .child(
-            div()
-                .flex()
-                .justify_end()
-                .child(
-                    ui::primary_button(
-                        "project-onboarding-clone-submit",
-                        t("projectOnboarding", "clone.submit"),
-                    )
-                    .opacity(if enabled { 1.0 } else { 0.4 })
-                    .on_click(move |_: &ClickEvent, window, cx| {
-                        if !enabled {
-                            return;
-                        }
-                        start_operation(
-                            &submit_state,
-                            PendingOperation::Clone {
-                                url: url.clone(),
-                                parent: parent.clone(),
-                                name: effective_name.clone(),
-                            },
-                            window,
-                            cx,
-                        );
-                    }),
-                ),
+            div().flex().justify_end().child(
+                ui::primary_button(
+                    "project-onboarding-clone-submit",
+                    t("projectOnboarding", "clone.submit"),
+                )
+                .opacity(if enabled { 1.0 } else { 0.4 })
+                .on_click(move |_: &ClickEvent, window, cx| {
+                    if !enabled {
+                        return;
+                    }
+                    start_operation(
+                        &submit_state,
+                        PendingOperation::Clone {
+                            url: url.clone(),
+                            parent: parent.clone(),
+                            name: effective_name.clone(),
+                        },
+                        window,
+                        cx,
+                    );
+                }),
+            ),
         )
         .child(render_phase_status(state, cx))
         .into_any_element()
@@ -2002,11 +1961,8 @@ fn render_new_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut App) -
     let name_error = (!name.is_empty() && validate_portable_basename(&name).is_err())
         .then_some(t("projectOnboarding", "error.invalidName").to_string());
     let target = target_preview(&state.read(cx).flow.host, &parent, &name);
-    let enabled = host_ready
-        && !blocked
-        && !parent.is_empty()
-        && !name.is_empty()
-        && name_error.is_none();
+    let enabled =
+        host_ready && !blocked && !parent.is_empty() && !name.is_empty() && name_error.is_none();
     let browse_state = state.clone();
     let submit_state = state.clone();
     div()
@@ -2034,37 +1990,31 @@ fn render_new_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut App) -
             target,
         ))
         .child(
-            div()
-                .flex()
-                .justify_end()
-                .child(
-                    ui::primary_button(
-                        "project-onboarding-create-submit",
-                        t("projectOnboarding", "create.createAndInitialize"),
-                    )
-                    .opacity(if enabled { 1.0 } else { 0.4 })
-                    .on_click(move |_: &ClickEvent, window, cx| {
-                        if enabled {
-                            start_operation(
-                                &submit_state,
-                                PendingOperation::CreateNew {
-                                    parent: parent.clone(),
-                                    name: name.clone(),
-                                },
-                                window,
-                                cx,
-                            );
-                        }
-                    }),
-                ),
+            div().flex().justify_end().child(
+                ui::primary_button(
+                    "project-onboarding-create-submit",
+                    t("projectOnboarding", "create.createAndInitialize"),
+                )
+                .opacity(if enabled { 1.0 } else { 0.4 })
+                .on_click(move |_: &ClickEvent, window, cx| {
+                    if enabled {
+                        start_operation(
+                            &submit_state,
+                            PendingOperation::CreateNew {
+                                parent: parent.clone(),
+                                name: name.clone(),
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                }),
+            ),
         )
         .into_any_element()
 }
 
-fn render_existing_folder_form(
-    state: &Entity<ProjectOnboardingView>,
-    cx: &mut App,
-) -> AnyElement {
+fn render_existing_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> AnyElement {
     let (path, blocked, host_ready, input, probe) = {
         let view = state.read(cx);
         (
@@ -2179,43 +2129,34 @@ fn render_existing_folder_form(
             &input,
             blocked,
             move |window, cx| {
-                open_directory_picker(
-                    &browse_state,
-                    PickerTarget::InitializeExisting,
-                    window,
-                    cx,
-                );
+                open_directory_picker(&browse_state, PickerTarget::InitializeExisting, window, cx);
             },
         ))
         .when_some(relationship, |el, relationship| el.child(relationship))
         .child(
-            div()
-                .flex()
-                .justify_end()
-                .child(
-                    ui::primary_button("project-onboarding-existing-submit", label)
-                        .opacity(if enabled { 1.0 } else { 0.4 })
-                        .on_click(move |_: &ClickEvent, window, cx| {
-                            if !enabled {
-                                return;
+            div().flex().justify_end().child(
+                ui::primary_button("project-onboarding-existing-submit", label)
+                    .opacity(if enabled { 1.0 } else { 0.4 })
+                    .on_click(move |_: &ClickEvent, window, cx| {
+                        if !enabled {
+                            return;
+                        }
+                        let Some(path) = action_path.clone() else {
+                            return;
+                        };
+                        let operation = match &probe {
+                            ExistingProbeState::Ready(HostPathProbe {
+                                git: GitRelationship::NestedInRepository { .. },
+                                ..
+                            }) => PendingOperation::AddExisting { path },
+                            ExistingProbeState::Unselected | ExistingProbeState::Error(_) => {
+                                PendingOperation::ClassifyExisting { path }
                             }
-                            let Some(path) = action_path.clone() else {
-                                return;
-                            };
-                            let operation = match &probe {
-                                ExistingProbeState::Ready(HostPathProbe {
-                                    git: GitRelationship::NestedInRepository { .. },
-                                    ..
-                                }) => PendingOperation::AddExisting { path },
-                                ExistingProbeState::Unselected
-                                | ExistingProbeState::Error(_) => {
-                                    PendingOperation::ClassifyExisting { path }
-                                }
-                                _ => PendingOperation::InitializeExisting { path },
-                            };
-                            start_operation(&submit_state, operation, window, cx);
-                        }),
-                ),
+                            _ => PendingOperation::InitializeExisting { path },
+                        };
+                        start_operation(&submit_state, operation, window, cx);
+                    }),
+            ),
         )
         .when(path.is_empty(), |el| {
             el.child(
@@ -2348,13 +2289,7 @@ fn render_host_row(
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .child(
-                    div()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded_full()
-                        .bg(status_color),
-                )
+                .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(status_color))
                 .child(
                     div()
                         .text_size(ui::font_px(10.0))
@@ -2415,18 +2350,20 @@ fn render_path_field(
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                .child(div().flex_1().min_w(px(0.0)).child(Input::new(input).disabled(disabled)))
                 .child(
-                    ui::ghost_button(
-                        browse_id,
-                        t("projectOnboarding", "browse"),
-                    )
-                    .opacity(if disabled { 0.4 } else { 1.0 })
-                    .on_click(move |_: &ClickEvent, window, cx| {
-                        if !disabled {
-                            on_browse(window, cx);
-                        }
-                    }),
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(Input::new(input).disabled(disabled)),
+                )
+                .child(
+                    ui::ghost_button(browse_id, t("projectOnboarding", "browse"))
+                        .opacity(if disabled { 0.4 } else { 1.0 })
+                        .on_click(move |_: &ClickEvent, window, cx| {
+                            if !disabled {
+                                on_browse(window, cx);
+                            }
+                        }),
                 ),
         )
         .into_any_element()
@@ -2441,10 +2378,7 @@ fn field_label(label: impl Into<SharedString>) -> AnyElement {
         .into_any_element()
 }
 
-fn render_target_preview(
-    label: impl Into<SharedString>,
-    target: Option<String>,
-) -> AnyElement {
+fn render_target_preview(label: impl Into<SharedString>, target: Option<String>) -> AnyElement {
     div()
         .w_full()
         .flex()
@@ -2473,11 +2407,7 @@ fn render_target_preview(
         .into_any_element()
 }
 
-fn target_preview(
-    host: &ProjectHostSelection,
-    parent: &str,
-    name: &str,
-) -> Option<String> {
+fn target_preview(host: &ProjectHostSelection, parent: &str, name: &str) -> Option<String> {
     if parent.is_empty() || name.is_empty() {
         return None;
     }
@@ -2530,7 +2460,11 @@ fn render_phase_status(state: &Entity<ProjectOnboardingView>, cx: &App) -> AnyEl
 fn localized_error(error: &OnboardingError) -> String {
     match error.kind {
         OnboardingErrorKind::Collision => {
-            format!("{}: {}", t("projectOnboarding", "error.targetExists"), error.message)
+            format!(
+                "{}: {}",
+                t("projectOnboarding", "error.targetExists"),
+                error.message
+            )
         }
         OnboardingErrorKind::GitUnavailable => format!(
             "{}: {}",
@@ -2573,8 +2507,7 @@ fn localized_error(error: &OnboardingError) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        picker_request_is_current, ssh_failure_epoch_is_current,
-        ssh_operation_authority_is_current,
+        picker_request_is_current, ssh_failure_epoch_is_current, ssh_operation_authority_is_current,
     };
 
     #[test]
@@ -2595,8 +2528,23 @@ mod tests {
 
     #[test]
     fn project_onboarding_dispatch_requires_current_ssh_fingerprint_and_epoch() {
-        assert!(ssh_operation_authority_is_current(11, Some(11), Some(7), Some(7)));
-        assert!(!ssh_operation_authority_is_current(11, Some(12), Some(7), Some(7)));
-        assert!(!ssh_operation_authority_is_current(11, Some(11), Some(7), Some(8)));
+        assert!(ssh_operation_authority_is_current(
+            11,
+            Some(11),
+            Some(7),
+            Some(7)
+        ));
+        assert!(!ssh_operation_authority_is_current(
+            11,
+            Some(12),
+            Some(7),
+            Some(7)
+        ));
+        assert!(!ssh_operation_authority_is_current(
+            11,
+            Some(11),
+            Some(7),
+            Some(8)
+        ));
     }
 }
