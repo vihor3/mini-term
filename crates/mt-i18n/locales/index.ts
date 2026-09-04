@@ -36,6 +36,7 @@ import { mobileRelay } from './mobileRelay';
 import { panels } from './panels';
 import { terminalSearch } from './terminalSearch';
 import { projectSwitcher } from './projectSwitcher';
+import { projectOnboarding } from './projectOnboarding';
 import { usageStats } from './usageStats';
 
 type Dict = Record<string, unknown>;
@@ -73,6 +74,7 @@ export const dicts: { zh: Dict; en: Dict } = {
     panels: panels.zh,
     terminalSearch: terminalSearch.zh,
     projectSwitcher: projectSwitcher.zh,
+    projectOnboarding: projectOnboarding.zh,
     usageStats: usageStats.zh,
   },
   en: {
@@ -107,6 +109,7 @@ export const dicts: { zh: Dict; en: Dict } = {
     panels: panels.en,
     terminalSearch: terminalSearch.en,
     projectSwitcher: projectSwitcher.en,
+    projectOnboarding: projectOnboarding.en,
     usageStats: usageStats.en,
   },
 };

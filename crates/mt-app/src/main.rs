@@ -91,6 +91,7 @@ mod persist;
 mod pricing;
 mod project_kind;
 mod project_list;
+mod project_onboarding;
 mod project_switcher;
 mod project_tree;
 mod prompt;

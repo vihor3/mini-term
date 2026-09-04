@@ -154,6 +154,87 @@ pub struct HostCommandResult {
     pub observed_connection_epoch: Option<u64>,
 }
 
+/// Local-side command context used before a project/worktree identity exists.
+/// A Windows WSL UNC path remains a local picker result, but commands execute
+/// inside the owning distribution with a POSIX cwd.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PreProjectLocalContext {
+    Native { cwd: PathBuf },
+    Wsl { distro: String, cwd: String },
+}
+
+impl PreProjectLocalContext {
+    pub fn from_host_path(path: &str) -> Result<Self, CommandExecutionError> {
+        if path.is_empty() || path.contains('\0') {
+            return Err(command_error(
+                CommandExecutionErrorKind::Io,
+                "pre-project path is invalid",
+            ));
+        }
+        if let Some(wsl) = mt_core::parse_wsl_unc(&path.replace('/', "\\")) {
+            if wsl.distro.is_empty() || wsl.distro.contains('\0') {
+                return Err(command_error(
+                    CommandExecutionErrorKind::Io,
+                    "WSL distribution identity is invalid",
+                ));
+            }
+            return Ok(Self::Wsl {
+                distro: wsl.distro,
+                cwd: wsl.unix_path,
+            });
+        }
+        Ok(Self::Native {
+            cwd: PathBuf::from(path),
+        })
+    }
+}
+
+pub fn plan_pre_project_local_command(
+    context: &PreProjectLocalContext,
+    plan: &CommandPlan,
+) -> Result<PlannedHostCommand, CommandExecutionError> {
+    validate_argv(plan)?;
+    match context {
+        PreProjectLocalContext::Native { cwd } => Ok(PlannedHostCommand::Process {
+            program: plan.program.clone(),
+            args: plan.args.clone(),
+            cwd: Some(cwd.clone()),
+        }),
+        PreProjectLocalContext::Wsl { distro, cwd } => {
+            let mut args = vec![
+                "--distribution".to_string(),
+                distro.clone(),
+                "--cd".to_string(),
+                cwd.clone(),
+                "--exec".to_string(),
+                plan.program.clone(),
+            ];
+            args.extend(plan.args.clone());
+            Ok(PlannedHostCommand::Process {
+                program: "wsl.exe".into(),
+                args,
+                cwd: None,
+            })
+        }
+    }
+}
+
+/// Execute a local or automatic-WSL command before project registration while
+/// retaining the existing timeout, bounded-output, and process-tree cleanup.
+pub fn execute_pre_project_local_command(
+    context: &PreProjectLocalContext,
+    plan: &CommandPlan,
+    timeout: Duration,
+    output_cap: usize,
+) -> Result<CommandOutput, CommandExecutionError> {
+    let PlannedHostCommand::Process { program, args, cwd } =
+        plan_pre_project_local_command(context, plan)?
+    else {
+        unreachable!("pre-project local planning never produces SSH commands")
+    };
+    run_process(&program, &args, cwd, timeout, output_cap)
+}
+
 pub fn plan_host_command(
     snapshot: &ProjectExecutionSnapshot,
     plan: &CommandPlan,
@@ -939,6 +1020,52 @@ mod tests {
                     "list",
                     "--repo",
                     "host/o/r",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                cwd: None,
+            }
+        );
+    }
+
+    #[test]
+    fn project_onboarding_local_and_wsl_plans_keep_structured_argv() {
+        let local = plan_pre_project_local_command(
+            &PreProjectLocalContext::from_host_path("/repo with spaces").unwrap(),
+            &CommandPlan::new("git", ["init", "--", "name with spaces"]),
+        )
+        .unwrap();
+        assert_eq!(
+            local,
+            PlannedHostCommand::Process {
+                program: "git".into(),
+                args: vec!["init".into(), "--".into(), "name with spaces".into()],
+                cwd: Some(PathBuf::from("/repo with spaces")),
+            }
+        );
+
+        let wsl = plan_pre_project_local_command(
+            &PreProjectLocalContext::from_host_path(
+                r"\\wsl.localhost\Ubuntu\home\u\repo with spaces",
+            )
+            .unwrap(),
+            &CommandPlan::new("git", ["status", "--short"]),
+        )
+        .unwrap();
+        assert_eq!(
+            wsl,
+            PlannedHostCommand::Process {
+                program: "wsl.exe".into(),
+                args: [
+                    "--distribution",
+                    "Ubuntu",
+                    "--cd",
+                    "/home/u/repo with spaces",
+                    "--exec",
+                    "git",
+                    "status",
+                    "--short",
                 ]
                 .into_iter()
                 .map(str::to_string)

@@ -8,17 +8,7 @@
 //! [`crate::overlay`] 覆盖物栈、不走 [`crate::prompt`]**,就是
 //! [`TerminalArea`](crate::terminal_area::TerminalArea) 的一个早退分支。
 //!
-//! # 与原版的一处偏差(有理由,见报告)
-//!
-//! **「添加本地项目」走 [`crate::modal::open_add_project`]**(路径输入框 +
-//! 「浏览…」)而不是像原版那样直接弹系统目录选择框。理由是 GPUI 侧「添加项目」
-//! 只该有一条路:项目列表底部那颗按钮已经是这个弹窗,而它多出来的手输那一路
-//! 是有意保留的(UNC / WSL 路径在目录选择框里常常点不到,见 `modal.rs`)。
-//! 同一个动作在两处表现不同才是真的坏体验。
-//!
-//! 第二颗按钮「添加 SSH 远程项目」由 BB-b 补上,走
-//! [`crate::remote_project::open`] —— 与项目列表底部那颗 `SSH` 钮同一种覆盖物,
-//! 两处入口不会各开一个。
+//! 首屏只提供一个「添加项目」入口，主机选择与本地 / SSH 操作都在统一引导内完成。
 
 use gpui::{
     App, ClickEvent, Div, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
@@ -27,7 +17,6 @@ use gpui::{
 
 use crate::hotkeys;
 use crate::i18n::t;
-use crate::modal;
 use crate::store::AppStore;
 use crate::ui;
 
@@ -79,18 +68,16 @@ pub fn guide(store: Entity<AppStore>) -> Div {
                 .flex()
                 .items_center()
                 .justify_center()
-                .gap(px(8.0))
-                .child(add_local_button(store.clone()))
-                .child(add_remote_button(store)),
+                .child(add_project_button(store)),
         )
         .child(hints())
 }
 
 /// 主按钮:accent 描边 + `--accent-subtle` 底,hover 转 `--accent-muted`
 /// (`FirstRunGuide.tsx:29-31` 的 `primary`)。
-fn add_local_button(store: Entity<AppStore>) -> impl IntoElement {
+fn add_project_button(store: Entity<AppStore>) -> impl IntoElement {
     div()
-        .id("first-run-add-local")
+        .id("first-run-add-project")
         .px(px(16.0))
         .py(px(10.0))
         .rounded(px(6.0))
@@ -101,30 +88,9 @@ fn add_local_button(store: Entity<AppStore>) -> impl IntoElement {
         .text_color(ui::accent())
         .cursor_pointer()
         .hover(|el| el.bg(ui::accent_muted()))
-        .child(t("app", "firstRun.addLocal"))
+        .child(t("projectOnboarding", "title"))
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            modal::open_add_project(store.clone(), window, cx);
-        })
-}
-
-/// 次按钮:边框 + 淡字,hover 转 accent(`FirstRunGuide.tsx:32-34` 的 `secondary`)。
-///
-/// 点开的是与项目列表底部 `SSH` 钮**同一个**弹窗(同一种覆盖物,防叠开)。
-fn add_remote_button(store: Entity<AppStore>) -> impl IntoElement {
-    div()
-        .id("first-run-add-remote")
-        .px(px(16.0))
-        .py(px(10.0))
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(ui::border_default())
-        .text_size(ui::font_px(13.0))
-        .text_color(ui::text_secondary())
-        .cursor_pointer()
-        .hover(|el| el.border_color(ui::accent()).text_color(ui::accent()))
-        .child(t("app", "firstRun.addRemote"))
-        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            crate::remote_project::open(store.clone(), None, window, cx);
+            crate::project_onboarding::open(store.clone(), None, window, cx);
         })
 }
 

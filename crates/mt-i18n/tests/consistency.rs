@@ -14,9 +14,9 @@ use mt_i18n::{
     Locale, Namespace, dict, interpolate, lookup, namespace, namespaces, t_args_in, t_in, t_path,
 };
 
-/// TS 侧 `crates/mt-i18n/locales/*.ts` 数出来的对账数字（生成器 2026-08-29 跑出）：
-/// 32 个命名空间文件（`locales/index.ts` 里 32 条 import 一一对上），
-/// 每种语言 840 条叶子文案。改字典后重跑生成器，这里的数字随 dict.rs 一起更新。
+/// TS 侧 `crates/mt-i18n/locales/*.ts` 的当前对账基线：
+/// 33 个命名空间文件（`locales/index.ts` 里 33 条 import 一一对上），
+/// 每种语言 903 条叶子文案。改字典后重跑生成器，这里的数字随 dict.rs 一起更新。
 ///
 /// 727 → 735：M 批(mt-app 消费批)补齐 GPUI 侧 8 条缺 key 文案
 /// （`paneGroup.shellExited` / `settings.terminal.fontSizeNewOnly` /
@@ -82,8 +82,9 @@ use mt_i18n::{
 /// 失效三条可见反馈。
 /// 839 → 840：远程文档刷新失败但保留已加载内容时补非阻断警告。
 /// 840 → 842：新建终端菜单接入 AI 启动器段（分组标题 + 「管理启动器…」入口）。
-const EXPECTED_NAMESPACES: usize = 32;
-const EXPECTED_ENTRIES_PER_LANG: usize = 842;
+/// 842 → 903：统一项目引导新增 `projectOnboarding` 命名空间（61 条）。
+const EXPECTED_NAMESPACES: usize = 33;
+const EXPECTED_ENTRIES_PER_LANG: usize = 903;
 
 /// TS 侧 `locales/index.ts` 收编的全部命名空间，手抄一份放这里做交叉验证 ——
 /// 只信生成器的话，「某个 ns 文件整体没被读到」这种错会一起漏过去。
@@ -103,6 +104,7 @@ const TS_NAMESPACES: &[&str] = &[
     "paneGroup",
     "panels",
     "projectList",
+    "projectOnboarding",
     "projectSwitcher",
     "prompt",
     "remoteProject",

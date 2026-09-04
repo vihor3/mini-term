@@ -116,9 +116,28 @@ jobs:
           retention-days: 3
 
       - name: Check generated i18n dictionary
+        if: ${{ !cancelled() }}
+        id: generated-i18n
+        shell: bash
+        env:
+          I18N_PATCH_PATH: generated-i18n.patch
         run: |
           node crates/mt-i18n/tools/gen_from_ts.mjs
-          git diff --exit-code -- crates/mt-i18n/src/dict.rs
+          git diff --binary -- crates/mt-i18n/src/dict.rs > "$I18N_PATCH_PATH"
+          if [ -s "$I18N_PATCH_PATH" ]; then
+            cat "$I18N_PATCH_PATH"
+            exit 1
+          fi
+          rm -f "$I18N_PATCH_PATH"
+
+      - name: Upload generated i18n diagnostic patch
+        if: ${{ failure() && hashFiles('generated-i18n.patch') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: generated-i18n-${{ github.run_id }}
+          path: generated-i18n.patch
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Test sidecar and ConPTY staging
         run: node --test tests/stageSidecars.test.cjs tests/conptyBundle.test.cjs
@@ -205,6 +224,16 @@ jobs:
             -p mt-terminal \
             -p mt-terminal-host \
             -p mt-ui
+
+      - name: Run focused onboarding tests
+        shell: bash
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-app --bin mini-term --no-fail-fast \
+            project_onboarding
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-app --bin mini-term --no-fail-fast \
+            remote_ssh::project_ops
 
       - name: Check sidecars
         run: cargo check --manifest-path sidecars/Cargo.toml --locked --target x86_64-pc-windows-msvc --all-targets

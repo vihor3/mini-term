@@ -50,7 +50,7 @@ use mt_config::SshConnection;
 
 use crate::i18n::{t, tr};
 use crate::menu::{self, MenuItem};
-use crate::prompt::{Confirm, autofocus, kind, open_guarded};
+use crate::prompt::{Confirm, autofocus, close_guarded, kind, open_guarded};
 use crate::ssh_conn::{SshGroupBucket, build_group_buckets, connection_summary};
 use crate::store::AppStore;
 use crate::ui;
@@ -539,6 +539,8 @@ struct ConnForm {
 
 pub struct SshPanel {
     store: Entity<AppStore>,
+    /// 从项目引导进入时，新增连接保存成功后的单次回调。
+    on_connection_created: Option<OnConnectionCreated>,
     selected: GroupKey,
     collapsed: HashSet<String>,
     form: Option<ConnForm>,
@@ -558,6 +560,8 @@ pub struct SshPanel {
     /// 改名 / 新建两个输入框的「回车提交 / 失焦提交」订阅。
     _subs: Vec<Subscription>,
 }
+
+type OnConnectionCreated = Box<dyn FnOnce(SshConnection, &mut Window, &mut App)>;
 
 impl Render for SshPanel {
     /// 状态盒子。画面由 Dialog 的 builder 每帧重建(见 `modal.rs` 的说明)。
@@ -619,16 +623,39 @@ impl SshPanel {
 
 /// 打开「SSH 连接」面板。
 pub fn open(window: &mut Window, cx: &mut App) {
+    open_panel(None, window, cx);
+}
+
+/// 从项目引导直接打开新增连接表单。
+///
+/// 只有新连接成功保存时才关闭面板并调用回调；编辑已有连接仍保留普通管理语义。
+pub fn open_add(
+    on_created: impl FnOnce(SshConnection, &mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    open_panel(Some(Box::new(on_created)), window, cx);
+}
+
+fn open_panel(
+    on_connection_created: Option<OnConnectionCreated>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     // 守卫要在**建任何输入框之前**判(与 `prompt::show_prompt` 同一条)
     if crate::overlay::contains(crate::overlay::key(kind::SSH_PANEL)) {
         return;
     }
     let store = AppStore::global(cx);
+    let form = on_connection_created
+        .as_ref()
+        .map(|_| new_form(None, String::new(), window, cx));
     let state = cx.new(|_cx| SshPanel {
         store,
+        on_connection_created,
         selected: GroupKey::All,
         collapsed: HashSet::new(),
-        form: None,
+        form,
         renaming: None,
         creating: None,
         dragging: None,
@@ -758,7 +785,7 @@ fn text_field(
     })
 }
 
-fn save_form(state: &Entity<SshPanel>, cx: &mut App) {
+fn save_form(state: &Entity<SshPanel>, window: &mut Window, cx: &mut App) {
     let Some(conn) = state.read(cx).form.as_ref().map(|f| {
         build_connection(
             f.id.clone(),
@@ -777,16 +804,27 @@ fn save_form(state: &Entity<SshPanel>, cx: &mut App) {
         return;
     }
     let mut conn = conn;
-    if conn.id.is_empty() {
+    let created = conn.id.is_empty();
+    if created {
         conn.id = crate::tree::gen_id("ssh");
     }
-    state.update(cx, |panel, cx| {
+    let conn_for_store = conn.clone();
+    let on_created = state.update(cx, |panel, cx| {
         panel.form = None;
         panel
             .store
-            .update(cx, |store, cx| store.upsert_ssh_connection(conn, cx));
+            .update(cx, |store, cx| store.upsert_ssh_connection(conn_for_store, cx));
         cx.notify();
+        if created {
+            panel.on_connection_created.take()
+        } else {
+            None
+        }
     });
+    if let Some(on_created) = on_created {
+        close_guarded(kind::SSH_PANEL, window, cx);
+        on_created(conn, window, cx);
+    }
 }
 
 /// 删除一条连接。**不可撤销**(密码/私钥路径一并丢失)且会静默收窄已关联项目的
@@ -1552,7 +1590,9 @@ fn render_form(state: &Entity<SshPanel>, cx: &mut App) -> AnyElement {
                         .opacity(if can_save { 1.0 } else { 0.4 })
                         .on_click({
                             let state = state.clone();
-                            move |_: &ClickEvent, _window, cx: &mut App| save_form(&state, cx)
+                            move |_: &ClickEvent, window, cx: &mut App| {
+                                save_form(&state, window, cx)
+                            }
                         }),
                 ),
         )

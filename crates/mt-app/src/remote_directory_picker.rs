@@ -1,4 +1,4 @@
-//! Lightweight remote directory browser used by the add-remote-project form.
+//! Lightweight remote directory browser used by unified project onboarding.
 
 use std::rc::Rc;
 
@@ -34,7 +34,13 @@ impl PickerState {
         if self.loading {
             return;
         }
-        self.request_id = self.request_id.wrapping_add(1);
+        let Some(request_id) = self.request_id.checked_add(1) else {
+            self.has_valid_current = false;
+            self.error = Some(t("projectOnboarding", "error.requestOverflow").to_string());
+            cx.notify();
+            return;
+        };
+        self.request_id = request_id;
         let request_id = self.request_id;
         let connection_id = self.connection.id.clone();
         let connection = self.connection.clone();

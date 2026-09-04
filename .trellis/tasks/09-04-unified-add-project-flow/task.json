@@ -1,0 +1,29 @@
+{
+  "id": "unified-add-project-flow",
+  "name": "unified-add-project-flow",
+  "title": "Unified Local and Remote Add Project Flow",
+  "description": "Unify local and SSH project onboarding into one Orca-style modal supporting folder add, repository clone, new-folder Git initialization, and existing-folder Git initialization.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": "crates/mt-app project onboarding UI, host-scoped filesystem/Git operations, project persistence integration, and focused tests/workflows",
+  "package": null,
+  "priority": "P2",
+  "creator": "leo",
+  "assignee": "leo",
+  "createdAt": "2026-09-04",
+  "completedAt": null,
+  "branch": "feat/remote-file-management",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "planning_status": "implementation-complete-awaiting-actions",
+    "previous_task_audit": "completed; Trellis drift repaired; bounded scope exceptions documented"
+  }
+}

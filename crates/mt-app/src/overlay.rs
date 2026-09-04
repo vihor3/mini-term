@@ -49,7 +49,10 @@ use std::cell::RefCell;
 /// 所以调用点一律走这里的常量。
 pub mod kind {
     pub const SETTINGS: &str = "settings";
-    pub const ADD_PROJECT: &str = "add-project";
+    /// 统一的本地 / SSH 项目引导弹窗。
+    pub const PROJECT_ONBOARDING: &str = "project-onboarding";
+    /// 旧本地添加入口的兼容别名。两种旧入口仍共享同一个防叠开守卫。
+    pub const ADD_PROJECT: &str = PROJECT_ONBOARDING;
     pub const RENAME_PANE: &str = "rename-pane";
     pub const REMOVE_PROJECT: &str = "remove-project";
     /// 通用输入框(重命名 / 新建文件 / 编辑描述…)。
@@ -95,9 +98,8 @@ pub mod kind {
     /// 「关联 SSH」弹窗(项目右键菜单)。与 [`SSH_PANEL`] **不同种类**:
     /// 两个都开着是合法的(在关联弹窗里发现连接名不对,回头去改)。
     pub const SSH_ASSOC: &str = "ssh-assoc";
-    /// 「添加远程项目」弹窗。三个入口(项目列表底部 SSH 钮 / 分组右键 /
-    /// 首启引导第二颗按钮)共用这一种类,防的正是「两处入口各开一个」。
-    pub const ADD_REMOTE_PROJECT: &str = "add-remote-project";
+    /// 旧远程添加入口的兼容别名。
+    pub const ADD_REMOTE_PROJECT: &str = PROJECT_ONBOARDING;
     /// 文件上传/下载发现同名目标后的三选一冲突策略弹窗。
     pub const FILE_CONFLICT: &str = "file-conflict";
     /// 添加远程项目时叠在表单上方的远程目录浏览器。

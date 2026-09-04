@@ -755,7 +755,6 @@ impl OrcaProjectSidebar {
 
     fn render_projects_header(&self, _cx: &mut Context<Self>) -> gpui::Div {
         let store_for_add = self.store.clone();
-        let store_for_options = self.store.clone();
         div()
             .h(px(36.0))
             .flex_none()
@@ -789,22 +788,9 @@ impl OrcaProjectSidebar {
                         .on_click(
                             move |event: &gpui::ClickEvent, window, cx| {
                                 cx.stop_propagation();
-                                let remote_store = store_for_options.clone();
                                 menu::show(
                                     event.position(),
                                     vec![
-                                        menu::item(
-                                            t("projectList", "menu.addRemoteProject"),
-                                            move |window, cx| {
-                                                crate::remote_project::open(
-                                                    remote_store.clone(),
-                                                    None,
-                                                    window,
-                                                    cx,
-                                                );
-                                            },
-                                        ),
-                                        menu::separator(),
                                         menu::item(t("app", "activityBar.ssh"), |window, cx| {
                                             crate::ssh_panel::open(window, cx);
                                         }),
@@ -827,7 +813,12 @@ impl OrcaProjectSidebar {
                                 .into_any_element(),
                         )
                         .on_click(move |_event, window, cx| {
-                            crate::modal::open_add_project(store_for_add.clone(), window, cx);
+                            crate::project_onboarding::open(
+                                store_for_add.clone(),
+                                None,
+                                window,
+                                cx,
+                            );
                         }),
                     ),
             )

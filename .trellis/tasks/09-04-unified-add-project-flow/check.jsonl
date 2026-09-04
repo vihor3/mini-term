@@ -1,0 +1,18 @@
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/prd.md", "reason": "Verify every acceptance criterion and scope boundary"}
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/design.md", "reason": "Verify operation ownership, host routing, safety, and rollback contracts"}
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/implement.md", "reason": "Verify every planned batch and Actions gate completed"}
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/research/validation.md", "reason": "Acceptance-criteria matrix, failure coverage, and residual-risk checklist"}
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/research/host-operations.md", "reason": "Check mutation ownership, exact postconditions, and SSH uncertainty handling"}
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/research/ui-onboarding.md", "reason": "Check every entry point and modal interaction was migrated"}
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/research/orca-reference.md", "reason": "Check Orca-aligned behavior and recorded intentional differences"}
+{"file": ".trellis/spec/mt-app/backend/quality-guidelines.md", "reason": "Check async ownership, execution-time revalidation, and regression coverage"}
+{"file": ".trellis/spec/mt-app/backend/workbench-identity-contract.md", "reason": "Check exact project/worktree activation and stale-result safety"}
+{"file": ".trellis/spec/mt-app/backend/remote-runtime-reconciliation-contract.md", "reason": "Check remote host authority and generation fences"}
+{"file": ".trellis/spec/mt-project/backend/worktree-identity-contract.md", "reason": "Check canonical locator and dedupe behavior"}
+{"file": ".trellis/spec/mt-project/backend/worktree-catalog-contract.md", "reason": "Check registration, alias preservation, and persistence behavior"}
+{"file": ".trellis/spec/mt-layout/backend/worktree-layout-contract.md", "reason": "Check tree placement and layout identity remain consistent"}
+{"file": ".trellis/spec/mt-ssh/backend/remote-runtime-contract.md", "reason": "Check bounded SSH execution, epoch fencing, and pool ownership"}
+{"file": ".trellis/spec/mt-ssh/backend/error-handling.md", "reason": "Check uncertain dispatch is never blindly retried or destructively cleaned"}
+{"file": ".trellis/spec/mt-app/backend/release-staging-contract.md", "reason": "Check all executable validation and installer proof came from GitHub Actions"}
+{"file": ".github/workflows/ci.yml", "reason": "Check Linux and Windows onboarding test gates"}
+{"file": ".github/workflows/windows-package.yml", "reason": "Check verified Windows installer build and artifact upload"}

@@ -30,6 +30,11 @@ pub(super) enum AuthoritativeBindingInstall {
     Failed(String),
 }
 
+pub(super) struct PreparedProjectIdentity {
+    binding: ProjectWorktreeBinding,
+    restored_layout: Option<SavedProjectLayout>,
+}
+
 fn authoritative_rebind_blocker(
     worktree_changed: bool,
     has_live_pty: bool,
@@ -416,40 +421,47 @@ impl AppStore {
             .map(|binding| binding.worktree_id.clone());
     }
 
-    pub(super) fn register_project_identity(&mut self, project_id: &str) {
-        let Some(project) = self.project(project_id).cloned() else {
-            return;
-        };
-        let existing = self.project_worktree_bindings.get(project_id);
-        let Ok(binding) = resolve_project_binding(
-            &project,
+    pub(super) fn prepare_project_identity(
+        &self,
+        project: &ProjectConfig,
+    ) -> Result<PreparedProjectIdentity, String> {
+        let existing = self.project_worktree_bindings.get(&project.id);
+        let binding = resolve_project_binding(
+            project,
             &self.config.ssh_connections,
             &self.host_install_id,
             existing,
-        ) else {
-            return;
-        };
-
+        )
+        .map_err(|error| format!("could not resolve project identity: {error:#}"))?;
         let mut restored_layout = None;
-        if let Some(store) = self.layout_store.as_ref() {
+        let binding = if let Some(store) = self.layout_store.as_ref() {
             let now_ms = super::layout::unix_time_ms();
-            match store.reconcile_worktree_layouts(std::slice::from_ref(&binding), now_ms) {
-                Ok(mut reconciled) => {
-                    restored_layout = reconciled.layouts.remove(project_id);
-                    self.project_worktree_bindings.extend(reconciled.bindings);
-                }
-                Err(error) => {
-                    eprintln!("[identity] 项目 {project_id} 的 worktree 绑定落盘失败: {error:#}");
-                    self.project_worktree_bindings
-                        .insert(project_id.to_string(), binding.clone());
-                }
-            }
+            let mut reconciled = store
+                .reconcile_worktree_layouts(std::slice::from_ref(&binding), now_ms)
+                .map_err(|error| format!("could not persist project identity: {error:#}"))?;
+            restored_layout = reconciled.layouts.remove(&project.id);
+            reconciled
+                .bindings
+                .remove(&project.id)
+                .unwrap_or(binding)
         } else {
-            self.project_worktree_bindings
-                .insert(project_id.to_string(), binding.clone());
-        }
+            binding
+        };
+        Ok(PreparedProjectIdentity {
+            binding,
+            restored_layout,
+        })
+    }
 
-        if let Some(layout) = restored_layout {
+    pub(super) fn install_prepared_project_identity(
+        &mut self,
+        project_id: &str,
+        prepared: PreparedProjectIdentity,
+    ) -> WorktreeId {
+        let worktree_id = prepared.binding.worktree_id.clone();
+        self.project_worktree_bindings
+            .insert(project_id.to_string(), prepared.binding);
+        if let Some(layout) = prepared.restored_layout {
             apply_reconciled_project_layout(
                 &mut self.config,
                 &mut self.project_states,
@@ -459,6 +471,32 @@ impl AppStore {
             );
         }
         self.sync_active_worktree();
+        worktree_id
+    }
+
+    pub(super) fn register_project_identity(&mut self, project_id: &str) {
+        let Some(project) = self.project(project_id).cloned() else {
+            return;
+        };
+        match self.prepare_project_identity(&project) {
+            Ok(prepared) => {
+                self.install_prepared_project_identity(project_id, prepared);
+            }
+            Err(error) => {
+                eprintln!("[identity] project {project_id} identity registration failed: {error}");
+                let existing = self.project_worktree_bindings.get(project_id);
+                if let Ok(binding) = resolve_project_binding(
+                    &project,
+                    &self.config.ssh_connections,
+                    &self.host_install_id,
+                    existing,
+                ) {
+                    self.project_worktree_bindings
+                        .insert(project_id.to_string(), binding);
+                    self.sync_active_worktree();
+                }
+            }
+        }
     }
 
     pub(super) fn install_authoritative_remote_binding(

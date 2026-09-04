@@ -955,7 +955,7 @@ fn project_menu(
     entries
 }
 
-/// 分组行右键菜单(`ProjectList.tsx:965-1007`)。六项连排、**无分隔线**。
+/// 分组行右键菜单(`ProjectList.tsx:965-1007`)。项目添加只保留统一入口。
 fn group_menu(
     view: &Entity<ProjectList>,
     store: &Entity<AppStore>,
@@ -980,21 +980,8 @@ fn group_menu(
         let store = store.clone();
         let id = group.id.clone();
         menu::item(t("projectList", "menu.addProject"), move |window, cx| {
-            modal::open_add_project_into(store.clone(), Some(id.clone()), window, cx);
+            crate::project_onboarding::open(store.clone(), Some(id.clone()), window, cx);
         })
-    });
-
-    // 「添加远程项目」紧跟「添加项目」(原版 `ProjectList.tsx:971`):
-    // 新项目直接落进该分组,分组折叠则展开
-    entries.push({
-        let store = store.clone();
-        let id = group.id.clone();
-        menu::item(
-            t("projectList", "menu.addRemoteProject"),
-            move |window, cx| {
-                crate::remote_project::open(store.clone(), Some(id.clone()), window, cx);
-            },
-        )
     });
 
     if group.depth > 0 {
@@ -2343,8 +2330,7 @@ impl ProjectList {
 
     /// 底部按钮条。
     fn render_footer(&self, cx: &mut Context<Self>) -> gpui::Div {
-        // 底部按钮条(`ProjectList.tsx:1087-1113`):添加项目 / SSH / +。
-        // 中间那颗 `SSH` 走 `remote_project::open`(根层),BB-b 补齐。
+        // 项目添加统一进入主机感知的引导；SSH 连接管理仍由活动栏入口承担。
         let dashed_button = |id: &'static str, label: SharedString, wide: bool| {
             div()
                 .id(id)
@@ -2377,21 +2363,13 @@ impl ProjectList {
                     true,
                 )
                 .on_click(move |_event, window, cx| {
-                    modal::open_add_project(store_for_add.clone(), window, cx);
+                    crate::project_onboarding::open(
+                        store_for_add.clone(),
+                        None,
+                        window,
+                        cx,
+                    );
                 }),
-            )
-            .child(
-                dashed_button("add-remote-project", "SSH".into(), false)
-                    .tooltip(|window, cx| {
-                        mt_ui::tooltip::Tooltip::new(t(
-                            "projectList",
-                            "addRemoteProject",
-                        ))
-                        .build(window, cx)
-                    })
-                    .on_click(cx.listener(|this, _event, window, cx| {
-                        crate::remote_project::open(this.store.clone(), None, window, cx);
-                    })),
             )
             .child(
                 dashed_button("new-group", "+".into(), false)

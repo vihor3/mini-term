@@ -16,11 +16,11 @@
 //! 连接选择区(左栏分组 + 右栏单选列表)与 [`crate::ssh_panel`] 同构且共用
 //! 同一份视图件。
 //!
-//! # 三个入口
+//! # 兼容状态
 //!
-//! 项目列表底部的 `SSH` 钮(根层)、分组右键「添加远程项目」(落进该组)、
-//! 首启引导第二颗按钮。三者共用 [`crate::overlay::kind::ADD_REMOTE_PROJECT`]
-//! 一种覆盖物 —— 防的正是「两处入口各开一个」。
+//! 当前可见入口已经统一转到 `crate::project_onboarding`。本模块暂时保留旧 API，
+//! 并与统一引导共用 [`crate::overlay::kind::ADD_REMOTE_PROJECT`] 的防叠开守卫，
+//! 便于 Actions 通过前回滚，不再作为正常用户入口。
 
 use std::collections::HashSet;
 

@@ -1,0 +1,18 @@
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/prd.md", "reason": "Approved product scope and acceptance criteria"}
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/design.md", "reason": "Host-scoped architecture, operation semantics, ownership, and rollback design"}
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/implement.md", "reason": "Ordered implementation batches and Actions-only gates"}
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/research/ui-onboarding.md", "reason": "Existing GPUI entry points, modal patterns, pickers, and activation flow"}
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/research/host-operations.md", "reason": "Pre-project local and SSH operation boundary and mutation safety"}
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/research/validation.md", "reason": "Test seams, failure matrix, and acceptance-criteria coverage"}
+{"file": ".trellis/tasks/09-04-unified-add-project-flow/research/orca-reference.md", "reason": "Orca source interaction patterns and intentional mini-term differences"}
+{"file": ".trellis/spec/mt-app/backend/quality-guidelines.md", "reason": "GPUI async ownership, revalidation, and Actions-only quality rules"}
+{"file": ".trellis/spec/mt-app/backend/workbench-identity-contract.md", "reason": "Stable project/worktree activation and stale callback invariants"}
+{"file": ".trellis/spec/mt-app/backend/remote-runtime-reconciliation-contract.md", "reason": "Remote host generation, authority, and reconciliation rules"}
+{"file": ".trellis/spec/mt-project/backend/worktree-identity-contract.md", "reason": "Canonical local and remote worktree identity contract"}
+{"file": ".trellis/spec/mt-project/backend/worktree-catalog-contract.md", "reason": "Catalog registration, alias, and persistence invariants"}
+{"file": ".trellis/spec/mt-layout/backend/worktree-layout-contract.md", "reason": "Project tree placement and stable layout identity"}
+{"file": ".trellis/spec/mt-ssh/backend/remote-runtime-contract.md", "reason": "Authenticated SSH identity, epochs, bounded operations, and session ownership"}
+{"file": ".trellis/spec/mt-ssh/backend/error-handling.md", "reason": "Dispatch uncertainty, retry, cleanup, and exact-session retirement"}
+{"file": ".trellis/spec/mt-app/backend/release-staging-contract.md", "reason": "GitHub Actions build, staging, and installer evidence contract"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer data flow and integration review checklist"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Existing abstraction discovery and reuse checklist"}

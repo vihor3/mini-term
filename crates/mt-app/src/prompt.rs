@@ -54,7 +54,9 @@ where
     open_guarded_with_close(kind, window, cx, build, |_window, _cx| {});
 }
 
-fn open_guarded_with_close<F, C>(
+/// Guarded dialog with a lifecycle callback for every user-driven close path.
+/// Programmatic callers invalidate their state before [`close_guarded`].
+pub(crate) fn open_guarded_with_close<F, C>(
     kind: &'static str,
     window: &mut Window,
     cx: &mut App,

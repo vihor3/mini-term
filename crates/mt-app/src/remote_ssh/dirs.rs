@@ -374,14 +374,7 @@ pub fn rename_entry(
 
 /// 连接自检:只探到远程 `$HOME` 为止,返回它。
 ///
-/// 原版没有独立的「测试连接」command(SshModal 只做 CRUD),这里把
-/// [`validate_dir`] 的前半段单独暴露,BB-b 若要做「测试」按钮可以直接用 ——
-/// 不新增任何行为,失败文案与真实使用同源。
-/// ⚠️ **有意保留的无调用点代码**(窄作用域 `allow`,不是整模块的那种):
-/// BB-b 逐字复刻 `SshModal.tsx` 时确认原版**没有**「测试连接」按钮,所以没有
-/// 入口接它。删掉的话哪天要加这颗按钮又得把同一段重写一遍,而它与
-/// [`validate_dir`] 共用同一条失败面 —— 留着零成本。
-#[allow(dead_code)]
+/// 项目引导用它验证所选主机并取得规范化 home；失败文案与真实目录访问同源。
 pub fn probe_connection(conn: &SshConnection) -> Result<String, String> {
     validate_dir(conn, "~")
 }
