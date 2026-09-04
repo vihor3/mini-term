@@ -384,8 +384,7 @@ mod tests {
     };
 
     fn assert_same_canonical_directory(actual: &str, expected: &Path) {
-        let expected =
-            LocalProjectOps::canonical_directory(&expected.to_string_lossy()).unwrap();
+        let expected = LocalProjectOps::canonical_directory(&expected.to_string_lossy()).unwrap();
         assert_eq!(
             mt_project::worktree::normalize_path_for_comparison(actual),
             mt_project::worktree::normalize_path_for_comparison(&expected.to_string_lossy())
