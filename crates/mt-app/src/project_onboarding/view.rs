@@ -620,12 +620,10 @@ fn complete_host_probe(
                 view.flow.set_host_status(HostStatus::Ready {
                     observed_epoch: Some(epoch),
                 });
-                let clone_parent =
-                    matches!(view.clone_parent.read(cx).value().trim(), "" | "~")
-                        .then(|| view.clone_parent.clone());
-                let create_parent =
-                    matches!(view.create_parent.read(cx).value().trim(), "" | "~")
-                        .then(|| view.create_parent.clone());
+                let clone_parent = matches!(view.clone_parent.read(cx).value().trim(), "" | "~")
+                    .then(|| view.clone_parent.clone());
+                let create_parent = matches!(view.create_parent.read(cx).value().trim(), "" | "~")
+                    .then(|| view.create_parent.clone());
                 Some((home, clone_parent, create_parent))
             }
             Ok(_) => {
@@ -1852,7 +1850,7 @@ fn render_clone_page(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> Any
     let name_error = ((!effective_name.is_empty()
         && validate_portable_basename(&effective_name).is_err())
         || (!url.is_empty() && url_valid && effective_name.is_empty()))
-        .then_some(t("projectOnboarding", "error.invalidName").to_string());
+    .then_some(t("projectOnboarding", "error.invalidName").to_string());
     let retrying_registration = registration_retry_path.is_some();
     let target = registration_retry_path
         .clone()
@@ -2607,8 +2605,8 @@ fn localized_error(error: &OnboardingError) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateMode, FormContextOwner, HostSignature, OnboardingPage, PendingRegistration,
-        PendingOperation, operation_with_registration_retry, picker_request_is_current,
+        CreateMode, FormContextOwner, HostSignature, OnboardingPage, PendingOperation,
+        PendingRegistration, operation_with_registration_retry, picker_request_is_current,
         ssh_failure_epoch_is_current, ssh_host_probe_epoch_is_current,
         ssh_operation_authority_is_current,
     };

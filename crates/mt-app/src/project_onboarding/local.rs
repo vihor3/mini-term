@@ -472,11 +472,8 @@ mod tests {
             GitRelationship::RepositoryRoot { .. }
         ));
 
-        let nested = initialize_existing_folder(
-            &LocalProjectOps,
-            &child.to_string_lossy(),
-        )
-        .unwrap();
+        let nested =
+            initialize_existing_folder(&LocalProjectOps, &child.to_string_lossy()).unwrap();
         let repository_root = match nested {
             OnboardingOperationResult::NestedRepository {
                 repository_root, ..

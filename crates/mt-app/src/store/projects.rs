@@ -1031,8 +1031,8 @@ mod project_onboarding_tests {
             String::from_utf8_lossy(&init.stderr)
         );
         let configured_path = repository_path.join(".");
-        let resolved = mt_project::worktree::resolve_local(&host_install_id(), &configured_path)
-            .unwrap();
+        let resolved =
+            mt_project::worktree::resolve_local(&host_install_id(), &configured_path).unwrap();
         assert_eq!(
             resolved.source,
             WorktreeIdentitySource::AuthoritativeLocalGit
@@ -1097,11 +1097,8 @@ mod project_onboarding_tests {
         let wsl_project = project("wsl-provisional", configured_wsl_path, None);
         let local_binding = super::super::identity::binding_from_resolved(
             local_project.id.clone(),
-            mt_project::worktree::resolve_provisional_local(
-                &host_install_id(),
-                stale_local_path,
-            )
-            .unwrap(),
+            mt_project::worktree::resolve_provisional_local(&host_install_id(), stale_local_path)
+                .unwrap(),
         );
         let wsl_binding = super::super::identity::binding_from_resolved(
             wsl_project.id.clone(),
