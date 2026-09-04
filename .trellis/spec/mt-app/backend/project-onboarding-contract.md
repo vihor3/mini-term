@@ -94,10 +94,16 @@ page/mode, host signature, and optional SSH connection epoch.
 - `Initialize Existing Folder` runs `git init` only for `NotGit`. An exact Git
   root is added directly. A nested folder returns its containing root and does
   not create a nested `.git` directory.
+- Clone URL validity and destination-basename validity are independent. A valid
+  repository URL whose inferred final segment is not a portable basename must
+  remain usable after the user supplies a valid editable destination name; the
+  inferred-name failure alone must not mark the URL invalid.
 - Local commands keep structured program/argv values. SSH is the only boundary
   that serializes argv into a quoted POSIX command.
 - SSH results are usable only when connection ID, configuration fingerprint,
-  and authenticated connection epoch still match the selected host.
+  and authenticated connection epoch still match the selected host. The host
+  readiness probe returns both canonical home and the exact session epoch; the
+  UI may enter `Ready` only while that returned epoch is still current.
 - Every normal SSH probe, target check, create, Git exec, and cleanup call is
   pinned to the operation's originally captured authenticated epoch before it
   may inspect or mutate remote state. Acquiring a newer session makes that call
@@ -120,10 +126,18 @@ page/mode, host signature, and optional SSH connection epoch.
   error has no reconciliation authority.
 - `ProjectLocationKey::Local` uses normalized canonical local identity.
   `ProjectLocationKey::Ssh` uses exact saved connection ID plus normalized,
-  case-sensitive absolute POSIX path.
+  case-sensitive absolute POSIX path. Dedupe may bridge a configured alias to a
+  binding canonical path only for authoritative local sources or an
+  authoritative SSH binding whose endpoint/configured-path identity context
+  still matches. Provisional Local/WSL/SSH bindings must match the canonical
+  form recomputed from the current configured path.
 - Registration either activates the existing location or inserts one project,
   prepares its worktree identity, places it in the requested group, activates
   it, and returns the exact project/worktree pair used for workbench focus.
+- If filesystem/Git work succeeds but registration fails, retain only the
+  verified canonical path under the exact form context. A retry performs a new
+  read-only directory probe and retries registration; it must never rerun the
+  completed clone or `git init` mutation.
 - Closing, going Back, changing host, or changing create mode invalidates the
   current owner. A late result may not change UI state, persist a project, or
   reactivate a workbench page.
@@ -131,6 +145,9 @@ page/mode, host signature, and optional SSH connection epoch.
   an idle matching form context. Starting an operation supersedes open pickers.
 - Any identity-counter overflow is terminal for that modal instance; navigation
   cannot clear it or permit more work. The user must close and reopen the modal.
+- The unified modal is the only compiled onboarding surface. Do not retain the
+  obsolete local folder dialog, remote-project dialog, or their raw insertion
+  helpers after all entry points have migrated.
 
 ## 4. Validation & Error Matrix
 
@@ -144,6 +161,7 @@ page/mode, host signature, and optional SSH connection epoch.
 | Git marker exists but discovery fails | Git failure; fail closed |
 | SSH failure proven before dispatch | Disconnected-before-dispatch error |
 | SSH command may have started or reply is lost | Outcome uncertain; fresh post-probe only |
+| SSH host probe returns an epoch that is no longer current | Host remains disconnected; do not accept its home path |
 | Normal SSH result returns a different epoch | Stale result; no reconciliation or registration |
 | Verified uncertain-dispatch post-probe returns the exact fresh current epoch | Reconcile that same owner to the newer epoch, then recheck before registration |
 | Any failed clone | Preserve the target if present and report its path; never delete it |
@@ -151,6 +169,7 @@ page/mode, host signature, and optional SSH connection epoch.
 | Failed init in a pre-existing directory | Preserve all user files and directory state |
 | Duplicate canonical host/path | Activate existing project; do not insert another |
 | Target group disappeared | Registration error; do not silently place elsewhere |
+| Registration retry after successful clone/init | Re-probe read-only and retry registration; never repeat the mutation |
 | Owner/fingerprint/epoch mismatch | Ignore completion as stale |
 
 Authentication guidance may tell the user to run `gh auth login` on the owning
@@ -184,10 +203,21 @@ host. Project onboarding must not launch a browser or attempt account login.
   read-only uncertain-dispatch post-probe can acquire the fresh session.
 - Operation tests must assert that Add Existing and parent probes disable Git
   inspection while initialization and repository post-probes enable it.
+- URL tests must separately assert URL syntax and inferred-name validity, and
+  prove that a manually supplied valid destination name enables clone when the
+  URL itself is valid but its inferred segment is reserved or otherwise invalid.
 - URL tests must cover HTTPS, SSH/scp forms, editable folder-name inference,
   structured argv, bounded diagnostics, and credential redaction.
 - Store tests must cover local-vs-SSH separation, SSH connection identity,
-  POSIX case sensitivity, normalization, invalid paths, and duplicate activation.
+  POSIX case sensitivity, normalization, invalid paths, duplicate activation,
+  authoritative canonical aliases, and rejection of stale provisional bindings.
+- Local integration tests must preserve sentinel files across Add Existing and
+  Initialize Existing, verify real clone/init postconditions, and prove nested
+  folders do not acquire their own `.git`.
+- Registration-retry tests must prove a verified path is scoped to the exact form
+  context and produces `AddExisting`/read-only work instead of a second mutation.
+- SSH host-probe tests must reject a result whose captured epoch is not the exact
+  current connection epoch.
 - Store transaction tests that use fixture SSH connections must not start the
   production remote-runtime hydration path or a headless GPUI application. Use
   the context-free registration state seam or an injected runtime fake so

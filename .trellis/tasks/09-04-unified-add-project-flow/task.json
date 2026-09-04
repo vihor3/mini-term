@@ -23,8 +23,8 @@
   "relatedFiles": [],
   "notes": "",
   "meta": {
-    "planning_status": "actions-rerun-pending-after-headless-test-removal",
+    "planning_status": "actions-rerun-pending-after-final-review-hardening",
     "previous_task_audit": "completed; Trellis drift repaired; bounded scope exceptions documented",
-    "last_ci_run": "33849560976: Windows passed; Linux Cargo test remained stuck under headless GPUI"
+    "last_ci_run": "33853578087: success at 8054414; superseded by final review hardening"
   }
 }
