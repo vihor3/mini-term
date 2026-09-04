@@ -15,7 +15,7 @@
   "branch": "feat/remote-file-management",
   "base_branch": "main",
   "worktree_path": null,
-  "commit": null,
+  "commit": "2112aec0e2ffc2cb7c4127e02a3d37338a99cf2d",
   "pr_url": null,
   "subtasks": [],
   "children": [],
@@ -23,8 +23,55 @@
   "relatedFiles": [],
   "notes": "",
   "meta": {
-    "planning_status": "actions-rerun-pending-after-final-review-hardening",
+    "planning_status": "implementation-complete-actions-validated",
     "previous_task_audit": "completed; Trellis drift repaired; bounded scope exceptions documented",
-    "last_ci_run": "33853578087: success at 8054414; superseded by final review hardening"
+    "execution_policy": "github-actions-only",
+    "validated_at": "2026-09-04",
+    "validation_head_sha": "2112aec0e2ffc2cb7c4127e02a3d37338a99cf2d",
+    "ci_run": {
+      "id": "33910845940",
+      "url": "https://github.com/vihor3/mini-term/actions/runs/33910845940",
+      "conclusion": "success",
+      "rust_workspace_job_id": "101146633240",
+      "windows_msvc_job_id": "101146633455",
+      "root_tests_passed": 1976,
+      "root_tests_ignored": 1,
+      "sidecar_tests_passed": 94,
+      "node_staging_tests_passed": 10,
+      "windows_focused_tests_passed": 63,
+      "changed_line_rustfmt_hunks": 0,
+      "changed_line_clippy_warnings": 0,
+      "task_scope_windows_warnings": 0
+    },
+    "windows_package_run": {
+      "id": "33910846030",
+      "url": "https://github.com/vihor3/mini-term/actions/runs/33910846030",
+      "conclusion": "success",
+      "job_id": "101146633031",
+      "artifact": {
+        "id": "9952065376",
+        "name": "Mini-Term_1.2.2-ci.23_windows-x64",
+        "size_bytes": 18207803,
+        "digest": "sha256:97de278d74d22a793ebb58fa2fc7ab98073782a15e6e10b7960e0aa620a9b384",
+        "expires_at": "2026-09-18T19:48:04Z",
+        "download_url": "https://github.com/vihor3/mini-term/actions/runs/33910846030/artifacts/9952065376"
+      },
+      "installer": {
+        "file": "Mini-Term_1.2.2-ci.23_x64-setup.exe",
+        "size_bytes": 18217228,
+        "sha256": "8c1b5daadcc3ec284842920c24f8c2785ddeaa35e2698e4c58d0378cd1e8b102",
+        "machine": "0x014c"
+      },
+      "payloads_verified": 8,
+      "feature_markers_verified": 7,
+      "extracted_files": 13
+    },
+    "physical_windows_ui_smoke": "not-run",
+    "residual_risks": [
+      "physical Windows UI smoke test not performed",
+      "SFTP same-account replacement race cannot be eliminated without descriptor-relative remote operations",
+      "provider-specific UNC directory identity metadata remains dependent on the Windows filesystem provider"
+    ],
+    "task_sync_status": "acceptance criteria, design, spec, validation evidence synchronized; no scope drift"
   }
 }

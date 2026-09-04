@@ -88,17 +88,17 @@ Replace the separate local and SSH project-onboarding surfaces with one Orca-sty
 
 ## Acceptance Criteria
 
-- [ ] AC1: One add-project modal can target either the local machine or any saved SSH host without opening the old separate remote-project modal.
-- [ ] AC2: Adding an existing local or remote folder registers and opens it without changing its filesystem contents.
-- [ ] AC3: Cloning on either host shows the final destination, executes on that host, and only registers the project after success.
-- [ ] AC4: New Folder mode creates a previously absent directory, initializes Git, registers it, and opens it.
-- [ ] AC5: Initialize Existing Folder mode initializes a non-Git directory without changing existing user files, then registers and opens it.
-- [ ] AC6: Selecting an existing Git repository root skips `git init` and adds the project directly.
-- [ ] AC7: Selecting a directory nested inside another Git worktree does not create a nested `.git`; the UI identifies and can add the containing repository root.
-- [ ] AC8: Switching hosts or forms cannot apply stale validation/operation results to the current form.
-- [ ] AC9: Duplicate host/path selections activate the existing project and do not add another persisted record.
-- [ ] AC10: Failed clone, folder creation, Git initialization, authentication, or connection operations show an actionable error and do not register a partial project.
-- [ ] AC11: Relevant unit/integration coverage and the Windows GitHub Actions workflows pass; no executable validation is performed locally.
+- [x] AC1: One add-project modal can target either the local machine or any saved SSH host without opening the old separate remote-project modal.
+- [x] AC2: Adding an existing local or remote folder registers and opens it without changing its filesystem contents.
+- [x] AC3: Cloning on either host shows the final destination, executes on that host, and only registers the project after success.
+- [x] AC4: New Folder mode creates a previously absent directory, initializes Git, registers it, and opens it.
+- [x] AC5: Initialize Existing Folder mode initializes a non-Git directory without changing existing user files, then registers and opens it.
+- [x] AC6: Selecting an existing Git repository root skips `git init` and adds the project directly.
+- [x] AC7: Selecting a directory nested inside another Git worktree does not create a nested `.git`; the UI identifies and can add the containing repository root.
+- [x] AC8: Switching hosts or forms cannot apply stale validation/operation results to the current form.
+- [x] AC9: Duplicate host/path selections activate the existing project and do not add another persisted record.
+- [x] AC10: Failed clone, folder creation, Git initialization, authentication, or connection operations show an actionable error and do not register a partial project.
+- [x] AC11: Relevant unit/integration coverage and the Windows GitHub Actions workflows pass; no executable validation is performed locally.
 
 ## Out of Scope
 

@@ -100,6 +100,14 @@ page/mode, host signature, and optional SSH connection epoch.
   inferred-name failure alone must not mark the URL invalid.
 - Local commands keep structured program/argv values. SSH is the only boundary
   that serializes argv into a quoted POSIX command.
+- Local Git-root classification may use normalized path equality as a fast
+  path, but Windows must not treat lexical inequality as proof of nesting.
+  After both directories are canonicalized, compare their opened directory
+  identity by volume serial number plus file index when long-name, 8.3, or
+  equivalent path aliases still differ. Equal identity means the selected
+  directory is the exact repository root. Failure to read either identity is
+  a `GitFailure`; it must not silently become `NestedInRepository` or
+  `NotGit`.
 - SSH results are usable only when connection ID, configuration fingerprint,
   and authenticated connection epoch still match the selected host. The host
   readiness probe returns both canonical home and the exact session epoch; the
@@ -159,6 +167,7 @@ page/mode, host signature, and optional SSH connection epoch.
 | Existing target in New Folder mode | Collision error; no mkdir/init |
 | Git probe explicitly reports `not a git repository` | `NotGit` |
 | Git marker exists but discovery fails | Git failure; fail closed |
+| Windows canonical paths differ only by long/8.3 alias | Compare directory file identity; equal identity is exact root; identity read failure is Git failure |
 | SSH failure proven before dispatch | Disconnected-before-dispatch error |
 | SSH command may have started or reply is lost | Outcome uncertain; fresh post-probe only |
 | SSH host probe returns an epoch that is no longer current | Host remains disconnected; do not accept its home path |
@@ -187,6 +196,10 @@ host. Project onboarding must not launch a browser or attempt account login.
   and let the user add that root.
 - Bad: treat every exit code 128 as `NotGit` and run `git init` after dubious
   ownership, permission, or corrupt-repository errors.
+- Good: classify `C:\Users\RunnerAdmin\repo` and the same directory reached
+  through `C:\Users\RUNNER~1\repo` as one exact repository root when their
+  filesystem identities match.
+- Bad: classify every normalized-string mismatch on Windows as a nested root.
 
 ## 6. Tests Required
 
@@ -214,6 +227,10 @@ host. Project onboarding must not launch a browser or attempt account login.
 - Local integration tests must preserve sentinel files across Add Existing and
   Initialize Existing, verify real clone/init postconditions, and prove nested
   folders do not acquire their own `.git`.
+- Windows focused tests must exercise the directory-identity fallback rather
+  than only its lexical fast path, verify the Win32 information layout used by
+  the FFI, keep distinct sibling directories unequal, and run real clone/new
+  folder postconditions through exact-root classification.
 - Registration-retry tests must prove a verified path is scoped to the exact form
   context and produces `AddExisting`/read-only work instead of a second mutation.
 - SSH host-probe tests must reject a result whose captured epoch is not the exact

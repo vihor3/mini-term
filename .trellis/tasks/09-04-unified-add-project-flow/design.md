@@ -167,6 +167,12 @@ git -C <path> rev-parse --path-format=absolute --show-toplevel --git-common-dir
 
 A compatibility fallback is allowed only when the Git version proves that `--path-format` is unsupported. Parse exactly two bounded paths and canonicalize them on the same host. A present `.git` marker with failed discovery is an error, not `NotGit`.
 
+On Windows, canonical strings are only a fast path for deciding whether the
+selected directory is the exact Git top level. If long-name and 8.3 aliases
+still differ, compare the two opened directories by volume serial number and
+file index. Identity read failure fails closed as a Git error instead of
+misclassifying the folder as nested.
+
 ## Operation Semantics
 
 | Flow | Execution boundary | Success condition | Failure and cleanup |
