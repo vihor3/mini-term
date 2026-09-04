@@ -403,9 +403,8 @@ fn windows_directory_handle(path: &Path) -> Result<WindowsDirectoryHandle, Onboa
     let mut information = MaybeUninit::<WindowsByHandleFileInformation>::uninit();
     // SAFETY: `file` owns a valid open handle and `information` points to a
     // correctly sized writable BY_HANDLE_FILE_INFORMATION value.
-    let succeeded = unsafe {
-        get_file_information_by_handle(file.as_raw_handle(), information.as_mut_ptr())
-    };
+    let succeeded =
+        unsafe { get_file_information_by_handle(file.as_raw_handle(), information.as_mut_ptr()) };
     if succeeded == 0 {
         return Err(windows_directory_identity_error(
             path,
