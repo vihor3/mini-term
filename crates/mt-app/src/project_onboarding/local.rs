@@ -120,9 +120,7 @@ impl LocalProjectOps {
         let (top_level, common_dir) = parse_git_paths(&output.stdout)?;
         let (top_level, common_dir) =
             canonicalize_git_paths(&context, &canonical_string, top_level, common_dir, legacy)?;
-        if mt_project::worktree::normalize_path_for_comparison(&canonical_string)
-            == mt_project::worktree::normalize_path_for_comparison(&top_level)
-        {
+        if same_local_directory(canonical, Path::new(&top_level))? {
             Ok(GitRelationship::RepositoryRoot {
                 top_level,
                 common_dir,
@@ -360,6 +358,114 @@ fn canonicalize_git_path(path: &Path) -> Result<String, OnboardingError> {
         })
 }
 
+fn same_local_directory(left: &Path, right: &Path) -> Result<bool, OnboardingError> {
+    if mt_project::worktree::paths_equal(left, right) {
+        return Ok(true);
+    }
+
+    #[cfg(windows)]
+    {
+        let left = windows_directory_handle(left)?;
+        let right = windows_directory_handle(right)?;
+        Ok(left.volume_serial_number == right.volume_serial_number
+            && left.file_index == right.file_index)
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
+}
+
+#[cfg(windows)]
+struct WindowsDirectoryHandle {
+    _file: fs::File,
+    volume_serial_number: u32,
+    file_index: u64,
+}
+
+#[cfg(windows)]
+fn windows_directory_handle(path: &Path) -> Result<WindowsDirectoryHandle, OnboardingError> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+
+    const FILE_SHARE_ALL: u32 = 0x0000_0007;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .access_mode(0)
+        .share_mode(FILE_SHARE_ALL)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(|error| windows_directory_identity_error(path, error))?;
+    let mut information = MaybeUninit::<WindowsByHandleFileInformation>::uninit();
+    // SAFETY: `file` owns a valid open handle and `information` points to a
+    // correctly sized writable BY_HANDLE_FILE_INFORMATION value.
+    let succeeded = unsafe {
+        get_file_information_by_handle(file.as_raw_handle(), information.as_mut_ptr())
+    };
+    if succeeded == 0 {
+        return Err(windows_directory_identity_error(
+            path,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: GetFileInformationByHandle reported success and initialized the value.
+    let information = unsafe { information.assume_init() };
+
+    Ok(WindowsDirectoryHandle {
+        _file: file,
+        volume_serial_number: information.volume_serial_number,
+        file_index: (u64::from(information.file_index_high) << 32)
+            | u64::from(information.file_index_low),
+    })
+}
+
+#[cfg(windows)]
+fn windows_directory_identity_error(path: &Path, error: std::io::Error) -> OnboardingError {
+    OnboardingError::new(
+        OnboardingErrorKind::GitFailure,
+        format!(
+            "Git repository directory identity cannot be read at {}: {error}",
+            path.display()
+        ),
+    )
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsFileTime {
+    _low_date_time: u32,
+    _high_date_time: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsByHandleFileInformation {
+    _file_attributes: u32,
+    _creation_time: WindowsFileTime,
+    _last_access_time: WindowsFileTime,
+    _last_write_time: WindowsFileTime,
+    volume_serial_number: u32,
+    _file_size_high: u32,
+    _file_size_low: u32,
+    _number_of_links: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "GetFileInformationByHandle"]
+    fn get_file_information_by_handle(
+        handle: std::os::windows::io::RawHandle,
+        information: *mut WindowsByHandleFileInformation,
+    ) -> i32;
+}
+
 fn wsl_unc(distro: &str, path: &str) -> Result<String, OnboardingError> {
     if !path.starts_with('/') || path.contains('\0') {
         return Err(OnboardingError::new(
@@ -434,6 +540,24 @@ mod tests {
             assert_eq!(error.kind, OnboardingErrorKind::Validation);
             assert!(error.message.contains("absolute path"));
         }
+    }
+
+    #[test]
+    fn local_directory_identity_keeps_distinct_siblings_separate() {
+        let root = std::env::temp_dir().join(format!(
+            "mt-app-onboarding-directory-identity-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let left = root.join("left");
+        let right = root.join("right");
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+
+        assert!(same_local_directory(&left, &left).unwrap());
+        assert!(!same_local_directory(&left, &right).unwrap());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -595,5 +719,29 @@ mod tests {
         assert!(!git_path.starts_with(r"\\?\"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_file_information_layout_matches_win32_abi() {
+        assert_eq!(std::mem::size_of::<WindowsByHandleFileInformation>(), 52);
+        assert_eq!(std::mem::align_of::<WindowsByHandleFileInformation>(), 4);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_identity_accepts_distinct_path_aliases() {
+        let root = std::env::temp_dir().join(format!(
+            "mt-app-onboarding-windows-directory-identity-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let alias = root.join(".");
+
+        assert!(!mt_project::worktree::paths_equal(&root, &alias));
+        assert!(same_local_directory(&root, &alias).unwrap());
+
+        fs::remove_dir_all(root).unwrap();
     }
 }
