@@ -383,6 +383,15 @@ mod tests {
         add_existing_folder, clone_from_url, create_new_project, initialize_existing_folder,
     };
 
+    fn assert_same_canonical_directory(actual: &str, expected: &Path) {
+        let expected =
+            LocalProjectOps::canonical_directory(&expected.to_string_lossy()).unwrap();
+        assert_eq!(
+            mt_project::worktree::normalize_path_for_comparison(actual),
+            mt_project::worktree::normalize_path_for_comparison(&expected.to_string_lossy())
+        );
+    }
+
     #[test]
     fn only_explicit_not_repository_response_is_not_git() {
         assert_eq!(
@@ -528,10 +537,7 @@ mod tests {
             }
         };
 
-        assert_eq!(
-            mt_project::worktree::normalize_path_for_comparison(&canonical_path),
-            mt_project::worktree::normalize_path_for_comparison(&target.to_string_lossy())
-        );
+        assert_same_canonical_directory(&canonical_path, &target);
         assert!(matches!(
             LocalProjectOps::git_relationship(&target).unwrap(),
             GitRelationship::RepositoryRoot { .. }
@@ -564,10 +570,7 @@ mod tests {
             }
         };
 
-        assert_eq!(
-            mt_project::worktree::normalize_path_for_comparison(&canonical_path),
-            mt_project::worktree::normalize_path_for_comparison(&target.to_string_lossy())
-        );
+        assert_same_canonical_directory(&canonical_path, &target);
         assert!(matches!(
             LocalProjectOps::git_relationship(&target).unwrap(),
             GitRelationship::RepositoryRoot { .. }
