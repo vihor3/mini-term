@@ -98,8 +98,6 @@ pub mod kind {
     /// 「关联 SSH」弹窗(项目右键菜单)。与 [`SSH_PANEL`] **不同种类**:
     /// 两个都开着是合法的(在关联弹窗里发现连接名不对,回头去改)。
     pub const SSH_ASSOC: &str = "ssh-assoc";
-    /// 旧远程添加入口的兼容别名。
-    pub const ADD_REMOTE_PROJECT: &str = PROJECT_ONBOARDING;
     /// 文件上传/下载发现同名目标后的三选一冲突策略弹窗。
     pub const FILE_CONFLICT: &str = "file-conflict";
     /// 添加远程项目时叠在表单上方的远程目录浏览器。

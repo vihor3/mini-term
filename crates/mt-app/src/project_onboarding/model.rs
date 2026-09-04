@@ -178,18 +178,6 @@ pub enum GitRelationship {
     },
 }
 
-impl GitRelationship {
-    pub fn exact_root(&self) -> Option<(&str, &str)> {
-        match self {
-            Self::RepositoryRoot {
-                top_level,
-                common_dir,
-            } => Some((top_level, common_dir)),
-            Self::NotGit | Self::NestedInRepository { .. } => None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostPathProbe {
     pub canonical_path: String,

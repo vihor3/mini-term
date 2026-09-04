@@ -721,7 +721,7 @@ fn open_host_menu(
     ));
     entries.push(menu::item(
         t("projectOnboarding", "manageRemoteHosts"),
-        |window, cx| crate::ssh_panel::open(window, cx),
+        crate::ssh_panel::open,
     ));
     menu::show(position, entries, window, cx);
 }

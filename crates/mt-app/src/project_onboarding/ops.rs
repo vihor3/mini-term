@@ -75,8 +75,6 @@ pub trait ProjectHostOps {
 
     fn location_key(&self, canonical_path: &str) -> Result<ProjectLocationKey, OnboardingError>;
 
-    fn join_path(&self, canonical_parent: &str, name: &str) -> String;
-
     fn validate_basename(&self, name: &str) -> Result<(), OnboardingError>;
 }
 
@@ -736,6 +734,303 @@ fn redact_git_diagnostic(mut detail: String, secret_url: &str) -> String {
     detail
 }
 
+fn ensure_remote_result_authority(
+    expected_connection_epoch: Option<u64>,
+    expected_connection_fingerprint: u64,
+    observed_connection_epoch: u64,
+    observed_connection_fingerprint: u64,
+) -> Result<(), OnboardingError> {
+    if Some(observed_connection_epoch) != expected_connection_epoch
+        || observed_connection_fingerprint != expected_connection_fingerprint
+    {
+        return Err(OnboardingError::new(
+            OnboardingErrorKind::StaleOperation,
+            "SSH result did not match the operation connection authority",
+        ));
+    }
+    Ok(())
+}
+
+impl ProjectHostOps for crate::remote_ssh::RemoteProjectContext {
+    fn probe_existing_directory(
+        &self,
+        path: &str,
+        include_empty: bool,
+        inspect_git: bool,
+    ) -> Result<HostPathProbe, OnboardingError> {
+        let probe =
+            crate::remote_ssh::probe_existing_directory(self, path, include_empty, inspect_git)
+                .map_err(remote_error)?;
+        if probe.provenance != crate::remote_ssh::RemoteProbeProvenance::OperationEpoch {
+            return Err(OnboardingError::new(
+                OnboardingErrorKind::StaleOperation,
+                "normal SSH probe returned recovery-only provenance",
+            ));
+        }
+        ensure_remote_result_authority(
+            self.expected_connection_epoch,
+            self.connection_fingerprint,
+            probe.connection_epoch,
+            probe.connection_fingerprint,
+        )?;
+        Ok(host_path_probe_from_remote(probe))
+    }
+
+    fn probe_target(&self, parent: &str, name: &str) -> Result<TargetState, OnboardingError> {
+        let probe = crate::remote_ssh::probe_target(self, parent, name).map_err(remote_error)?;
+        ensure_remote_result_authority(
+            self.expected_connection_epoch,
+            self.connection_fingerprint,
+            probe.connection_epoch,
+            probe.connection_fingerprint,
+        )?;
+        Ok(match probe.state {
+            crate::remote_ssh::RemoteTargetState::Absent(canonical_target) => {
+                TargetState::Absent { canonical_target }
+            }
+            crate::remote_ssh::RemoteTargetState::EmptyDirectory(canonical_target) => {
+                TargetState::EmptyDirectory { canonical_target }
+            }
+            crate::remote_ssh::RemoteTargetState::NonEmptyDirectory(canonical_target) => {
+                TargetState::NonEmptyDirectory { canonical_target }
+            }
+            crate::remote_ssh::RemoteTargetState::Other(canonical_target) => {
+                TargetState::Other { canonical_target }
+            }
+        })
+    }
+
+    fn create_directory_exclusive(&self, target: &str) -> Result<(), OnboardingError> {
+        crate::remote_ssh::create_directory_exclusive(self, target)
+            .map(|_| ())
+            .map_err(remote_error)
+    }
+
+    fn remove_empty_directory(&self, target: &str) -> Result<(), OnboardingError> {
+        crate::remote_ssh::remove_empty_directory(self, target)
+            .map(|_| ())
+            .map_err(remote_error)
+    }
+
+    fn run_git(
+        &self,
+        cwd: &str,
+        plan: &CommandPlan,
+    ) -> Result<HostCommandOutcome, OnboardingError> {
+        let result = crate::remote_ssh::run_git(self, cwd, plan).map_err(remote_error)?;
+        ensure_remote_result_authority(
+            self.expected_connection_epoch,
+            self.connection_fingerprint,
+            result.connection_epoch,
+            result.connection_fingerprint,
+        )?;
+        Ok(remote_mutation_outcome(result))
+    }
+
+    fn probe_after_uncertain_dispatch(
+        &self,
+        path: &str,
+        include_empty: bool,
+        inspect_git: bool,
+    ) -> Result<VerifiedUncertainPostcondition, OnboardingError> {
+        let probe = crate::remote_ssh::probe_existing_directory_after_uncertain_dispatch(
+            self,
+            path,
+            include_empty,
+            inspect_git,
+        )
+        .map_err(|failure| remote_recovery_error(failure, self.connection_fingerprint))?;
+        if probe.provenance
+            != crate::remote_ssh::RemoteProbeProvenance::PostconditionVerifiedAfterUncertainDispatch
+        {
+            return Err(OnboardingError::new(
+                OnboardingErrorKind::StaleOperation,
+                "SSH uncertainty recovery probe returned normal-operation provenance",
+            ));
+        }
+        if probe.connection_fingerprint != self.connection_fingerprint {
+            return Err(OnboardingError::new(
+                OnboardingErrorKind::StaleOperation,
+                "SSH recovery probe returned a different connection fingerprint",
+            ));
+        }
+        let observed_connection_epoch = Some(probe.connection_epoch);
+        Ok(VerifiedUncertainPostcondition {
+            probe: host_path_probe_from_remote(probe),
+            authority: OperationResultAuthority::verified_after_uncertain_dispatch(
+                observed_connection_epoch,
+            ),
+        })
+    }
+
+    fn location_key(&self, path: &str) -> Result<ProjectLocationKey, OnboardingError> {
+        Ok(ProjectLocationKey::Ssh {
+            connection_id: self.connection.id.clone(),
+            normalized_posix_path: normalize_posix_location(path)?,
+        })
+    }
+
+    fn validate_basename(&self, name: &str) -> Result<(), OnboardingError> {
+        validate_portable_basename(name)
+    }
+}
+
+fn host_path_probe_from_remote(probe: crate::remote_ssh::RemotePathProbe) -> HostPathProbe {
+    HostPathProbe {
+        canonical_path: probe.canonical_path,
+        directory_empty: probe.directory_empty,
+        git: match probe.git {
+            crate::remote_ssh::RemoteGitRelationship::NotGit => GitRelationship::NotGit,
+            crate::remote_ssh::RemoteGitRelationship::RepositoryRoot {
+                top_level,
+                common_dir,
+            } => GitRelationship::RepositoryRoot {
+                top_level,
+                common_dir,
+            },
+            crate::remote_ssh::RemoteGitRelationship::NestedInRepository {
+                top_level,
+                common_dir,
+            } => GitRelationship::NestedInRepository {
+                top_level,
+                common_dir,
+            },
+        },
+        observed_connection_epoch: Some(probe.connection_epoch),
+    }
+}
+
+fn normalize_posix_location(path: &str) -> Result<String, OnboardingError> {
+    if !path.starts_with('/') || path.contains('\0') {
+        return Err(OnboardingError::new(
+            OnboardingErrorKind::Validation,
+            format!("SSH project path must be absolute POSIX: {path}"),
+        ));
+    }
+    let mut segments = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                return Err(OnboardingError::new(
+                    OnboardingErrorKind::Validation,
+                    format!("SSH project path cannot contain `..`: {path}"),
+                ));
+            }
+            value => segments.push(value),
+        }
+    }
+    Ok(if segments.is_empty() {
+        "/".into()
+    } else {
+        format!("/{}", segments.join("/"))
+    })
+}
+
+fn remote_error(message: String) -> OnboardingError {
+    let lower = message.to_ascii_lowercase();
+    let kind = if lower.contains("auth") || lower.contains("permission denied") {
+        OnboardingErrorKind::Authentication
+    } else if lower.contains("already exists")
+        || lower.contains("target is not empty")
+        || lower.contains("target already exists")
+    {
+        OnboardingErrorKind::Collision
+    } else if lower.contains("git is unavailable") {
+        OnboardingErrorKind::GitUnavailable
+    } else if lower.contains("git could not inspect")
+        || lower.contains("repository probe")
+        || lower.contains(".git marker")
+    {
+        OnboardingErrorKind::GitFailure
+    } else if lower.contains("superseded") || lower.contains("connection") {
+        OnboardingErrorKind::DisconnectedBeforeDispatch
+    } else {
+        OnboardingErrorKind::Validation
+    };
+    OnboardingError::new(kind, message)
+}
+
+fn remote_recovery_error(
+    failure: crate::remote_ssh::RemoteRecoveryProbeError,
+    expected_fingerprint: u64,
+) -> OnboardingError {
+    let mut error = remote_error(failure.message);
+    if failure.connection_fingerprint == expected_fingerprint
+        && let Some(epoch) = failure.connection_epoch
+    {
+        error = error.with_authority(
+            OperationResultAuthority::verified_after_uncertain_dispatch(Some(epoch)),
+        );
+    }
+    error
+}
+
+fn remote_mutation_outcome(result: crate::remote_ssh::RemoteMutationOutcome) -> HostCommandOutcome {
+    let crate::remote_ssh::RemoteMutationOutcome {
+        output,
+        transport_error,
+        authority_error,
+        connection_epoch,
+        ..
+    } = result;
+    let transport_uncertain = transport_error.is_some();
+    let mut stderr = Vec::new();
+    let (dispatch, exit_code, timed_out, stdout_truncated, stderr_truncated) =
+        if let Some(output) = output {
+            let dispatch = if transport_uncertain
+                || output.requires_session_retirement()
+                || output.state == mt_ssh::BoundedExecState::ExecReplyUnknown
+                || (output.state == mt_ssh::BoundedExecState::Started
+                    && (output.timed_out || output.exit_code.is_none()))
+            {
+                HostCommandDispatch::OutcomeUncertain
+            } else if output.safe_to_fallback() {
+                HostCommandDispatch::SafeBeforeDispatchFailure
+            } else {
+                HostCommandDispatch::Completed
+            };
+            let fields = (
+                dispatch,
+                output.exit_code.and_then(|code| i32::try_from(code).ok()),
+                output.timed_out,
+                output.stdout_truncated,
+                output.stderr_truncated,
+            );
+            stderr = output.stderr;
+            fields
+        } else {
+            (
+                HostCommandDispatch::OutcomeUncertain,
+                None,
+                false,
+                false,
+                false,
+            )
+        };
+    if let Some(error) = transport_error {
+        if !stderr.is_empty() {
+            stderr.extend_from_slice(b"; ");
+        }
+        stderr.extend_from_slice(error.as_bytes());
+    }
+    if let Some(error) = authority_error {
+        if !stderr.is_empty() {
+            stderr.extend_from_slice(b"; ");
+        }
+        stderr.extend_from_slice(error.as_bytes());
+    }
+    HostCommandOutcome {
+        dispatch,
+        exit_code,
+        timed_out,
+        stdout_truncated,
+        stderr_truncated,
+        stderr,
+        observed_connection_epoch: Some(connection_epoch),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -838,9 +1133,6 @@ mod tests {
             })
         }
 
-        fn join_path(&self, parent: &str, name: &str) -> String {
-            format!("{}/{name}", parent.trim_end_matches('/'))
-        }
 
         fn validate_basename(&self, name: &str) -> Result<(), OnboardingError> {
             validate_portable_basename(name)
@@ -1545,6 +1837,23 @@ mod tests {
     }
 
     #[test]
+    fn normal_remote_result_authority_requires_expected_epoch_and_fingerprint() {
+        assert!(ensure_remote_result_authority(Some(42), 7, 42, 7).is_ok());
+        assert_eq!(
+            ensure_remote_result_authority(Some(42), 7, 43, 7)
+                .unwrap_err()
+                .kind,
+            OnboardingErrorKind::StaleOperation
+        );
+        assert_eq!(
+            ensure_remote_result_authority(Some(42), 7, 42, 8)
+                .unwrap_err()
+                .kind,
+            OnboardingErrorKind::StaleOperation
+        );
+    }
+
+    #[test]
     fn recovery_probe_error_authority_requires_the_selected_fingerprint() {
         let owned = remote_recovery_error(
             crate::remote_ssh::RemoteRecoveryProbeError {
@@ -1570,265 +1879,5 @@ mod tests {
             7,
         );
         assert_eq!(stale.authority, None);
-    }
-}
-
-impl ProjectHostOps for crate::remote_ssh::RemoteProjectContext {
-    fn probe_existing_directory(
-        &self,
-        path: &str,
-        include_empty: bool,
-        inspect_git: bool,
-    ) -> Result<HostPathProbe, OnboardingError> {
-        let probe =
-            crate::remote_ssh::probe_existing_directory(self, path, include_empty, inspect_git)
-                .map_err(remote_error)?;
-        if probe.provenance != crate::remote_ssh::RemoteProbeProvenance::OperationEpoch {
-            return Err(OnboardingError::new(
-                OnboardingErrorKind::StaleOperation,
-                "normal SSH probe returned recovery-only provenance",
-            ));
-        }
-        Ok(host_path_probe_from_remote(probe))
-    }
-
-    fn probe_target(&self, parent: &str, name: &str) -> Result<TargetState, OnboardingError> {
-        let probe = crate::remote_ssh::probe_target(self, parent, name).map_err(remote_error)?;
-        Ok(match probe.state {
-            crate::remote_ssh::RemoteTargetState::Absent(canonical_target) => {
-                TargetState::Absent { canonical_target }
-            }
-            crate::remote_ssh::RemoteTargetState::EmptyDirectory(canonical_target) => {
-                TargetState::EmptyDirectory { canonical_target }
-            }
-            crate::remote_ssh::RemoteTargetState::NonEmptyDirectory(canonical_target) => {
-                TargetState::NonEmptyDirectory { canonical_target }
-            }
-            crate::remote_ssh::RemoteTargetState::Other(canonical_target) => {
-                TargetState::Other { canonical_target }
-            }
-        })
-    }
-
-    fn create_directory_exclusive(&self, target: &str) -> Result<(), OnboardingError> {
-        crate::remote_ssh::create_directory_exclusive(self, target)
-            .map(|_| ())
-            .map_err(remote_error)
-    }
-
-    fn remove_empty_directory(&self, target: &str) -> Result<(), OnboardingError> {
-        crate::remote_ssh::remove_empty_directory(self, target)
-            .map(|_| ())
-            .map_err(remote_error)
-    }
-
-    fn run_git(
-        &self,
-        cwd: &str,
-        plan: &CommandPlan,
-    ) -> Result<HostCommandOutcome, OnboardingError> {
-        let result = crate::remote_ssh::run_git(self, cwd, plan).map_err(remote_error)?;
-        Ok(remote_mutation_outcome(result))
-    }
-
-    fn probe_after_uncertain_dispatch(
-        &self,
-        path: &str,
-        include_empty: bool,
-        inspect_git: bool,
-    ) -> Result<VerifiedUncertainPostcondition, OnboardingError> {
-        let probe = crate::remote_ssh::probe_existing_directory_after_uncertain_dispatch(
-            self,
-            path,
-            include_empty,
-            inspect_git,
-        )
-        .map_err(|failure| remote_recovery_error(failure, self.connection_fingerprint))?;
-        if probe.provenance
-            != crate::remote_ssh::RemoteProbeProvenance::PostconditionVerifiedAfterUncertainDispatch
-        {
-            return Err(OnboardingError::new(
-                OnboardingErrorKind::StaleOperation,
-                "SSH uncertainty recovery probe returned normal-operation provenance",
-            ));
-        }
-        let observed_connection_epoch = Some(probe.connection_epoch);
-        Ok(VerifiedUncertainPostcondition {
-            probe: host_path_probe_from_remote(probe),
-            authority: OperationResultAuthority::verified_after_uncertain_dispatch(
-                observed_connection_epoch,
-            ),
-        })
-    }
-
-    fn location_key(&self, path: &str) -> Result<ProjectLocationKey, OnboardingError> {
-        Ok(ProjectLocationKey::Ssh {
-            connection_id: self.connection.id.clone(),
-            normalized_posix_path: normalize_posix_location(path)?,
-        })
-    }
-
-    fn join_path(&self, parent: &str, name: &str) -> String {
-        crate::remote_ssh::join_posix(parent, name)
-    }
-
-    fn validate_basename(&self, name: &str) -> Result<(), OnboardingError> {
-        validate_portable_basename(name)
-    }
-}
-
-fn host_path_probe_from_remote(probe: crate::remote_ssh::RemotePathProbe) -> HostPathProbe {
-    HostPathProbe {
-        canonical_path: probe.canonical_path,
-        directory_empty: probe.directory_empty,
-        git: match probe.git {
-            crate::remote_ssh::RemoteGitRelationship::NotGit => GitRelationship::NotGit,
-            crate::remote_ssh::RemoteGitRelationship::RepositoryRoot {
-                top_level,
-                common_dir,
-            } => GitRelationship::RepositoryRoot {
-                top_level,
-                common_dir,
-            },
-            crate::remote_ssh::RemoteGitRelationship::NestedInRepository {
-                top_level,
-                common_dir,
-            } => GitRelationship::NestedInRepository {
-                top_level,
-                common_dir,
-            },
-        },
-        observed_connection_epoch: Some(probe.connection_epoch),
-    }
-}
-
-fn normalize_posix_location(path: &str) -> Result<String, OnboardingError> {
-    if !path.starts_with('/') || path.contains('\0') {
-        return Err(OnboardingError::new(
-            OnboardingErrorKind::Validation,
-            format!("SSH project path must be absolute POSIX: {path}"),
-        ));
-    }
-    let mut segments = Vec::new();
-    for segment in path.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                return Err(OnboardingError::new(
-                    OnboardingErrorKind::Validation,
-                    format!("SSH project path cannot contain `..`: {path}"),
-                ));
-            }
-            value => segments.push(value),
-        }
-    }
-    Ok(if segments.is_empty() {
-        "/".into()
-    } else {
-        format!("/{}", segments.join("/"))
-    })
-}
-
-fn remote_error(message: String) -> OnboardingError {
-    let lower = message.to_ascii_lowercase();
-    let kind = if lower.contains("auth") || lower.contains("permission denied") {
-        OnboardingErrorKind::Authentication
-    } else if lower.contains("already exists")
-        || lower.contains("target is not empty")
-        || lower.contains("target already exists")
-    {
-        OnboardingErrorKind::Collision
-    } else if lower.contains("git is unavailable") {
-        OnboardingErrorKind::GitUnavailable
-    } else if lower.contains("git could not inspect")
-        || lower.contains("repository probe")
-        || lower.contains(".git marker")
-    {
-        OnboardingErrorKind::GitFailure
-    } else if lower.contains("superseded") || lower.contains("connection") {
-        OnboardingErrorKind::DisconnectedBeforeDispatch
-    } else {
-        OnboardingErrorKind::Validation
-    };
-    OnboardingError::new(kind, message)
-}
-
-fn remote_recovery_error(
-    failure: crate::remote_ssh::RemoteRecoveryProbeError,
-    expected_fingerprint: u64,
-) -> OnboardingError {
-    let mut error = remote_error(failure.message);
-    if failure.connection_fingerprint == expected_fingerprint {
-        if let Some(epoch) = failure.connection_epoch {
-            error = error.with_authority(
-                OperationResultAuthority::verified_after_uncertain_dispatch(Some(epoch)),
-            );
-        }
-    }
-    error
-}
-
-fn remote_mutation_outcome(result: crate::remote_ssh::RemoteMutationOutcome) -> HostCommandOutcome {
-    let crate::remote_ssh::RemoteMutationOutcome {
-        output,
-        transport_error,
-        authority_error,
-        connection_epoch,
-        ..
-    } = result;
-    let transport_uncertain = transport_error.is_some();
-    let mut stderr = Vec::new();
-    let (dispatch, exit_code, timed_out, stdout_truncated, stderr_truncated) =
-        if let Some(output) = output {
-            let dispatch = if transport_uncertain
-                || output.requires_session_retirement()
-                || output.state == mt_ssh::BoundedExecState::ExecReplyUnknown
-                || (output.state == mt_ssh::BoundedExecState::Started
-                    && (output.timed_out || output.exit_code.is_none()))
-            {
-                HostCommandDispatch::OutcomeUncertain
-            } else if output.safe_to_fallback() {
-                HostCommandDispatch::SafeBeforeDispatchFailure
-            } else {
-                HostCommandDispatch::Completed
-            };
-            let fields = (
-                dispatch,
-                output.exit_code.and_then(|code| i32::try_from(code).ok()),
-                output.timed_out,
-                output.stdout_truncated,
-                output.stderr_truncated,
-            );
-            stderr = output.stderr;
-            fields
-        } else {
-            (
-                HostCommandDispatch::OutcomeUncertain,
-                None,
-                false,
-                false,
-                false,
-            )
-        };
-    if let Some(error) = transport_error {
-        if !stderr.is_empty() {
-            stderr.extend_from_slice(b"; ");
-        }
-        stderr.extend_from_slice(error.as_bytes());
-    }
-    if let Some(error) = authority_error {
-        if !stderr.is_empty() {
-            stderr.extend_from_slice(b"; ");
-        }
-        stderr.extend_from_slice(error.as_bytes());
-    }
-    HostCommandOutcome {
-        dispatch,
-        exit_code,
-        timed_out,
-        stdout_truncated,
-        stderr_truncated,
-        stderr,
-        observed_connection_epoch: Some(connection_epoch),
     }
 }

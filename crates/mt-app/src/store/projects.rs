@@ -1014,13 +1014,15 @@ mod project_onboarding_tests {
         let first_path = first_path.to_string_lossy().to_string();
         let second_path = second_path.to_string_lossy().to_string();
         Application::headless().run(move |cx| {
-            let mut config = AppConfig::default();
-            config.project_tree = Some(vec![ProjectTreeItem::Group(ProjectGroup {
-                id: "target".into(),
-                name: "Target".into(),
-                collapsed: true,
-                children: Vec::new(),
-            })]);
+            let config = AppConfig {
+                project_tree: Some(vec![ProjectTreeItem::Group(ProjectGroup {
+                    id: "target".into(),
+                    name: "Target".into(),
+                    collapsed: true,
+                    children: Vec::new(),
+                })]),
+                ..AppConfig::default()
+            };
             let store = cx.new(|_| test_store(config, HashMap::new(), ai));
 
             store.update(cx, |store, cx| {

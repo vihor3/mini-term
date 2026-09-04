@@ -225,10 +225,6 @@ impl ProjectHostOps for LocalProjectOps {
         })
     }
 
-    fn join_path(&self, parent: &str, name: &str) -> String {
-        Path::new(parent).join(name).to_string_lossy().to_string()
-    }
-
     fn validate_basename(&self, name: &str) -> Result<(), OnboardingError> {
         validate_portable_basename(name)
     }

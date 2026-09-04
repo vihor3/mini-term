@@ -19,7 +19,7 @@
 //! # 兼容状态
 //!
 //! 当前可见入口已经统一转到 `crate::project_onboarding`。本模块暂时保留旧 API，
-//! 并与统一引导共用 [`crate::overlay::kind::ADD_REMOTE_PROJECT`] 的防叠开守卫，
+//! 并与统一引导共用 [`crate::overlay::kind::PROJECT_ONBOARDING`] 的防叠开守卫，
 //! 便于 Actions 通过前回滚，不再作为正常用户入口。
 
 use std::collections::HashSet;
@@ -84,7 +84,7 @@ pub fn open(
     cx: &mut App,
 ) {
     // 守卫要在**建输入框之前**判(与 `prompt::show_prompt` 同一条)
-    if crate::overlay::contains(crate::overlay::key(kind::ADD_REMOTE_PROJECT)) {
+    if crate::overlay::contains(crate::overlay::key(kind::PROJECT_ONBOARDING)) {
         return;
     }
     // 默认选第一条连接(原版 `connections[0]?.id ?? ''`)
@@ -136,7 +136,7 @@ pub fn open(
     });
 
     open_guarded(
-        kind::ADD_REMOTE_PROJECT,
+        kind::PROJECT_ONBOARDING,
         window,
         cx,
         move |dialog, window, cx| {
@@ -244,7 +244,7 @@ fn save(state: &Entity<AddRemotePanel>, window: &mut Window, cx: &mut App) {
                     // 校验期间允许其它种类的覆盖物叠到上面。只有当前添加项目弹窗
                     // 已回到栈顶时才真正写配置，否则 `close_guarded` 无法关闭它，
                     // 用户稍后再次点击会重复创建同一项目。
-                    if !crate::overlay::is_top(crate::overlay::key(kind::ADD_REMOTE_PROJECT)) {
+                    if !crate::overlay::is_top(crate::overlay::key(kind::PROJECT_ONBOARDING)) {
                         state_for_task.update(cx, |panel, cx| {
                             panel.busy = false;
                             panel.error =
@@ -283,7 +283,7 @@ fn save(state: &Entity<AddRemotePanel>, window: &mut Window, cx: &mut App) {
                         panel.busy = false;
                         cx.notify();
                     });
-                    let closed = close_guarded(kind::ADD_REMOTE_PROJECT, window, cx);
+                    let closed = close_guarded(kind::PROJECT_ONBOARDING, window, cx);
                     debug_assert!(closed, "添加远程项目写入前已确认弹窗位于栈顶");
                 }
                 Err(err) => {
@@ -337,7 +337,7 @@ fn read_frame(state: &Entity<AddRemotePanel>, cx: &App) -> Frame {
 fn render_body(state: &Entity<AddRemotePanel>, total: gpui::Pixels, cx: &mut App) -> AnyElement {
     let frame = read_frame(state, cx);
     let mut root = div().h(total).flex().flex_col().child(panel_header(
-        kind::ADD_REMOTE_PROJECT,
+        kind::PROJECT_ONBOARDING,
         t("remoteProject", "title"),
         Some(t("remoteProject", "subtitle").to_string()),
         !frame.busy,
@@ -633,7 +633,7 @@ fn render_footer(state: &Entity<AddRemotePanel>, frame: &Frame) -> AnyElement {
                         if state.read(cx).busy {
                             return;
                         }
-                        close_guarded(kind::ADD_REMOTE_PROJECT, window, cx);
+                        close_guarded(kind::PROJECT_ONBOARDING, window, cx);
                     }
                 }),
         )

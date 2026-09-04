@@ -110,6 +110,13 @@ pub struct RemoteMutationOutcome {
     pub connection_fingerprint: u64,
 }
 
+struct RemoteProbeRequest<'a> {
+    path: &'a str,
+    include_empty: bool,
+    inspect_git: bool,
+    provenance: RemoteProbeProvenance,
+}
+
 pub fn probe_existing_directory(
     context: &RemoteProjectContext,
     path: &str,
@@ -153,10 +160,13 @@ pub fn probe_existing_directory_after_uncertain_dispatch(
                 context,
                 &session,
                 &sftp,
-                path,
-                include_empty,
-                inspect_git,
-                RemoteProbeProvenance::PostconditionVerifiedAfterUncertainDispatch,
+                RemoteProbeRequest {
+                    path,
+                    include_empty,
+                    inspect_git,
+                    provenance:
+                        RemoteProbeProvenance::PostconditionVerifiedAfterUncertainDispatch,
+                },
             )
             .await;
             let failure_epoch = if result.is_err()
@@ -204,10 +214,12 @@ fn probe_existing_directory_with_provenance(
             context,
             &session,
             &sftp,
-            path,
-            include_empty,
-            inspect_git,
-            provenance,
+            RemoteProbeRequest {
+                path,
+                include_empty,
+                inspect_git,
+                provenance,
+            },
         )
         .await;
         sftp.close().await;
@@ -403,11 +415,14 @@ async fn probe_on_session(
     context: &RemoteProjectContext,
     session: &Arc<CachedSession>,
     sftp: &SftpHandle,
-    path: &str,
-    include_empty: bool,
-    inspect_git: bool,
-    provenance: RemoteProbeProvenance,
+    request: RemoteProbeRequest<'_>,
 ) -> Result<RemotePathProbe, String> {
+    let RemoteProbeRequest {
+        path,
+        include_empty,
+        inspect_git,
+        provenance,
+    } = request;
     ensure_probe_session(st, context, session, provenance).await?;
     let requested = if path.trim().is_empty() || path.trim() == "~" || path.trim().starts_with("~/")
     {
