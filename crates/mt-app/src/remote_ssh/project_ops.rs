@@ -164,8 +164,7 @@ pub fn probe_existing_directory_after_uncertain_dispatch(
                     path,
                     include_empty,
                     inspect_git,
-                    provenance:
-                        RemoteProbeProvenance::PostconditionVerifiedAfterUncertainDispatch,
+                    provenance: RemoteProbeProvenance::PostconditionVerifiedAfterUncertainDispatch,
                 },
             )
             .await;

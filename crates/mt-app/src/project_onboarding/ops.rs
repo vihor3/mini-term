@@ -959,9 +959,9 @@ fn remote_recovery_error(
     if failure.connection_fingerprint == expected_fingerprint
         && let Some(epoch) = failure.connection_epoch
     {
-        error = error.with_authority(
-            OperationResultAuthority::verified_after_uncertain_dispatch(Some(epoch)),
-        );
+        error = error.with_authority(OperationResultAuthority::verified_after_uncertain_dispatch(
+            Some(epoch),
+        ));
     }
     error
 }
@@ -1132,7 +1132,6 @@ mod tests {
                 normalized_canonical_path: path.into(),
             })
         }
-
 
         fn validate_basename(&self, name: &str) -> Result<(), OnboardingError> {
             validate_portable_basename(name)
