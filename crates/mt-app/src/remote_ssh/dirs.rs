@@ -7,8 +7,9 @@ use mt_project::fs::{ALWAYS_IGNORE, FileEntry, TextGitignore, natural_cmp};
 
 use super::{
     DEFAULT_REMOTE_PASTE_DIR, GITIGNORE_MAX_BYTES, expand_tilde, join_posix, lock, open_sftp,
-    posix_relative, remote_home, split_posix_leaf, state, valid_remote_name, valid_sftp_child_name,
-    validate_remote_dir_under_root, validate_remote_leaf_under_root,
+    open_sftp_with_session, posix_relative, remote_home, split_posix_leaf, state,
+    valid_remote_name, valid_sftp_child_name, validate_remote_dir_under_root,
+    validate_remote_leaf_under_root,
 };
 
 #[derive(Debug, Clone)]
@@ -22,6 +23,12 @@ pub struct RemoteDirectoryEntry {
 pub struct RemoteDirectoryListing {
     pub canonical_path: String,
     pub directories: Vec<RemoteDirectoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteConnectionProbe {
+    pub canonical_home: String,
+    pub connection_epoch: u64,
 }
 
 /// 把配置里的「远程粘贴落盘目录」解析成远端绝对路径。
@@ -207,48 +214,6 @@ pub fn list_directory_for(
     }
 }
 
-// ---------------------------------------------------------------------------
-// 入口 2:远程目录验证(「添加远程项目」保存前)
-// ---------------------------------------------------------------------------
-
-/// 验证远程路径是一个存在的目录,返回展开后的绝对路径。
-/// `~` / `~/xxx` 用 SFTP canonicalize 展开;不存在或不是目录返回 Err。
-///
-/// 兼作**连接测试**:走完整的「取 session → 认证 → 开 SFTP → canonicalize」,
-/// 连不上时的错误面与真实使用一致(原版没有独立的 test 命令,同一条路)。
-///
-/// **阻塞**,丢 `background_executor`。
-pub fn validate_dir(conn: &SshConnection, path: &str) -> Result<String, String> {
-    let st = state();
-    st.block_on(async move {
-        let sftp = open_sftp(st, conn).await?;
-        let result = async {
-            let trimmed = path.trim();
-            let expanded = if trimmed.is_empty() || trimmed == "~" || trimmed.starts_with("~/") {
-                let home = remote_home(st, &sftp, &conn.id).await?;
-                expand_tilde(trimmed, &home)
-            } else {
-                trimmed.to_string()
-            };
-            let canonical = sftp
-                .canonicalize(&expanded)
-                .await
-                .map_err(|e| format!("远程路径无效: {}", e.message()))?;
-            let is_dir = sftp
-                .is_dir(&canonical)
-                .await
-                .map_err(|e| format!("远程路径不可访问: {}", e.message()))?;
-            if !is_dir {
-                return Err(format!("远程路径不是目录: {canonical}"));
-            }
-            Ok(canonical)
-        }
-        .await;
-        sftp.close().await;
-        result
-    })
-}
-
 /// 为“新建远程项目”提供的轻量目录浏览；不应用项目 `.gitignore` 或固定隐藏目录。
 /// **阻塞**,调用方必须放到 background executor。
 pub fn browse_directory(
@@ -372,9 +337,39 @@ pub fn rename_entry(
     })
 }
 
-/// 连接自检:只探到远程 `$HOME` 为止,返回它。
+/// 连接自检:只探到远程 `$HOME` 为止,返回它和承载该结果的精确会话 epoch。
 ///
 /// 项目引导用它验证所选主机并取得规范化 home；失败文案与真实目录访问同源。
-pub fn probe_connection(conn: &SshConnection) -> Result<String, String> {
-    validate_dir(conn, "~")
+pub fn probe_connection(conn: &SshConnection) -> Result<RemoteConnectionProbe, String> {
+    let st = state();
+    st.block_on(async move {
+        let (session, sftp) = open_sftp_with_session(st, conn).await?;
+        let result = async {
+            let home = remote_home(st, &sftp, &conn.id).await?;
+            let canonical_home = sftp
+                .canonicalize(&home)
+                .await
+                .map_err(|error| format!("远程路径无效: {}", error.message()))?;
+            if !sftp
+                .is_dir(&canonical_home)
+                .await
+                .map_err(|error| format!("远程路径不可访问: {}", error.message()))?
+            {
+                return Err(format!("远程路径不是目录: {canonical_home}"));
+            }
+            let connection_epoch = session.connection_epoch().get();
+            if !st.pool().is_current_session(&conn.id, &session).await
+                || !st.connection_epoch_is_current(&conn.id, connection_epoch)
+            {
+                return Err("SSH host probe was superseded by a newer connection".into());
+            }
+            Ok(RemoteConnectionProbe {
+                canonical_home,
+                connection_epoch,
+            })
+        }
+        .await;
+        sftp.close().await;
+        result
+    })
 }

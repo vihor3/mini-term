@@ -2,20 +2,19 @@
 //!
 //! 左栏分组列表 + 右栏连接列表:连接的增删改、分组的新建/改名/解散、把连接
 //! 拖进分组。数据层全在 [`crate::store::AppStore`] 的 SSH 段(每一步立即落盘),
-//! 分组归类走 [`crate::ssh_conn`] 的纯函数 —— 「一处实现三处用」是原版的刻意
-//! 安排,三个弹窗(本面板 / [`crate::ssh_assoc`] / [`crate::remote_project`])
-//! 共用同一份桶顺序与空组处理。
+//! 分组归类走 [`crate::ssh_conn`] 的纯函数 —— 「一处实现多处用」是原版的刻意
+//! 安排,本面板、[`crate::ssh_assoc`] 与统一项目引导共用同一份桶顺序与空组处理。
 //!
-//! # 本模块也是另两个弹窗的**共享视图件**出处
+//! # 本模块也是其他 SSH 浮层的**共享视图件**出处
 //!
 //! [`GroupKey`] / [`resolve_active`] / [`visible_buckets`] / [`sidebar_row`] /
-//! [`bucket_header`] / [`conn_card`] 六件都是 `pub(crate)`:三个弹窗的
+//! [`bucket_header`] / [`conn_card`] 六件都是 `pub(crate)`:这些浮层的
 //! 「左栏 + 右栏桶」是同构的,原版靠 `import { GroupSidebarRow } from './SshModal'`
 //! 共用,这里照办。
 //!
 //! 右栏那整套「分组折叠 + 逐条渲染」也在这儿([`render_conn_buckets`] +
-//! [`BucketCollapse`])—— 此前三个弹窗各抄一份,连折叠开关的闭包都一字不差;
-//! 行内容(单选圆点 / 勾选框 / 行内表单)由闭包注入,那才是三家真正的差别。
+//! [`BucketCollapse`])—— 此前两个 SSH 弹窗各抄一份,连折叠开关的闭包都一字不差;
+//! 行内容(单选圆点 / 勾选框 / 行内表单)由闭包注入,那才是各调用方真正的差别。
 //! 底栏外壳 [`panel_footer`] 同理,多加一个消费方 [`crate::env_vars`]。
 //!
 //! # 与原版的三处形态差异
@@ -30,7 +29,7 @@
 //!
 //! # 本面板独有:点连接名复制名字
 //!
-//! [`copyable_name`] —— 只长在本面板的行上。另两个弹窗共用 [`conn_text`],
+//! [`copyable_name`] —— 只长在本面板的行上。关联弹窗复用 [`conn_text`],
 //! 它们的**整行**点击是勾选 / 单选,名字上再接一个点击语义就打架了。
 //!
 //! # 防叠开
@@ -66,7 +65,7 @@ pub(crate) fn panel_total_h(viewport: gpui::Size<gpui::Pixels>) -> gpui::Pixels 
 /// 左栏宽度(原版 `w-44` = 176px)。
 const SIDEBAR_W: f32 = 176.0;
 
-// ─── 左栏选中态(三个弹窗共用) ────────────────────────────────
+// ─── 左栏选中态(SSH 面板与关联弹窗共用) ────────────────────────────────
 
 /// 左栏选中的是哪一档。原版是 `string | null`:`null` = 全部、`''` = 未分组、
 /// 其余 = 具名分组名(组名已 trim,不会是空串)。
@@ -81,7 +80,7 @@ pub(crate) enum GroupKey {
 /// 选中的分组可能因(在另一个弹窗里)删除 / 重命名 / 解散而消失 —— 回落「全部」。
 ///
 /// `ungrouped_visible` 是「未分组那一行现在画不画得出来」:本面板拖拽期间即便
-/// 空桶也照画(好让用户把连接拖出分组),另两个弹窗只看桶空不空。
+/// 空桶也照画(好让用户把连接拖出分组),关联弹窗只看桶空不空。
 pub(crate) fn resolve_active(
     selected: &GroupKey,
     group_names: &[String],
@@ -282,9 +281,9 @@ pub(crate) fn panel_header(
 
 /// 弹窗底栏外壳:左边一句灰色脚注,右边的按钮由调用方 `.child()` 追加。
 ///
-/// [`crate::ssh_assoc`] / [`crate::remote_project`] / [`crate::env_vars`] 三个
-/// 弹窗的底栏容器与脚注一字不差;**按钮不并进来** —— 它们的 id、置灰口径
-/// (busy / 空列表 / 校验未过)与点击语义三家各不相同,硬凑只会把三份分支塞进
+/// `crate::ssh_assoc` 与 `crate::env_vars` 的底栏容器和脚注一字不差;
+/// **按钮不并进来** —— 它们的 id、置灰口径(busy / 空列表 / 校验未过)
+/// 与点击语义各不相同,硬凑只会把多份分支塞进
 /// 一个签名里。
 pub(crate) fn panel_footer(hint: impl Into<SharedString>) -> gpui::Div {
     div()
@@ -304,7 +303,7 @@ pub(crate) fn panel_footer(hint: impl Into<SharedString>) -> gpui::Div {
         )
 }
 
-/// 一条连接的卡片外壳(名称 + `user@host:port` 副行)。三个弹窗共用同一款卡,
+/// 一条连接的卡片外壳(名称 + `user@host:port` 副行)。SSH 面板与关联弹窗共用同一款卡,
 /// 差别只在左侧的勾选框/单选钮与右侧的操作按钮,由调用方追加。
 pub(crate) fn conn_card(
     id: impl Into<gpui::ElementId>,
@@ -351,7 +350,7 @@ fn name_line() -> gpui::Div {
 }
 
 /// 名称行由调用方给的版本。本面板要把名字做成「点一下就复制」
-/// (见 [`copyable_name`]),另两个弹窗不能这么干 —— 它们**整行**点击另有语义
+/// (见 [`copyable_name`]),关联弹窗不能这么干 —— 它们**整行**点击另有语义
 /// (勾选 / 单选),名字上再接一个点击就成了「点哪儿结果不一样」。
 fn conn_text_with_name(name: AnyElement, conn: &SshConnection, suffix: &str) -> AnyElement {
     div()
@@ -375,21 +374,21 @@ fn conn_text_with_name(name: AnyElement, conn: &SshConnection, suffix: &str) -> 
 }
 
 /// 右栏折叠态住在各自面板结构的 `collapsed` 字段上 —— [`render_conn_buckets`]
-/// 要改的就是这一个字段,三家的其余状态互不相干,所以只抽这一口。
+/// 要改的就是这一个字段,各浮层的其余状态互不相干,所以只抽这一口。
 pub(crate) trait BucketCollapse: 'static {
     fn collapsed_set(&mut self) -> &mut HashSet<String>;
 }
 
-/// 右栏「分组折叠 + 逐条渲染」的骨架。三个弹窗此前逐字重复三份,差别只有两处:
-/// 元素 id 前缀与**行内容**(本面板的行/行内表单二选一、[`crate::ssh_assoc`]
-/// 的勾选框、[`crate::remote_project`] 的单选圆点),后者由 `row` 闭包注入。
+/// 右栏「分组折叠 + 逐条渲染」的骨架。多个 SSH 浮层此前逐字重复,差别只有两处:
+/// 元素 id 前缀与**行内容**(本面板的行/行内表单二选一、
+/// `crate::ssh_assoc` 的勾选框),后者由 `row` 闭包注入。
 ///
 /// - **只有「全部」视图画桶标题**:选中某个具名分组时右栏就是那一桶,再画一遍
 ///   组名是废话;同理折叠只在「全部」视图下生效(`active == All` 才看 `collapsed`);
 /// - `has_named` = 现在有没有具名分组。全是未分组连接时连「未分组」这个标题都
 ///   不画 —— 原版 `bucket.group || hasNamedGroup` 那条;
 /// - 返回**一桶一个** `AnyElement`,调用方 `.children(...)` 铺进列表容器 ——
-///   三家的容器 id / padding / 空态提示各不相同,那一层不并。
+///   各浮层的容器 id / padding / 空态提示不同,那一层不并。
 pub(crate) fn render_conn_buckets<T: BucketCollapse>(
     state: &Entity<T>,
     buckets: Vec<SshGroupBucket>,
@@ -1265,7 +1264,7 @@ fn render_list(state: &Entity<SshPanel>, frame: &Frame, cx: &mut App) -> AnyElem
         );
     }
 
-    // 骨架与另两个弹窗共用(见 [`render_conn_buckets`]);本面板的行有两态 ——
+    // 骨架与关联弹窗共用(见 [`render_conn_buckets`]);本面板的行有两态 ——
     // 正在编辑的那一条原地换成表单
     list = list.children(render_conn_buckets(
         state,

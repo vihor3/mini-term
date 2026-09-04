@@ -489,7 +489,7 @@ fn git_url_has_sensitive_components(value: &str) -> bool {
     has_userinfo || value.contains(['?', '#'])
 }
 
-fn validate_git_url(url: &str) -> Result<(), OnboardingError> {
+pub fn validate_git_url(url: &str) -> Result<(), OnboardingError> {
     let url = url.trim();
     if url.is_empty() || url.contains('\0') || url.chars().any(char::is_whitespace) {
         return Err(OnboardingError::new(
@@ -1729,6 +1729,8 @@ mod tests {
             redact_git_url("git@example.com:o/repo.git"),
             "<redacted>@example.com:o/repo.git"
         );
+        assert!(validate_git_url("https://example.com/o/CON.git").is_ok());
+        assert!(infer_clone_folder_name("https://example.com/o/CON.git").is_err());
         for invalid in ["CON", "aux.txt", "COM1.log", "LPT9", "repo\nname"] {
             assert!(validate_portable_basename(invalid).is_err(), "{invalid}");
         }

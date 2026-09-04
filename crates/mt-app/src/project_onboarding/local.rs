@@ -378,6 +378,10 @@ fn wsl_unc(distro: &str, path: &str) -> Result<String, OnboardingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project_onboarding::model::OnboardingOperationResult;
+    use crate::project_onboarding::ops::{
+        add_existing_folder, clone_from_url, create_new_project, initialize_existing_folder,
+    };
 
     #[test]
     fn only_explicit_not_repository_response_is_not_git() {
@@ -422,6 +426,157 @@ mod tests {
             assert_eq!(error.kind, OnboardingErrorKind::Validation);
             assert!(error.message.contains("absolute path"));
         }
+    }
+
+    #[test]
+    fn local_add_and_initialize_preserve_existing_files_and_nested_root() {
+        let root = std::env::temp_dir().join(format!(
+            "mt-app-onboarding-existing-integration-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let project = root.join("existing project");
+        let child = project.join("child");
+        fs::create_dir_all(&child).unwrap();
+        let sentinel = project.join("sentinel.bin");
+        let child_sentinel = child.join("keep.txt");
+        let sentinel_bytes = b"existing project contents\0stay intact";
+        fs::write(&sentinel, sentinel_bytes).unwrap();
+        fs::write(&child_sentinel, b"nested contents stay intact").unwrap();
+        let project_path = project.to_string_lossy().to_string();
+
+        let added = add_existing_folder(&LocalProjectOps, &project_path).unwrap();
+        let added_path = match added {
+            OnboardingOperationResult::ReadyToRegister(location) => location.canonical_path,
+            OnboardingOperationResult::NestedRepository { .. } => {
+                panic!("Add Existing unexpectedly returned a nested repository")
+            }
+        };
+        assert_eq!(fs::read(&sentinel).unwrap(), sentinel_bytes);
+        assert!(!project.join(".git").exists());
+
+        let initialized = initialize_existing_folder(&LocalProjectOps, &project_path).unwrap();
+        let initialized_path = match initialized {
+            OnboardingOperationResult::ReadyToRegister(location) => location.canonical_path,
+            OnboardingOperationResult::NestedRepository { .. } => {
+                panic!("Initialize Existing unexpectedly returned a nested repository")
+            }
+        };
+        assert_eq!(
+            mt_project::worktree::normalize_path_for_comparison(&initialized_path),
+            mt_project::worktree::normalize_path_for_comparison(&added_path)
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), sentinel_bytes);
+        assert!(matches!(
+            LocalProjectOps::git_relationship(Path::new(&initialized_path)).unwrap(),
+            GitRelationship::RepositoryRoot { .. }
+        ));
+
+        let nested = initialize_existing_folder(
+            &LocalProjectOps,
+            &child.to_string_lossy(),
+        )
+        .unwrap();
+        let repository_root = match nested {
+            OnboardingOperationResult::NestedRepository {
+                repository_root, ..
+            } => repository_root,
+            OnboardingOperationResult::ReadyToRegister(_) => {
+                panic!("nested folder unexpectedly became its own repository")
+            }
+        };
+        assert_eq!(
+            mt_project::worktree::normalize_path_for_comparison(&repository_root),
+            mt_project::worktree::normalize_path_for_comparison(&initialized_path)
+        );
+        assert!(!child.join(".git").exists());
+        assert_eq!(
+            fs::read(&child_sentinel).unwrap(),
+            b"nested contents stay intact"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_clone_creates_an_exact_repository_in_the_selected_parent() {
+        let root = std::env::temp_dir().join(format!(
+            "mt-app-onboarding-clone-integration-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source.git");
+        let destination_parent = root.join("destination");
+        fs::create_dir_all(&destination_parent).unwrap();
+        let source_setup = LocalProjectOps
+            .run_git(
+                &root.to_string_lossy(),
+                &CommandPlan::new("git", ["init", "--bare", "source.git"]),
+            )
+            .unwrap();
+        assert!(source_setup.succeeded());
+        let target = destination_parent.join("cloned project");
+
+        let cloned = clone_from_url(
+            &LocalProjectOps,
+            "../source.git",
+            &destination_parent.to_string_lossy(),
+            "cloned project",
+        )
+        .unwrap();
+        let canonical_path = match cloned {
+            OnboardingOperationResult::ReadyToRegister(location) => location.canonical_path,
+            OnboardingOperationResult::NestedRepository { .. } => {
+                panic!("Clone unexpectedly returned a nested repository")
+            }
+        };
+
+        assert_eq!(
+            mt_project::worktree::normalize_path_for_comparison(&canonical_path),
+            mt_project::worktree::normalize_path_for_comparison(&target.to_string_lossy())
+        );
+        assert!(matches!(
+            LocalProjectOps::git_relationship(&target).unwrap(),
+            GitRelationship::RepositoryRoot { .. }
+        ));
+        assert!(source.join("HEAD").is_file());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_new_folder_creates_an_exact_git_repository() {
+        let root = std::env::temp_dir().join(format!(
+            "mt-app-onboarding-new-folder-integration-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("new project with spaces");
+
+        let created = create_new_project(
+            &LocalProjectOps,
+            &root.to_string_lossy(),
+            "new project with spaces",
+        )
+        .unwrap();
+        let canonical_path = match created {
+            OnboardingOperationResult::ReadyToRegister(location) => location.canonical_path,
+            OnboardingOperationResult::NestedRepository { .. } => {
+                panic!("New Folder unexpectedly returned a nested repository")
+            }
+        };
+
+        assert_eq!(
+            mt_project::worktree::normalize_path_for_comparison(&canonical_path),
+            mt_project::worktree::normalize_path_for_comparison(&target.to_string_lossy())
+        );
+        assert!(matches!(
+            LocalProjectOps::git_relationship(&target).unwrap(),
+            GitRelationship::RepositoryRoot { .. }
+        ));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(windows)]

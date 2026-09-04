@@ -1,11 +1,11 @@
-//! SSH 连接列表 / 关联范围的**纯逻辑**(BB-b 的三个 Modal 共用)。
+//! SSH 连接列表 / 关联范围的**纯逻辑**(SSH 面板、关联弹窗与统一项目引导共用)。
 //!
-//! 对应 `src/components/SshModal.tsx` 里被另外两个弹窗 import 的那几个导出
+//! 对应 `src/components/SshModal.tsx` 里被其他 SSH 界面复用的导出
 //! (`connectionSummary` / `buildGroupBuckets` / `SshGroupBucket`)、
-//! `SshAssocModal.tsx` 的 `initialChecked` / `sameScope`,以及
-//! `src/utils/remoteProject.ts` 的远程项目判定。
+//! `SshAssocModal.tsx` 的 `initialChecked` / `sameScope`,以及统一项目引导的
+//! 主机列表。
 //!
-//! **一处实现三处用**是原版的刻意安排(注释原话:「避免两边分组顺序/空组处理
+//! **一处实现多处用**是原版的刻意安排(注释原话:「避免两边分组顺序/空组处理
 //! 走样」),移植时保持不变 —— 视图层不许各自再写一份分组。
 //!
 //! 全是纯函数,不碰 store、不碰网络,单测直接钉。
@@ -46,8 +46,8 @@ pub struct GroupBuckets {
 }
 
 impl GroupBuckets {
-    /// 拍平成「具名桶 + (非空时)未分组桶」的展示序 —— 三个 Modal 的右栏
-    /// 都是这个顺序(`AddRemoteProjectModal.tsx:99-102` 的 `groups`)。
+    /// 拍平成「具名桶 + (非空时)未分组桶」的展示序。
+    /// 统一项目引导与关联弹窗都使用这个顺序。
     pub fn display_order(&self) -> Vec<SshGroupBucket> {
         let mut out: Vec<SshGroupBucket> = self
             .named
@@ -127,25 +127,6 @@ pub fn merge_ssh_groups_on_rename(groups: &[String], old_name: &str, new_name: &
         }
     }
     out
-}
-
-/// 「添加远程项目」的项目名兜底(`AddRemoteProjectModal.tsx:69-70`)。
-///
-/// 用户填了就用用户的(trim);没填取远程路径的**末段**;末段也取不到
-/// (路径就是 `/`)就用整条路径 —— 与原版
-/// `name.trim() || canonical.split('/').filter(Boolean).pop() || canonical`
-/// 三级回落逐字对应。远程路径来自 SFTP canonicalize,不会是空串。
-pub fn remote_project_name(name: &str, remote_path: &str) -> String {
-    let trimmed = name.trim();
-    if !trimmed.is_empty() {
-        return trimmed.to_string();
-    }
-    remote_path
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .next_back()
-        .unwrap_or(remote_path)
-        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -397,7 +378,7 @@ mod tests {
         assert_eq!(only.len(), 1);
     }
 
-    // --- 分组改名 / 远程项目名 ---
+    // --- 分组改名 ---
 
     #[test]
     fn rename_merges_into_existing_group_without_duplicates() {
@@ -413,15 +394,6 @@ mod tests {
         assert_eq!(merge_ssh_groups_on_rename(&groups, "a", "z"), ids(&["z", "b"]));
         // 老名字不在表里(只有连接带着它)→ 列表原样保留(去空白/去重)
         assert_eq!(merge_ssh_groups_on_rename(&groups, "x", "y"), ids(&["a", "b"]));
-    }
-
-    #[test]
-    fn remote_project_name_falls_back_to_last_path_segment() {
-        assert_eq!(remote_project_name("  我的项目 ", "/home/u/proj"), "我的项目");
-        assert_eq!(remote_project_name("", "/home/u/proj"), "proj");
-        assert_eq!(remote_project_name("  ", "/home/u/proj/"), "proj");
-        // 根目录:末段取不到 → 用整条路径
-        assert_eq!(remote_project_name("", "/"), "/");
     }
 
     // --- 初始勾选 ---

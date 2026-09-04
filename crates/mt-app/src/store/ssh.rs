@@ -1,12 +1,10 @@
 //! SSH 相关的 `AppStore` 方法。原 `store.rs` 里那个独立的 `impl AppStore` 块
 //! 整块搬来(含块前的段注释),逻辑一行未改。
 
-use std::collections::HashSet;
-
 use gpui::{Context, Task};
-use mt_config::{ProjectConfig, SshConnection};
+use mt_config::SshConnection;
 
-use crate::tree::{PaneState, PaneStatus, gen_id};
+use crate::tree::{PaneState, PaneStatus};
 
 use super::{AppStore, ProjectState, SshAssocOutcome};
 
@@ -14,14 +12,13 @@ use super::{AppStore, ProjectState, SshAssocOutcome};
 // SSH(audit #28,BB-a 批)
 // ===========================================================================
 //
-// 三块:① 连接表 / 分组 CRUD(`SshModal.tsx` 的 `persist` 那一串);
-// ② 远程项目(`AddRemoteProjectModal.tsx` + `remoteProject.ts`);
-// ③ 「关联 SSH」的启用/停用(`SshAssocModal.tsx::handleSave`);
+// 两块:① 连接表 / 分组 CRUD(`SshModal.tsx` 的 `persist` 那一串);
+// ② 「关联 SSH」的启用/停用(`SshAssocModal.tsx::handleSave`);
 // 外加断线重连(`PaneGroup.tsx::handleReconnect` + `resetPaneForReconnect`)。
 //
-// BB-b 已把消费方全部接上(三个弹窗 + 远程项目 UI + 断线遮罩 + 文件树/会话
-// 面板的远程分流),BB-a 留的 `allow(dead_code)` 随之删除 —— 从此这里多一个
-// 没人调的函数就会在 `cargo check` 里红。
+// BB-b 已把消费方全部接上(SSH 面板、关联弹窗、统一项目引导、断线遮罩与
+// 文件树/会话面板的远程分流),BB-a 留的 `allow(dead_code)` 随之删除。
+// 从此这里多一个没人调的函数就会在 `cargo check` 里红。
 impl AppStore {
     /// 已保存的 SSH 连接(`config.sshConnections`)。
     pub fn ssh_connections(&self) -> &[SshConnection] {
@@ -196,54 +193,6 @@ impl AppStore {
             return crate::ssh_conn::remote_pane_label(project, &self.config.ssh_connections);
         }
         pane.shell_name.clone()
-    }
-
-    /// 添加一个 SSH 远程项目并返回它的 id(`AddRemoteProjectModal.tsx::handleSave`
-    /// 的落盘那一半 —— 远程路径的 `~` 展开与目录校验由调用方先跑
-    /// [`crate::remote_ssh::validate_dir`],这里只接**已 canonicalize 的绝对路径**)。
-    ///
-    /// - `name` 为空时取路径末段(再取不到就用整条路径),与原版一字不差;
-    /// - 远程项目**不参与** [`Self::find_project_by_path`] 的去重(那条判据显式
-    ///   排除了 `ssh_connection_id.is_some()` 的项目):两台机器上的
-    ///   `/home/u/proj` 是两个项目;
-    /// - `target_group` 非空时落进该分组(分组折叠由调用方展开)。
-    pub fn add_remote_project(
-        &mut self,
-        name: &str,
-        connection_id: &str,
-        remote_path: &str,
-        target_group: Option<&str>,
-        cx: &mut Context<Self>,
-    ) -> String {
-        let final_name = crate::ssh_conn::remote_project_name(name, remote_path);
-        let id = gen_id("proj");
-        self.config.projects.push(ProjectConfig {
-            id: id.clone(),
-            name: final_name,
-            path: remote_path.to_string(),
-            description: None,
-            saved_layout: None,
-            expanded_dirs: Vec::new(),
-            ssh_mcp_enabled: false,
-            ssh_cli_token: None,
-            ssh_connection_ids: None,
-            env_vars: Vec::new(),
-            wsl_sessions_distro: None,
-            ssh_connection_id: Some(connection_id.to_string()),
-            parent_project_id: None,
-            kind_override: None,
-        });
-        let tree = self.config.project_tree.get_or_insert_with(Vec::new);
-        tree.push(mt_config::ProjectTreeItem::ProjectId(id.clone()));
-        self.project_states.insert(id.clone(), ProjectState::new());
-        self.expanded_dirs.insert(id.clone(), HashSet::new());
-        self.register_project_identity(&id);
-        if let Some(group_id) = target_group {
-            self.move_item(&id, Some(group_id), None, cx);
-        }
-        self.save_config_now();
-        cx.notify();
-        id
     }
 
     // --- 「关联 SSH」(SSH 工具 = CLI + Skill)---

@@ -97,7 +97,6 @@ mod project_tree;
 mod prompt;
 mod redraw;
 mod remote_directory_picker;
-mod remote_project;
 mod remote_ssh;
 mod search_modal;
 mod session_branch;

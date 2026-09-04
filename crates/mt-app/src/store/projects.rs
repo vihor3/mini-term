@@ -129,8 +129,8 @@ impl AppStore {
     /// - **子项目不进 `projectTree`**(移动出去时才转成普通树节点);
     /// - 路径已经是项目 → 返回既有 id,不重复添加(`GitWorktreeModal.tsx:341-351`)。
     ///
-    /// 与 [`add_project`](Self::add_project) 的差别只有「带父项目 + 返回 id +
-    /// 不自动切过去」三条 —— worktree「设为项目」要自己决定切不切。
+    /// 这是 worktree「设为项目」的内部插入路径；统一项目引导使用下面的
+    /// `register_or_activate_project` 边界来完成规范路径去重与激活。
     pub fn add_project_at(
         &mut self,
         path: &Path,
@@ -190,57 +190,6 @@ impl AppStore {
         for pty_id in pty_ids {
             self.dispose_terminal(pty_id, cx);
         }
-        cx.notify();
-    }
-
-    /// 添加项目(目录路径)。名字取目录名。
-    pub fn add_project(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let path_str = path.to_string_lossy().to_string();
-        if let Some(existing) = self
-            .config
-            .projects
-            .iter()
-            .find(|p| p.path == path_str)
-            .map(|p| p.id.clone())
-        {
-            self.set_active_project(&existing, cx);
-            return;
-        }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| path_str.clone());
-        let id = gen_id("proj");
-
-        self.config.projects.push(ProjectConfig {
-            id: id.clone(),
-            name,
-            path: path_str,
-            description: None,
-            saved_layout: None,
-            expanded_dirs: Vec::new(),
-            ssh_mcp_enabled: false,
-            ssh_cli_token: None,
-            ssh_connection_ids: None,
-            env_vars: Vec::new(),
-            wsl_sessions_distro: None,
-            ssh_connection_id: None,
-            parent_project_id: None,
-            kind_override: None,
-        });
-        // projectTree 是「分组 + 排序」那一层;这里只保证新项目出现在树里,
-        // 分组编辑是后续批次的事。
-        let tree = self.config.project_tree.get_or_insert_with(Vec::new);
-        tree.push(mt_config::ProjectTreeItem::ProjectId(id.clone()));
-
-        self.project_states.insert(id.clone(), ProjectState::new());
-        self.expanded_dirs.insert(id.clone(), HashSet::new());
-        self.register_project_identity(&id);
-        self.active_project_id = Some(id.clone());
-        self.config.last_active_project_id = Some(id.clone());
-        self.sync_active_worktree();
-        self.hydrate_project(&id, cx);
-        self.save_config_soon(cx);
         cx.notify();
     }
 
@@ -586,7 +535,13 @@ impl AppStore {
             .config
             .projects
             .iter()
-            .find(|project| project_matches_location(project, &location))
+            .find(|project| {
+                project_matches_location(
+                    project,
+                    self.onboarding_canonical_path_for_project(project),
+                    &location,
+                )
+            })
             .map(|project| project.id.clone());
         if let Some(project_id) = existing_id {
             if self.worktree_id_for_project(&project_id).is_none() {
@@ -718,22 +673,36 @@ fn validate_registration_location(
     Ok(())
 }
 
-fn project_matches_location(project: &ProjectConfig, location: &ProjectLocationKey) -> bool {
+fn project_matches_location(
+    project: &ProjectConfig,
+    canonical_binding_path: Option<&str>,
+    location: &ProjectLocationKey,
+) -> bool {
     match location {
         ProjectLocationKey::Local {
             normalized_canonical_path,
         } => {
             project.ssh_connection_id.is_none()
-                && mt_project::worktree::normalize_path_for_comparison(&project.path)
-                    == *normalized_canonical_path
+                && [Some(project.path.as_str()), canonical_binding_path]
+                    .into_iter()
+                    .flatten()
+                    .any(|path| {
+                        mt_project::worktree::normalize_path_for_comparison(path)
+                            == *normalized_canonical_path
+                    })
         }
         ProjectLocationKey::Ssh {
             connection_id,
             normalized_posix_path,
         } => {
             project.ssh_connection_id.as_deref() == Some(connection_id.as_str())
-                && normalize_registration_posix(&project.path).ok().as_deref()
-                    == Some(normalized_posix_path.as_str())
+                && [Some(project.path.as_str()), canonical_binding_path]
+                    .into_iter()
+                    .flatten()
+                    .any(|path| {
+                        normalize_registration_posix(path).ok().as_deref()
+                            == Some(normalized_posix_path.as_str())
+                    })
         }
     }
 }
@@ -972,10 +941,17 @@ mod project_onboarding_tests {
 
         assert!(project_matches_location(
             &project("local", &format!("{canonical}/"), None),
+            None,
             &location,
         ));
         assert!(!project_matches_location(
             &project("remote", canonical, Some("ssh-a")),
+            None,
+            &location,
+        ));
+        assert!(project_matches_location(
+            &project("local-alias", "/configured/alias", None),
+            Some(canonical),
             &location,
         ));
         assert!(validate_registration_location(&location, canonical).is_ok());
@@ -1003,14 +979,17 @@ mod project_onboarding_tests {
 
         assert!(project_matches_location(
             &project("same", "/home/leo/./Repo/", Some("ssh-a")),
+            None,
             &location,
         ));
         assert!(!project_matches_location(
             &project("other-host", "/home/leo/Repo", Some("ssh-b")),
+            None,
             &location,
         ));
         assert!(!project_matches_location(
             &project("other-case", "/home/leo/repo", Some("ssh-a")),
+            None,
             &location,
         ));
         assert!(validate_registration_location(&location, "/home/leo/Repo").is_ok());
@@ -1029,6 +1008,129 @@ mod project_onboarding_tests {
         assert!(normalize_registration_posix("relative/repo").is_err());
         assert!(normalize_registration_posix("/home/leo/../secret").is_err());
         assert!(normalize_registration_posix("/home/leo/\0repo").is_err());
+    }
+
+    #[test]
+    fn project_registration_dedupes_an_authoritative_local_canonical_binding() {
+        let test_root = std::env::temp_dir().join(format!(
+            "mt-app-project-registration-authoritative-alias-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&test_root);
+        let repository_path = test_root.join("repo");
+        fs::create_dir_all(&repository_path).unwrap();
+        let init = std::process::Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .arg(&repository_path)
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let configured_path = repository_path.join(".");
+        let resolved = mt_project::worktree::resolve_local(&host_install_id(), &configured_path)
+            .unwrap();
+        assert_eq!(
+            resolved.source,
+            WorktreeIdentitySource::AuthoritativeLocalGit
+        );
+        let canonical_path = resolved.canonical_worktree_path.clone();
+        let configured_path = configured_path.to_string_lossy().to_string();
+        assert_ne!(
+            mt_project::worktree::normalize_path_for_comparison(&configured_path),
+            mt_project::worktree::normalize_path_for_comparison(&canonical_path)
+        );
+        let alias = project("local-alias", &configured_path, None);
+        let binding = super::super::identity::binding_from_resolved(alias.id.clone(), resolved);
+        let config = AppConfig {
+            projects: vec![alias.clone()],
+            project_tree: Some(vec![ProjectTreeItem::ProjectId(alias.id.clone())]),
+            ..AppConfig::default()
+        };
+        let mut bindings = HashMap::new();
+        bindings.insert(alias.id.clone(), binding.clone());
+        let (ai, _events) = crate::ai::AiBridge::new(false);
+        let mut store = test_store(config, bindings, ai);
+
+        assert_eq!(
+            store.onboarding_canonical_path_for_project(&alias),
+            binding.canonical_worktree_path.as_deref()
+        );
+        let outcome = store
+            .register_or_activate_project_inner(
+                local_location(&canonical_path),
+                &canonical_path,
+                Some("Ignored duplicate name"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            outcome.disposition,
+            ProjectRegistrationDisposition::ActivatedExisting
+        );
+        assert_eq!(outcome.project_id, alias.id);
+        assert_eq!(outcome.worktree_id, binding.worktree_id);
+        assert_eq!(store.config.projects.len(), 1);
+        assert_eq!(
+            tree_project_count(store.config.project_tree.as_deref().unwrap()),
+            1
+        );
+        drop(store);
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn onboarding_dedupe_rejects_stale_provisional_local_and_wsl_bindings() {
+        let (configured_local_path, stale_local_path) = if cfg!(windows) {
+            (r"C:\configured\repo", r"C:\stale\repo")
+        } else {
+            ("/configured/repo", "/stale/repo")
+        };
+        let configured_wsl_path = r"\\wsl$\Ubuntu\home\leo\configured";
+        let stale_wsl_path = r"\\wsl$\Ubuntu\home\leo\stale";
+        let local_project = project("local-provisional", configured_local_path, None);
+        let wsl_project = project("wsl-provisional", configured_wsl_path, None);
+        let local_binding = super::super::identity::binding_from_resolved(
+            local_project.id.clone(),
+            mt_project::worktree::resolve_provisional_local(
+                &host_install_id(),
+                stale_local_path,
+            )
+            .unwrap(),
+        );
+        let wsl_binding = super::super::identity::binding_from_resolved(
+            wsl_project.id.clone(),
+            mt_project::worktree::resolve_provisional_wsl(
+                &host_install_id(),
+                "Ubuntu",
+                stale_wsl_path,
+            )
+            .unwrap(),
+        );
+        let config = AppConfig {
+            projects: vec![local_project.clone(), wsl_project.clone()],
+            ..AppConfig::default()
+        };
+        let bindings = HashMap::from([
+            (local_project.id.clone(), local_binding),
+            (wsl_project.id.clone(), wsl_binding),
+        ]);
+        let (ai, _events) = crate::ai::AiBridge::new(false);
+        let store = test_store(config, bindings, ai);
+
+        assert_eq!(
+            store.onboarding_canonical_path_for_project(&local_project),
+            None
+        );
+        assert_eq!(
+            store.onboarding_canonical_path_for_project(&wsl_project),
+            None
+        );
     }
 
     #[test]
@@ -1114,7 +1216,7 @@ mod project_onboarding_tests {
                         .config
                         .projects
                         .iter()
-                        .filter(|project| project_matches_location(project, &first_location))
+                        .filter(|project| project_matches_location(project, None, &first_location))
                         .count(),
                     1
                 );
@@ -1178,7 +1280,7 @@ mod project_onboarding_tests {
                         .config
                         .projects
                         .iter()
-                        .filter(|project| project_matches_location(project, &first_location))
+                        .filter(|project| project_matches_location(project, None, &first_location))
                         .count(),
                     1
                 );
@@ -1270,6 +1372,12 @@ mod project_onboarding_tests {
                 );
                 store.config.projects.push(remote_project.clone());
                 store
+                    .config
+                    .project_tree
+                    .as_mut()
+                    .unwrap()
+                    .push(ProjectTreeItem::ProjectId(remote_project.id.clone()));
+                store
                     .project_states
                     .insert(remote_project.id.clone(), ProjectState::new());
                 store
@@ -1305,6 +1413,37 @@ mod project_onboarding_tests {
                     Some(canonical_path)
                 );
                 assert_eq!(preserved.identity_context, authoritative_context);
+                assert_eq!(
+                    store.onboarding_canonical_path_for_project(&remote_project),
+                    Some(canonical_path)
+                );
+
+                let projects_before_alias_duplicate = store.config.projects.len();
+                let tree_records_before_alias_duplicate =
+                    tree_project_count(store.config.project_tree.as_deref().unwrap());
+                let alias_duplicate = store
+                    .register_or_activate_project_inner(
+                        ProjectLocationKey::Ssh {
+                            connection_id: connection.id.clone(),
+                            normalized_posix_path: canonical_path.into(),
+                        },
+                        canonical_path,
+                        Some("Ignored canonical alias"),
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    alias_duplicate.disposition,
+                    ProjectRegistrationDisposition::ActivatedExisting
+                );
+                assert_eq!(alias_duplicate.project_id, remote_project.id);
+                assert_eq!(alias_duplicate.worktree_id, authoritative_worktree_id);
+                assert_eq!(store.config.projects.len(), projects_before_alias_duplicate);
+                assert_eq!(
+                    tree_project_count(store.config.project_tree.as_deref().unwrap()),
+                    tree_records_before_alias_duplicate
+                );
             }
 
             drop(store);

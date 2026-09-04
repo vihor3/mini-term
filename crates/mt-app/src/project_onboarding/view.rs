@@ -16,7 +16,7 @@ use super::{
     OnboardingState, OperationOwner, OperationPhase, OperationResultAuthority, ProjectHostOps,
     ProjectHostSelection, VerifiedProjectLocation, add_existing_folder, checked_next,
     clone_from_url, create_new_project, infer_clone_folder_name, initialize_existing_folder,
-    validate_portable_basename,
+    validate_git_url, validate_portable_basename,
 };
 use crate::i18n::{t, tr};
 use crate::menu::{self, MenuEntry, MenuItem};
@@ -107,13 +107,25 @@ enum PickerTarget {
     InitializeExisting,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct FormContextOwner {
     form_instance_id: u64,
     host_generation: u64,
     page: OnboardingPage,
     create_mode: CreateMode,
     host_signature: HostSignature,
+}
+
+#[derive(Clone, Debug)]
+struct PendingRegistration {
+    context: FormContextOwner,
+    canonical_path: String,
+}
+
+impl PendingRegistration {
+    fn path_for_context(&self, context: &FormContextOwner) -> Option<&str> {
+        (self.context == *context).then_some(self.canonical_path.as_str())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -129,6 +141,10 @@ fn picker_request_is_current(active: Option<u64>, request_id: u64, busy: bool) -
 
 fn ssh_failure_epoch_is_current(expected: Option<u64>, current: Option<u64>) -> bool {
     expected.is_some() && expected == current
+}
+
+fn ssh_host_probe_epoch_is_current(observed: u64, current: Option<u64>) -> bool {
+    current == Some(observed)
 }
 
 fn ssh_operation_authority_is_current(
@@ -149,7 +165,7 @@ struct HostProbeOwner {
     host_signature: HostSignature,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum PendingOperation {
     AddExisting {
         path: String,
@@ -169,6 +185,13 @@ enum PendingOperation {
     ClassifyExisting {
         path: String,
     },
+}
+
+fn operation_with_registration_retry(
+    retry_path: Option<String>,
+    fallback: PendingOperation,
+) -> PendingOperation {
+    retry_path.map_or(fallback, |path| PendingOperation::AddExisting { path })
 }
 
 enum BackgroundCompletion {
@@ -196,6 +219,7 @@ struct ProjectOnboardingView {
     existing_path: Entity<InputState>,
     existing_probe: ExistingProbeState,
     applying_existing_path: bool,
+    pending_registration: Option<PendingRegistration>,
     next_picker_request_id: u64,
     active_picker_request_id: Option<u64>,
     _subscriptions: Vec<Subscription>,
@@ -234,8 +258,9 @@ impl ProjectOnboardingView {
         ] {
             subscriptions.push(cx.subscribe(
                 &input,
-                |_this: &mut Self, _input, event: &InputEvent, cx| {
+                |this: &mut Self, _input, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
+                        this.pending_registration = None;
                         cx.notify();
                     }
                 },
@@ -245,6 +270,7 @@ impl ProjectOnboardingView {
             &existing_path,
             |this: &mut Self, _input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
+                    this.pending_registration = None;
                     if !this.applying_existing_path {
                         this.existing_probe = ExistingProbeState::Unselected;
                     }
@@ -268,6 +294,7 @@ impl ProjectOnboardingView {
             existing_path,
             existing_probe: ExistingProbeState::Unselected,
             applying_existing_path: false,
+            pending_registration: None,
             next_picker_request_id: 0,
             active_picker_request_id: None,
             _subscriptions: subscriptions,
@@ -292,6 +319,12 @@ impl ProjectOnboardingView {
             && self.flow.page == owner.page
             && self.flow.create_mode == owner.create_mode
             && self.flow.host.signature() == owner.host_signature
+    }
+
+    fn pending_registration_path(&self) -> Option<&str> {
+        self.pending_registration
+            .as_ref()
+            .and_then(|pending| pending.path_for_context(&self.context_owner()))
     }
 
     fn picker_context_matches(&self, owner: &PickerOwner) -> bool {
@@ -386,6 +419,7 @@ fn navigate_to(
 ) {
     let focus = state.update(cx, |view, cx| {
         view.active_picker_request_id = None;
+        view.pending_registration = None;
         if view.flow.navigate(page).is_err() {
             cx.notify();
             return None;
@@ -414,6 +448,7 @@ fn switch_create_mode(
 ) {
     let (focus, existing_path) = state.update(cx, |view, cx| {
         view.active_picker_request_id = None;
+        view.pending_registration = None;
         if view.flow.switch_create_mode(mode).is_err() {
             cx.notify();
             return (None, None);
@@ -458,6 +493,7 @@ fn select_host(
             return (false, None, None, None);
         }
         view.active_picker_request_id = None;
+        view.pending_registration = None;
         if view.flow.switch_host(host.clone()).is_err() {
             cx.notify();
             return (false, None, None, None);
@@ -532,7 +568,7 @@ fn connect_selected_host(state: &Entity<ProjectOnboardingView>, window: &mut Win
 fn complete_host_probe(
     state: &Entity<ProjectOnboardingView>,
     owner: &HostProbeOwner,
-    result: Result<String, String>,
+    result: Result<crate::remote_ssh::RemoteConnectionProbe, String>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -573,26 +609,31 @@ fn complete_host_probe(
             return None;
         }
         let defaults = match result {
-            Ok(home) => match crate::remote_ssh::current_connection_epoch(connection_id) {
-                Some(epoch) => {
-                    view.flow.set_host_status(HostStatus::Ready {
-                        observed_epoch: Some(epoch),
-                    });
-                    let clone_parent =
-                        matches!(view.clone_parent.read(cx).value().trim(), "" | "~")
-                            .then(|| view.clone_parent.clone());
-                    let create_parent =
-                        matches!(view.create_parent.read(cx).value().trim(), "" | "~")
-                            .then(|| view.create_parent.clone());
-                    Some((home, clone_parent, create_parent))
-                }
-                None => {
-                    view.flow.set_host_status(HostStatus::Error(
-                        t("projectOnboarding", "error.disconnected").to_string(),
-                    ));
-                    None
-                }
-            },
+            Ok(probe)
+                if ssh_host_probe_epoch_is_current(
+                    probe.connection_epoch,
+                    crate::remote_ssh::current_connection_epoch(connection_id),
+                ) =>
+            {
+                let epoch = probe.connection_epoch;
+                let home = probe.canonical_home;
+                view.flow.set_host_status(HostStatus::Ready {
+                    observed_epoch: Some(epoch),
+                });
+                let clone_parent =
+                    matches!(view.clone_parent.read(cx).value().trim(), "" | "~")
+                        .then(|| view.clone_parent.clone());
+                let create_parent =
+                    matches!(view.create_parent.read(cx).value().trim(), "" | "~")
+                        .then(|| view.create_parent.clone());
+                Some((home, clone_parent, create_parent))
+            }
+            Ok(_) => {
+                view.flow.set_host_status(HostStatus::Error(
+                    t("projectOnboarding", "error.disconnected").to_string(),
+                ));
+                None
+            }
             Err(error) => {
                 view.flow.set_host_status(HostStatus::Error(error));
                 None
@@ -1398,6 +1439,7 @@ fn invalidate_changed_remote_authority(
             t("projectOnboarding", "error.disconnected").to_string(),
         ));
         view.existing_probe = ExistingProbeState::Unselected;
+        view.pending_registration = None;
         cx.notify();
         Some((
             view.clone_parent.clone(),
@@ -1420,6 +1462,7 @@ fn register_completed_project(
     cx: &mut App,
 ) {
     let observed_epoch = location.authority.observed_connection_epoch;
+    let retry_path = location.canonical_path.clone();
     if !completion_authority_is_current(state, owner, observed_epoch, cx) {
         invalidate_changed_remote_authority(state, owner, window, cx);
         return;
@@ -1443,6 +1486,7 @@ fn register_completed_project(
                 if !view.flow.apply_success(owner, observed_epoch) {
                     return false;
                 }
+                view.pending_registration = None;
                 let _ = view.flow.close();
                 cx.notify();
                 true
@@ -1463,6 +1507,10 @@ fn register_completed_project(
             state.update(cx, |view, cx| {
                 let error = OnboardingError::new(OnboardingErrorKind::Registration, error);
                 if view.flow.apply_failure(owner, observed_epoch, error) {
+                    view.pending_registration = Some(PendingRegistration {
+                        context: view.context_owner(),
+                        canonical_path: retry_path.clone(),
+                    });
                     cx.notify();
                 }
             });
@@ -1586,7 +1634,7 @@ fn render_header(
 }
 
 fn render_home(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> AnyElement {
-    let (ready, blocked, host_error) = {
+    let (ready, blocked, host_error, registration_retry_path) = {
         let view = state.read(cx);
         (
             matches!(&view.flow.host_status, HostStatus::Ready { .. }),
@@ -1595,6 +1643,7 @@ fn render_home(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> AnyElemen
                 HostStatus::Error(error) => Some(error.clone()),
                 _ => None,
             },
+            view.pending_registration_path().map(str::to_string),
         )
     };
     let enabled = ready && !blocked;
@@ -1637,7 +1686,16 @@ fn render_home(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> AnyElemen
             )
             .on_click(move |_: &ClickEvent, window, cx| {
                 if enabled {
-                    open_directory_picker(&add_state, PickerTarget::AddExisting, window, cx);
+                    if let Some(path) = registration_retry_path.clone() {
+                        start_operation(
+                            &add_state,
+                            PendingOperation::AddExisting { path },
+                            window,
+                            cx,
+                        );
+                    } else {
+                        open_directory_picker(&add_state, PickerTarget::AddExisting, window, cx);
+                    }
                 }
             }),
         )
@@ -1757,7 +1815,17 @@ fn onboarding_action_row(
 }
 
 fn render_clone_page(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> AnyElement {
-    let (url, parent, typed_name, blocked, host_ready, url_input, parent_input, name_input) = {
+    let (
+        url,
+        parent,
+        typed_name,
+        blocked,
+        host_ready,
+        url_input,
+        parent_input,
+        name_input,
+        registration_retry_path,
+    ) = {
         let view = state.read(cx);
         (
             view.clone_url.read(cx).value().trim().to_string(),
@@ -1768,8 +1836,10 @@ fn render_clone_page(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> Any
             view.clone_url.clone(),
             view.clone_parent.clone(),
             view.clone_name.clone(),
+            view.pending_registration_path().map(str::to_string),
         )
     };
+    let url_valid = validate_git_url(&url).is_ok();
     let inferred = infer_clone_folder_name(&url).ok();
     let effective_name = if typed_name.is_empty() {
         inferred.clone().unwrap_or_default()
@@ -1777,19 +1847,24 @@ fn render_clone_page(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> Any
         typed_name.clone()
     };
     let suggested_name = typed_name.is_empty().then(|| inferred.clone()).flatten();
-    let url_error = (!url.is_empty() && inferred.is_none())
+    let url_error = (!url.is_empty() && !url_valid)
         .then_some(t("projectOnboarding", "error.invalidUrl").to_string());
-    let name_error = (!effective_name.is_empty()
+    let name_error = ((!effective_name.is_empty()
         && validate_portable_basename(&effective_name).is_err())
-    .then_some(t("projectOnboarding", "error.invalidName").to_string());
-    let target = target_preview(&state.read(cx).flow.host, &parent, &effective_name);
+        || (!url.is_empty() && url_valid && effective_name.is_empty()))
+        .then_some(t("projectOnboarding", "error.invalidName").to_string());
+    let retrying_registration = registration_retry_path.is_some();
+    let target = registration_retry_path
+        .clone()
+        .or_else(|| target_preview(&state.read(cx).flow.host, &parent, &effective_name));
     let enabled = host_ready
         && !blocked
-        && !url.is_empty()
-        && inferred.is_some()
-        && !parent.is_empty()
-        && !effective_name.is_empty()
-        && name_error.is_none();
+        && (retrying_registration
+            || (!url.is_empty()
+                && url_valid
+                && !parent.is_empty()
+                && !effective_name.is_empty()
+                && name_error.is_none()));
     let browse_state = state.clone();
     let submit_state = state.clone();
     let suggested_input = name_input.clone();
@@ -1860,23 +1935,26 @@ fn render_clone_page(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> Any
             div().flex().justify_end().child(
                 ui::primary_button(
                     "project-onboarding-clone-submit",
-                    t("projectOnboarding", "clone.submit"),
+                    if retrying_registration {
+                        t("projectOnboarding", "create.addProject")
+                    } else {
+                        t("projectOnboarding", "clone.submit")
+                    },
                 )
                 .opacity(if enabled { 1.0 } else { 0.4 })
                 .on_click(move |_: &ClickEvent, window, cx| {
                     if !enabled {
                         return;
                     }
-                    start_operation(
-                        &submit_state,
+                    let operation = operation_with_registration_retry(
+                        registration_retry_path.clone(),
                         PendingOperation::Clone {
                             url: url.clone(),
                             parent: parent.clone(),
                             name: effective_name.clone(),
                         },
-                        window,
-                        cx,
                     );
+                    start_operation(&submit_state, operation, window, cx);
                 }),
             ),
         )
@@ -1947,7 +2025,7 @@ fn render_create_page(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> An
 }
 
 fn render_new_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> AnyElement {
-    let (name, parent, blocked, host_ready, name_input, parent_input) = {
+    let (name, parent, blocked, host_ready, name_input, parent_input, registration_retry_path) = {
         let view = state.read(cx);
         (
             view.create_name.read(cx).value().trim().to_string(),
@@ -1956,13 +2034,19 @@ fn render_new_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut App) -
             matches!(&view.flow.host_status, HostStatus::Ready { .. }),
             view.create_name.clone(),
             view.create_parent.clone(),
+            view.pending_registration_path().map(str::to_string),
         )
     };
     let name_error = (!name.is_empty() && validate_portable_basename(&name).is_err())
         .then_some(t("projectOnboarding", "error.invalidName").to_string());
-    let target = target_preview(&state.read(cx).flow.host, &parent, &name);
-    let enabled =
-        host_ready && !blocked && !parent.is_empty() && !name.is_empty() && name_error.is_none();
+    let retrying_registration = registration_retry_path.is_some();
+    let target = registration_retry_path
+        .clone()
+        .or_else(|| target_preview(&state.read(cx).flow.host, &parent, &name));
+    let enabled = host_ready
+        && !blocked
+        && (retrying_registration
+            || (!parent.is_empty() && !name.is_empty() && name_error.is_none()));
     let browse_state = state.clone();
     let submit_state = state.clone();
     div()
@@ -1993,20 +2077,23 @@ fn render_new_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut App) -
             div().flex().justify_end().child(
                 ui::primary_button(
                     "project-onboarding-create-submit",
-                    t("projectOnboarding", "create.createAndInitialize"),
+                    if retrying_registration {
+                        t("projectOnboarding", "create.addProject")
+                    } else {
+                        t("projectOnboarding", "create.createAndInitialize")
+                    },
                 )
                 .opacity(if enabled { 1.0 } else { 0.4 })
                 .on_click(move |_: &ClickEvent, window, cx| {
                     if enabled {
-                        start_operation(
-                            &submit_state,
+                        let operation = operation_with_registration_retry(
+                            registration_retry_path.clone(),
                             PendingOperation::CreateNew {
                                 parent: parent.clone(),
                                 name: name.clone(),
                             },
-                            window,
-                            cx,
                         );
+                        start_operation(&submit_state, operation, window, cx);
                     }
                 }),
             ),
@@ -2015,7 +2102,7 @@ fn render_new_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut App) -
 }
 
 fn render_existing_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> AnyElement {
-    let (path, blocked, host_ready, input, probe) = {
+    let (path, blocked, host_ready, input, probe, registration_retry_path) = {
         let view = state.read(cx);
         (
             view.existing_path.read(cx).value().trim().to_string(),
@@ -2023,98 +2110,109 @@ fn render_existing_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut A
             matches!(&view.flow.host_status, HostStatus::Ready { .. }),
             view.existing_path.clone(),
             view.existing_probe.clone(),
+            view.pending_registration_path().map(str::to_string),
         )
     };
-    let (label, enabled, action_path, relationship) = match &probe {
-        ExistingProbeState::Ready(HostPathProbe {
-            canonical_path,
-            git: GitRelationship::NotGit,
-            ..
-        }) => (
-            t("projectOnboarding", "create.initializeAndAdd"),
-            host_ready && !blocked,
-            Some(canonical_path.clone()),
-            Some(
-                div()
-                    .text_size(ui::font_px(11.0))
-                    .text_color(ui::text_secondary())
-                    .child(t("projectOnboarding", "create.nonGitDetected"))
-                    .into_any_element(),
-            ),
-        ),
-        ExistingProbeState::Ready(HostPathProbe {
-            canonical_path,
-            git: GitRelationship::RepositoryRoot { .. },
-            ..
-        }) => (
+    let retrying_registration = registration_retry_path.is_some();
+    let (label, enabled, action_path, relationship) = if let Some(path) = registration_retry_path {
+        (
             t("projectOnboarding", "create.addProject"),
             host_ready && !blocked,
-            Some(canonical_path.clone()),
-            Some(
-                div()
-                    .text_size(ui::font_px(11.0))
-                    .text_color(ui::color_success())
-                    .child(t("projectOnboarding", "create.repositoryRootDetected"))
-                    .into_any_element(),
-            ),
-        ),
-        ExistingProbeState::Ready(HostPathProbe {
-            git:
-                GitRelationship::NestedInRepository {
-                    top_level,
-                    common_dir: _,
-                },
-            ..
-        }) => (
-            t("projectOnboarding", "create.useRepositoryRoot"),
-            host_ready && !blocked,
-            Some(top_level.clone()),
-            Some(
-                div()
-                    .text_size(ui::font_px(11.0))
-                    .text_color(ui::color_warning())
-                    .child(tr!(
-                        "projectOnboarding",
-                        "create.nestedRepository",
-                        path = top_level.clone()
-                    ))
-                    .into_any_element(),
-            ),
-        ),
-        ExistingProbeState::Probing => (
-            t("projectOnboarding", "create.inspectFolder"),
-            false,
+            Some(path),
             None,
-            Some(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .text_size(ui::font_px(11.0))
-                    .text_color(ui::text_muted())
-                    .child(ui::spinner(px(12.0), ui::text_muted()))
-                    .child(t("projectOnboarding", "status.validating"))
-                    .into_any_element(),
+        )
+    } else {
+        match &probe {
+            ExistingProbeState::Ready(HostPathProbe {
+                canonical_path,
+                git: GitRelationship::NotGit,
+                ..
+            }) => (
+                t("projectOnboarding", "create.initializeAndAdd"),
+                host_ready && !blocked,
+                Some(canonical_path.clone()),
+                Some(
+                    div()
+                        .text_size(ui::font_px(11.0))
+                        .text_color(ui::text_secondary())
+                        .child(t("projectOnboarding", "create.nonGitDetected"))
+                        .into_any_element(),
+                ),
             ),
-        ),
-        ExistingProbeState::Error(error) => (
-            t("projectOnboarding", "create.inspectFolder"),
-            host_ready && !blocked && !path.is_empty(),
-            (!path.is_empty()).then_some(path.clone()),
-            Some(
-                div()
-                    .text_size(ui::font_px(11.0))
-                    .text_color(ui::color_error())
-                    .child(localized_error(error))
-                    .into_any_element(),
+            ExistingProbeState::Ready(HostPathProbe {
+                canonical_path,
+                git: GitRelationship::RepositoryRoot { .. },
+                ..
+            }) => (
+                t("projectOnboarding", "create.addProject"),
+                host_ready && !blocked,
+                Some(canonical_path.clone()),
+                Some(
+                    div()
+                        .text_size(ui::font_px(11.0))
+                        .text_color(ui::color_success())
+                        .child(t("projectOnboarding", "create.repositoryRootDetected"))
+                        .into_any_element(),
+                ),
             ),
-        ),
-        ExistingProbeState::Unselected => (
-            t("projectOnboarding", "create.inspectFolder"),
-            host_ready && !blocked && !path.is_empty(),
-            (!path.is_empty()).then_some(path.clone()),
-            None,
-        ),
+            ExistingProbeState::Ready(HostPathProbe {
+                git:
+                    GitRelationship::NestedInRepository {
+                        top_level,
+                        common_dir: _,
+                    },
+                ..
+            }) => (
+                t("projectOnboarding", "create.useRepositoryRoot"),
+                host_ready && !blocked,
+                Some(top_level.clone()),
+                Some(
+                    div()
+                        .text_size(ui::font_px(11.0))
+                        .text_color(ui::color_warning())
+                        .child(tr!(
+                            "projectOnboarding",
+                            "create.nestedRepository",
+                            path = top_level.clone()
+                        ))
+                        .into_any_element(),
+                ),
+            ),
+            ExistingProbeState::Probing => (
+                t("projectOnboarding", "create.inspectFolder"),
+                false,
+                None,
+                Some(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .text_size(ui::font_px(11.0))
+                        .text_color(ui::text_muted())
+                        .child(ui::spinner(px(12.0), ui::text_muted()))
+                        .child(t("projectOnboarding", "status.validating"))
+                        .into_any_element(),
+                ),
+            ),
+            ExistingProbeState::Error(error) => (
+                t("projectOnboarding", "create.inspectFolder"),
+                host_ready && !blocked && !path.is_empty(),
+                (!path.is_empty()).then_some(path.clone()),
+                Some(
+                    div()
+                        .text_size(ui::font_px(11.0))
+                        .text_color(ui::color_error())
+                        .child(localized_error(error))
+                        .into_any_element(),
+                ),
+            ),
+            ExistingProbeState::Unselected => (
+                t("projectOnboarding", "create.inspectFolder"),
+                host_ready && !blocked && !path.is_empty(),
+                (!path.is_empty()).then_some(path.clone()),
+                None,
+            ),
+        }
     };
     let browse_state = state.clone();
     let submit_state = state.clone();
@@ -2144,7 +2242,8 @@ fn render_existing_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut A
                         let Some(path) = action_path.clone() else {
                             return;
                         };
-                        let operation = match &probe {
+                        let retry_path = retrying_registration.then(|| path.clone());
+                        let fallback = match &probe {
                             ExistingProbeState::Ready(HostPathProbe {
                                 git: GitRelationship::NestedInRepository { .. },
                                 ..
@@ -2154,6 +2253,7 @@ fn render_existing_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut A
                             }
                             _ => PendingOperation::InitializeExisting { path },
                         };
+                        let operation = operation_with_registration_retry(retry_path, fallback);
                         start_operation(&submit_state, operation, window, cx);
                     }),
             ),
@@ -2507,8 +2607,60 @@ fn localized_error(error: &OnboardingError) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        picker_request_is_current, ssh_failure_epoch_is_current, ssh_operation_authority_is_current,
+        CreateMode, FormContextOwner, HostSignature, OnboardingPage, PendingRegistration,
+        PendingOperation, operation_with_registration_retry, picker_request_is_current,
+        ssh_failure_epoch_is_current, ssh_host_probe_epoch_is_current,
+        ssh_operation_authority_is_current,
     };
+
+    #[test]
+    fn registration_retry_path_is_scoped_to_the_original_form_context() {
+        let context = FormContextOwner {
+            form_instance_id: 4,
+            host_generation: 7,
+            page: OnboardingPage::Clone,
+            create_mode: CreateMode::NewFolder,
+            host_signature: HostSignature::Local,
+        };
+        let pending = PendingRegistration {
+            context: context.clone(),
+            canonical_path: "/repo".into(),
+        };
+
+        assert_eq!(pending.path_for_context(&context), Some("/repo"));
+
+        let mut stale = context;
+        stale.host_generation += 1;
+        assert_eq!(pending.path_for_context(&stale), None);
+    }
+
+    #[test]
+    fn registration_retry_reprobes_instead_of_repeating_the_mutation() {
+        let operation = operation_with_registration_retry(
+            Some("/repo".into()),
+            PendingOperation::Clone {
+                url: "https://example.com/repo.git".into(),
+                parent: "/parent".into(),
+                name: "repo".into(),
+            },
+        );
+
+        assert_eq!(
+            operation,
+            PendingOperation::AddExisting {
+                path: "/repo".into(),
+            }
+        );
+
+        let fallback = PendingOperation::CreateNew {
+            parent: "/parent".into(),
+            name: "repo".into(),
+        };
+        assert_eq!(
+            operation_with_registration_retry(None, fallback.clone()),
+            fallback
+        );
+    }
 
     #[test]
     fn project_onboarding_picker_accepts_only_the_latest_idle_request() {
@@ -2524,6 +2676,13 @@ mod tests {
         assert!(!ssh_failure_epoch_is_current(Some(7), Some(8)));
         assert!(!ssh_failure_epoch_is_current(Some(7), None));
         assert!(!ssh_failure_epoch_is_current(None, None));
+    }
+
+    #[test]
+    fn project_onboarding_host_probe_requires_its_exact_current_ssh_epoch() {
+        assert!(ssh_host_probe_epoch_is_current(7, Some(7)));
+        assert!(!ssh_host_probe_epoch_is_current(7, Some(8)));
+        assert!(!ssh_host_probe_epoch_is_current(7, None));
     }
 
     #[test]

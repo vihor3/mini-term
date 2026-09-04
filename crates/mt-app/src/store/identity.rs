@@ -280,6 +280,66 @@ fn host_path(project: &ProjectConfig, canonical: &str) -> String {
 }
 
 impl AppStore {
+    pub(super) fn onboarding_canonical_path_for_project(
+        &self,
+        project: &ProjectConfig,
+    ) -> Option<&str> {
+        let binding = self.project_worktree_bindings.get(&project.id)?;
+        let canonical_path = binding.canonical_worktree_path.as_deref()?;
+        let identity_source = binding.identity_source.as_str();
+
+        let Some(connection_id) = project.ssh_connection_id.as_deref() else {
+            if [
+                WorktreeIdentitySource::AuthoritativeLocalGit.as_str(),
+                WorktreeIdentitySource::LocalDirectory.as_str(),
+            ]
+            .contains(&identity_source)
+            {
+                return Some(canonical_path);
+            }
+
+            let configured_path = if identity_source
+                == WorktreeIdentitySource::ProvisionalLocal.as_str()
+            {
+                worktree::resolve_provisional_local(&self.host_install_id, &project.path)
+                    .ok()?
+                    .canonical_worktree_path
+            } else if identity_source == WorktreeIdentitySource::ProvisionalWsl.as_str() {
+                let host_visible_path = project.path.replace('/', "\\");
+                let wsl = mt_core::parse_wsl_unc(&host_visible_path)?;
+                worktree::resolve_provisional_wsl(
+                    &self.host_install_id,
+                    &wsl.distro,
+                    &project.path,
+                )
+                .ok()?
+                .canonical_worktree_path
+            } else {
+                return None;
+            };
+            return (canonical_path == configured_path.as_str()).then_some(canonical_path);
+        };
+        let connection =
+            crate::ssh_conn::remote_connection(project, &self.config.ssh_connections)?;
+        let configured_path = worktree::resolve_provisional_ssh(
+            &self.host_install_id,
+            connection_id,
+            &project.path,
+        )
+        .ok()?
+        .canonical_worktree_path;
+
+        if is_authoritative_remote_binding(binding) {
+            let expected_context = ssh_binding_identity_context(connection, &configured_path);
+            (binding.identity_context.as_deref() == Some(expected_context.as_str()))
+                .then_some(canonical_path)
+        } else if identity_source == WorktreeIdentitySource::ProvisionalSsh.as_str() {
+            (canonical_path == configured_path.as_str()).then_some(canonical_path)
+        } else {
+            None
+        }
+    }
+
     /// Immutable command-routing facts for one configured project/worktree.
     /// The caller may move this snapshot to a background thread, but must
     /// re-resolve and compare it before applying a completion.
