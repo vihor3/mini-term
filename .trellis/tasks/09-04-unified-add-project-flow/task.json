@@ -23,7 +23,8 @@
   "relatedFiles": [],
   "notes": "",
   "meta": {
-    "planning_status": "implementation-complete-awaiting-actions",
-    "previous_task_audit": "completed; Trellis drift repaired; bounded scope exceptions documented"
+    "planning_status": "actions-rerun-pending-after-linux-test-isolation",
+    "previous_task_audit": "completed; Trellis drift repaired; bounded scope exceptions documented",
+    "last_ci_run": "33843991633: cancelled after fixture SSH hydration kept the Linux transaction test alive"
   }
 }

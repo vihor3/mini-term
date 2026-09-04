@@ -188,6 +188,10 @@ host. Project onboarding must not launch a browser or attempt account login.
   structured argv, bounded diagnostics, and credential redaction.
 - Store tests must cover local-vs-SSH separation, SSH connection identity,
   POSIX case sensitivity, normalization, invalid paths, and duplicate activation.
+- Store transaction tests that use fixture SSH connections must not start the
+  production remote-runtime hydration path. Use a non-hydrating activation seam
+  or an injected runtime fake, and cancel delayed GPUI tasks before quitting the
+  headless app so results never depend on DNS or socket timeout behavior.
 - Windows GitHub Actions must compile the affected packages and run focused
   onboarding and SSH project-operation tests. Linux Actions remains the full
   workspace check, Clippy, test, rustfmt, i18n, and whitespace gate.

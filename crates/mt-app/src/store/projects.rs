@@ -543,6 +543,25 @@ impl AppStore {
         target_group: Option<&str>,
         cx: &mut Context<Self>,
     ) -> Result<ProjectRegistrationOutcome, String> {
+        self.register_or_activate_project_inner(
+            location,
+            canonical_path,
+            suggested_name,
+            target_group,
+            true,
+            cx,
+        )
+    }
+
+    fn register_or_activate_project_inner(
+        &mut self,
+        location: ProjectLocationKey,
+        canonical_path: &str,
+        suggested_name: Option<&str>,
+        target_group: Option<&str>,
+        hydrate: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<ProjectRegistrationOutcome, String> {
         validate_registration_location(&location, canonical_path)?;
         let requested_group = match target_group {
             Some(group_id) => {
@@ -574,7 +593,11 @@ impl AppStore {
                 .worktree_id_for_project(&project_id)
                 .cloned()
                 .ok_or_else(|| "existing project has no worktree identity".to_string())?;
-            self.set_active_project(&project_id, cx);
+            if hydrate {
+                self.set_active_project(&project_id, cx);
+            } else {
+                self.set_active_project_without_hydration(&project_id, cx);
+            }
             return Ok(ProjectRegistrationOutcome {
                 project_id,
                 worktree_id,
@@ -640,7 +663,11 @@ impl AppStore {
         self.project_states.insert(id.clone(), ProjectState::new());
         self.expanded_dirs.insert(id.clone(), HashSet::new());
         let worktree_id = self.install_prepared_project_identity(&id, prepared);
-        self.set_active_project(&id, cx);
+        if hydrate {
+            self.set_active_project(&id, cx);
+        } else {
+            self.set_active_project_without_hydration(&id, cx);
+        }
         self.save_config_now();
         cx.notify();
         Ok(ProjectRegistrationOutcome {
@@ -1028,11 +1055,12 @@ mod project_onboarding_tests {
             store.update(cx, |store, cx| {
                 let first_location = local_location(&first_path);
                 let stale_group_error = store
-                    .register_or_activate_project(
+                    .register_or_activate_project_inner(
                         first_location.clone(),
                         &first_path,
                         Some("Alpha"),
                         Some("missing"),
+                        false,
                         cx,
                     )
                     .unwrap_err();
@@ -1050,11 +1078,12 @@ mod project_onboarding_tests {
                 );
 
                 let first = store
-                    .register_or_activate_project(
+                    .register_or_activate_project_inner(
                         first_location.clone(),
                         &first_path,
                         Some("  Alpha  "),
                         Some("target"),
+                        false,
                         cx,
                     )
                     .unwrap();
@@ -1096,11 +1125,12 @@ mod project_onboarding_tests {
                 assert_eq!(project_occurrences(&target.children, &first.project_id), 1);
 
                 let second = store
-                    .register_or_activate_project(
+                    .register_or_activate_project_inner(
                         local_location(&second_path),
                         &second_path,
                         None,
                         None,
+                        false,
                         cx,
                     )
                     .unwrap();
@@ -1113,11 +1143,12 @@ mod project_onboarding_tests {
                     tree_project_count(store.config.project_tree.as_deref().unwrap());
 
                 let duplicate = store
-                    .register_or_activate_project(
+                    .register_or_activate_project_inner(
                         first_location.clone(),
                         &first_path,
                         Some("Ignored duplicate name"),
                         None,
+                        false,
                         cx,
                     )
                     .unwrap();
@@ -1159,7 +1190,7 @@ mod project_onboarding_tests {
                     tree_project_count(store.config.project_tree.as_deref().unwrap());
                 let bindings_before_ssh = store.project_worktree_bindings.len();
                 let ssh_error = store
-                    .register_or_activate_project(
+                    .register_or_activate_project_inner(
                         ProjectLocationKey::Ssh {
                             connection_id: "missing-ssh".into(),
                             normalized_posix_path: "/srv/repo".into(),
@@ -1167,6 +1198,7 @@ mod project_onboarding_tests {
                         "/srv/repo",
                         None,
                         None,
+                        false,
                         cx,
                     )
                     .unwrap_err();
@@ -1185,11 +1217,12 @@ mod project_onboarding_tests {
                     normalized_posix_path: "/srv/new-repo".into(),
                 };
                 let remote = store
-                    .register_or_activate_project(
+                    .register_or_activate_project_inner(
                         remote_location.clone(),
                         "/srv/new-repo",
                         Some("Remote"),
                         None,
+                        false,
                         cx,
                     )
                     .unwrap();
@@ -1207,11 +1240,12 @@ mod project_onboarding_tests {
                 let remote_tree_count =
                     tree_project_count(store.config.project_tree.as_deref().unwrap());
                 let remote_duplicate = store
-                    .register_or_activate_project(
+                    .register_or_activate_project_inner(
                         remote_location,
                         "/srv/./new-repo/",
                         Some("Ignored"),
                         None,
+                        false,
                         cx,
                     )
                     .unwrap();
@@ -1271,6 +1305,12 @@ mod project_onboarding_tests {
                     Some(canonical_path)
                 );
                 assert_eq!(preserved.identity_context, authoritative_context);
+            });
+
+            // This transaction test owns no runtime work. Cancel the last
+            // delayed save before stopping the headless application.
+            store.update(cx, |store, _| {
+                store._save_task = None;
             });
 
             cx.quit();
