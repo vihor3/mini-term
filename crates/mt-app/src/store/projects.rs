@@ -84,9 +84,9 @@ impl AppStore {
         self.set_active_project_inner(id, false, cx);
     }
 
-    fn set_active_project_inner(&mut self, id: &str, hydrate: bool, cx: &mut Context<Self>) {
+    fn set_active_project_state(&mut self, id: &str) -> bool {
         if self.active_project_id.as_deref() == Some(id) {
-            return;
+            return false;
         }
         self.active_project_id = Some(id.to_string());
         self.sync_active_worktree();
@@ -94,6 +94,13 @@ impl AppStore {
             state.needs_attention = false;
         }
         self.config.last_active_project_id = Some(id.to_string());
+        true
+    }
+
+    fn set_active_project_inner(&mut self, id: &str, hydrate: bool, cx: &mut Context<Self>) {
+        if !self.set_active_project_state(id) {
+            return;
+        }
         // Ordinary project navigation keeps lazy hydration. Exact live-runtime
         // navigation already owns a terminal entity and deliberately skips it.
         if hydrate {
@@ -548,19 +555,19 @@ impl AppStore {
             canonical_path,
             suggested_name,
             target_group,
-            true,
-            cx,
+            Some(cx),
         )
     }
 
+    /// `activation_cx` is always present in production. Tests may omit it to
+    /// exercise the registration transaction without starting a GPUI runtime.
     fn register_or_activate_project_inner(
         &mut self,
         location: ProjectLocationKey,
         canonical_path: &str,
         suggested_name: Option<&str>,
         target_group: Option<&str>,
-        hydrate: bool,
-        cx: &mut Context<Self>,
+        activation_cx: Option<&mut Context<Self>>,
     ) -> Result<ProjectRegistrationOutcome, String> {
         validate_registration_location(&location, canonical_path)?;
         let requested_group = match target_group {
@@ -593,10 +600,10 @@ impl AppStore {
                 .worktree_id_for_project(&project_id)
                 .cloned()
                 .ok_or_else(|| "existing project has no worktree identity".to_string())?;
-            if hydrate {
+            if let Some(cx) = activation_cx {
                 self.set_active_project(&project_id, cx);
             } else {
-                self.set_active_project_without_hydration(&project_id, cx);
+                self.set_active_project_state(&project_id);
             }
             return Ok(ProjectRegistrationOutcome {
                 project_id,
@@ -663,13 +670,12 @@ impl AppStore {
         self.project_states.insert(id.clone(), ProjectState::new());
         self.expanded_dirs.insert(id.clone(), HashSet::new());
         let worktree_id = self.install_prepared_project_identity(&id, prepared);
-        if hydrate {
+        if let Some(cx) = activation_cx {
             self.set_active_project(&id, cx);
         } else {
-            self.set_active_project_without_hydration(&id, cx);
+            self.set_active_project_state(&id);
         }
         self.save_config_now();
-        cx.notify();
         Ok(ProjectRegistrationOutcome {
             project_id: id,
             worktree_id,
@@ -766,7 +772,6 @@ mod project_onboarding_tests {
     use std::fs;
     use std::sync::Arc;
 
-    use gpui::{AppContext as _, Application};
     use mt_config::{AppConfig, ProjectGroup, ProjectTreeItem, SshConnection};
     use mt_identity::{ExecutionHostId, HostInstallId, RepoId};
     use mt_layout::ProjectWorktreeBinding;
@@ -1040,7 +1045,9 @@ mod project_onboarding_tests {
         fs::create_dir_all(&second_path).unwrap();
         let first_path = first_path.to_string_lossy().to_string();
         let second_path = second_path.to_string_lossy().to_string();
-        Application::headless().run(move |cx| {
+
+        // Fixture SSH identities must remain independent of GPUI and remote runtime shutdown.
+        {
             let config = AppConfig {
                 project_tree: Some(vec![ProjectTreeItem::Group(ProjectGroup {
                     id: "target".into(),
@@ -1050,9 +1057,9 @@ mod project_onboarding_tests {
                 })]),
                 ..AppConfig::default()
             };
-            let store = cx.new(|_| test_store(config, HashMap::new(), ai));
+            let mut store = test_store(config, HashMap::new(), ai);
 
-            store.update(cx, |store, cx| {
+            {
                 let first_location = local_location(&first_path);
                 let stale_group_error = store
                     .register_or_activate_project_inner(
@@ -1060,8 +1067,7 @@ mod project_onboarding_tests {
                         &first_path,
                         Some("Alpha"),
                         Some("missing"),
-                        false,
-                        cx,
+                        None,
                     )
                     .unwrap_err();
                 assert!(stale_group_error.contains("target project group no longer exists"));
@@ -1083,8 +1089,7 @@ mod project_onboarding_tests {
                         &first_path,
                         Some("  Alpha  "),
                         Some("target"),
-                        false,
-                        cx,
+                        None,
                     )
                     .unwrap();
                 assert_eq!(
@@ -1130,8 +1135,7 @@ mod project_onboarding_tests {
                         &second_path,
                         None,
                         None,
-                        false,
-                        cx,
+                        None,
                     )
                     .unwrap();
                 assert_eq!(
@@ -1148,8 +1152,7 @@ mod project_onboarding_tests {
                         &first_path,
                         Some("Ignored duplicate name"),
                         None,
-                        false,
-                        cx,
+                        None,
                     )
                     .unwrap();
                 assert_eq!(
@@ -1198,8 +1201,7 @@ mod project_onboarding_tests {
                         "/srv/repo",
                         None,
                         None,
-                        false,
-                        cx,
+                        None,
                     )
                     .unwrap_err();
                 assert!(ssh_error.contains("SSH connection missing-ssh is unavailable"));
@@ -1222,8 +1224,7 @@ mod project_onboarding_tests {
                         "/srv/new-repo",
                         Some("Remote"),
                         None,
-                        false,
-                        cx,
+                        None,
                     )
                     .unwrap();
                 assert_eq!(
@@ -1245,8 +1246,7 @@ mod project_onboarding_tests {
                         "/srv/./new-repo/",
                         Some("Ignored"),
                         None,
-                        false,
-                        cx,
+                        None,
                     )
                     .unwrap();
                 assert_eq!(
@@ -1305,16 +1305,10 @@ mod project_onboarding_tests {
                     Some(canonical_path)
                 );
                 assert_eq!(preserved.identity_context, authoritative_context);
-            });
+            }
 
-            // This transaction test owns no runtime work. Cancel the last
-            // delayed save before stopping the headless application.
-            store.update(cx, |store, _| {
-                store._save_task = None;
-            });
-
-            cx.quit();
-        });
+            drop(store);
+        }
         let _ = fs::remove_dir_all(test_root);
     }
 }

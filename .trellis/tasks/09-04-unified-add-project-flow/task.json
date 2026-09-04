@@ -23,8 +23,8 @@
   "relatedFiles": [],
   "notes": "",
   "meta": {
-    "planning_status": "actions-rerun-pending-after-linux-test-isolation",
+    "planning_status": "actions-rerun-pending-after-headless-test-removal",
     "previous_task_audit": "completed; Trellis drift repaired; bounded scope exceptions documented",
-    "last_ci_run": "33843991633: cancelled after fixture SSH hydration kept the Linux transaction test alive"
+    "last_ci_run": "33849560976: Windows passed; Linux Cargo test remained stuck under headless GPUI"
   }
 }
