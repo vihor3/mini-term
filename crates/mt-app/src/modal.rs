@@ -23,8 +23,7 @@
 use std::cell::Cell;
 
 use gpui::{
-    App, AppContext, ClickEvent, Entity, Focusable as _, ParentElement, StatefulInteractiveElement,
-    Styled, Window, div, px,
+    App, AppContext, ClickEvent, Entity, Focusable as _, ParentElement, Styled, Window, div, px,
 };
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputState, SelectAll};
