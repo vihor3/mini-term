@@ -19,6 +19,7 @@ use super::identity::TerminalRoute;
 use super::pure::{
     resolve_auto_resume_command, resolve_resume_cwd, resolve_scrollback, terminal_style_from,
 };
+use super::{AppStore, ProjectState, TerminalJumpTarget};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TerminalCloseRequest {
@@ -1399,8 +1400,8 @@ mod lifecycle_tests {
             ("owner".into(), request.binding.clone()),
             ("alias".into(), alias_binding),
         ]);
-        request.aliases = terminal_close_aliases(&request.target, &bindings, &states).unwrap();
         let mut states = HashMap::from([("owner".into(), state), ("alias".into(), alias_state)]);
+        request.aliases = terminal_close_aliases(&request.target, &bindings, &states).unwrap();
         assert!(request.may_replace_alias_layout(None));
         assert!(request.may_replace_alias_layout(Some("owner")));
         assert!(!request.may_replace_alias_layout(Some("alias")));
