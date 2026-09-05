@@ -960,7 +960,6 @@ pub(crate) fn click_position(event: &ClickEvent, window: &Window) -> gpui::Point
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

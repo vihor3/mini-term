@@ -300,7 +300,6 @@ pub fn toggle_maximize(window: &mut Window, _cx: &mut App) {
     window.zoom_window();
 }
 
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Control {
     Min,
