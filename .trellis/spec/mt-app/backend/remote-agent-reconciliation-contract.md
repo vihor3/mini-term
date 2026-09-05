@@ -158,6 +158,11 @@ MINI_TERM_REMOTE_AGENT_STATUS=0
 - Retirement tests cover two-empty confirmation, stronger-owner preservation,
   shell output after retirement, a later genuine launch, natural PTY exit,
   delayed event/poll rejection, and idempotent teardown.
+- Cross-crate tracker tests use the public
+  `track_input_with_line_snapshot(pty_id, data, None)` input API.
+  `SessionTracker::track_input` is an mt-ai-local `#[cfg(test)]` helper and
+  is unavailable when mt-ai is compiled as mt-app's dependency. Do not expose
+  a production compatibility helper just to make consumer tests compile.
 - Presentation tests cover live work, steady waiting/approval/completion/error,
   offline/stale work, no evidence, and catalog-progress independence.
 - All checks and disposable fixture execution run only in GitHub Actions.

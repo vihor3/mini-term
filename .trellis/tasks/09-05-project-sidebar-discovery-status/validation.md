@@ -74,6 +74,43 @@ Artifact IDs are `9972444604` (`rustfmt-diagnostics-33976393533`) and
 14 source keys and reports 952 entries per language. This patch application
 is not a passing validation result; the correction requires another run.
 
+### Second Actions Submission
+
+- `1d2ea0dd634756dcf52ad05f2ba34ee55b369db8`:
+  `fix: apply sidebar CI diagnostics`.
+- CI: <https://github.com/vihor3/mini-term/actions/runs/33976617320>.
+- Windows Package:
+  <https://github.com/vihor3/mini-term/actions/runs/33976617345>.
+- The newer push cancelled the remaining initial Windows jobs through the
+  existing concurrency policy. Initial run-level cancellation does not turn
+  its failed Linux checks into a pass.
+- Second-run formatting, generated i18n, staging tests, and locked graph
+  checks passed. Linux/Windows compilation and remaining gates were still
+  in progress at this checkpoint; no full green run is claimed yet.
+
+### Second-Run Compiler Diagnostics
+
+CI `33976617320` failed on both Linux and Windows. The two reported E0599
+errors were new regression test calls to the nonexistent
+`SessionTracker::track_input` at `store/remote_agents.rs:1010` and `:1061`.
+Clippy and tests were not reached. A bounded Trellis checker is correcting
+the calls against the existing tracker API; no production compatibility API
+or relaxed assertion is authorized as a workaround. Local checks remain
+prohibited. Windows packaging does not compile these tests and its result
+cannot replace the failed all-targets gate.
+
+The scoped correction uses the existing
+`track_input_with_line_snapshot(pty_id, "codex\r", None)` at both sites. It
+retains launch inference through the normal raw-input fallback; production
+code and all regression assertions are unchanged. Executable confirmation
+requires the next Actions run.
+
+The checker completed its bounded static handoff. Root cause:
+`track_input` is an mt-ai-local `#[cfg(test)]` wrapper, so dependency builds
+used by mt-app tests cannot call it. The correction matches that wrapper's
+delegation exactly, and the cross-crate testing contract now records this
+boundary. No local checks ran.
+
 ## Static Integration Outcome
 
 - Worktree settings use typed canonical/configured exclusions, retain new

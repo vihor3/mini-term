@@ -35,9 +35,10 @@
   raw discovery, sidebar visibility, and in-flight activation safety.
 
 Implementation and test source handed off on 2026-09-05. Checked source-writing
-items do not assert executed tests. The independent static reviewer is next;
-all executable checks, generated dictionary synchronization, and native
-acceptance remain pending.
+items do not assert executed tests. Independent static review is complete.
+The Actions-generated dictionary patch was applied in `1d2ea0d`; its rerun
+passed the generated dictionary and formatting gates. Complete CI and native
+acceptance remain pending; see the parent validation record.
 - [x] Run the Trellis reviewer on the exact scoped changes, self-fix its
   verified findings, and inspect the final diff for unrelated changes.
 - [ ] Obtain CI and native UI evidence before marking the child complete.

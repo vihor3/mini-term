@@ -1007,7 +1007,7 @@ mod tests {
         let request = request();
         let mut registry = AgentRuntimeRegistry::default();
         let tracker = SessionTracker::new();
-        tracker.track_input(request.pty_id, "codex\r");
+        tracker.track_input_with_line_snapshot(request.pty_id, "codex\r", None);
         apply_inventory_and_retire_tracking(
             &mut registry,
             &tracker,
@@ -1058,7 +1058,7 @@ mod tests {
             accepted_agent_projection(&registry, &request.route, false).status,
             PaneStatus::Idle
         );
-        tracker.track_input(request.pty_id, "codex\r");
+        tracker.track_input_with_line_snapshot(request.pty_id, "codex\r", None);
         assert!(tracker.is_ai_session(request.pty_id));
         apply_inventory_and_retire_tracking(
             &mut registry,

@@ -37,7 +37,8 @@
 
 The implementation agent handed off on 2026-09-05. Checked items denote
 implementation and regression source only, not executed validation. Independent
-static review is in progress; all Actions and native evidence remains pending.
+static review is complete. Actions verification is running and native evidence
+remains pending; see the parent validation record.
 - [x] Add bounded diagnostics only where existing views cannot prove the
   startup acceptance. Never log prompts, argv, environments, or credentials.
 - [x] Run the Trellis reviewer and update relevant accepted-projection,
@@ -50,7 +51,7 @@ capability, activity, and connectivity facts; no new broad logging was added.
 Static review and the Hook-owner correction are complete. The production
 `retire_terminal_polling` helper is now covered by regression source, but full
 Pane/AppStore event-loop and native delivery remain unverified. No check was
-executed locally, and no Actions run has yet validated these edits.
+executed locally. Complete exact-commit Actions verification remains pending.
 
 ## Validation
 
