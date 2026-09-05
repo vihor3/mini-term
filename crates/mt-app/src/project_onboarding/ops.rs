@@ -1129,7 +1129,11 @@ mod tests {
 
         fn location_key(&self, path: &str) -> Result<ProjectLocationKey, OnboardingError> {
             Ok(ProjectLocationKey::Local {
-                normalized_canonical_path: path.into(),
+                normalized_canonical_path:
+                    crate::execution_host::normalize_host_visible_project_path(path)
+                        .map_err(|message| {
+                            OnboardingError::new(OnboardingErrorKind::Validation, message)
+                        })?,
             })
         }
 

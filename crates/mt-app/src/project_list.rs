@@ -849,9 +849,7 @@ fn project_menu(
                         // 项目里可能挂着多个仓库,与原版的项目级入口同口径
                         true,
                         Some(id.clone()),
-                        // 原版这个入口的 onChanged 是空的(项目列表自己有
-                        // 焦点重探那条路把新 worktree 的徽章补上)
-                        |_cx| {},
+                        |cx| crate::worktree_catalog::force_refresh_global(cx),
                         window,
                         cx,
                     );

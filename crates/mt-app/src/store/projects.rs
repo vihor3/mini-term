@@ -490,6 +490,12 @@ pub struct ProjectRegistrationOutcome {
     pub disposition: ProjectRegistrationDisposition,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectPlacement<'a> {
+    TopLevel { target_group: Option<&'a str> },
+    ChildWorktree { root_project_id: &'a str },
+}
+
 impl AppStore {
     pub fn register_or_activate_project(
         &mut self,
@@ -499,11 +505,28 @@ impl AppStore {
         target_group: Option<&str>,
         cx: &mut Context<Self>,
     ) -> Result<ProjectRegistrationOutcome, String> {
-        self.register_or_activate_project_inner(
+        self.register_or_activate_project_with_placement(
             location,
             canonical_path,
             suggested_name,
-            target_group,
+            ProjectPlacement::TopLevel { target_group },
+            cx,
+        )
+    }
+
+    pub fn register_or_activate_project_with_placement(
+        &mut self,
+        location: ProjectLocationKey,
+        canonical_path: &str,
+        suggested_name: Option<&str>,
+        placement: ProjectPlacement<'_>,
+        cx: &mut Context<Self>,
+    ) -> Result<ProjectRegistrationOutcome, String> {
+        self.register_or_activate_project_placed_inner(
+            location,
+            canonical_path,
+            suggested_name,
+            placement,
             Some(cx),
         )
     }
@@ -518,18 +541,53 @@ impl AppStore {
         target_group: Option<&str>,
         activation_cx: Option<&mut Context<Self>>,
     ) -> Result<ProjectRegistrationOutcome, String> {
+        self.register_or_activate_project_placed_inner(
+            location,
+            canonical_path,
+            suggested_name,
+            ProjectPlacement::TopLevel { target_group },
+            activation_cx,
+        )
+    }
+
+    fn register_or_activate_project_placed_inner(
+        &mut self,
+        location: ProjectLocationKey,
+        canonical_path: &str,
+        suggested_name: Option<&str>,
+        placement: ProjectPlacement<'_>,
+        activation_cx: Option<&mut Context<Self>>,
+    ) -> Result<ProjectRegistrationOutcome, String> {
         validate_registration_location(&location, canonical_path)?;
-        let requested_group = match target_group {
-            Some(group_id) => {
-                let group = self
-                    .config
-                    .project_tree
-                    .as_deref()
-                    .and_then(|tree| crate::project_tree::find_group_in_tree(tree, group_id))
-                    .ok_or_else(|| format!("target project group no longer exists: {group_id}"))?;
-                Some((group_id.to_string(), group.collapsed))
+        let (requested_group, parent_project_id) = match placement {
+            ProjectPlacement::TopLevel { target_group } => {
+                let requested_group = match target_group {
+                    Some(group_id) => {
+                        let group = self
+                            .config
+                            .project_tree
+                            .as_deref()
+                            .and_then(|tree| {
+                                crate::project_tree::find_group_in_tree(tree, group_id)
+                            })
+                            .ok_or_else(|| {
+                                format!("target project group no longer exists: {group_id}")
+                            })?;
+                        Some((group_id.to_string(), group.collapsed))
+                    }
+                    None => None,
+                };
+                (requested_group, None)
             }
-            None => None,
+            ProjectPlacement::ChildWorktree { root_project_id } => {
+                validate_child_worktree_placement(
+                    &self.config.projects,
+                    root_project_id,
+                    &location,
+                    canonical_path,
+                )?;
+                (None, Some(root_project_id.to_string()))
+            }
         };
         let existing_id = self
             .config
@@ -600,28 +658,32 @@ impl AppStore {
             env_vars: Vec::new(),
             wsl_sessions_distro: None,
             ssh_connection_id,
-            parent_project_id: None,
+            parent_project_id: parent_project_id.clone(),
             kind_override: None,
         };
         let prepared = self.prepare_project_identity(&project)?;
 
-        self.ensure_tree();
-        if let Some((group_id, true)) = requested_group.as_ref()
-            && let Some(tree) = self.config.project_tree.as_mut()
-            && let Some(group) = crate::project_tree::find_group_in_tree_mut(tree, group_id)
-        {
-            group.collapsed = false;
+        if parent_project_id.is_none() {
+            self.ensure_tree();
+            if let Some((group_id, true)) = requested_group.as_ref()
+                && let Some(tree) = self.config.project_tree.as_mut()
+                && let Some(group) = crate::project_tree::find_group_in_tree_mut(tree, group_id)
+            {
+                group.collapsed = false;
+            }
         }
         self.config.projects.push(project);
-        let tree = self.config.project_tree.get_or_insert_with(Vec::new);
-        crate::project_tree::insert_into_tree(
-            tree,
-            requested_group
-                .as_ref()
-                .map(|(group_id, _)| group_id.as_str()),
-            mt_config::ProjectTreeItem::ProjectId(id.clone()),
-            None,
-        );
+        if parent_project_id.is_none() {
+            let tree = self.config.project_tree.get_or_insert_with(Vec::new);
+            crate::project_tree::insert_into_tree(
+                tree,
+                requested_group
+                    .as_ref()
+                    .map(|(group_id, _)| group_id.as_str()),
+                mt_config::ProjectTreeItem::ProjectId(id.clone()),
+                None,
+            );
+        }
         self.project_states.insert(id.clone(), ProjectState::new());
         self.expanded_dirs.insert(id.clone(), HashSet::new());
         let worktree_id = self.install_prepared_project_identity(&id, prepared);
@@ -650,10 +712,13 @@ fn validate_registration_location(
         ProjectLocationKey::Local {
             normalized_canonical_path,
         } => {
-            if !Path::new(canonical_path).is_absolute() {
+            if !Path::new(canonical_path).is_absolute()
+                && mt_core::parse_wsl_unc(&canonical_path.replace('/', "\\")).is_none()
+            {
                 return Err("local canonical project path must be absolute".into());
             }
-            let expected = mt_project::worktree::normalize_path_for_comparison(canonical_path);
+            let expected =
+                crate::execution_host::normalize_host_visible_project_path(canonical_path)?;
             if expected != *normalized_canonical_path {
                 return Err("local project location key does not match its canonical path".into());
             }
@@ -687,8 +752,10 @@ fn project_matches_location(
                     .into_iter()
                     .flatten()
                     .any(|path| {
-                        mt_project::worktree::normalize_path_for_comparison(path)
-                            == *normalized_canonical_path
+                        crate::execution_host::normalize_host_visible_project_path(path)
+                            .ok()
+                            .as_deref()
+                            == Some(normalized_canonical_path.as_str())
                     })
         }
         ProjectLocationKey::Ssh {
@@ -708,22 +775,54 @@ fn project_matches_location(
 }
 
 fn normalize_registration_posix(path: &str) -> Result<String, String> {
-    if !path.starts_with('/') || path.contains('\0') {
-        return Err(format!("SSH project path must be absolute POSIX: {path}"));
+    crate::execution_host::normalize_absolute_posix_path(path)
+}
+
+fn validate_child_worktree_placement(
+    projects: &[ProjectConfig],
+    root_project_id: &str,
+    location: &ProjectLocationKey,
+    canonical_path: &str,
+) -> Result<(), String> {
+    let root = projects
+        .iter()
+        .find(|project| project.id == root_project_id)
+        .ok_or_else(|| format!("root project no longer exists: {root_project_id}"))?;
+    if root.parent_project_id.is_some() {
+        return Err("discovered worktree parent must be a top-level project".into());
     }
-    let mut segments = Vec::new();
-    for segment in path.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => return Err(format!("SSH project path cannot contain `..`: {path}")),
-            value => segments.push(value),
+
+    match location {
+        ProjectLocationKey::Ssh { connection_id, .. } => {
+            if root.ssh_connection_id.as_deref() != Some(connection_id.as_str()) {
+                return Err("discovered SSH worktree does not belong to the root connection".into());
+            }
+            if mt_core::parse_wsl_unc(&canonical_path.replace('/', "\\")).is_some() {
+                return Err("discovered SSH worktree path cannot be a WSL path".into());
+            }
+        }
+        ProjectLocationKey::Local { .. } => {
+            if root.ssh_connection_id.is_some() {
+                return Err("discovered local worktree does not belong to the SSH root".into());
+            }
+            let root_wsl = mt_core::parse_wsl_unc(&root.path.replace('/', "\\"));
+            let child_wsl = mt_core::parse_wsl_unc(&canonical_path.replace('/', "\\"));
+            match (root_wsl, child_wsl) {
+                (Some(root_wsl), Some(child_wsl))
+                    if root_wsl.distro.eq_ignore_ascii_case(&child_wsl.distro) => {}
+                (Some(_), Some(_)) => {
+                    return Err(
+                        "discovered WSL worktree belongs to another distribution".into(),
+                    );
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err("discovered worktree host does not match the root project".into());
+                }
+                (None, None) => {}
+            }
         }
     }
-    Ok(if segments.is_empty() {
-        "/".into()
-    } else {
-        format!("/{}", segments.join("/"))
-    })
+    Ok(())
 }
 
 fn project_name_from_path(path: &str) -> String {
@@ -896,7 +995,8 @@ mod project_onboarding_tests {
 
     fn local_location(path: &str) -> ProjectLocationKey {
         ProjectLocationKey::Local {
-            normalized_canonical_path: mt_project::worktree::normalize_path_for_comparison(path),
+            normalized_canonical_path:
+                crate::execution_host::normalize_host_visible_project_path(path).unwrap(),
         }
     }
 
@@ -934,9 +1034,8 @@ mod project_onboarding_tests {
             "/home/leo/repo"
         };
         let location = ProjectLocationKey::Local {
-            normalized_canonical_path: mt_project::worktree::normalize_path_for_comparison(
-                canonical,
-            ),
+            normalized_canonical_path:
+                crate::execution_host::normalize_host_visible_project_path(canonical).unwrap(),
         };
 
         assert!(project_matches_location(
@@ -960,9 +1059,9 @@ mod project_onboarding_tests {
         assert!(
             validate_registration_location(
                 &ProjectLocationKey::Local {
-                    normalized_canonical_path: mt_project::worktree::normalize_path_for_comparison(
-                        relative
-                    ),
+                    normalized_canonical_path:
+                        crate::execution_host::normalize_host_visible_project_path(relative)
+                            .unwrap(),
                 },
                 relative,
             )
@@ -1059,6 +1158,10 @@ mod project_onboarding_tests {
             store.onboarding_canonical_path_for_project(&alias),
             binding.canonical_worktree_path.as_deref()
         );
+        assert_eq!(
+            store.trusted_canonical_worktree_path_for_project(&alias.id),
+            binding.canonical_worktree_path.as_deref()
+        );
         let outcome = store
             .register_or_activate_project_inner(
                 local_location(&canonical_path),
@@ -1126,6 +1229,14 @@ mod project_onboarding_tests {
         );
         assert_eq!(
             store.onboarding_canonical_path_for_project(&wsl_project),
+            None
+        );
+        assert_eq!(
+            store.trusted_canonical_worktree_path_for_project(&local_project.id),
+            None
+        );
+        assert_eq!(
+            store.trusted_canonical_worktree_path_for_project(&wsl_project.id),
             None
         );
     }
@@ -1414,6 +1525,10 @@ mod project_onboarding_tests {
                     store.onboarding_canonical_path_for_project(&remote_project),
                     Some(canonical_path)
                 );
+                assert_eq!(
+                    store.trusted_canonical_worktree_path_for_project(&remote_project.id),
+                    Some(canonical_path)
+                );
 
                 let projects_before_alias_duplicate = store.config.projects.len();
                 let tree_records_before_alias_duplicate =
@@ -1446,5 +1561,273 @@ mod project_onboarding_tests {
             drop(store);
         }
         let _ = fs::remove_dir_all(test_root);
+    }
+
+    #[test]
+    fn child_local_registration_dedupes_and_preserves_top_level_aliases() {
+        let test_root = std::env::temp_dir().join(format!(
+            "mt-app-child-local-registration-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&test_root);
+        let root_path = test_root.join("root");
+        let child_path = test_root.join("child");
+        let alias_path = test_root.join("top-level-alias");
+        fs::create_dir_all(&root_path).unwrap();
+        fs::create_dir_all(&child_path).unwrap();
+        fs::create_dir_all(&alias_path).unwrap();
+        let root_path = root_path.to_string_lossy().to_string();
+        let child_path = child_path.to_string_lossy().to_string();
+        let alias_path = alias_path.to_string_lossy().to_string();
+        let root = project("root", &root_path, None);
+        let alias = project("alias", &alias_path, None);
+        let config = AppConfig {
+            projects: vec![root.clone(), alias.clone()],
+            project_tree: Some(vec![
+                ProjectTreeItem::ProjectId(root.id.clone()),
+                ProjectTreeItem::ProjectId(alias.id.clone()),
+            ]),
+            ..AppConfig::default()
+        };
+        let (ai, _events) = crate::ai::AiBridge::new(false);
+        let mut store = test_store(config, HashMap::new(), ai);
+
+        let child = store
+            .register_or_activate_project_placed_inner(
+                local_location(&child_path),
+                &child_path,
+                Some("Feature"),
+                ProjectPlacement::ChildWorktree {
+                    root_project_id: &root.id,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(child.disposition, ProjectRegistrationDisposition::RegisteredNew);
+        assert_eq!(
+            store
+                .project(&child.project_id)
+                .and_then(|project| project.parent_project_id.as_deref()),
+            Some(root.id.as_str())
+        );
+        assert_eq!(
+            tree_project_count(store.config.project_tree.as_deref().unwrap()),
+            2
+        );
+
+        let repeated = store
+            .register_or_activate_project_placed_inner(
+                local_location(&child_path),
+                &child_path,
+                Some("Ignored"),
+                ProjectPlacement::ChildWorktree {
+                    root_project_id: &root.id,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            repeated.disposition,
+            ProjectRegistrationDisposition::ActivatedExisting
+        );
+        assert_eq!(repeated.project_id, child.project_id);
+        assert_eq!(repeated.worktree_id, child.worktree_id);
+
+        let top_level_alias = store
+            .register_or_activate_project_placed_inner(
+                local_location(&alias_path),
+                &alias_path,
+                Some("Ignored"),
+                ProjectPlacement::ChildWorktree {
+                    root_project_id: &root.id,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(top_level_alias.project_id, alias.id);
+        assert_eq!(
+            store.project(&top_level_alias.project_id).unwrap().parent_project_id,
+            None
+        );
+        assert_eq!(
+            project_occurrences(
+                store.config.project_tree.as_deref().unwrap(),
+                &top_level_alias.project_id,
+            ),
+            1
+        );
+
+        let nested_path = test_root.join("nested").to_string_lossy().to_string();
+        let nested_parent_error = store
+            .register_or_activate_project_placed_inner(
+                local_location(&nested_path),
+                &nested_path,
+                None,
+                ProjectPlacement::ChildWorktree {
+                    root_project_id: &child.project_id,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(nested_parent_error.contains("top-level project"));
+        drop(store);
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn child_wsl_registration_dedupes_unc_aliases_and_fences_distro() {
+        let root = project("wsl-root", r"\\wsl$\Ubuntu\home\leo\repo", None);
+        let config = AppConfig {
+            projects: vec![root.clone()],
+            project_tree: Some(vec![ProjectTreeItem::ProjectId(root.id.clone())]),
+            ..AppConfig::default()
+        };
+        let (ai, _events) = crate::ai::AiBridge::new(false);
+        let mut store = test_store(config, HashMap::new(), ai);
+        let child_path = r"\\wsl$\Ubuntu\home\leo\repo-feature";
+
+        let child = store
+            .register_or_activate_project_placed_inner(
+                local_location(child_path),
+                child_path,
+                Some("Feature"),
+                ProjectPlacement::ChildWorktree {
+                    root_project_id: &root.id,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .project(&child.project_id)
+                .and_then(|project| project.parent_project_id.as_deref()),
+            Some(root.id.as_str())
+        );
+        assert_eq!(
+            tree_project_count(store.config.project_tree.as_deref().unwrap()),
+            1
+        );
+
+        let alias_path = r"\\wsl.localhost\ubuntu\home\leo\repo-feature";
+        let duplicate = store
+            .register_or_activate_project_placed_inner(
+                local_location(alias_path),
+                alias_path,
+                None,
+                ProjectPlacement::ChildWorktree {
+                    root_project_id: &root.id,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(duplicate.project_id, child.project_id);
+        assert_eq!(
+            duplicate.disposition,
+            ProjectRegistrationDisposition::ActivatedExisting
+        );
+
+        let other_distro = r"\\wsl$\Debian\home\leo\repo-feature";
+        let error = store
+            .register_or_activate_project_placed_inner(
+                local_location(other_distro),
+                other_distro,
+                None,
+                ProjectPlacement::ChildWorktree {
+                    root_project_id: &root.id,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(error.contains("another distribution"));
+    }
+
+    #[test]
+    fn child_ssh_registration_requires_the_root_connection() {
+        let connection = ssh_connection("ssh-a");
+        let other_connection = ssh_connection("ssh-b");
+        let root = project("ssh-root", "/srv/repo", Some(connection.id.as_str()));
+        let config = AppConfig {
+            projects: vec![root.clone()],
+            project_tree: Some(vec![ProjectTreeItem::ProjectId(root.id.clone())]),
+            ssh_connections: vec![connection.clone(), other_connection.clone()],
+            ..AppConfig::default()
+        };
+        let (ai, _events) = crate::ai::AiBridge::new(false);
+        let mut store = test_store(config, HashMap::new(), ai);
+        let location = ProjectLocationKey::Ssh {
+            connection_id: connection.id.clone(),
+            normalized_posix_path: "/srv/repo-feature".into(),
+        };
+
+        let child = store
+            .register_or_activate_project_placed_inner(
+                location.clone(),
+                "/srv/repo-feature",
+                Some("Feature"),
+                ProjectPlacement::ChildWorktree {
+                    root_project_id: &root.id,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .project(&child.project_id)
+                .and_then(|project| project.parent_project_id.as_deref()),
+            Some(root.id.as_str())
+        );
+        assert_eq!(
+            store
+                .project(&child.project_id)
+                .and_then(|project| project.ssh_connection_id.as_deref()),
+            Some(connection.id.as_str())
+        );
+        assert_eq!(
+            tree_project_count(store.config.project_tree.as_deref().unwrap()),
+            1
+        );
+
+        let duplicate = store
+            .register_or_activate_project_placed_inner(
+                location,
+                "/srv/./repo-feature/",
+                None,
+                ProjectPlacement::ChildWorktree {
+                    root_project_id: &root.id,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(duplicate.project_id, child.project_id);
+
+        let wrong_connection_error = store
+            .register_or_activate_project_placed_inner(
+                ProjectLocationKey::Ssh {
+                    connection_id: other_connection.id.clone(),
+                    normalized_posix_path: "/srv/other".into(),
+                },
+                "/srv/other",
+                None,
+                ProjectPlacement::ChildWorktree {
+                    root_project_id: &root.id,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(wrong_connection_error.contains("root connection"));
+
+        let local_child_path = if cfg!(windows) {
+            r"C:\repo-feature"
+        } else {
+            "/tmp/repo-feature"
+        };
+        let local_error = validate_child_worktree_placement(
+            store.projects(),
+            &root.id,
+            &local_location(local_child_path),
+            local_child_path,
+        )
+        .unwrap_err();
+        assert!(local_error.contains("SSH root"));
     }
 }

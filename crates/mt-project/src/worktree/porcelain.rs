@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::{GitAnnotation, WorktreeFact, WorktreePathState, paths_equal};
+use super::{
+    GitAnnotation, WorktreeFact, WorktreePathSemantics, WorktreePathState, paths_equal,
+};
 
 #[derive(Default)]
 struct RecordBuilder {
@@ -59,6 +61,13 @@ impl RecordBuilder {
 }
 
 pub(super) fn parse_porcelain_z(input: &[u8]) -> Result<Vec<WorktreeFact>> {
+    parse_porcelain_z_with_path_semantics(input, WorktreePathSemantics::Native)
+}
+
+pub(super) fn parse_porcelain_z_with_path_semantics(
+    input: &[u8],
+    path_semantics: WorktreePathSemantics,
+) -> Result<Vec<WorktreeFact>> {
     let fields: Vec<&[u8]> = input.split(|byte| *byte == 0).collect();
     let mut records = Vec::new();
     let mut builder = RecordBuilder::default();
@@ -85,11 +94,18 @@ pub(super) fn parse_porcelain_z(input: &[u8]) -> Result<Vec<WorktreeFact>> {
     if records.is_empty() {
         bail!("porcelain output contained no worktree records");
     }
-    validate_records(&records)?;
+    validate_records(&records, path_semantics)?;
     Ok(records)
 }
 
 pub(super) fn parse_porcelain_text(input: &[u8]) -> Result<Vec<WorktreeFact>> {
+    parse_porcelain_text_with_path_semantics(input, WorktreePathSemantics::Native)
+}
+
+pub(super) fn parse_porcelain_text_with_path_semantics(
+    input: &[u8],
+    path_semantics: WorktreePathSemantics,
+) -> Result<Vec<WorktreeFact>> {
     let mut records = Vec::new();
     let mut builder = RecordBuilder::default();
 
@@ -111,20 +127,46 @@ pub(super) fn parse_porcelain_text(input: &[u8]) -> Result<Vec<WorktreeFact>> {
     if records.is_empty() {
         bail!("porcelain output contained no worktree records");
     }
-    validate_records(&records)?;
+    validate_records(&records, path_semantics)?;
     Ok(records)
 }
 
-fn validate_records(records: &[WorktreeFact]) -> Result<()> {
+fn validate_records(
+    records: &[WorktreeFact],
+    path_semantics: WorktreePathSemantics,
+) -> Result<()> {
     for (index, record) in records.iter().enumerate() {
         if records[..index]
             .iter()
-            .any(|previous| paths_equal(&previous.path, &record.path))
+            .any(|previous| paths_equal_for(previous, record, path_semantics))
         {
             bail!("duplicate worktree path in porcelain output");
         }
     }
     Ok(())
+}
+
+fn paths_equal_for(
+    left: &WorktreeFact,
+    right: &WorktreeFact,
+    path_semantics: WorktreePathSemantics,
+) -> bool {
+    match path_semantics {
+        WorktreePathSemantics::Native => paths_equal(&left.path, &right.path),
+        WorktreePathSemantics::Posix => {
+            normalize_posix_path(&left.path.to_string_lossy())
+                == normalize_posix_path(&right.path.to_string_lossy())
+        }
+    }
+}
+
+fn normalize_posix_path(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() && path.starts_with('/') {
+        "/"
+    } else {
+        trimmed
+    }
 }
 
 fn parse_field(field: &[u8], quoted: bool, builder: &mut RecordBuilder) -> Result<()> {

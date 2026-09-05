@@ -32,7 +32,7 @@ use crate::{
     ClosePane, FocusDown, FocusLeft, FocusRight, FocusUp, GlobalSearch, JumpAttention, MarkerNext,
     MarkerPrev, NewTerminal, NextPane, OpenTerminalSettings, PrevPane, RenamePane, SelectPane,
     SplitDown, SplitRight, SwitchProject, TerminalSearch, ToggleMiddleColumn, ToggleSessions,
-    ToggleUsage, git_changes, project_switcher,
+    ToggleUsage, git_changes, jump_palette,
 };
 
 /// 应用级动作的 key context(与 `Workspace::render` 的 `key_context` 一致)。
@@ -403,22 +403,33 @@ pub fn bind_keys(cx: &mut App) {
         ));
     }
 
-    // 项目切换器的方向键。**不进快捷键表** —— 它是弹窗内部键位,设置页不该列。
+    // Quick Open 内部键位。**不进快捷键表** —— 它们是弹窗内部导航,设置页不该列。
     //
-    // 谓词写成 `"ProjectSwitcher > Input"` 而不是 `"ProjectSwitcher"`:只有与
+    // 谓词写成 `"JumpPalette > Input"` 而不是 `"JumpPalette"`:只有与
     // `Input` **同深度**才压得过组件库自带的 `up`/`down`(单行输入框那两个处理器
     // 直接 return、不 propagate,挂在容器上的 on_key_down 永远收不到)。
-    // 详见 project_switcher 模块注释,机制有单测钉住。
     bindings.push(KeyBinding::new(
         "up",
-        project_switcher::SwitcherPrev,
-        Some("ProjectSwitcher > Input"),
+        jump_palette::JumpPrev,
+        Some("JumpPalette > Input"),
     ));
     bindings.push(KeyBinding::new(
         "down",
-        project_switcher::SwitcherNext,
-        Some("ProjectSwitcher > Input"),
+        jump_palette::JumpNext,
+        Some("JumpPalette > Input"),
     ));
+    bindings.push(KeyBinding::new(
+        "tab",
+        jump_palette::JumpToggleFilter,
+        Some("JumpPalette > Input"),
+    ));
+    for n in 1..=9usize {
+        bindings.push(KeyBinding::new(
+            &format!("ctrl-{n}"),
+            jump_palette::JumpDirect(n),
+            Some("JumpPalette > Input"),
+        ));
+    }
 
     // Git 提交框的 Ctrl/Cmd+Enter(`GitChanges.tsx:411-415`)。**不进快捷键表** ——
     // 原版它是 textarea 的 onKeyDown,不在 hotkeys.ts 里。谓词同上要与 `Input` 同深度。
@@ -443,7 +454,7 @@ pub fn bind_keys(cx: &mut App) {
     // 解法是在**更深**的 `Terminal` context 上用 `NoAction` 把它们压掉:
     // `Keymap::bindings_for_input` 先按 context 深度排序,遇到 `NoAction` 直接 break,
     // 更浅的 `Root` 那两条不再参与,这次按键退回 key 监听路径,由终端自己翻成
-    // `\t` / `ESC [ Z`。深度优先的用法与上面 `ProjectSwitcher > Input` 同源。
+    // `\t` / `ESC [ Z`。深度优先的用法与上面 `JumpPalette > Input` 同源。
     //
     // **不进快捷键表**:它不是一条「应用快捷键」,而是解除组件库对终端的抢键,
     // 设置页列出来只会让人以为 Tab 是个可改键位的功能。

@@ -65,7 +65,7 @@ pub mod kind {
     pub const MENU: &str = "menu";
     /// 全局搜索(Ctrl+Shift+F)。
     pub const GLOBAL_SEARCH: &str = "global-search";
-    /// 项目快速切换器(Ctrl+Shift+P)。
+    /// 全局 Quick Open(Ctrl+Shift+P);保留旧常量名作为覆盖物身份。
     pub const PROJECT_SWITCHER: &str = "project-switcher";
     /// 终端内查找条(Ctrl+F)。**逐 pane 一条**,slot 存 `pty_id`。
     pub const TERMINAL_SEARCH: &str = "terminal-search";

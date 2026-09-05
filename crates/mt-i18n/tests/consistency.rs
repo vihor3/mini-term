@@ -16,7 +16,7 @@ use mt_i18n::{
 
 /// TS 侧 `crates/mt-i18n/locales/*.ts` 的当前对账基线：
 /// 33 个命名空间文件（`locales/index.ts` 里 33 条 import 一一对上），
-/// 每种语言 903 条叶子文案。改字典后重跑生成器，这里的数字随 dict.rs 一起更新。
+/// 每种语言 938 条叶子文案。改字典后重跑生成器，这里的数字随 dict.rs 一起更新。
 ///
 /// 727 → 735：M 批(mt-app 消费批)补齐 GPUI 侧 8 条缺 key 文案
 /// （`paneGroup.shellExited` / `settings.terminal.fontSizeNewOnly` /
@@ -83,8 +83,9 @@ use mt_i18n::{
 /// 839 → 840：远程文档刷新失败但保留已加载内容时补非阻断警告。
 /// 840 → 842：新建终端菜单接入 AI 启动器段（分组标题 + 「管理启动器…」入口）。
 /// 842 → 903：统一项目引导新增 `projectOnboarding` 命名空间（61 条）。
+/// 903 → 938：全局 Quick Open 扩展 `projectSwitcher` 文案，净增 35 条。
 const EXPECTED_NAMESPACES: usize = 33;
-const EXPECTED_ENTRIES_PER_LANG: usize = 903;
+const EXPECTED_ENTRIES_PER_LANG: usize = 938;
 
 /// TS 侧 `locales/index.ts` 收编的全部命名空间，手抄一份放这里做交叉验证 ——
 /// 只信生成器的话，「某个 ns 文件整体没被读到」这种错会一起漏过去。

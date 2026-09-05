@@ -75,6 +75,7 @@ mod git_worktree;
 mod github_tasks;
 mod hotkeys;
 mod i18n;
+mod jump_palette;
 mod markers;
 mod menu;
 mod mobile_panel;
@@ -92,7 +93,6 @@ mod pricing;
 mod project_kind;
 mod project_list;
 mod project_onboarding;
-mod project_switcher;
 mod project_tree;
 mod prompt;
 mod redraw;
@@ -120,6 +120,7 @@ mod ui;
 mod update_check;
 mod usage_panel;
 mod workbench_area;
+mod worktree_catalog;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -200,7 +201,7 @@ actions!(
         TerminalSearch,
         /// 全局搜索(Ctrl+Shift+F,toggle)
         GlobalSearch,
-        /// 项目快速切换器(Ctrl+Shift+P)
+        /// 全局快速打开(Ctrl+Shift+P)
         SwitchProject,
         /// 跳到上一个 AI 任务标记(Ctrl+Shift+↑)
         MarkerPrev,
@@ -487,6 +488,10 @@ struct Workspace {
     toast_layer: Entity<toast::ToastLayer>,
     /// Orca 对齐的默认左栏；旧 ProjectList 只为回滚壳保留。
     orca_sidebar: Entity<OrcaProjectSidebar>,
+    /// One host-aware repository inventory shared by sidebar and jump palette.
+    worktree_catalog: Entity<worktree_catalog::WorktreeCatalog>,
+    /// Process-local stable-target recency shared by every palette open.
+    jump_recency: Entity<jump_palette::JumpRecency>,
     project_list: Entity<ProjectList>,
     file_tree: Entity<FileTree>,
     terminal_area: Entity<TerminalArea>,
@@ -574,7 +579,13 @@ impl Workspace {
         .detach();
 
         let title_bar = cx.new(|cx| TitleBar::new(store.clone(), cx));
-        let orca_sidebar = cx.new(|cx| OrcaProjectSidebar::new(store.clone(), cx));
+        let worktree_catalog =
+            cx.new(|cx| worktree_catalog::WorktreeCatalog::new(store.clone(), cx));
+        worktree_catalog::install(worktree_catalog.clone(), cx);
+        let jump_recency = cx.new(|cx| jump_palette::JumpRecency::new(store.clone(), cx));
+        let orca_sidebar = cx.new(|cx| {
+            OrcaProjectSidebar::new(store.clone(), worktree_catalog.clone(), cx)
+        });
         let project_list = cx.new(|cx| ProjectList::new(store.clone(), cx));
         let file_tree = cx.new(|cx| FileTree::new(store.clone(), cx));
         file_tree::install(file_tree.clone(), cx);
@@ -595,6 +606,7 @@ impl Workspace {
             &orca_sidebar,
             window,
             |this: &mut Workspace, _sidebar, event: &OrcaSidebarEvent, window, cx| match event {
+                OrcaSidebarEvent::OpenJumpPalette => this.open_jump_palette(window, cx),
                 OrcaSidebarEvent::ToggleAgents => this.toggle_agents(window, cx),
                 OrcaSidebarEvent::OpenUsage => this.toggle_usage(window, cx),
                 OrcaSidebarEvent::OpenSettings => {
@@ -727,6 +739,8 @@ impl Workspace {
             toast_layer: toast::layer(cx),
             title_bar,
             orca_sidebar,
+            worktree_catalog,
+            jump_recency,
             project_list,
             file_tree,
             terminal_area,
@@ -2012,7 +2026,67 @@ impl Workspace {
             )
     }
 
-    /// Ctrl+Shift+P:项目快速切换器。
+    fn open_jump_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = cx.entity();
+        jump_palette::open(
+            self.store.clone(),
+            self.worktree_catalog.clone(),
+            self.jump_recency.clone(),
+            move |command, window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.handle_jump_command(command, window, cx)
+                });
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn handle_jump_command(
+        &mut self,
+        command: jump_palette::JumpCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            jump_palette::JumpCommand::Settings(page) => {
+                settings::open_settings(self.store.clone(), page, window, cx)
+            }
+            jump_palette::JumpCommand::Usage => {
+                if !self.usage_open {
+                    self.toggle_usage(window, cx);
+                }
+            }
+            jump_palette::JumpCommand::AddProject => {
+                project_onboarding::open(self.store.clone(), None, window, cx)
+            }
+            jump_palette::JumpCommand::NewTerminal => {
+                let Some(project_id) = self.store.read(cx).active_project_id.clone() else {
+                    return;
+                };
+                let anchor = self.target_pane(cx).map(|(_, pane_id)| pane_id);
+                let created = self.store.update(cx, |store, cx| {
+                    store.new_terminal(&project_id, None, anchor, window, cx)
+                });
+                if created.is_none() {
+                    toast::push_message(
+                        notify::ToastKind::WslInfo,
+                        project_id,
+                        t("projectSwitcher", "actionNewTerminal").to_string(),
+                        t("projectSwitcher", "staleTarget").to_string(),
+                        cx,
+                    );
+                    return;
+                }
+                workbench_area::activate_terminal_page(window, cx);
+            }
+            jump_palette::JumpCommand::FileSearch => {
+                search_modal::open(self.store.clone(), window, cx)
+            }
+        }
+    }
+
+    /// Ctrl+Shift+P:全局 Quick Open。兼容动作名仍为 `SwitchProject`。
     fn on_switch_project(
         &mut self,
         _: &SwitchProject,
@@ -2022,7 +2096,7 @@ impl Workspace {
         if yields_to_overlay(window, cx) {
             return;
         }
-        project_switcher::open(self.store.clone(), window, cx);
+        self.open_jump_palette(window, cx);
     }
 
     /// 视口尺寸一变,就把对应的 [`ResizableState`] 换成一个新的空实体 ——

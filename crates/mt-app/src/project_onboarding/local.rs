@@ -219,7 +219,11 @@ impl ProjectHostOps for LocalProjectOps {
 
     fn location_key(&self, path: &str) -> Result<ProjectLocationKey, OnboardingError> {
         Ok(ProjectLocationKey::Local {
-            normalized_canonical_path: mt_project::worktree::normalize_path_for_comparison(path),
+            normalized_canonical_path:
+                crate::execution_host::normalize_host_visible_project_path(path)
+                    .map_err(|message| {
+                        OnboardingError::new(OnboardingErrorKind::Validation, message)
+                    })?,
         })
     }
 
@@ -466,17 +470,11 @@ unsafe extern "system" {
 }
 
 fn wsl_unc(distro: &str, path: &str) -> Result<String, OnboardingError> {
-    if !path.starts_with('/') || path.contains('\0') {
-        return Err(OnboardingError::new(
+    crate::execution_host::wsl_host_visible_path(distro, path).map_err(|_| {
+        OnboardingError::new(
             OnboardingErrorKind::GitFailure,
             "Git returned an invalid WSL path",
-        ));
-    }
-    let tail = path.trim_start_matches('/').replace('/', "\\");
-    Ok(if tail.is_empty() {
-        format!(r"\\wsl.localhost\{distro}")
-    } else {
-        format!(r"\\wsl.localhost\{distro}\{tail}")
+        )
     })
 }
 

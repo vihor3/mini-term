@@ -16,6 +16,7 @@ use mt_identity::{
 };
 
 use crate::pane::TerminalRecovery;
+use crate::tree::PaneStatus;
 
 use super::{AppStore, RemoteAgentProbeCapability};
 
@@ -41,6 +42,32 @@ pub struct AgentTargetView {
     pub received_at_unix_ms: i64,
     pub attention: bool,
     pub unread: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TerminalJumpTarget {
+    pub project_id: String,
+    pub execution_host_id: ExecutionHostId,
+    pub worktree_id: WorktreeId,
+    pub tab_id: TabId,
+    pub pane_key: PaneKey,
+    pub terminal_session_id: TerminalSessionId,
+    pub terminal_incarnation_id: Option<TerminalIncarnationId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalJumpView {
+    pub target: TerminalJumpTarget,
+    pub project_name: String,
+    pub root_project_name: String,
+    pub worktree_name: String,
+    pub host_label: String,
+    pub panel_label: String,
+    pub pane_label: String,
+    pub status: PaneStatus,
+    pub active: bool,
+    pub dormant: bool,
+    pub live: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,6 +239,23 @@ fn exact_terminal_route<'a>(
     })
 }
 
+fn terminal_jump_identity_matches(
+    target: &TerminalJumpTarget,
+    execution_host_id: &ExecutionHostId,
+    worktree_id: &WorktreeId,
+    tab_id: &TabId,
+    pane_key: &PaneKey,
+    terminal_session_id: &TerminalSessionId,
+    terminal_incarnation_id: Option<&TerminalIncarnationId>,
+) -> bool {
+    &target.execution_host_id == execution_host_id
+        && &target.worktree_id == worktree_id
+        && &target.tab_id == tab_id
+        && &target.pane_key == pane_key
+        && &target.terminal_session_id == terminal_session_id
+        && target.terminal_incarnation_id.as_ref() == terminal_incarnation_id
+}
+
 fn preferred_agent_route_project_id<'a>(
     candidate_project_ids: impl IntoIterator<Item = &'a str>,
     active_project_id: Option<&str>,
@@ -375,6 +419,175 @@ impl AppStore {
             .collect();
         targets.sort_by(compare_agent_targets);
         targets
+    }
+
+    /// Immutable terminal rows for global navigation. Saved panes remain
+    /// visible before hydration, while live panes carry their expected
+    /// incarnation so activation can reject a reused runtime route.
+    pub fn terminal_jump_views(&self) -> Vec<TerminalJumpView> {
+        let mut rows = Vec::new();
+        for project in &self.config.projects {
+            let Some(binding) = self.project_worktree_bindings.get(&project.id) else {
+                continue;
+            };
+            let Some(state) = self.project_states.get(&project.id) else {
+                continue;
+            };
+            let worktree_path = binding
+                .canonical_worktree_path
+                .as_deref()
+                .unwrap_or(project.path.as_str());
+            let host_label = self
+                .project_execution_snapshot(&project.id)
+                .map(|snapshot| snapshot.host_label)
+                .unwrap_or_else(|_| binding.execution_host_id.to_string());
+            let active_pane_id = self.active_pane_id(&project.id);
+            for (panel_index, panel) in state.panels.iter().enumerate() {
+                let panel_label = panel
+                    .custom_title
+                    .clone()
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| format!("Terminal {}", panel_index + 1));
+                for pane in panel.layout.panes() {
+                    let target = TerminalJumpTarget {
+                        project_id: project.id.clone(),
+                        execution_host_id: binding.execution_host_id.clone(),
+                        worktree_id: binding.worktree_id.clone(),
+                        tab_id: panel.tab_id.clone(),
+                        pane_key: pane.pane_key.clone(),
+                        terminal_session_id: pane.terminal_session_id.clone(),
+                        terminal_incarnation_id: pane.terminal_incarnation_id.clone(),
+                    };
+                    let live = pane.pty_id.is_some_and(|pty_id| {
+                        self.terminals.contains_key(&pty_id)
+                            && self.terminal_routes.get(&pty_id).is_some_and(|route| {
+                                route_matches_terminal(
+                                    route,
+                                    &target.execution_host_id,
+                                    &target.worktree_id,
+                                    &target.tab_id,
+                                    &target.pane_key,
+                                    &target.terminal_session_id,
+                                    target.terminal_incarnation_id.as_ref(),
+                                )
+                            })
+                    });
+                    let active = self.active_project_id.as_deref() == Some(project.id.as_str())
+                        && self.active_worktree_id() == Some(&binding.worktree_id)
+                        && state.active_panel().map(|active| &active.tab_id) == Some(&panel.tab_id)
+                        && active_pane_id.as_deref() == Some(pane.id.as_str());
+                    rows.push(TerminalJumpView {
+                        target,
+                        project_name: project.name.clone(),
+                        root_project_name: self.root_project_name_for(&project.id),
+                        worktree_name: path_leaf_label(worktree_path, &project.name),
+                        host_label: host_label.clone(),
+                        panel_label: panel_label.clone(),
+                        pane_label: self.pane_display_label(&project.id, pane),
+                        status: pane.status,
+                        active,
+                        dormant: pane.pty_id.is_none(),
+                        live,
+                    });
+                }
+            }
+        }
+        rows
+    }
+
+    fn resolve_terminal_jump_target(&self, target: &TerminalJumpTarget) -> Option<(String, bool)> {
+        let binding = self.project_worktree_bindings.get(&target.project_id)?;
+        if binding.execution_host_id != target.execution_host_id
+            || binding.worktree_id != target.worktree_id
+        {
+            return None;
+        }
+        let state = self.project_states.get(&target.project_id)?;
+        let panel = state
+            .panels
+            .iter()
+            .find(|panel| panel.tab_id == target.tab_id)?;
+        let pane = panel.layout.pane(target.pane_key.as_str())?;
+        if !terminal_jump_identity_matches(
+            target,
+            &binding.execution_host_id,
+            &binding.worktree_id,
+            &panel.tab_id,
+            &pane.pane_key,
+            &pane.terminal_session_id,
+            pane.terminal_incarnation_id.as_ref(),
+        ) {
+            return None;
+        }
+        let live = match pane.pty_id {
+            Some(pty_id) => {
+                self.terminals.contains_key(&pty_id)
+                    && self.terminal_routes.get(&pty_id).is_some_and(|route| {
+                        route_matches_terminal(
+                            route,
+                            &target.execution_host_id,
+                            &target.worktree_id,
+                            &target.tab_id,
+                            &target.pane_key,
+                            &target.terminal_session_id,
+                            target.terminal_incarnation_id.as_ref(),
+                        )
+                    })
+            }
+            None => false,
+        };
+        pane.pty_id.is_none_or(|_| live)
+            .then(|| (pane.id.clone(), live))
+    }
+
+    fn focus_terminal_jump_target(
+        &mut self,
+        target: &TerminalJumpTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((pane_id, live)) = self.resolve_terminal_jump_target(target) else {
+            return false;
+        };
+        self.set_active_project_without_hydration(&target.project_id, cx);
+        let Some((current_pane_id, current_live)) = self.resolve_terminal_jump_target(target) else {
+            return false;
+        };
+        if pane_id != current_pane_id || live != current_live {
+            return false;
+        }
+        if live {
+            if !self.activate_existing_pane(&target.project_id, &pane_id, window, cx) {
+                return false;
+            }
+        } else {
+            self.activate_pane(&target.project_id, &pane_id, window, cx);
+            // `activate_pane` hydrates when it changes panels, but an exact
+            // dormant pane may already belong to the active panel. Make that
+            // path perform the same ordinary project hydration as any other
+            // dormant terminal activation.
+            self.hydrate_project(&target.project_id, cx);
+        }
+        self.active_project_id.as_deref() == Some(target.project_id.as_str())
+            && self.active_worktree_id() == Some(&target.worktree_id)
+            && self.focused_pane_id.as_deref() == Some(pane_id.as_str())
+    }
+
+    /// Revalidate and focus exactly one saved/live terminal. A missing or
+    /// reused pane is inert; only an exact dormant pane may run its ordinary
+    /// hydration path.
+    pub fn activate_terminal_jump_target(
+        store: &Entity<Self>,
+        target: &TerminalJumpTarget,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        if !store.update(cx, |store, cx| {
+            store.focus_terminal_jump_target(target, window, cx)
+        }) {
+            return false;
+        }
+        crate::workbench_area::activate_terminal_page(window, cx)
     }
 
     fn agent_target_is_active(&self, target: &AgentTargetView) -> bool {
@@ -595,6 +808,18 @@ mod tests {
         }
     }
 
+    fn terminal_target(route: &AgentRoute) -> TerminalJumpTarget {
+        TerminalJumpTarget {
+            project_id: "project".into(),
+            execution_host_id: route.execution_host_id.clone(),
+            worktree_id: route.worktree_id.clone(),
+            tab_id: route.tab_id.clone(),
+            pane_key: route.pane_key.clone(),
+            terminal_session_id: route.terminal_session_id.clone(),
+            terminal_incarnation_id: Some(route.terminal_incarnation_id.clone()),
+        }
+    }
+
     #[test]
     fn exact_terminal_route_rejects_every_reused_identity_boundary() {
         let route = route();
@@ -676,6 +901,46 @@ mod tests {
             &route.terminal_session_id,
             &TerminalIncarnationId::new(),
         ));
+    }
+
+    #[test]
+    fn terminal_jump_target_rejects_each_stable_identity_mismatch() {
+        let route = route();
+        let target = terminal_target(&route);
+        let matches = |target: &TerminalJumpTarget| {
+            terminal_jump_identity_matches(
+                target,
+                &route.execution_host_id,
+                &route.worktree_id,
+                &route.tab_id,
+                &route.pane_key,
+                &route.terminal_session_id,
+                Some(&route.terminal_incarnation_id),
+            )
+        };
+        assert!(matches(&target));
+        let mut changed = target.clone();
+        changed.execution_host_id = ExecutionHostId::derive("other", &HostInstallId::new());
+        assert!(!matches(&changed));
+        let mut changed = target.clone();
+        changed.worktree_id = WorktreeId::derive(
+            &RepoId::derive(&route.execution_host_id, "/other/.git"),
+            "/other",
+            None,
+        );
+        assert!(!matches(&changed));
+        let mut changed = target.clone();
+        changed.tab_id = TabId::new();
+        assert!(!matches(&changed));
+        let mut changed = target.clone();
+        changed.pane_key = PaneKey::new();
+        assert!(!matches(&changed));
+        let mut changed = target.clone();
+        changed.terminal_session_id = TerminalSessionId::new();
+        assert!(!matches(&changed));
+        let mut changed = target;
+        changed.terminal_incarnation_id = Some(TerminalIncarnationId::new());
+        assert!(!matches(&changed));
     }
 
     #[test]

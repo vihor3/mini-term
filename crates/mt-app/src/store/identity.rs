@@ -332,6 +332,17 @@ impl AppStore {
         }
     }
 
+    /// Canonical path that is safe to use for catalog dedupe. Authoritative
+    /// aliases are returned only when their resolver-owned provenance still
+    /// matches the current project and execution-host configuration.
+    pub(crate) fn trusted_canonical_worktree_path_for_project(
+        &self,
+        project_id: &str,
+    ) -> Option<&str> {
+        self.project(project_id)
+            .and_then(|project| self.onboarding_canonical_path_for_project(project))
+    }
+
     /// Immutable command-routing facts for one configured project/worktree.
     /// The caller may move this snapshot to a background thread, but must
     /// re-resolve and compare it before applying a completion.

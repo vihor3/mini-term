@@ -654,7 +654,7 @@ impl TitleBar {
     ) -> AnyElement {
         let mut panel = div()
             // 焦点收在面板上,免得下拉开着时打字落进终端。原版没有 Esc 关闭、
-            // 也没有键盘导航(那是 `ProjectSwitcher` / audit #26 的事),所以这里
+            // 也没有键盘导航(那是全局 Quick Open 的事),所以这里
             // 只登记焦点、不挂按键。
             .track_focus(&self.focus)
             .flex()

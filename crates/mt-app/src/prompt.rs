@@ -180,7 +180,7 @@ pub fn is_open(kind: &'static str) -> bool {
 /// 排在它后面直接 focus 虽然通常也能赢,但 `window.defer` 让这一手稳稳落在
 /// **本轮 effect 全部跑完之后**,不必去推敲弹窗内部还会不会再动焦点。
 /// 输入框元素这时尚未画出并不要紧:`window.focus` 只记 id,下一帧
-/// `track_focus` 自会接上(`project_switcher` / `search_modal` 一直这么用)。
+/// `track_focus` 自会接上(`jump_palette` / `search_modal` 一直这么用)。
 ///
 /// # 与 Dialog 键位的关系
 ///

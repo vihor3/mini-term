@@ -1398,6 +1398,7 @@ impl GitPanel {
                         false,
                         None,
                         move |cx| {
+                            crate::worktree_catalog::force_refresh_global(cx);
                             this.update(cx, |this, cx| {
                                 if this.scope_matches(&scope) {
                                     this.load_repos(cx);

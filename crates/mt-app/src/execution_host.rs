@@ -136,6 +136,93 @@ impl ProjectExecutionSnapshot {
     }
 }
 
+/// Normalize an execution-host POSIX path without borrowing local filesystem
+/// semantics. WSL and SSH paths are case-sensitive and may not escape root.
+pub fn normalize_absolute_posix_path(path: &str) -> Result<String, String> {
+    if !path.starts_with('/') || path.contains('\0') {
+        return Err(format!("execution-host path must be absolute POSIX: {path}"));
+    }
+    let mut segments = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                return Err(format!(
+                    "execution-host path cannot contain `..`: {path}"
+                ));
+            }
+            value => segments.push(value),
+        }
+    }
+    Ok(if segments.is_empty() {
+        "/".into()
+    } else {
+        format!("/{}", segments.join("/"))
+    })
+}
+
+/// Convert a WSL-owned POSIX path to the canonical host-visible UNC spelling
+/// used at project registration and persistence boundaries.
+pub fn wsl_host_visible_path(distro: &str, path: &str) -> Result<String, String> {
+    if distro.is_empty() || distro.contains('\0') {
+        return Err("WSL distribution identity is invalid".into());
+    }
+    let path = normalize_absolute_posix_path(path)?;
+    if path == "/" {
+        Ok(format!(r"\\wsl.localhost\{distro}"))
+    } else {
+        Ok(format!(
+            r"\\wsl.localhost\{distro}\{}",
+            path.trim_start_matches('/').replace('/', "\\")
+        ))
+    }
+}
+
+/// Host-qualified canonical key for configured Local/WSL project paths. WSL
+/// aliases (`wsl$` and `wsl.localhost`) collapse to distro plus POSIX path,
+/// while native local paths retain the platform comparison rules.
+pub fn normalize_host_visible_project_path(path: &str) -> Result<String, String> {
+    if path.is_empty() || path.contains('\0') {
+        return Err("configured project path is invalid".into());
+    }
+    if let Some(wsl) = mt_core::parse_wsl_unc(&path.replace('/', "\\")) {
+        return Ok(format!(
+            "wsl:{}:{}",
+            wsl.distro.to_lowercase(),
+            normalize_absolute_posix_path(&wsl.unix_path)?
+        ));
+    }
+    Ok(format!(
+        "local:{}",
+        mt_project::worktree::normalize_path_for_comparison(path)
+    ))
+}
+
+/// Resolve the exact configured project folder into the spelling understood
+/// by its execution backend. Catalog discovery uses this rather than a
+/// persisted canonical binding so the folder the user added remains the Git
+/// scan anchor.
+pub fn configured_execution_path(
+    backend: &ExecutionBackend,
+    configured_path: &str,
+) -> Result<String, String> {
+    if configured_path.is_empty() || configured_path.contains('\0') {
+        return Err("configured project path is invalid".into());
+    }
+    match backend {
+        ExecutionBackend::Local => Ok(configured_path.to_string()),
+        ExecutionBackend::Wsl { distro } => {
+            let parsed = mt_core::parse_wsl_unc(&configured_path.replace('/', "\\"))
+                .ok_or_else(|| "configured WSL project path is not a WSL UNC path".to_string())?;
+            if !parsed.distro.eq_ignore_ascii_case(distro) {
+                return Err("configured WSL project path belongs to another distribution".into());
+            }
+            normalize_absolute_posix_path(&parsed.unix_path)
+        }
+        ExecutionBackend::Ssh { .. } => normalize_absolute_posix_path(configured_path),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlannedHostCommand {
     Process {
@@ -937,6 +1024,62 @@ mod tests {
 
     fn command() -> CommandPlan {
         CommandPlan::new("gh", ["issue", "list", "--repo", "host/o/r"])
+    }
+
+    #[test]
+    fn host_posix_normalization_and_wsl_projection_are_case_preserving() {
+        assert_eq!(
+            normalize_absolute_posix_path("/srv/Repo/./feature/").unwrap(),
+            "/srv/Repo/feature"
+        );
+        assert!(normalize_absolute_posix_path("srv/repo").is_err());
+        assert!(normalize_absolute_posix_path("/srv/../repo").is_err());
+        assert_eq!(
+            wsl_host_visible_path("Ubuntu", "/home/User/repo").unwrap(),
+            r"\\wsl.localhost\Ubuntu\home\User\repo"
+        );
+    }
+
+    #[test]
+    fn configured_scan_anchor_stays_on_its_owning_backend() {
+        assert_eq!(
+            configured_execution_path(&ExecutionBackend::Local, "/repo/./linked").unwrap(),
+            "/repo/./linked"
+        );
+        assert_eq!(
+            configured_execution_path(
+                &ExecutionBackend::Wsl {
+                    distro: "Ubuntu".into(),
+                },
+                r"\\wsl$\ubuntu\home\User\linked",
+            )
+            .unwrap(),
+            "/home/User/linked"
+        );
+        assert!(
+            configured_execution_path(
+                &ExecutionBackend::Wsl {
+                    distro: "Debian".into(),
+                },
+                r"\\wsl$\Ubuntu\home\User\linked",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn host_visible_project_keys_collapse_wsl_unc_aliases_only() {
+        assert_eq!(
+            normalize_host_visible_project_path(r"\\wsl$\Ubuntu\home\User\repo").unwrap(),
+            normalize_host_visible_project_path(
+                r"\\wsl.localhost\ubuntu\home\User\repo\"
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            normalize_host_visible_project_path(r"\\wsl$\Ubuntu\home\User\repo").unwrap(),
+            normalize_host_visible_project_path(r"\\wsl$\Ubuntu\home\user\repo").unwrap()
+        );
     }
 
     #[cfg(target_os = "linux")]
