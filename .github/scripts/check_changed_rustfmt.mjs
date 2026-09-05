@@ -163,25 +163,18 @@ console.log(
   `rustfmt baseline ignored outside changed lines: ${ignoredBaseline}; changed-line formatting hunks: ${relevant.length}`,
 );
 const patchPath = process.env.RUSTFMT_PATCH_PATH;
+// Relevance selects files, not independently applicable formatting edits. Import
+// moves and later hunk offsets require every formatting hunk in each such file.
+const fullPatch = fullDiffs.join("");
 if (patchPath && relevant.length > 0) {
-  const byFile = new Map();
-  for (const hunk of relevant) {
-    const hunks = byFile.get(hunk.file) ?? [];
-    hunks.push(hunk.text);
-    byFile.set(hunk.file, hunks);
-  }
-  const patch = [...byFile.entries()]
-    .map(
-      ([file, hunks]) =>
-        [`--- a/${file}`, `+++ b/${file}`, ...hunks].join("\n"),
-    )
-    .join("\n");
-  fs.writeFileSync(patchPath, `${patch}\n`);
-  console.error(`wrote changed-line rustfmt patch to ${patchPath}`);
+  fs.writeFileSync(patchPath, fullPatch);
+  console.error(
+    `wrote complete rustfmt patch to ${patchPath} (includes baseline hunks only in files with changed-line differences)`,
+  );
 }
 const fullPatchPath = process.env.RUSTFMT_FULL_PATCH_PATH;
 if (fullPatchPath && fullDiffs.length > 0) {
-  fs.writeFileSync(fullPatchPath, fullDiffs.join(""));
+  fs.writeFileSync(fullPatchPath, fullPatch);
   console.error(`wrote full-context rustfmt diagnostic patch to ${fullPatchPath}`);
 }
 if (relevant.length > 0) {

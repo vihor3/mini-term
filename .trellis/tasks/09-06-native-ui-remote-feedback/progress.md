@@ -15,27 +15,31 @@
 
 | Child | State | Evidence |
 | --- | --- | --- |
-| native-terminal-navigation | Actions corrections | `c3eefa7` pushed; i18n passes, residual titlebar formatting patch staged; Windows compile in progress |
-| native-agent-ownership-status | Implementing | Activated; lower-layer implementation dispatched without overlapping navigation files |
-| native-file-browser | Implementing | Activated for disjoint onboarding/browser slice while Agent integration continues |
-| native-remote-git | Implementing | Disjoint mt-project command/parser work activated; app integration not yet dispatched |
-| native-tasks-gh-accounts | Implementing | Disjoint mt-github account domain activated; app/secret executor not yet dispatched |
+| native-terminal-navigation | Actions corrections | `4947f55` format/i18n and Linux/Windows compilation pass; three Clippy corrections assigned, tests/package pending |
+| native-agent-ownership-status | Implementing / Reviewing | Lower layer source-complete under independent check; app integration still implementing |
+| native-file-browser | Reviewing | Onboarding/browser source-complete; FileTree independent review includes upload epoch-pinning |
+| native-remote-git | Implementing / Reviewing | Domain under independent check; host adapter/coordinator implementing; Git UI not yet dispatched |
+| native-tasks-gh-accounts | Implementing | Domain final source pass resumed, then dedicated secret-safe executor; Tasks UI/config not yet dispatched |
 
 ## Current Dispatch
 
-Main active task: `.trellis/tasks/09-06-native-tasks-gh-accounts`.
+Main active task: `.trellis/tasks/09-06-native-remote-git`.
 Navigation remains open pending Actions and native acceptance, not archived.
 Agent implementation remains in progress under the explicit owners below.
-The default serialized delivery order is relaxed only for disjoint onboarding,
-FileTree and transport-free Git/GitHub domain files. Shared store/main/
-execution-host ownership and integrated review remain coordinated and
-serialized. This changes scheduling, not the approved product scope.
+The default serialized delivery order is relaxed only for explicitly disjoint
+source slices. Shared store/main/execution-host ownership and integrated review
+remain coordinated. This changes scheduling, not the approved product scope.
 
 Current lower-layer implementer: `01a07372-7fd4-7420-9760-88ef3afa4b70`
 (Epicurus), owning `mt-ai/src` plus focused tests, `mt-ssh/src/agent.rs` and
 narrow exports/tests, and `mt-pty/src/ssh.rs` plus needed exports/tests. It may
 not edit mt-app/config/layout/ui, workflows or task metadata. It must hand off
 bounded ownership/activity APIs in the Agent child's `lower-layer-handoff.md`.
+Epicurus is now source-complete and closed. Lower-layer checker
+`01a0739f-6b07-71b1-a29d-99eb0bb1f750` (Leibniz) owns that same bounded source/
+fixture scope and `lower-layer-review.md`. It must not edit app/spec/workflow;
+main forwards any API/finding notes to Rawls. The implementation fixtures and
+tests are authored only, with no executed results yet.
 App implementer: `01a07379-8615-7cd1-a4a2-68701d4cbb35` (Rawls), owning
 `store/{remote_agents,ai,context}.rs`, catalog/sidebar/Sessions/remote_ssh and
 narrow store declarations. It coordinates lower-layer APIs directly with
@@ -43,6 +47,10 @@ Epicurus and records `app-handoff.md`. Navigation formatting was staged before
 this dispatch, keeping its CI correction separate from new Agent changes.
 Main also authorized narrow `pane_actions.rs` and `title_bar.rs` changes for
 exact-owned Agent liveness/title integration, preserving all navigation fences.
+After reading its draft handoff, main also authorized `agent_activity.rs`
+freshness presentation/fixture, `store/projects.rs` necessary test initializer,
+and a narrow `pane.rs`/`store/panes.rs` real title-event capture path. Its needed
+remote title lookup lives in `remote_ssh/sessions.rs`, not general SSH exec.
 Resumed navigation checker James owns only `menu.rs` and the unused search-bar
 import for the current compiler diagnostic; there is no write overlap.
 That focused correction is now source-complete and James is closed again;
@@ -53,21 +61,58 @@ Onboarding implementer `01a0737c-6d5f-7152-9936-5707a1867101` (Raman) owns
 locale sources, recording `onboarding-handoff.md`. It may not edit FileTree,
 store/main, remote_ssh, execution-host code, specs or workflows. Agent owners
 were notified that their captured task/scope remains unchanged by this pointer.
+Its draft handoff found unpinned remote browsing. Main authorized browser-only
+`remote_ssh/dirs.rs` changes plus existing `RemoteProjectContext`/session-check
+helper visibility in `project_ops.rs`; no mutation semantics or generic exec
+changes. `pub use dirs::*` already exports the resulting API.
+Raman is now source-complete and closed. Its full browser and epoch-pinned
+listing have authored regression coverage only. An independent source check,
+Actions gates and native acceptance remain open; its handoff explicitly records
+the existing SFTP readdir materialization and opaque error limitations.
 
 FileTree implementer `01a0737d-cad5-7f51-b3d9-8cf32bf2c7ae` (Parfit) owns
 `file_tree/`, narrowly the main Files sizing chain if needed, and FileTree locale
 sources. It records `file-tree-handoff.md`; no store/host/onboarding ownership.
+Parfit is now complete and closed. Reviewer Pauli
+`01a073b9-fd9f-77f2-9d28-fd32e7eadd70` owns those files and the narrow
+`remote_ssh/transfer.rs` epoch-pinned upload variants needed by FileTree. Legacy
+upload callers are preserved. It records `file-tree-review.md`.
 
 Git domain implementer `01a0737f-42ef-73f2-8e2a-49b1ec476efb` (Turing) owns
 only `mt-project` Git plans/parsers and narrow DTO/diff exports/tests, recording
 `domain-handoff.md`. It must hand off transport-free APIs early. No dependency,
 app/SSH, workflow or spec edits are assigned; app integration is not dispatched.
+That initial domain slice is complete and released to reviewer McClintock
+`01a073bc-d8ba-77c2-9822-07fc11343632`, limited to `mt-project` Git files/tests
+and `domain-review.md`. Turing now owns new `git_backend` and
+`remote_ssh/git_ops.rs` modules, narrow execution-host helpers and module wiring.
+It records `backend-handoff.md`; full Git UI and worktree finalization are a
+later separately owned slice. No UI remote guard is enabled prematurely.
 
 Tasks domain implementer `01a07384-8b00-7363-9f9b-84b36d2b9c8e` (Copernicus)
 owns only transport-free `mt-github` account plans/models/parsers/errors and
 focused tests, recording its child's `domain-handoff.md`. No process/credential
 handling, config/app/SSH changes or real-account probes are authorized. App
 selection and the dedicated secret executor are not dispatched yet.
+Main interrupted/parked this owner after its source/17-test authorship handoff
+to free the six-agent limit for the urgent CI review. It is closed, NOT declared
+feature-complete. Resume it after the blocker review for its final source pass,
+or route its explicitly unfinished handoff to a checker before app integration.
+Copernicus is now resumed for its domain final source pass, then new
+`tasks_account_executor` and narrowly `remote_ssh/tasks_accounts.rs` plus module
+wiring. It may not edit Turing's execution_host.rs; helper requests go through
+main. Config/Tasks UI/store and generic SSH libraries remain outside its scope.
+
+Resumed James `01a07327-8943-7030-85bc-3bbcd8f33159` now owns only the changed-
+rustfmt diagnostic script, focused Node tests, the corresponding added Actions
+test step, and a navigation formatter follow-up report. It audits the committed
+navigation-only `d50f616..c90ff13` delta against the original full artifact for
+partial-hunk damage; source fixes outside that write set are coordinated through
+main. Rawls owns and has restored the two known panes.rs defects below.
+James completed and is closed. Both diagnostic paths now contain complete U3
+patches; four actual production-script/application fixtures and their Actions
+step are authored. The bounded 26-file source audit found no further damage.
+Main records the prevention contract and adds Windows Files/browser test steps.
 
 ### Completed Navigation Dispatches
 
@@ -202,6 +247,43 @@ only one old Polyline wrap and two nearby duplicate blank lines remain. That
 three-hunk titlebar patch is mechanically applied/staged without staging Rawls's
 new Agent edits in the same file. The remaining historical formatting is left
 alone; no local formatter/check was run and no gate was weakened.
+
+`c90ff131039792c5d1202749ccf3841846e9f93e` commits that exact three-hunk
+Actions titlebar patch plus scoped activation/progress bookkeeping. Agent,
+Files and domain edits remain unstaged. CI is
+https://github.com/vihor3/mini-term/actions/runs/33993926699 and Windows Package
+is https://github.com/vihor3/mini-term/actions/runs/33993926710; both are pending
+results and supersede the cancelled third run. Main has started updating the
+mt-ai successor contract from the implemented semantic acceptance API; final
+source review may refine it, and it is not execution evidence.
+
+The fourth candidate's format/i18n gates pass. Latest observed CI jobs
+`101380936776` (Linux) and `101380936899` (Windows) are compiling. No completed
+tests, full CI result or package acceptance has been reported for `c90ff13`.
+
+Subagent messaging is unavailable inside the implementer tool sets. They write
+early API/blocker notes to handoffs; main must read/forward those notes instead
+of assuming peer `send_input` worked. Main forwarded lower-layer Agent APIs to
+Rawls and resolved the app title/liveness and browser epoch write-scope requests.
+
+The fourth CI completed FAILING at Linux/Windows compile. All tests/lint after
+compilation remain unexecuted. Diagnostics: Linux job `101380936776`, Windows
+job `101380936899`. The first partial `-U0` artifact omitted the insertion side
+of a moved `use super::{AppStore, ProjectState, TerminalJumpTarget}` in panes.rs;
+it also placed a lifecycle-test `states` declaration after its use. The result
+produced 82/86 cascading app errors, not proof of 82 independent defects. Main
+disclosed the artifact-application mistake to the user and asked Rawls to restore
+both; source inspection now confirms those two fixes, still unstaged.
+James must change machine-applicable diagnostics to complete full-context
+rustfmt output for affected files while preserving changed-line-only gating,
+and author actual patch-application regressions for Actions. Main must not apply
+the old partial-hunk artifacts again. No local formatter, Node test, compilation
+or automated verification has run. All currently unstaged feature work is kept.
+Rawls's two corrections were manually isolated into a full-context index-only
+staging patch at `~/.cache/mini-term/actions/33993926699/navigation-source-repair.patch`.
+The concurrently added `PaneEvent::TitleChanged` branch is excluded. Main
+committed/pushed those two restorations separately while formatter source review
+continues. The fourth Windows package run failed at GPUI compilation as well.
 Main has updated the existing workbench identity and worktree layout specs for
 the implemented flat navigation boundary. Reviewer/source follow-ups may refine
 them; documentation is not execution evidence.
@@ -211,3 +293,21 @@ unit fixtures choose `cmd.exe` on Windows; Unix IPC integration stays Unix-only.
 No workflow, test or fixture was executed locally. Apply only Actions-produced
 formatting/i18n diagnostic patches and coordinated source fixes, then obtain
 fresh exact-commit evidence before claiming validation.
+
+`4947f5542636d4ca95c487772c941ffca53b4181` commits just the two panes.rs
+source restorations. CI `33996331503` and Windows Package `33996331532` refer to
+that exact SHA. Linux format/i18n, staging tests, locked graphs and workspace/
+sidecar compilation pass; Windows affected-package compilation passes. Linux
+Clippy job `101387417299` reports sidebar redundant closure, store tests before
+production items, and one needless test borrow. Rawls owns these files and has
+the exact three corrections. Later Linux tests are skipped, not passed. Latest
+Windows job `101387417542` is running onboarding tests; package job
+`101387417437` is building the app. No full gate or installer is accepted.
+
+Agent lower review fixed rejection epoch side effects, unchanged weak-poll
+presentation identity, semantic capture epoch, and bounded probe framing/races.
+Main approved its remaining P1 correlation repair: weak process evidence cannot
+borrow an unbound Hook by provider alone. Exact process/session proof is needed;
+singleton weak-PTY upgrades require pre-batch uniqueness, and independent
+same-provider processes must survive in either order. Leibniz continues that
+bounded follow-up and authors production-login execution coverage for Actions.

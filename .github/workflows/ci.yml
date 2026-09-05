@@ -83,6 +83,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Test changed Rust formatting diagnostics
+        run: node --test tests/changedRustfmt.test.cjs
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
@@ -234,6 +237,16 @@ jobs:
           cargo test --locked --target x86_64-pc-windows-msvc \
             -p mt-app --bin mini-term --no-fail-fast \
             remote_ssh::project_ops
+
+      - name: Run file browser regressions
+        shell: bash
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-app --bin mini-term --no-fail-fast \
+            file_tree::tests
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-app --bin mini-term --no-fail-fast \
+            remote_directory_picker
 
       - name: Check sidecars
         run: cargo check --manifest-path sidecars/Cargo.toml --locked --target x86_64-pc-windows-msvc --all-targets

@@ -142,3 +142,78 @@ locked root + sidecar graphs on GitHub Actions
 
 Each transition consumes a fully validated predecessor and leaves no ambiguous
 partial release state after failure.
+
+## Scenario: Actions Formatting Diagnostics
+
+### 1. Scope / Trigger
+
+Use this boundary when the pre-release CI formatter reports changed-line
+violations and uploads a patch for source repair. Diagnostic relevance and a
+safe source transformation are different contracts.
+
+### 2. Signatures
+
+Runner-only entry points:
+
+```text
+node .github/scripts/check_changed_rustfmt.mjs <base-sha>
+node --test tests/changedRustfmt.test.cjs
+RUSTFMT_PATCH_PATH=changed-rustfmt.patch
+RUSTFMT_FULL_PATCH_PATH=full-rustfmt.patch
+```
+
+### 3. Contracts
+
+- Changed-line intersection controls failure; historical formatting entirely
+  outside changed lines remains non-failing. Baseline-only and untouched files
+  are not included in an applicable artifact.
+- Once a file has a relevant formatting violation, BOTH patch paths contain
+  its complete `diff -U3` transformation to rustfmt output. Retain every hunk
+  in that file, including historical ones. The legacy `changed-rustfmt.patch`
+  name does not mean individual hunks may be discarded.
+- Selected `-U0` hunks are console diagnostics only. They may omit half an
+  import move and retain offsets assuming omitted edits occurred. They must
+  never be presented or applied as an independent source repair.
+- Produce and test artifacts only in Actions. Source repair may mechanically
+  apply downloaded complete patches, preserving unrelated work. A follow-up
+  source commit needs fresh Actions evidence. Never regenerate/check locally
+  or use `--unidiff-zero` to relax artifact application.
+- Fixing the producer does not repair old incomplete applications. Compare
+  affected committed source with the original complete artifact, restore lost
+  content through its current owner, and keep concurrent feature edits separate.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Changed import is moved onto baseline lines | Artifact retains deletion and insertion |
+| Earlier historical formatting changes later hunk offsets | Include the full file transformation with context |
+| Only baseline formatting differs | Exit zero and produce no applicable patch |
+| Two files have relevant changes, another is baseline-only | Complete patches for the two affected files only |
+| Patch fails normal contextual application | Stop and reconcile source ownership; do not force offsets |
+| Old partial patch compiled incorrectly or lost content | Restore from original source/full artifact; rerun all affected gates |
+
+### 5. Good / Base / Bad
+
+- Good: a moved import and its unchanged-line insertion travel in one complete
+  artifact, which reproduces the formatter's full file output.
+- Base: a changed comment does not force unrelated historical formatting.
+- Bad: discard nonintersecting hunks and assume the remainder preserves Rust
+  semantics because the original full transformation came from rustfmt.
+
+### 6. Tests Required
+
+The four production-script fixtures exercise import moves, split declaration
+hunks after ignored offsets, unchanged baseline gating, and multiple files.
+Both public artifacts must apply with ordinary `git apply`, reproduce the full
+expected formatter output, and leave excluded files unchanged. Run after Setup
+Rust in Actions. Compilation/lint/tests and exact-SHA package verification are
+still required; patch-application tests alone do not validate the product.
+
+### 7. Wrong vs Correct
+
+Wrong: upload independent changed-line `-U0` hunks and apply with relaxed context.
+
+Correct: use changed lines to select violations/files, upload complete per-file
+`-U3` patches, apply them without relaxing context, then validate the resulting
+commit through Actions.
