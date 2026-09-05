@@ -5,8 +5,9 @@
 ### 1. Scope / Trigger
 
 Use this contract when `mt-app` schedules an authenticated SSH Agent inventory,
-accepts its result, recreates poll state, handles a remote-runtime gap, or
-projects activity/connectivity into panes and Agent feeds. `mt-app` owns route
+accepts its result, recreates poll state, handles a remote-runtime gap or
+natural PTY exit, or projects activity/connectivity into panes and Agent feeds.
+`mt-app` owns route
 and scheduling facts; `mt-ssh` owns authenticated process discovery.
 
 ### 2. Signatures
@@ -59,9 +60,32 @@ MINI_TERM_REMOTE_AGENT_STATUS=0
   run also emits no connectivity event, and a hysteresis-suppressed inventory
   does not reserve an event sequence before it becomes eligible to apply.
 - Recent PTY output plus a live matched process projects `ai-working`; a quiet
-  live process projects `ai-idle`. Two successful empty Linux inventories are
-  required to retire prior process evidence. The first empty result is a race
-  window.
+  live process projects `ai-idle`, subject to the registry's accepted state and
+  stronger evidence. Presence plus recency is not provider-semantic completion
+  telemetry. Two successful empty Linux inventories are required to retire
+  prior process evidence. The first empty result is a race window.
+- For routed Agent observations, call registry acceptance before changing
+  legacy pane/project status, attention, Git-watcher flags, or completion
+  notifications. `AgentApplyOutcome::Ignored` permits none of those effects;
+  `Applied` projects the accepted registry state, not the weak incoming value.
+  An ordinary non-Agent shell observation is a separate compatibility path,
+  not an ignored Agent event. Inventory success likewise projects current
+  accepted state because individual observations may have been rejected.
+- A Hook exit with no provider cannot borrow the newest route provider from a
+  process-attested run. Resolve a unique current Hook owner, retain its exact
+  session/process identity, and reject ambiguous ownership before side effects.
+  Never let generic same-provider fallback redirect an exact Hook exit to a
+  different run. Ordinary non-Agent shell fallback is unaffected.
+- Accepted confirmed absence may clear the exact route's contradicted weak
+  tracker latch only after the last process-attested run retires and no
+  stronger live Hook/run remains. Keep the terminal registration and two-empty
+  hysteresis. An empty inventory for a never-attested heuristic session, a
+  probe failure, or a reconnect cannot trigger blanket tracker expiry.
+- Natural PTY exit retires that incarnation's local observation sources and
+  poll eligibility, making queued events and inventory completions inert.
+  Cleanup is idempotent with explicit close/detach. Retain remote last-known
+  semantic activity with disconnected/stale connectivity: a transport exit
+  does not prove that its remote process exited. Preserve warm-attach identity.
 - Hook-enabled panes retain Hook authority. Without Hook, weak PTY idle/error
   cannot clear a current process-attested run while the feature is enabled.
   Unsupported/probe failures preserve activity and update only bounded
@@ -71,6 +95,12 @@ MINI_TERM_REMOTE_AGENT_STATUS=0
   never exported remotely.
 - Exact value `0` disables route injection and remote polling. Local Hook/PTY
   perception and the existing four-state UI continue unchanged.
+- Sidebar indicators separate semantic activity, connectivity, and attention.
+  Only live Starting/Working may animate, and attention/error takes priority.
+  Waiting/Blocked/Done/error are steady. Stale/disconnected Working retains its
+  activity but has no live-work spinner. Catalog refresh/warnings cannot create
+  Agent activity; no rich evidence uses ordinary legacy fallback. Keep stable
+  indicator geometry and the existing one-way four-state compatibility map.
 
 ### 4. Validation & Error Matrix
 
@@ -85,6 +115,13 @@ MINI_TERM_REMOTE_AGENT_STATUS=0
 | Project, path, connection, fingerprint, route, or epoch changes | Reject the old completion |
 | Capability is unsupported | Preserve activity; show unsupported capability separately |
 | Probe fails | Preserve activity; publish bounded stale/disconnected diagnostics only |
+| PTY Working sequence 10 arrives after accepted Waiting sequence 11 | Reject without legacy/attention/completion changes |
+| Weaker observation is accepted beneath Hook state | Project the retained Hook semantics, not the incoming status |
+| Independent accepted runs share a route | Aggregate all runs; evidence precedence is not route-wide suppression |
+| Provider-less Hook exit follows another provider's process observation | Retire only the exact Hook owner or reject unresolved ownership |
+| Last attested run retires after confirmed absence | Clear only contradicted weak tracking; later shell output cannot resurrect it |
+| Natural PTY exit precedes a queued observer/poll completion | Ignore old work; remote activity is retained as disconnected/stale |
+| Working run loses connectivity | Preserve semantic activity without live spinner |
 | Feature value is exactly `0` | Disable remote route injection and polling |
 
 ### 5. Good / Base / Bad Cases
@@ -99,6 +136,8 @@ MINI_TERM_REMOTE_AGENT_STATUS=0
   the two-confirmation retirement contract.
 - Bad: Emit a fresh connectivity event on every timer tick; Waiting/Done rows
   would repeatedly become unread without a state change.
+- Bad: Set `pane.status` before observing the rich event; registry rejection
+  cannot undo already-emitted attention, notifications, or project aggregation.
 
 ### 6. Tests Required
 
@@ -113,6 +152,17 @@ MINI_TERM_REMOTE_AGENT_STATUS=0
   emit no new event, while changed connectivity or epoch is accepted.
 - SSH launcher tests preserve exact route values and incarnation equality.
 - Linux focused tests plus Windows MSVC checks compile scheduling and projection.
+- Accepted-projection tests cover stale sequence/epoch, Hook priority, ordinary
+  shell fallback, multiple exact-route processes, provider-less Hook exits,
+  ambiguous owner rejection, and mixed panes with legacy fallback.
+- Retirement tests cover two-empty confirmation, stronger-owner preservation,
+  shell output after retirement, a later genuine launch, natural PTY exit,
+  delayed event/poll rejection, and idempotent teardown.
+- Presentation tests cover live work, steady waiting/approval/completion/error,
+  offline/stale work, no evidence, and catalog-progress independence.
+- All checks and disposable fixture execution run only in GitHub Actions.
+  Record native startup cadence separately using a matching Actions artifact;
+  static source review and compiler success are not runtime reproduction.
 
 ### 7. Wrong vs Correct
 

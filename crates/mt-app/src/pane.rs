@@ -651,6 +651,9 @@ impl TerminalPane {
                 if this
                     .update(cx, |pane, cx| {
                         pane.drain_term_events(cx);
+                        if disconnected.is_some() || exit.is_some() {
+                            pane.ai.remove_pane(pane.pty_id);
+                        }
                         if let Some(error) = disconnected.as_ref() {
                             pane.transport = None;
                             pane.backend_notice = Some(format!(

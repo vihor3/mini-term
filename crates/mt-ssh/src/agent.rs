@@ -364,7 +364,10 @@ if [ ! -d /proc ] || ! command -v tr >/dev/null 2>&1 || ! command -v head >/dev/
 fi
 printf 'capability=linux-proc\n'
 count=0
+# Expand only the fixed process list; argv and stat splitting stay literal.
+set +f
 for proc in /proc/[0-9]*; do
+  set -f
   [ -r "$proc/environ" ] || continue
   env_lines=$(tr '\000' '\n' < "$proc/environ" 2>/dev/null) || continue
   has_line() {{
@@ -503,6 +506,213 @@ mod tests {
         assert!(command.contains("printf 'agent\\t%s\\t%s\\t%s\\n'"));
         assert!(!command.contains("printf '%s' \"$env_lines\""));
         assert!(!command.contains("printf '%s' \"$args\""));
+    }
+
+    #[cfg(target_os = "linux")]
+    mod generated_probe {
+        use super::*;
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::os::unix::process::CommandExt;
+        use std::path::{Path, PathBuf};
+        use std::process::{Child, Command, ExitStatus, Stdio};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        const TIMEOUT: Duration = Duration::from_secs(10);
+        const READY: &str = "mini-term-probe-fixture-ready";
+
+        struct OwnedChild(Child);
+
+        impl OwnedChild {
+            fn wait(&mut self) -> ExitStatus {
+                let deadline = Instant::now() + TIMEOUT;
+                loop {
+                    if let Some(status) = self.0.try_wait().unwrap() {
+                        return status;
+                    }
+                    assert!(Instant::now() < deadline, "probe child did not exit");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                // Only children created by this test are ever terminated.
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        struct FixtureDirectory(PathBuf);
+
+        impl FixtureDirectory {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "mini-term-agent-probe-{}",
+                    TerminalSessionId::new()
+                ));
+                std::fs::create_dir(&path).unwrap();
+                std::fs::write(path.join("codex"), b"").unwrap();
+                Self(path)
+            }
+        }
+
+        impl Drop for FixtureDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        #[test]
+        #[ignore = "subprocess fixture for generated_probe tests"]
+        fn linux_probe_fixture() {
+            if std::env::var_os("MINITERM_PROBE_TEST_FIXTURE").is_none() {
+                return;
+            }
+            println!("{READY}");
+            std::io::stdout().flush().unwrap();
+            let mut shutdown = [0];
+            let _ = std::io::stdin().read(&mut shutdown).unwrap();
+        }
+
+        fn fixture(route: &RemoteAgentRoute, argv0: &str, cwd: &Path) -> OwnedChild {
+            let mut child = OwnedChild(
+                Command::new(std::env::current_exe().unwrap())
+                    .arg0(argv0)
+                    .args([
+                        "--exact",
+                        "agent::tests::generated_probe::linux_probe_fixture",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env_clear()
+                    .env("MINITERM_PROBE_TEST_FIXTURE", "1")
+                    .env("MINITERM_AGENT_PROTOCOL_VERSION", route.protocol_version.to_string())
+                    .env("MINITERM_EXECUTION_HOST_ID", route.execution_host_id.as_str())
+                    .env("MINITERM_WORKTREE_ID", route.worktree_id.as_str())
+                    .env("MINITERM_TAB_ID", route.tab_id.as_str())
+                    .env("MINITERM_PANE_KEY", route.pane_key.as_str())
+                    .env("MINITERM_TERMINAL_SESSION_ID", route.terminal_session_id.as_str())
+                    .env(
+                        "MINITERM_TERMINAL_INCARNATION_ID",
+                        route.terminal_incarnation_id.as_str(),
+                    )
+                    .current_dir(cwd)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let stdout = child.0.stdout.take().unwrap();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut ready = false;
+                for line in BufReader::new(stdout.take(4096)).lines() {
+                    if !ready && line.is_ok_and(|line| line.ends_with(READY)) {
+                        ready = true;
+                        let _ = tx.send(true);
+                    }
+                }
+                if !ready {
+                    let _ = tx.send(false);
+                }
+            });
+            assert!(rx.recv_timeout(TIMEOUT).expect("fixture readiness timed out"));
+            child
+        }
+
+        fn probe(route: &RemoteAgentRoute, cwd: &Path) -> Vec<RemoteAgentProcess> {
+            let mut child = OwnedChild(
+                Command::new("/bin/sh")
+                    .args(["-f", "-c", &build_probe_command(route)])
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .current_dir(cwd)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let stdout = child.0.stdout.take().unwrap();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let result = stdout.take(16 * 1024 + 1).read_to_end(&mut bytes);
+                let _ = tx.send(result.map(|_| bytes));
+            });
+            let bytes = rx.recv_timeout(TIMEOUT).expect("probe timed out").unwrap();
+            assert!(child.wait().success());
+            let (capability, processes) = parse_inventory(&bytes).unwrap();
+            assert_eq!(capability, RemoteAgentCapability::LinuxProc);
+            processes
+        }
+
+        #[test]
+        fn generated_command_discovers_only_exact_route_and_process_identity() {
+            let route = route();
+            let cwd = FixtureDirectory::new();
+            let mut fixture = fixture(&route, "codex", &cwd.0);
+            let found = probe(&route, &cwd.0);
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].pid, fixture.0.id());
+            assert_eq!(found[0].provider, RemoteAgentProvider::Codex);
+            assert!(found[0].start_ticks > 0);
+            assert_eq!(probe(&route, &cwd.0), found);
+
+            for field in 0..7 {
+                let mut mismatch = route.clone();
+                match field {
+                    0 => mismatch.protocol_version += 1,
+                    1 => {
+                        mismatch.execution_host_id =
+                            ExecutionHostId::derive("other", &HostInstallId::new());
+                    }
+                    2 => {
+                        let repo = RepoId::derive(&route.execution_host_id, "/other/.git");
+                        mismatch.worktree_id = WorktreeId::derive(&repo, "/other", None);
+                    }
+                    3 => mismatch.tab_id = TabId::new(),
+                    4 => mismatch.pane_key = PaneKey::new(),
+                    5 => mismatch.terminal_session_id = TerminalSessionId::new(),
+                    6 => mismatch.terminal_incarnation_id = TerminalIncarnationId::new(),
+                    _ => unreachable!(),
+                }
+                assert!(probe(&mismatch, &cwd.0).is_empty(), "route field {field}");
+            }
+            drop(fixture.0.stdin.take());
+            assert!(fixture.wait().success());
+            assert!(probe(&route, &cwd.0).is_empty());
+        }
+
+        #[test]
+        fn generated_command_keeps_wildcard_argv_literal() {
+            let route = route();
+            let cwd = FixtureDirectory::new();
+            let _fixture = fixture(&route, "*", &cwd.0);
+            assert!(probe(&route, &cwd.0).is_empty());
+        }
+
+        #[test]
+        fn generated_command_normalizes_supported_provider_arguments() {
+            let route = route();
+            let cwd = FixtureDirectory::new();
+            for (argv0, provider) in [
+                ("claude-code", RemoteAgentProvider::Claude),
+                ("codex", RemoteAgentProvider::Codex),
+                ("opencode", RemoteAgentProvider::OpenCode),
+                ("pi", RemoteAgentProvider::Pi),
+                ("grok", RemoteAgentProvider::Grok),
+            ] {
+                let fixture = fixture(&route, argv0, &cwd.0);
+                let found = probe(&route, &cwd.0);
+                assert_eq!(found.len(), 1);
+                assert_eq!(found[0].pid, fixture.0.id());
+                assert_eq!(found[0].provider, provider);
+            }
+        }
     }
 
     #[test]

@@ -45,12 +45,16 @@ pub enum AiEvent {
 struct ChannelSink {
     tx: UnboundedSender<AiEvent>,
     routes: Arc<Mutex<HashMap<u32, AgentRoute>>>,
+    live_panes: Arc<Mutex<Vec<u32>>>,
     next_sequence: Arc<AtomicU64>,
 }
 
 impl ChannelSink {
-    fn route(&self, pty_id: u32) -> Option<AgentRoute> {
-        self.routes.lock().get(&pty_id).cloned()
+    fn route(&self, pty_id: u32) -> Option<Option<AgentRoute>> {
+        if !self.live_panes.lock().contains(&pty_id) {
+            return None;
+        }
+        Some(self.routes.lock().get(&pty_id).cloned())
     }
 
     fn sequence(&self) -> Option<u64> {
@@ -60,11 +64,13 @@ impl ChannelSink {
 
 impl StatusSink for ChannelSink {
     fn status_changed(&self, change: StatusChange) {
+        let Some(route) = self.route(change.pty_id) else {
+            return;
+        };
         let Some(sequence) = self.sequence() else {
             eprintln!("[ai] agent event sequence exhausted; dropping status event");
             return;
         };
-        let route = self.route(change.pty_id);
         let _ = self.tx.unbounded_send(AiEvent::Status {
             change,
             route,
@@ -74,11 +80,13 @@ impl StatusSink for ChannelSink {
     }
 
     fn session_identified(&self, identity: SessionIdentity) {
+        let Some(route) = self.route(identity.pty_id) else {
+            return;
+        };
         let Some(sequence) = self.sequence() else {
             eprintln!("[ai] agent event sequence exhausted; dropping session event");
             return;
         };
-        let route = self.route(identity.pty_id);
         let _ = self.tx.unbounded_send(AiEvent::Session {
             identity,
             route,
@@ -123,17 +131,18 @@ impl AiBridge {
     pub fn new(hook_enabled: bool) -> (Self, mpsc::UnboundedReceiver<AiEvent>) {
         let (tx, rx) = mpsc::unbounded();
         let routes = Arc::new(Mutex::new(HashMap::new()));
+        let live_panes = Arc::new(Mutex::new(Vec::new()));
         let next_sequence = Arc::new(AtomicU64::new(0));
         let perception = AiPerception::new(Arc::new(ChannelSink {
             tx,
             routes: routes.clone(),
+            live_panes: live_panes.clone(),
             next_sequence: next_sequence.clone(),
         }));
         // 数据目录统一走 mt_config —— hook-server.json 与 usage.db 必须落在
         // 与装机版同一个目录下(见迁移文档的技术债清单)。
         let data_dir = crate::app_data_dir();
 
-        let live_panes: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let bridge = Self {
             perception,
             live_panes,
@@ -238,5 +247,66 @@ mod tests {
         assert_eq!(allocate_event_sequence(&counter), Some(2));
         counter.store(u64::MAX, Ordering::Relaxed);
         assert_eq!(allocate_event_sequence(&counter), None);
+    }
+
+    #[test]
+    fn observer_teardown_is_idempotent_and_suppresses_delayed_events() {
+        let (tx, mut rx) = mpsc::unbounded();
+        let sink = Arc::new(ChannelSink {
+            tx,
+            routes: Arc::new(Mutex::new(HashMap::new())),
+            live_panes: Arc::new(Mutex::new(Vec::new())),
+            next_sequence: Arc::new(AtomicU64::new(0)),
+        });
+        // No monitor, Hook server, PTY, or filesystem setup is needed here.
+        let bridge = AiBridge {
+            perception: AiPerception::new(sink.clone()),
+            live_panes: sink.live_panes.clone(),
+            routes: sink.routes.clone(),
+            next_sequence: sink.next_sequence.clone(),
+            data_dir: PathBuf::new(),
+        };
+        let host = mt_identity::ExecutionHostId::derive("test", &mt_identity::HostInstallId::new());
+        let repo = mt_identity::RepoId::derive(&host, "/repo/.git");
+        let route = AgentRoute {
+            execution_host_id: host,
+            worktree_id: mt_identity::WorktreeId::derive(&repo, "/repo", None),
+            tab_id: mt_identity::TabId::new(),
+            pane_key: mt_identity::PaneKey::new(),
+            terminal_session_id: mt_identity::TerminalSessionId::new(),
+            terminal_incarnation_id: mt_identity::TerminalIncarnationId::new(),
+        };
+        bridge.add_pane(7, Some(route.clone()));
+        bridge.perception().observe_input(7, b"codex\r");
+        let change = StatusChange {
+            pty_id: 7,
+            status: "ai-working".into(),
+            cause: None,
+            agent: Some("codex".into()),
+        };
+        sink.status_changed(change.clone());
+        bridge.remove_pane(7);
+        bridge.remove_pane(7);
+        assert!(bridge.live_panes.lock().is_empty());
+        assert!(bridge.routes.lock().is_empty());
+        assert!(!bridge.perception().tracker().is_ai_session(7));
+        assert_eq!(bridge.perception().status_of(7), "idle");
+        sink.status_changed(change.clone());
+        sink.session_identified(SessionIdentity {
+            pty_id: 7,
+            agent: Some("codex".into()),
+            session_id: "delayed".into(),
+            cwd: None,
+        });
+        assert_eq!(sink.next_sequence.load(Ordering::Relaxed), 1);
+        let AiEvent::Status { route: captured, .. } = rx.try_recv().unwrap() else {
+            panic!("expected the event queued before exit");
+        };
+        assert_eq!(captured, Some(route));
+        assert!(rx.try_recv().is_err());
+
+        bridge.add_pane(7, None);
+        sink.status_changed(change);
+        assert!(matches!(rx.try_recv().unwrap(), AiEvent::Status { route: None, .. }));
     }
 }

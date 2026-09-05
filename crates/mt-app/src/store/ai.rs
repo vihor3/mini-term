@@ -8,20 +8,20 @@
 
 use gpui::Context;
 use mt_ai::{
-    AgentActivity, AgentConfirmation, AgentConnectivity, AgentEvidence, AgentObservation,
-    AgentProvider,
+    AgentActivity, AgentApplyOutcome, AgentConfirmation, AgentConnectivity, AgentEvidence,
+    AgentObservation, AgentProvider, AgentRuntimeRegistry,
 };
 use mt_identity::AgentEventId;
 
 use crate::ai::AiEvent;
 use crate::markers::{self, AiMarker, MarkerBatch};
 use crate::notify::{NotifyPrefs, PaneRef, StatusTransition};
-use crate::tree::{AiSessionRef, PaneStatus};
+use crate::tree::{AiSessionRef, PaneStatus, SplitNode};
 
 use super::identity::TerminalRoute;
 use super::pure::{
     AiProjects, DoneScope, PendingFork, TitleBarLight, collect_ai_projects,
-    compute_title_bar_light, push_lineage_edge, resolve_fork_edge,
+    compute_title_bar_light, find_pane_of_pty, push_lineage_edge, resolve_fork_edge,
 };
 use super::remote_runtime::RemoteRuntimePhase;
 use super::{AppStore, PendingAlert};
@@ -29,11 +29,117 @@ use super::{AppStore, PendingAlert};
 fn captured_route_matches(
     captured: Option<&TerminalRoute>,
     current: Option<&TerminalRoute>,
+    terminal_exited: bool,
 ) -> bool {
+    if terminal_exited {
+        return false;
+    }
     match (captured, current) {
         (Some(captured), Some(current)) => captured == current,
         (None, None) => true,
         _ => false,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct AgentPaneProjection {
+    pub status: PaneStatus,
+    pub attention: bool,
+    pub provider: Option<String>,
+    pub evidence: AgentEvidence,
+}
+
+impl AgentPaneProjection {
+    pub(super) fn apply_to_layout(&self, layout: &mut SplitNode, pty_id: u32) -> bool {
+        if !layout.update_status_by_pty(
+            pty_id,
+            self.status,
+            self.attention,
+            self.provider.as_deref(),
+        ) {
+            return false;
+        }
+        // Unlike an unspecified legacy update, an accepted projection with no
+        // single provider must clear the previous inferred provider.
+        if matches!(self.status, PaneStatus::AiWorking | PaneStatus::AiIdle)
+            && let Some(pane) = layout.pane_by_pty_mut(pty_id)
+        {
+            pane.detected_agent.clone_from(&self.provider);
+        }
+        true
+    }
+}
+
+pub(super) fn accepted_agent_projection(
+    registry: &AgentRuntimeRegistry,
+    route: &TerminalRoute,
+    retained_attention: bool,
+) -> AgentPaneProjection {
+    let active = || {
+        registry.runs().filter(|state| {
+            &state.route == route
+                && !state.activity.is_ended()
+                && state.confirmation == AgentConfirmation::LiveConfirmed
+                && state.evidence != AgentEvidence::RestoredHistory
+        })
+    };
+    let evidence = active()
+        .map(|state| state.evidence)
+        .max()
+        .unwrap_or(AgentEvidence::RestoredHistory);
+    let mut projection = AgentPaneProjection {
+        status: PaneStatus::Idle,
+        attention: evidence == AgentEvidence::Hook && retained_attention,
+        provider: None,
+        evidence,
+    };
+    let mut providers = std::collections::HashSet::new();
+    // The registry has already reconciled evidence within each run. Independent
+    // accepted runs all contribute; receipt order must not pick a pane owner.
+    for state in active() {
+        let status = PaneStatus::from_str(state.activity.legacy_status())
+            .expect("agent activity has a legacy projection");
+        if status.priority() > projection.status.priority() {
+            projection.status = status;
+        }
+        projection.attention |= state.activity == AgentActivity::Blocked;
+        providers.insert(state.provider.as_str());
+    }
+    if providers.len() == 1 {
+        projection.provider = providers.into_iter().next().map(str::to_string);
+    }
+    projection
+}
+
+fn project_status_observation(
+    registry: &AgentRuntimeRegistry,
+    route: Option<&TerminalRoute>,
+    outcome: Option<AgentApplyOutcome>,
+    change: &mt_ai::StatusChange,
+    old_attention: bool,
+    hook_event: bool,
+) -> Option<AgentPaneProjection> {
+    let incoming_attention = change
+        .cause
+        .as_deref()
+        .is_some_and(mt_ai::is_attention_cause);
+    match outcome {
+        Some(AgentApplyOutcome::Ignored(_)) => None,
+        Some(AgentApplyOutcome::Applied { .. }) => Some(accepted_agent_projection(
+            registry,
+            route?,
+            if hook_event {
+                incoming_attention
+            } else {
+                old_attention
+            },
+        )),
+        None => Some(AgentPaneProjection {
+            status: PaneStatus::from_str(&change.status)?,
+            attention: incoming_attention,
+            provider: change.agent.clone(),
+            evidence: AgentEvidence::PtyActivity,
+        }),
     }
 }
 
@@ -281,7 +387,23 @@ impl AppStore {
         // (原版把 `clearPendingFork` 挂在 `pty-exit` 监听里,同一时机)
         self.clear_pending_fork(pty_id);
         // 原版 `App.tsx:359` 的 `markPtyExited`:与状态落 error 同一时机
-        self.exited_ptys.insert(pty_id);
+        super::remote_agents::retire_terminal_polling(
+            pty_id,
+            &mut self.exited_ptys,
+            &mut self.remote_agent_polls,
+        );
+        self.ai.remove_pane(pty_id);
+        crate::git_watch::forget_pane(pty_id);
+        // Keep the route for last-known views and explicit close. Transport loss
+        // does not prove that the remote Agent process ended.
+        if let Some(route) = self.terminal_routes.get(&pty_id).cloned() {
+            self.mark_agent_connectivity(
+                route,
+                None,
+                AgentConnectivity::Disconnected,
+                chrono::Utc::now().timestamp_millis(),
+            );
+        }
         let mut touched: Option<String> = None;
         for (pid, state) in self.project_states.iter_mut() {
             let hit = state
@@ -324,13 +446,20 @@ impl AppStore {
         event_id: AgentEventId,
         sequence: u64,
         change: &mt_ai::StatusChange,
-    ) {
-        let Some(route) = route else { return };
-        let Some(activity) =
-            mt_ai::activity_from_legacy_status(&change.status, change.cause.as_deref())
-        else {
-            return;
-        };
+    ) -> Option<AgentApplyOutcome> {
+        let route = route?;
+        let activity =
+            mt_ai::activity_from_legacy_status(&change.status, change.cause.as_deref())?;
+        let connection_epoch = self.current_agent_connection_epoch(project_id, &route);
+        if change.agent.is_none() && change.cause.is_some() && activity.is_ended() {
+            return Some(self.agent_runtime.observe_hook_exit(
+                route,
+                event_id,
+                sequence,
+                connection_epoch,
+                chrono::Utc::now().timestamp_millis(),
+            ));
+        }
         let provider = change
             .agent
             .as_deref()
@@ -347,16 +476,15 @@ impl AppStore {
                     .ai_session_agent(change.pty_id)
                     .and_then(|provider| provider.parse().ok())
             });
-        let Some(provider) = provider else { return };
-        let evidence = if change.cause.is_some()
-            || self.ai.perception().hooks().is_hook_enabled(change.pty_id)
-        {
+        let provider = provider?;
+        // A queued monitor event stays weak even if Hook became enabled
+        // between emission and delivery. Authoritative updates carry a cause.
+        let evidence = if change.cause.is_some() {
             AgentEvidence::Hook
         } else {
             AgentEvidence::PtyActivity
         };
-        let connection_epoch = self.current_agent_connection_epoch(project_id, &route);
-        let _ = self.agent_runtime.observe(AgentObservation {
+        Some(self.agent_runtime.observe(AgentObservation {
             event_id,
             route,
             sequence,
@@ -369,7 +497,7 @@ impl AppStore {
             confirmation: AgentConfirmation::LiveConfirmed,
             evidence,
             received_at_unix_ms: chrono::Utc::now().timestamp_millis(),
-        });
+        }))
     }
 
     fn observe_agent_session(
@@ -379,8 +507,8 @@ impl AppStore {
         event_id: AgentEventId,
         sequence: u64,
         identity: &mt_ai::SessionIdentity,
-    ) {
-        let Some(route) = route else { return };
+    ) -> Option<AgentApplyOutcome> {
+        let route = route?;
         let existing = self.agent_runtime.active_run_for_route(&route);
         let provider = identity
             .agent
@@ -393,7 +521,7 @@ impl AppStore {
             .unwrap_or(AgentActivity::Starting);
         let connection_epoch = project_id
             .and_then(|project_id| self.current_agent_connection_epoch(project_id, &route));
-        let _ = self.agent_runtime.observe(AgentObservation {
+        Some(self.agent_runtime.observe(AgentObservation {
             event_id,
             route,
             sequence,
@@ -406,7 +534,7 @@ impl AppStore {
             confirmation: AgentConfirmation::LiveConfirmed,
             evidence: AgentEvidence::Hook,
             received_at_unix_ms: chrono::Utc::now().timestamp_millis(),
-        });
+        }))
     }
 
     /// 后台线程送上来的 AI 事件(见 `ai.rs` 的接线图)。
@@ -425,38 +553,43 @@ impl AppStore {
                 event_id,
                 sequence,
             } => {
-                if !captured_route_matches(route.as_ref(), self.terminal_routes.get(&change.pty_id))
-                {
+                if !captured_route_matches(
+                    route.as_ref(),
+                    self.terminal_routes.get(&change.pty_id),
+                    self.exited_ptys.contains(&change.pty_id),
+                ) {
                     return None;
                 }
                 let status = PaneStatus::from_str(&change.status)?;
-                let hook_enabled = self.ai.perception().hooks().is_hook_enabled(change.pty_id);
-                let preserved_process = route
-                    .as_ref()
-                    .and_then(|route| self.agent_runtime.active_run_for_route(route))
-                    .filter(|state| {
-                        state.evidence == AgentEvidence::ProcessAttested
-                            && !state.activity.is_ended()
-                            && state.connectivity != AgentConnectivity::Disconnected
-                            && crate::ai::remote_agent_status_enabled()
-                            && !hook_enabled
-                            && change.cause.is_none()
-                            && matches!(status, PaneStatus::Idle | PaneStatus::Error)
-                    })
-                    .map(|state| {
-                        (
-                            PaneStatus::from_str(state.activity.legacy_status())
-                                .expect("agent activity has a legacy projection"),
-                            state.provider.as_str().to_string(),
-                        )
-                    });
-                let projected_status = preserved_process
-                    .as_ref()
-                    .map_or(status, |(status, _)| *status);
-                let projected_agent = preserved_process
-                    .as_ref()
-                    .map(|(_, provider)| provider.as_str())
-                    .or(change.agent.as_deref());
+                let (owner, pane_id) = find_pane_of_pty(&self.project_states, change.pty_id)?;
+                let pane = self.project_states.get(&owner)?.pane(&pane_id)?;
+                let old_status = pane.status;
+                let old_attention = pane.attention;
+                let hook_event = change.cause.is_some();
+                let incoming_attention = change
+                    .cause
+                    .as_deref()
+                    .is_some_and(mt_ai::is_attention_cause);
+                let outcome = self.observe_agent_status(
+                    &owner,
+                    route.clone(),
+                    event_id,
+                    sequence,
+                    &change,
+                );
+                let agent_observation = outcome.is_some();
+                let projection = project_status_observation(
+                    &self.agent_runtime,
+                    route.as_ref(),
+                    outcome,
+                    &change,
+                    old_attention,
+                    hook_event,
+                )?;
+                let projected_status = projection.status;
+                let notify_transition = (hook_event || projection.evidence != AgentEvidence::Hook)
+                    && projected_status == status
+                    && projection.attention == incoming_attention;
                 // Git 面板的 pty-output 嗅探要跳过 AI pane 的输出。判据与
                 // `App.tsx:284` 的 `markAiPty(ptyId, status === 'ai-working' ||
                 // status === 'ai-idle')` 一字不差(见 `git_watch` 模块注释)。
@@ -464,59 +597,38 @@ impl AppStore {
                     change.pty_id,
                     matches!(projected_status, PaneStatus::AiWorking | PaneStatus::AiIdle),
                 );
-                // attention 与状态解耦:codex 的 PermissionRequest 状态是 ai-working
-                // 但同样要点黄灯。判定按事件名,与旧版 isAttentionCause 同一张表。
-                let attention = change
-                    .cause
-                    .as_deref()
-                    .map(mt_ai::is_attention_cause)
-                    .unwrap_or(false);
-
-                let mut owner: Option<String> = None;
-                let mut pane_id = String::new();
-                let mut old_status = PaneStatus::Idle;
-                let mut old_attention = false;
-                'projects: for (pid, state) in self.project_states.iter_mut() {
-                    let mut hit = false;
-                    // 跨全部面板找:后台面板里的 AI 状态一样要亮灯
-                    for layout in state.layouts_mut() {
-                        let Some(pane) = layout.pane_by_pty(change.pty_id) else {
-                            continue;
-                        };
-                        old_status = pane.status;
-                        old_attention = pane.attention;
-                        pane_id = pane.id.clone();
+                if let Some(state) = self.project_states.get_mut(&owner) {
+                    state.layouts_mut().any(|layout| {
+                        if agent_observation {
+                            return projection.apply_to_layout(layout, change.pty_id);
+                        }
                         layout.update_status_by_pty(
                             change.pty_id,
                             projected_status,
-                            attention,
-                            projected_agent,
-                        );
-                        hit = true;
-                        break;
-                    }
-                    if hit {
-                        state.status = state.highest_status();
-                        owner = Some(pid.clone());
-                        break 'projects;
-                    }
+                            projection.attention,
+                            projection.provider.as_deref(),
+                        )
+                    });
+                    state.status = state.highest_status();
                 }
-                let owner = owner?;
-                self.observe_agent_status(&owner, route, event_id, sequence, &change);
                 let project_active = self.active_project_id.as_deref() == Some(owner.as_str());
 
-                let plan = self.done.apply(
-                    &StatusTransition {
-                        pane_id: &pane_id,
-                        old_status,
-                        new_status: projected_status,
-                        old_attention,
-                        cause: change.cause.as_deref(),
-                        window_focused: self.window_focused,
-                        project_active,
-                    },
-                    &self.notify_prefs(),
-                );
+                let plan = if notify_transition {
+                    self.done.apply(
+                        &StatusTransition {
+                            pane_id: &pane_id,
+                            old_status,
+                            new_status: projected_status,
+                            old_attention,
+                            cause: change.cause.as_deref(),
+                            window_focused: self.window_focused,
+                            project_active,
+                        },
+                        &self.notify_prefs(),
+                    )
+                } else {
+                    crate::notify::AlertPlan::default()
+                };
                 if plan.mark_needs_attention
                     && let Some(state) = self.project_states.get_mut(&owner)
                 {
@@ -546,6 +658,21 @@ impl AppStore {
                 if !captured_route_matches(
                     route.as_ref(),
                     self.terminal_routes.get(&identity.pty_id),
+                    self.exited_ptys.contains(&identity.pty_id),
+                ) {
+                    return None;
+                }
+                let current_owner = find_pane_of_pty(&self.project_states, identity.pty_id)
+                    .map(|(owner, _)| owner);
+                if matches!(
+                    self.observe_agent_session(
+                        current_owner.as_deref(),
+                        route,
+                        event_id,
+                        sequence,
+                        &identity,
+                    ),
+                    Some(AgentApplyOutcome::Ignored(_))
                 ) {
                     return None;
                 }
@@ -567,7 +694,6 @@ impl AppStore {
                     self.save_project_layout_soon(owner, cx);
                     cx.notify();
                 }
-                self.observe_agent_session(owner.as_deref(), route, event_id, sequence, &identity);
                 // 分支自记账:这个 pane 是 fork 出来的话,新身份到手即落边。
                 // **必须在这里**而不是等 pane 变 ai-working —— 身份只上报一次,
                 // 错过就再没有第二次机会把 child→parent 记下来。
@@ -859,11 +985,335 @@ mod route_tests {
     fn captured_route_rejects_reused_pty_and_missing_identity() {
         let captured = route();
         let mut current = captured.clone();
-        assert!(captured_route_matches(Some(&captured), Some(&current)));
+        assert!(captured_route_matches(Some(&captured), Some(&current), false));
+        assert!(!captured_route_matches(Some(&captured), Some(&current), true));
         current.terminal_incarnation_id = TerminalIncarnationId::new();
-        assert!(!captured_route_matches(Some(&captured), Some(&current)));
-        assert!(!captured_route_matches(Some(&captured), None));
-        assert!(!captured_route_matches(None, Some(&current)));
-        assert!(captured_route_matches(None, None));
+        assert!(!captured_route_matches(Some(&captured), Some(&current), false));
+        assert!(!captured_route_matches(Some(&captured), None, false));
+        assert!(!captured_route_matches(None, Some(&current), false));
+        assert!(captured_route_matches(None, None, false));
+        assert!(!captured_route_matches(None, None, true));
+    }
+
+    fn status_observation(
+        route: TerminalRoute,
+        sequence: u64,
+        activity: AgentActivity,
+        evidence: AgentEvidence,
+    ) -> AgentObservation {
+        AgentObservation {
+            event_id: AgentEventId::new(),
+            route,
+            sequence,
+            connection_epoch: Some(1),
+            provider: AgentProvider::CODEX.parse().unwrap(),
+            provider_session_id: None,
+            process: None,
+            activity,
+            connectivity: AgentConnectivity::Live,
+            confirmation: AgentConfirmation::LiveConfirmed,
+            evidence,
+            received_at_unix_ms: sequence as i64,
+        }
+    }
+
+    fn status_change(status: &str) -> mt_ai::StatusChange {
+        mt_ai::StatusChange {
+            pty_id: 7,
+            status: status.into(),
+            cause: None,
+            agent: Some("codex".into()),
+        }
+    }
+
+    #[test]
+    fn providerless_hook_exit_projects_the_surviving_process_not_the_old_hook() {
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        let mut hook = status_observation(
+            route.clone(), 1, AgentActivity::Blocked, AgentEvidence::Hook,
+        );
+        hook.provider_session_id = Some("hook-session".into());
+        registry.observe(hook);
+        let mut process = status_observation(
+            route.clone(), 2, AgentActivity::Working, AgentEvidence::ProcessAttested,
+        );
+        process.provider = "claude".parse().unwrap();
+        process.process = mt_ai::AgentProcessIdentity::new(20, 200);
+        registry.observe(process);
+        let outcome = registry.observe_hook_exit(route.clone(), AgentEventId::new(), 3, Some(1), 3);
+        let change = mt_ai::StatusChange {
+            pty_id: 7,
+            status: "idle".into(),
+            cause: Some("SessionEnd".into()),
+            agent: None,
+        };
+        let projection = project_status_observation(
+            &registry, Some(&route), Some(outcome), &change, true, true,
+        )
+        .unwrap();
+        assert_eq!(projection.status, PaneStatus::AiWorking);
+        assert_eq!(projection.provider.as_deref(), Some("claude"));
+        assert!(!projection.attention);
+        assert!(registry.runs().any(|run| {
+            run.provider.as_str() == "codex" && run.activity == AgentActivity::Exited
+        }));
+    }
+
+    #[test]
+    fn unknown_or_multiple_hook_owners_have_no_projection() {
+        for owner_count in [0, 2] {
+            let route = route();
+            let mut registry = AgentRuntimeRegistry::default();
+            for pid in 1..=owner_count {
+                let mut hook = status_observation(
+                    route.clone(), pid as u64, AgentActivity::Blocked, AgentEvidence::Hook,
+                );
+                hook.process = mt_ai::AgentProcessIdentity::new(pid, 100);
+                registry.observe(hook);
+            }
+            let mut process = status_observation(
+                route.clone(), 3, AgentActivity::Working, AgentEvidence::ProcessAttested,
+            );
+            process.provider = "claude".parse().unwrap();
+            process.process = mt_ai::AgentProcessIdentity::new(20, 200);
+            registry.observe(process);
+            let before: Vec<_> = registry.runs().cloned().collect();
+            let outcome = registry.observe_hook_exit(
+                route.clone(), AgentEventId::new(), 4, Some(1), 4,
+            );
+            assert_eq!(
+                outcome,
+                AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::UnresolvedHookOwner)
+            );
+            let change = mt_ai::StatusChange {
+                pty_id: 7,
+                status: "idle".into(),
+                cause: Some("SessionEnd".into()),
+                agent: None,
+            };
+            assert!(project_status_observation(
+                &registry, Some(&route), Some(outcome), &change, true, true,
+            )
+            .is_none());
+            for run in before {
+                assert_eq!(registry.run(&run.run_id), Some(&run));
+            }
+        }
+    }
+
+    #[test]
+    fn delayed_pty_working_after_inventory_waiting_has_no_projection() {
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        registry
+            .apply_process_inventory(mt_ai::AgentProcessInventoryObservation {
+                event_id: AgentEventId::new(),
+                route: route.clone(),
+                sequence: 11,
+                connection_epoch: 1,
+                processes: vec![mt_ai::AgentProcessObservation {
+                    provider: AgentProvider::CODEX.parse().unwrap(),
+                    process: mt_ai::AgentProcessIdentity::new(10, 20).unwrap(),
+                    activity: AgentActivity::Waiting,
+                }],
+                received_at_unix_ms: 11,
+            })
+            .unwrap();
+        let before = accepted_agent_projection(&registry, &route, false);
+        let outcome = registry.observe(status_observation(
+            route.clone(),
+            10,
+            AgentActivity::Working,
+            AgentEvidence::PtyActivity,
+        ));
+        assert_eq!(
+            outcome,
+            AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::OutOfOrder)
+        );
+        // The caller must have a projection before touching status, attention,
+        // git-watcher flags, or DoneTracker.
+        assert!(project_status_observation(
+            &registry,
+            Some(&route),
+            Some(outcome),
+            &status_change("ai-working"),
+            false,
+            false,
+        )
+        .is_none());
+        assert_eq!(accepted_agent_projection(&registry, &route, false), before);
+        assert_eq!(before.status, PaneStatus::AiIdle);
+    }
+
+    #[test]
+    fn accepted_weak_status_preserves_hook_semantics_and_attention() {
+        for (activity, status, attention) in [
+            (AgentActivity::Blocked, PaneStatus::AiWorking, true),
+            (AgentActivity::Waiting, PaneStatus::AiIdle, true),
+            (AgentActivity::Done, PaneStatus::AiIdle, false),
+            (AgentActivity::Failed, PaneStatus::Error, false),
+        ] {
+            let route = route();
+            let mut registry = AgentRuntimeRegistry::default();
+            registry.observe(status_observation(route.clone(), 1, activity, AgentEvidence::Hook));
+            let outcome = registry.observe(status_observation(
+                route.clone(),
+                2,
+                AgentActivity::Working,
+                AgentEvidence::PtyActivity,
+            ));
+            let projection = project_status_observation(
+                &registry,
+                Some(&route),
+                Some(outcome),
+                &status_change("ai-working"),
+                attention,
+                false,
+            )
+            .unwrap();
+            assert_eq!(projection.status, status);
+            assert_eq!(projection.attention, attention);
+            assert_eq!(projection.evidence, AgentEvidence::Hook);
+        }
+    }
+
+    #[test]
+    fn ordinary_shell_and_unrouted_status_keep_legacy_fallback() {
+        let registry = AgentRuntimeRegistry::default();
+        let route = route();
+        for current_route in [None, Some(&route)] {
+            for status in ["idle", "error", "ai-working", "ai-idle"] {
+                let mut change = status_change(status);
+                change.agent = None;
+                let projection = project_status_observation(
+                    &registry,
+                    current_route,
+                    None,
+                    &change,
+                    false,
+                    false,
+                )
+                .unwrap();
+                assert_eq!(projection.status, PaneStatus::from_str(status).unwrap());
+            }
+        }
+        let change = mt_ai::StatusChange {
+            pty_id: 7,
+            status: "idle".into(),
+            cause: Some("SessionEnd".into()),
+            agent: None,
+        };
+        assert_eq!(
+            project_status_observation(&registry, None, None, &change, true, true)
+                .unwrap()
+                .status,
+            PaneStatus::Idle
+        );
+    }
+
+    #[test]
+    fn route_projection_aggregates_processes_without_arbitrary_provider() {
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        for (pid, provider, activity) in [
+            (10, "codex", AgentActivity::Working),
+            (20, "claude", AgentActivity::Waiting),
+        ] {
+            let mut event = status_observation(
+                route.clone(),
+                pid as u64,
+                activity,
+                AgentEvidence::ProcessAttested,
+            );
+            event.process = mt_ai::AgentProcessIdentity::new(pid, 100);
+            event.provider = provider.parse().unwrap();
+            registry.observe(event);
+        }
+        let projection = accepted_agent_projection(&registry, &route, false);
+        assert_eq!(projection.status, PaneStatus::AiWorking);
+        assert_eq!(projection.provider, None);
+        assert!(!projection.attention);
+
+        let mut other = route.clone();
+        other.terminal_incarnation_id = TerminalIncarnationId::new();
+        assert_eq!(
+            accepted_agent_projection(&registry, &other, false).status,
+            PaneStatus::Idle
+        );
+    }
+
+    #[test]
+    fn route_projection_keeps_independent_process_work_beside_hook_state() {
+        for (activity, status, attention) in [
+            (AgentActivity::Done, PaneStatus::AiWorking, false),
+            (AgentActivity::Waiting, PaneStatus::AiWorking, false),
+            (AgentActivity::Blocked, PaneStatus::AiWorking, true),
+            (AgentActivity::Failed, PaneStatus::Error, false),
+        ] {
+            let route = route();
+            let mut registry = AgentRuntimeRegistry::default();
+            registry
+                .apply_process_inventory(mt_ai::AgentProcessInventoryObservation {
+                    event_id: AgentEventId::new(),
+                    route: route.clone(),
+                    sequence: 1,
+                    connection_epoch: 1,
+                    processes: vec![
+                        mt_ai::AgentProcessObservation {
+                            provider: "codex".parse().unwrap(),
+                            process: mt_ai::AgentProcessIdentity::new(10, 100).unwrap(),
+                            activity: AgentActivity::Working,
+                        },
+                        mt_ai::AgentProcessObservation {
+                            provider: "claude".parse().unwrap(),
+                            process: mt_ai::AgentProcessIdentity::new(20, 200).unwrap(),
+                            activity: AgentActivity::Working,
+                        },
+                    ],
+                    received_at_unix_ms: 1,
+                })
+                .unwrap();
+            let mut hook = status_observation(route.clone(), 2, activity, AgentEvidence::Hook);
+            hook.process = mt_ai::AgentProcessIdentity::new(10, 100);
+            assert!(matches!(registry.observe(hook), AgentApplyOutcome::Applied { .. }));
+            let projection = accepted_agent_projection(&registry, &route, false);
+            assert_eq!(projection.status, status);
+            assert_eq!(projection.attention, attention);
+            assert_eq!(projection.provider, None);
+            assert_eq!(projection.evidence, AgentEvidence::Hook);
+            assert_eq!(registry.runs().count(), 2);
+        }
+    }
+
+    #[test]
+    fn accepted_ambiguous_provider_clears_only_inferred_legacy_identity() {
+        let mut pane = crate::tree::PaneState::new("shell");
+        pane.pty_id = Some(7);
+        pane.detected_agent = Some("codex".into());
+        let session = AiSessionRef {
+            agent: Some("codex".into()),
+            session_id: "hook-session".into(),
+            cwd: None,
+        };
+        pane.ai_session = Some(session.clone());
+        let mut layout = SplitNode::leaf(pane);
+        let projection = AgentPaneProjection {
+            status: PaneStatus::AiWorking,
+            attention: false,
+            provider: None,
+            evidence: AgentEvidence::ProcessAttested,
+        };
+        assert!(layout.update_status_by_pty(7, PaneStatus::AiWorking, false, None));
+        assert_eq!(
+            layout.pane_by_pty(7).unwrap().detected_agent.as_deref(),
+            Some("codex")
+        );
+        assert!(!projection.apply_to_layout(&mut layout, 8));
+        assert!(projection.apply_to_layout(&mut layout, 7));
+        let pane = layout.pane_by_pty(7).unwrap();
+        assert_eq!(pane.detected_agent, None);
+        assert_eq!(pane.ai_session, Some(session));
+        assert_eq!(pane.status, PaneStatus::AiWorking);
     }
 }

@@ -1,0 +1,8 @@
+{"file":".trellis/spec/mt-ai/backend/agent-runtime-contract.md","reason":"Preserve exact routes, monotonic event acceptance, semantic activity, and evidence precedence before legacy projection."}
+{"file":".trellis/spec/mt-ssh/backend/remote-agent-inventory-contract.md","reason":"Repair generated Linux process enumeration while retaining exact-route bounded framing and safe shell splitting."}
+{"file":".trellis/spec/mt-app/backend/remote-agent-reconciliation-contract.md","reason":"Preserve current probe ownership/epoch fences, two-empty hysteresis, Hook precedence, and no-op connectivity suppression."}
+{"file":".trellis/spec/mt-app/backend/remote-runtime-reconciliation-contract.md","reason":"Startup and reconnect must preserve host identity, generation fencing, and hydration ownership."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Keep worktree/pane/session/incarnation identity and separate terminal transport exit from remote Agent exit."}
+{"file":".trellis/spec/mt-app/backend/global-agent-activity-contract.md","reason":"Separate activity, connectivity, and acknowledgement; do not infer semantic work from connection state."}
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"HARD USER CONSTRAINT: all CI, compilation, tests/fixtures, lint/format, generation, packaging, and automated validation run only in GitHub Actions for every agent; local work is editing and source/diff review."}
+{"file":".trellis/tasks/09-05-project-sidebar-discovery-status/research/remote-agent-status.md","reason":"Confirmed probe globbing defect and legacy ordering gap; distinguish catalog freshness markers from unreproduced Agent-working animation."}

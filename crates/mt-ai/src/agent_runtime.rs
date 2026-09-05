@@ -250,6 +250,7 @@ pub enum AgentObservationIgnored {
     OutOfOrder,
     EndedRun,
     DuplicateProcess,
+    UnresolvedHookOwner,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -278,6 +279,22 @@ impl AgentRuntimeRegistry {
         }
 
         let matched = self.find_run(&observation);
+        // After retirement a queued, unbound PTY event must not create a new
+        // heuristic run. A later real launch still has a newer sequence.
+        if matched.is_none()
+            && observation.evidence == AgentEvidence::PtyActivity
+            && self.runs.values().any(|state| {
+                state.route == observation.route
+                    && !is_newer(
+                        state.connection_epoch,
+                        state.last_sequence,
+                        observation.connection_epoch,
+                        observation.sequence,
+                    )
+            })
+        {
+            return AgentApplyOutcome::Ignored(AgentObservationIgnored::OutOfOrder);
+        }
         if let Some(run_id) = matched {
             let state = self.runs.get_mut(&run_id).expect("matched run exists");
             if state.activity.is_ended() && !observation.activity.is_ended() {
@@ -489,6 +506,65 @@ impl AgentRuntimeRegistry {
             .max_by_key(|state| (state.received_at_unix_ms, state.last_sequence))
     }
 
+    /// Apply a provider-less Hook exit only when existing identity proves its
+    /// unique current owner. Ordinary observation matching is unchanged.
+    pub fn observe_hook_exit(
+        &mut self,
+        route: AgentRoute,
+        event_id: AgentEventId,
+        sequence: u64,
+        connection_epoch: Option<u64>,
+        received_at_unix_ms: i64,
+    ) -> AgentApplyOutcome {
+        let Some(owner) = self.exact_hook_exit_owner(&route) else {
+            return AgentApplyOutcome::Ignored(AgentObservationIgnored::UnresolvedHookOwner);
+        };
+        let observation = AgentObservation {
+            event_id,
+            route,
+            sequence,
+            connection_epoch,
+            provider: owner.provider.clone(),
+            provider_session_id: owner.provider_session_id.clone(),
+            process: owner.process,
+            activity: AgentActivity::Exited,
+            connectivity: AgentConnectivity::Live,
+            confirmation: AgentConfirmation::LiveConfirmed,
+            evidence: AgentEvidence::Hook,
+            received_at_unix_ms,
+        };
+        self.observe(observation)
+    }
+
+    fn exact_hook_exit_owner(&self, route: &AgentRoute) -> Option<&AgentRuntimeState> {
+        let same_route = || self.runs.values().filter(|state| &state.route == route);
+        let mut owners = same_route().filter(|state| {
+            state.evidence == AgentEvidence::Hook
+                && state.confirmation == AgentConfirmation::LiveConfirmed
+                && !state.activity.is_ended()
+        });
+        let owner = owners.next()?;
+        if owners.next().is_some() {
+            return None;
+        }
+        // Prove uniqueness in find_run's first applicable matching branch,
+        // including ended identity matches. Never rely on HashMap order.
+        let matches = same_route()
+            .filter(|state| {
+                if let Some(process) = owner.process {
+                    state.process == Some(process)
+                } else if let Some(session_id) = owner.provider_session_id.as_deref() {
+                    state.provider == owner.provider
+                        && state.provider_session_id.as_deref() == Some(session_id)
+                } else {
+                    state.provider == owner.provider && !state.activity.is_ended()
+                }
+            })
+            .take(2)
+            .count();
+        (matches == 1).then_some(owner)
+    }
+
     pub fn remove_route(&mut self, route: &AgentRoute) {
         self.runs.retain(|_, state| &state.route != route);
         self.latest_epoch_by_route.remove(route);
@@ -673,6 +749,122 @@ mod tests {
     }
 
     #[test]
+    fn hook_exit_ends_only_its_owner_beside_a_newer_process() {
+        for provider in ["claude", "codex"] {
+            let route = route();
+            let mut registry = AgentRuntimeRegistry::default();
+            let mut hook = observation(route.clone(), 1, AgentEvidence::Hook);
+            hook.provider = "codex".parse().unwrap();
+            hook.provider_session_id = Some("hook-session".into());
+            hook.process = AgentProcessIdentity::new(42, 100);
+            let AgentApplyOutcome::Applied { run_id: owner, .. } = registry.observe(hook) else {
+                panic!("Hook owner should be created");
+            };
+            let mut process = observation(route.clone(), 2, AgentEvidence::ProcessAttested);
+            process.provider = provider.parse().unwrap();
+            process.process = AgentProcessIdentity::new(43, 200);
+            process.received_at_unix_ms = 2;
+            let AgentApplyOutcome::Applied { run_id: peer, created: true } = registry.observe(process)
+            else {
+                panic!("independent process should be created");
+            };
+            let before = registry.run(&peer).unwrap().clone();
+            assert_eq!(registry.active_run_for_route(&route).unwrap().run_id, peer);
+            assert_eq!(
+                registry.observe_hook_exit(route, AgentEventId::new(), 3, None, 3),
+                AgentApplyOutcome::Applied { run_id: owner.clone(), created: false }
+            );
+            let ended = registry.run(&owner).unwrap();
+            assert_eq!(ended.activity, AgentActivity::Exited);
+            assert_eq!(ended.provider_session_id.as_deref(), Some("hook-session"));
+            assert_eq!(ended.process, AgentProcessIdentity::new(42, 100));
+            assert_eq!(registry.run(&peer), Some(&before));
+            assert_eq!(registry.runs().count(), 2);
+        }
+    }
+
+    #[test]
+    fn unbound_hook_exit_rejects_ambiguous_fallback_but_uses_exact_session() {
+        for (session_id, peer_provider, accepted) in [
+            (None, "claude", true),
+            (None, "codex", false),
+            (Some("hook-session"), "codex", true),
+        ] {
+            let route = route();
+            let mut registry = AgentRuntimeRegistry::default();
+            let mut hook = observation(route.clone(), 1, AgentEvidence::Hook);
+            hook.provider = "codex".parse().unwrap();
+            hook.provider_session_id = session_id.map(str::to_string);
+            let AgentApplyOutcome::Applied { run_id: owner, .. } = registry.observe(hook) else {
+                panic!("Hook owner should be created");
+            };
+            let mut process = observation(route.clone(), 2, AgentEvidence::ProcessAttested);
+            process.process = AgentProcessIdentity::new(43, 200);
+            let AgentApplyOutcome::Applied { run_id: peer, created: true } =
+                registry.observe(process.clone())
+            else {
+                panic!("independent process should be created");
+            };
+            // A provider correction must not make an unbound Hook exit choose
+            // whichever same-provider run happens to occur first in the map.
+            process.event_id = AgentEventId::new();
+            process.sequence = 3;
+            process.provider = peer_provider.parse().unwrap();
+            registry.observe(process);
+            let before = registry.run(&peer).unwrap().clone();
+            let outcome = registry.observe_hook_exit(route, AgentEventId::new(), 4, None, 4);
+            if accepted {
+                assert_eq!(
+                    outcome,
+                    AgentApplyOutcome::Applied { run_id: owner.clone(), created: false }
+                );
+                assert_eq!(registry.run(&owner).unwrap().activity, AgentActivity::Exited);
+                assert_eq!(registry.run(&owner).unwrap().provider_session_id.as_deref(), session_id);
+            } else {
+                assert_eq!(
+                    outcome,
+                    AgentApplyOutcome::Ignored(AgentObservationIgnored::UnresolvedHookOwner)
+                );
+                assert_eq!(registry.run(&owner).unwrap().activity, AgentActivity::Working);
+            }
+            assert_eq!(registry.run(&peer), Some(&before));
+        }
+    }
+
+    #[test]
+    fn exact_hook_exit_keeps_existing_event_epoch_and_sequence_fences() {
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        let mut hook = observation(route.clone(), 10, AgentEvidence::Hook);
+        hook.connection_epoch = Some(2);
+        let event_id = hook.event_id.clone();
+        let AgentApplyOutcome::Applied { run_id, .. } = registry.observe(hook) else {
+            panic!("Hook owner should be created");
+        };
+        let before = registry.run(&run_id).unwrap().clone();
+        for (event_id, sequence, epoch, reason) in [
+            (event_id, 11, Some(2), AgentObservationIgnored::DuplicateEvent),
+            (AgentEventId::new(), 0, Some(2), AgentObservationIgnored::InvalidSequence),
+            (AgentEventId::new(), 11, Some(0), AgentObservationIgnored::InvalidConnectionEpoch),
+            (AgentEventId::new(), 11, Some(1), AgentObservationIgnored::StaleConnectionEpoch),
+            (AgentEventId::new(), 9, Some(2), AgentObservationIgnored::OutOfOrder),
+        ] {
+            assert_eq!(
+                registry.observe_hook_exit(route.clone(), event_id, sequence, epoch, 11),
+                AgentApplyOutcome::Ignored(reason)
+            );
+            assert_eq!(registry.run(&run_id), Some(&before));
+        }
+        let mut other_route = route;
+        other_route.terminal_incarnation_id = TerminalIncarnationId::new();
+        assert_eq!(
+            registry.observe_hook_exit(other_route, AgentEventId::new(), 11, Some(2), 11),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::UnresolvedHookOwner)
+        );
+        assert_eq!(registry.run(&run_id), Some(&before));
+    }
+
+    #[test]
     fn provider_aliases_normalize_and_invalid_keys_fail() {
         assert_eq!(
             "Claude-Code".parse::<AgentProvider>().unwrap().as_str(),
@@ -727,6 +919,50 @@ mod tests {
         assert_eq!(state.process, Some(process));
         assert_eq!(state.evidence, AgentEvidence::ProcessAttested);
         assert_eq!(state.activity, AgentActivity::Waiting);
+    }
+
+    #[test]
+    fn retired_route_rejects_queued_pty_but_accepts_new_launch() {
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        let first = registry
+            .apply_process_inventory(AgentProcessInventoryObservation {
+                event_id: AgentEventId::new(),
+                route: route.clone(),
+                sequence: 9,
+                connection_epoch: 1,
+                processes: vec![AgentProcessObservation {
+                    provider: "claude".parse().unwrap(),
+                    process: AgentProcessIdentity::new(42, 99).unwrap(),
+                    activity: AgentActivity::Working,
+                }],
+                received_at_unix_ms: 9,
+            })
+            .unwrap();
+        registry
+            .apply_process_inventory(AgentProcessInventoryObservation {
+                event_id: AgentEventId::new(),
+                route: route.clone(),
+                sequence: 11,
+                connection_epoch: 1,
+                processes: vec![],
+                received_at_unix_ms: 11,
+            })
+            .unwrap();
+        let mut delayed = observation(route.clone(), 10, AgentEvidence::PtyActivity);
+        delayed.connection_epoch = Some(1);
+        assert_eq!(
+            registry.observe(delayed),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::OutOfOrder)
+        );
+        assert!(registry.active_run_for_route(&route).is_none());
+        let mut launch = observation(route, 12, AgentEvidence::PtyActivity);
+        launch.connection_epoch = Some(1);
+        let AgentApplyOutcome::Applied { run_id, created } = registry.observe(launch) else {
+            panic!("new launch should be accepted");
+        };
+        assert!(created);
+        assert_ne!(run_id, first[0]);
     }
 
     #[test]
