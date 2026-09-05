@@ -3,7 +3,7 @@
   "name": "global-search-worktree-discovery",
   "title": "Global Search and Automatic Worktree Discovery",
   "description": "Add an Orca-style global search overlay for chats, terminals, worktrees, settings, and actions, and automatically discover and display each project's Local, WSL, or SSH Git worktrees in the project sidebar.",
-  "status": "in_progress",
+  "status": "completed",
   "dev_type": null,
   "scope": "mt-project captured worktree parsing; mt-app shared Local/WSL/SSH worktree catalog, child registration, exact terminal activation, Orca sidebar integration, global jump palette, i18n/hotkeys, tests, and GitHub Actions validation/package evidence",
   "package": null,
@@ -11,7 +11,7 @@
   "creator": "leo",
   "assignee": "leo",
   "createdAt": "2026-09-05",
-  "completedAt": null,
+  "completedAt": "2026-09-05",
   "branch": "feat/remote-file-management",
   "base_branch": "main",
   "worktree_path": null,
@@ -74,6 +74,6 @@
       "physical Windows UI smoke test not performed",
       "the repository has no GPUI end-to-end window harness; pointer, backdrop, and focus paths were validated by unit contracts, existing overlay tests, source inspection, Windows compilation, and package verification"
     ],
-    "task_sync_status": "acceptance criteria, implementation plan, design, specs, validation evidence, product SHA, and Actions runs synchronized; no scope drift"
+    "task_sync_status": "archived task status, acceptance criteria, implementation plan, design, specs, validation evidence, product SHA, and Actions runs synchronized; no scope drift"
   }
 }

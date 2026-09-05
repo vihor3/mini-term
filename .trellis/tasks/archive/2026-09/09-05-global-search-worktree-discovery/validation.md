@@ -121,6 +121,9 @@ scope.
 - Relevant `mt-app` and `mt-project` contracts now record public porcelain path
   semantics, catalog authority, exact terminal routing, and child placement.
 - No repository `target/`, `dist/`, or `release/` directory was created.
+- Trellis archived the task on 2026-09-05 with `status: completed`, the exact
+  product SHA, CI/package run IDs, artifact evidence, and all implementation
+  and acceptance checkboxes synchronized.
 - Unrelated dirty Trellis/bootstrap/archive files were not staged, rewritten,
   reviewed, or included in this task's commits.
 

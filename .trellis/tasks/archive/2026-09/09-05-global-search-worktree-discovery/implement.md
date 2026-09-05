@@ -175,6 +175,6 @@ git diff -- <task-owned paths>
 - [x] Mark every PRD acceptance criterion only when evidence exists.
 - [x] Record residual risks, especially lack of a physical Windows UI smoke if
       it remains unperformed.
-- [ ] Commit validation/spec/task updates, archive the task, and verify the
+- [x] Commit validation/spec/task updates, archive the task, and verify the
       archived task metadata, commit SHA, CI run, package run, and progress all
       agree.
