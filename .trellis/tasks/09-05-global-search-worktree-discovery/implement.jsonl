@@ -1,0 +1,11 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Map Git command output, parser authority, catalog ownership, registration, stable activation, and UI projection end to end."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Reuse the existing porcelain parser, execution-host command runner, overlay, project registration, and exact Agent activation instead of creating parallel mechanisms."}
+{"file":".trellis/spec/mt-project/backend/worktree-catalog-contract.md","reason":"Preserve byte parsing, fallback, authority, generation, timeout, truncation, and last-known semantics while exposing captured-output parsing."}
+{"file":".trellis/spec/mt-project/backend/worktree-identity-contract.md","reason":"Keep Local, WSL, and SSH worktree identities host-qualified and distinguish provisional from authoritative remote identity."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Implement exact terminal/worktree navigation without path-based or active-state inference and preserve worktree-isolated layouts."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Reuse immutable Agent targets, exact Agent activation, worktree-scoped context, and stale callback fences."}
+{"file":".trellis/spec/mt-app/backend/project-onboarding-contract.md","reason":"Extend the centralized canonical location registration transaction for discovered child worktrees without adding raw insertion paths."}
+{"file":".trellis/spec/mt-app/backend/remote-runtime-reconciliation-contract.md","reason":"Keep authenticated SSH identity, connection epochs, and pre-hydration worktree binding reconciliation correct for discovered remote paths."}
+{"file":".trellis/tasks/09-05-global-search-worktree-discovery/research/current-state-and-orca.md","reason":"Repository and Orca source evidence, current gaps, prior Trellis drift audit, and resolved scope decisions."}
+{"file":".trellis/tasks/09-05-global-search-worktree-discovery/design.md","reason":"Normative shared-catalog, jump-palette, activation, refresh, compatibility, and rollback design for this task."}
+{"file":".trellis/tasks/archive/2026-09/09-01-orca-worktree-terminal-research/research/operation-logic.md","reason":"Preserve the previously approved Project -> Worktree, Quick Open, focus, and stable-target interaction rules."}

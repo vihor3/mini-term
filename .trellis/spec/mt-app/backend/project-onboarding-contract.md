@@ -64,12 +64,26 @@ struct OnboardingError {
 Registration is centralized:
 
 ```rust
-fn register_or_activate_project(
+pub enum ProjectPlacement<'a> {
+    TopLevel { target_group: Option<&'a str> },
+    ChildWorktree { root_project_id: &'a str },
+}
+
+pub fn register_or_activate_project(
     &mut self,
     location: ProjectLocationKey,
     canonical_path: &str,
     suggested_name: Option<&str>,
     target_group: Option<&str>,
+    cx: &mut Context<AppStore>,
+) -> Result<ProjectRegistrationOutcome, String>;
+
+pub fn register_or_activate_project_with_placement(
+    &mut self,
+    location: ProjectLocationKey,
+    canonical_path: &str,
+    suggested_name: Option<&str>,
+    placement: ProjectPlacement<'_>,
     cx: &mut Context<AppStore>,
 ) -> Result<ProjectRegistrationOutcome, String>;
 ```
@@ -142,6 +156,18 @@ page/mode, host signature, and optional SSH connection epoch.
 - Registration either activates the existing location or inserts one project,
   prepares its worktree identity, places it in the requested group, activates
   it, and returns the exact project/worktree pair used for workbench focus.
+- Existing onboarding calls the top-level wrapper. Automatic worktree
+  discovery calls `register_or_activate_project_with_placement` with
+  `ProjectPlacement::ChildWorktree` and the catalog's exact root project ID.
+- Child placement requires an existing top-level root and matching execution
+  host class. SSH children use the same saved connection ID; WSL children use
+  the same distribution; Local, WSL, and SSH paths cannot cross categories.
+- Location validation and canonical host/path dedupe run before insertion. If
+  an existing top-level alias already owns the location, activate it without
+  silently reparenting user configuration.
+- A newly inserted child sets `parent_project_id`, never enters `projectTree`,
+  prepares its normal worktree identity, persists through the same transaction,
+  and returns the exact `ProjectId + WorktreeId` used for reactivation.
 - If filesystem/Git work succeeds but registration fails, retain only the
   verified canonical path under the exact form context. A retry performs a new
   read-only directory probe and retries registration; it must never rerun the
@@ -179,6 +205,11 @@ page/mode, host signature, and optional SSH connection epoch.
 | Duplicate canonical host/path | Activate existing project; do not insert another |
 | Target group disappeared | Registration error; do not silently place elsewhere |
 | Registration retry after successful clone/init | Re-probe read-only and retry registration; never repeat the mutation |
+| Child root is missing or is itself a child | Registration error; no insertion |
+| Local/WSL/SSH child host does not match the root | Registration error; no insertion |
+| SSH child uses another connection or WSL child another distribution | Registration error; no insertion |
+| Child location matches an existing top-level alias | Activate the alias; do not reparent it |
+| Valid new child worktree | Set `parent_project_id`, keep it out of `projectTree`, and return exact project/worktree IDs |
 | Owner/fingerprint/epoch mismatch | Ignore completion as stale |
 
 Authentication guidance may tell the user to run `gh auth login` on the owning
@@ -200,6 +231,10 @@ host. Project onboarding must not launch a browser or attempt account login.
   through `C:\Users\RUNNER~1\repo` as one exact repository root when their
   filesystem identities match.
 - Bad: classify every normalized-string mismatch on Windows as a nested root.
+- Good: selecting an unconfigured SSH worktree registers one child under the
+  root that owns the same connection and activates the returned worktree ID.
+- Bad: insert a discovered child with `add_project_at`, infer a missing parent,
+  or reparent an existing top-level project solely because paths match.
 
 ## 6. Tests Required
 
@@ -227,6 +262,10 @@ host. Project onboarding must not launch a browser or attempt account login.
 - Local integration tests must preserve sentinel files across Add Existing and
   Initialize Existing, verify real clone/init postconditions, and prove nested
   folders do not acquire their own `.git`.
+- Child registration tests must cover Local, WSL, and SSH success, missing or
+  non-top-level roots, host/connection/distribution mismatch, repeated
+  selection, canonical aliases, existing top-level alias preservation, and
+  absence from `projectTree`.
 - Windows focused tests must exercise the directory-identity fallback rather
   than only its lexical fast path, verify the Win32 information layout used by
   the FFI, keep distinct sibling directories unequal, and run real clone/new
@@ -273,3 +312,16 @@ reactivate_active_page(&outcome.project_id, &outcome.worktree_id, window, cx);
 
 The concrete reducer method names may differ, but the ownership check,
 postcondition proof, central registration, and exact activation order may not.
+
+Catalog-owned child registration uses the explicit placement:
+
+```rust
+let outcome = store.register_or_activate_project_with_placement(
+    location,
+    canonical_path,
+    Some(suggested_name),
+    ProjectPlacement::ChildWorktree { root_project_id },
+    cx,
+)?;
+reactivate_active_page(&outcome.project_id, &outcome.worktree_id, window, cx);
+```

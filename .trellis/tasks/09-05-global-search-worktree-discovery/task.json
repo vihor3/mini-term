@@ -1,0 +1,79 @@
+{
+  "id": "global-search-worktree-discovery",
+  "name": "global-search-worktree-discovery",
+  "title": "Global Search and Automatic Worktree Discovery",
+  "description": "Add an Orca-style global search overlay for chats, terminals, worktrees, settings, and actions, and automatically discover and display each project's Local, WSL, or SSH Git worktrees in the project sidebar.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": "mt-project captured worktree parsing; mt-app shared Local/WSL/SSH worktree catalog, child registration, exact terminal activation, Orca sidebar integration, global jump palette, i18n/hotkeys, tests, and GitHub Actions validation/package evidence",
+  "package": null,
+  "priority": "P2",
+  "creator": "leo",
+  "assignee": "leo",
+  "createdAt": "2026-09-05",
+  "completedAt": null,
+  "branch": "feat/remote-file-management",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": "9e646e195baeef6e8f80b67bb7fe416df81a9e30",
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "planning_status": "implementation-complete-actions-validated",
+    "execution_policy": "github-actions-only",
+    "previous_task_audit": "archived status and Actions evidence are synchronized; approved Quick Open and execution-host remote/WSL worktree discovery were omitted from implementation and are corrective scope here",
+    "task_shape": "single integrated task because sidebar and palette share one catalog and activation boundary",
+    "worktree_scan_scope": "exact added project folder as Git anchor; related worktrees only; no recursive, parent, host-wide, or unrelated repository scan",
+    "validated_at": "2026-09-05",
+    "validation_head_sha": "9e646e195baeef6e8f80b67bb7fe416df81a9e30",
+    "ci_run": {
+      "id": "33938763291",
+      "url": "https://github.com/vihor3/mini-term/actions/runs/33938763291",
+      "conclusion": "success",
+      "rust_workspace_job_id": "101231864990",
+      "windows_msvc_job_id": "101231864887",
+      "root_tests_passed": 1988,
+      "root_tests_ignored": 1,
+      "sidecar_tests_passed": 94,
+      "node_staging_tests_passed": 10,
+      "windows_focused_tests_passed": 66,
+      "changed_line_rustfmt_hunks": 0,
+      "changed_line_clippy_warnings": 0,
+      "annotations": 0
+    },
+    "windows_package_run": {
+      "id": "33938763502",
+      "url": "https://github.com/vihor3/mini-term/actions/runs/33938763502",
+      "conclusion": "success",
+      "job_id": "101231852511",
+      "annotations": 0,
+      "artifact": {
+        "id": "9961440350",
+        "name": "Mini-Term_1.2.2-ci.27_windows-x64",
+        "size_bytes": 18297454,
+        "digest": "sha256:d8dc52b85e7bb55ec9fbf5c8fa08bdb557f26c175d0aa9c2ca11df2d7c96b3d6",
+        "expires_at": "2026-09-19T02:43:42Z",
+        "download_url": "https://github.com/vihor3/mini-term/actions/runs/33938763502/artifacts/9961440350"
+      },
+      "installer": {
+        "file": "Mini-Term_1.2.2-ci.27_x64-setup.exe",
+        "size_bytes": 18306839,
+        "sha256": "49f0da633d575bf0dbd6ebfe77d1f384559741c2be1aadfd66724c568a8c9c70",
+        "machine": "0x014c"
+      },
+      "payloads_verified": 8,
+      "feature_markers_verified": 7,
+      "extracted_files": 13
+    },
+    "physical_windows_ui_smoke": "not-run",
+    "residual_risks": [
+      "physical Windows UI smoke test not performed",
+      "the repository has no GPUI end-to-end window harness; pointer, backdrop, and focus paths were validated by unit contracts, existing overlay tests, source inspection, Windows compilation, and package verification"
+    ],
+    "task_sync_status": "acceptance criteria, implementation plan, design, specs, validation evidence, product SHA, and Actions runs synchronized; no scope drift"
+  }
+}

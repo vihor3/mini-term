@@ -44,6 +44,24 @@ pub fn terminal_binding_matches(
     terminal_session_id: &TerminalSessionId,
     terminal_incarnation_id: &TerminalIncarnationId,
 ) -> bool;
+
+pub struct TerminalJumpTarget {
+    pub project_id: String,
+    pub execution_host_id: ExecutionHostId,
+    pub worktree_id: WorktreeId,
+    pub tab_id: TabId,
+    pub pane_key: PaneKey,
+    pub terminal_session_id: TerminalSessionId,
+    pub terminal_incarnation_id: Option<TerminalIncarnationId>,
+}
+
+pub fn terminal_jump_views(&self) -> Vec<TerminalJumpView>;
+pub fn activate_terminal_jump_target(
+    store: &Entity<AppStore>,
+    target: &TerminalJumpTarget,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool;
 ```
 
 Deferred workbench handoff boundary:
@@ -84,6 +102,15 @@ pub fn reactivate_active_page(
   length-prefixed domains. Callers never concatenate or parse payloads.
 - `project_id` remains a compatibility/configuration key. `WorktreeId` owns
   workbench layout, document bucket, preview slot, and active-page state.
+- A global terminal jump captures project, execution host, worktree, tab, pane,
+  logical terminal session, and the optional saved/live incarnation before the
+  user selects it. No field may be derived from the later active project.
+- Resolution validates the complete target, changes project without hydrating
+  unrelated panes, then validates the same complete target again before focus.
+  A rebind or layout change between those checks is inert.
+- An exact dormant pane may run the ordinary hydration path for that saved
+  pane. A live target uses its existing terminal entity. Neither path creates a
+  replacement pane when the selected identity disappeared.
 - `PaneKey` and `TerminalSessionId` survive save/reload, split, move, reorder,
   rename, and worktree switches. A successful warm attach keeps both session
   and incarnation. A new PTY spawn or explicit reconnect keeps the session ID
@@ -132,6 +159,9 @@ pub fn reactivate_active_page(
 | Active project has no binding | Do not open, focus, save, or route worktree state |
 | Project was rebound after a callback was scheduled | Reject the callback without touching either worktree |
 | PTY event has an old incarnation | Reject it even when pane and session IDs still match |
+| Terminal jump differs by host/worktree/tab/pane/session/incarnation | Reject it without changing the current workbench |
+| Exact terminal jump points to a dormant saved pane | Activate that pane and run its ordinary hydration path |
+| Terminal jump target disappears during project activation | Reject the second check; never create or focus a substitute |
 | Restored stable pointer is invalid | Fall back deterministically and persist the corrected pointer |
 | One project alias is removed while another keeps the worktree | Keep the worktree bucket; remove only stale clean tabs and retain dirty drafts |
 | New PTY is spawned | Preserve pane/session identity and rotate incarnation |
@@ -151,6 +181,10 @@ pub fn reactivate_active_page(
 
 - Good: Worktree A keeps a terminal page while worktree B keeps a file page;
   switching restores each worktree's own route.
+- Good: Quick Open selects one dormant pane by its saved complete target and
+  hydrates that pane without touching sibling worktrees.
+- Bad: switch projects first, then look up a pane by display label or whichever
+  pane is active in the destination.
 - Good: An Agents overlay opened on a document captures project and worktree;
   closing it after a project rebind does not focus the new worktree.
 - Good: An SSH project configured as `/srv/repo-link` reuses its matching
@@ -180,6 +214,10 @@ pub fn reactivate_active_page(
 - Workbench tests assert worktree-isolated previews and stale callback rejection.
 - Search/overlay tests assert same project/path with a different `WorktreeId`
   cannot receive deferred focus.
+- Terminal jump projection tests assert saved dormant panes and live panes carry
+  the complete stable target and accurate state flags.
+- Exact activation tests vary every identity component, cover the second
+  revalidation, and prove stale selection never creates a replacement pane.
 - Remote runtime tests assert authoritative rebind is blocked by either live PTYs
   or open documents and that a safe rebind uses layout reconciliation before
   hydration.

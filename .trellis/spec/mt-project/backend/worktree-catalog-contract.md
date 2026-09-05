@@ -18,6 +18,26 @@ a registered worktree disappeared.
 pub fn scan(repo_path: &Path) -> anyhow::Result<WorktreeScan>;
 pub fn invalidate(repo_path: &Path);
 pub fn current_generation(repo_path: &Path) -> u64;
+pub enum WorktreePorcelainMode {
+    Nul,
+    Text,
+}
+
+pub enum WorktreePathSemantics {
+    Native,
+    Posix,
+}
+
+pub fn parse_porcelain(
+    mode: WorktreePorcelainMode,
+    bytes: &[u8],
+) -> anyhow::Result<Vec<WorktreeFact>>;
+
+pub fn parse_porcelain_with_path_semantics(
+    mode: WorktreePorcelainMode,
+    bytes: &[u8],
+    path_semantics: WorktreePathSemantics,
+) -> anyhow::Result<Vec<WorktreeFact>>;
 
 pub struct WorktreeScan {
     pub generation: u64,
@@ -37,6 +57,12 @@ the catalog; they must not introduce a second parser or authority model.
 
 - Run structured argv `git worktree list --porcelain -z` and parse raw bytes
   before any lossy conversion.
+- Host-specific command runners pass complete captured stdout through the
+  public parser boundary. They do not duplicate field parsing, C-quote
+  decoding, duplicate checks, unknown-field handling, or first-row/main rules.
+- `parse_porcelain` uses native path comparison. A WSL or SSH capture must call
+  `parse_porcelain_with_path_semantics(..., WorktreePathSemantics::Posix)` so
+  POSIX case remains distinct even when the GUI process runs on Windows.
 - Capture stdout and stderr independently with a 16 MiB retained-byte limit per
   stream. Continue draining after the limit so the child cannot block, then
   reject the scan instead of parsing a truncated authoritative inventory.
@@ -77,7 +103,8 @@ the catalog; they must not introduce a second parser or authority model.
 | Reader or process cleanup exceeds its bound | Return cleanup context; never wait indefinitely |
 | Non-authoritative empty result in app | Preserve last-known rows/badges |
 | Filesystem path missing but Git still registers it | Keep persisted project; absence is not proven |
-| Current authoritative inventory omits registered child path | Cleanup may remove the legacy child project |
+| WSL/SSH output differs only by POSIX path case | Keep both rows; do not apply Windows case folding |
+| Current authoritative inventory omits registered child path | Navigation may omit the row, but never deletes persistence; only a dedicated, explicitly destructive cleanup path may remove it |
 
 ### 5. Good / Base / Bad Cases
 
@@ -94,9 +121,11 @@ the catalog; they must not introduce a second parser or authority model.
 
 ### 6. Tests Required
 
-- Parser fixtures: spaces, newlines, detached, bare, sparse, locked/prunable
-  with and without reasons, unknown fields, invalid UTF-8, malformed quoting,
-  conflicting duplicates, and missing worktree path.
+- Public parser tests assert NUL/text parity, explicit Native/POSIX comparison,
+  malformed UTF-8/C quoting, conflicting fields, unknown fields, and duplicate
+  paths. Parser fixtures also cover spaces, newlines, detached, bare, sparse,
+  locked/prunable with and without reasons, unknown fields, invalid UTF-8,
+  malformed quoting, conflicting duplicates, and missing worktree path.
 - Catalog tests: unsupported `-z`, ordinary failure without retry, last-known
   fallback, common-dir singleflight, mutation generation fencing, per-stream
   output overflow, timeout process-tree cleanup, successful leader exit with a

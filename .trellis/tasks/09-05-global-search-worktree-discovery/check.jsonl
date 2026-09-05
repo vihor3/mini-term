@@ -1,0 +1,14 @@
+{"file":".trellis/tasks/09-05-global-search-worktree-discovery/prd.md","reason":"Verify every observable requirement and acceptance criterion against the final task-owned diff and Actions evidence."}
+{"file":".trellis/tasks/09-05-global-search-worktree-discovery/design.md","reason":"Verify shared ownership, data flow, activation, compatibility, and rollback boundaries were implemented without drift."}
+{"file":".trellis/tasks/09-05-global-search-worktree-discovery/implement.md","reason":"Verify every ordered implementation and validation gate has evidence before completion."}
+{"file":".trellis/tasks/09-05-global-search-worktree-discovery/research/current-state-and-orca.md","reason":"Check the implementation closes the two audited gaps and stays within the researched Orca behavior."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Review raw Git facts through host execution, parsing, catalog snapshots, registration, activation, and UI projection."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Check there is one parser, one catalog owner, one registration transaction, and existing exact navigation paths are reused."}
+{"file":".trellis/spec/mt-project/backend/worktree-catalog-contract.md","reason":"Verify parser/fallback/authority/generation/last-known behavior and bounded command handling."}
+{"file":".trellis/spec/mt-project/backend/worktree-identity-contract.md","reason":"Verify host-qualified Local/WSL/SSH location and identity semantics, including provisional authority limits."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Verify result targets capture and revalidate WorktreeId, tab, pane, session, and incarnation before focus."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Verify Agent target dedupe, exact activation, attention acknowledgement, context isolation, and stale-result handling."}
+{"file":".trellis/spec/mt-app/backend/project-onboarding-contract.md","reason":"Verify child registration keeps canonical dedupe, host ownership, transactionality, and exact returned activation identity."}
+{"file":".trellis/spec/mt-app/backend/remote-runtime-reconciliation-contract.md","reason":"Verify SSH fingerprint/epoch fencing and safe authoritative binding reconciliation for discovered remote worktrees."}
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Review GPUI state ownership, bounded work, tests, and final Actions-only quality evidence."}
+{"file":".trellis/spec/mt-app/backend/error-handling.md","reason":"Verify stale targets and host/catalog failures fail closed with bounded actionable diagnostics."}
