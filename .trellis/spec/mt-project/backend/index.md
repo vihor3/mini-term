@@ -20,6 +20,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
 | [Worktree Identity Contract](./worktree-identity-contract.md) | Canonical local and explicitly provisional remote worktree identity | Active |
+| [Git CLI Contract](./git-cli-contract.md) | Host-neutral plans, strict byte formats, literal targets and adapter obligations | Active |
 
 ---
 

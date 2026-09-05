@@ -1,4 +1,5 @@
 {"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"No local or manual SSH reproduction commands; Actions evidence required."}
+{"file":".trellis/spec/mt-project/backend/git-cli-contract.md","reason":"Paired strict formats, ref/path/object bounds, directory status capabilities, hook pathspec isolation and host-adapter obligations."}
 {"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Audit mutation completion after A-to-B-to-A switching and cache invalidation."}
 {"file":".trellis/spec/mt-app/backend/project-onboarding-contract.md","reason":"Check no uncertain mutation replay and execution-host fencing."}
 {"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Prevent same-path or stale binding from selecting another repository."}

@@ -7,9 +7,9 @@ implementation/Actions plans, not authorized live Git commands on user projects.
 
 ## Implementation Order
 
-- [ ] Read the source action matrix and host/context/mutation contracts. Map
+- [x] Read the source action matrix and host/context/mutation contracts. Map
   every reachable Git child/dialog call before removing the remote guard.
-- [ ] Add transport-free plans/parsers and narrowly expose reusable DTO/diff
+- [x] Add transport-free plans/parsers and narrowly expose reusable DTO/diff
   functions; preserve explicit Local/WSL/SSH dispatch and literal path semantics.
 - [ ] Implement bounded read and epoch-pinned mutation adapters with explicit
   uncertain outcomes and a source-owned conflicting-write coordinator.
@@ -21,6 +21,12 @@ implementation/Actions plans, not authorized live Git commands on user projects.
   destination browsing, registration, and exact destructive target validation.
 - [ ] Enable the remote panel only after all reachable operations are host-aware;
   request main's Trellis check and update affected specs after evidence agrees.
+
+The domain slice is source-complete and independently reviewed, including
+directory-status metadata and 35 authored tests. None have executed yet.
+The host adapter is implementing; UI/actions/dialog integration and every
+Actions/native acceptance gate remain open. See the two domain handoffs and
+`backend-handoff.md`; checked source steps are not a passing feature gate.
 
 ## Actions-Only Cases
 

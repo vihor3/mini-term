@@ -23,6 +23,9 @@ use parking_lot::Mutex;
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
 
+/// Transport-free Git command plans and machine-output parsers.
+pub mod cli;
+
 // ---------------------------------------------------------------------------
 // Data structures
 // ---------------------------------------------------------------------------

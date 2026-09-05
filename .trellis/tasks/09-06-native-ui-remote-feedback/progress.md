@@ -15,11 +15,11 @@
 
 | Child | State | Evidence |
 | --- | --- | --- |
-| native-terminal-navigation | Actions corrections | `4947f55` format/i18n and Linux/Windows compilation pass; three Clippy corrections assigned, tests/package pending |
-| native-agent-ownership-status | Implementing / Reviewing | Lower layer source-complete under independent check; app integration still implementing |
-| native-file-browser | Reviewing | Onboarding/browser source-complete; FileTree independent review includes upload epoch-pinning |
-| native-remote-git | Implementing / Reviewing | Domain under independent check; host adapter/coordinator implementing; Git UI not yet dispatched |
-| native-tasks-gh-accounts | Implementing | Domain final source pass resumed, then dedicated secret-safe executor; Tasks UI/config not yet dispatched |
+| native-terminal-navigation | Actions tests running | `f7b8a7e` format/i18n, Linux/Windows compilation and Linux Clippy pass; tests/package pending |
+| native-agent-ownership-status | Reviewing | App source complete under Bohr's combined check; lower correlation/silence follow-ups underway |
+| native-file-browser | Reviewing | Onboarding source-complete; FileTree review extends exact epoch/provenance through retained operations |
+| native-remote-git | Implementing | Domain independently reviewed, 35 tests authored; host adapter implementing; Git UI not dispatched |
+| native-tasks-gh-accounts | Implementing | Domain source-complete, 20 tests authored; dedicated executor and separate Tasks app/config integration underway |
 
 ## Current Dispatch
 
@@ -51,6 +51,13 @@ After reading its draft handoff, main also authorized `agent_activity.rs`
 freshness presentation/fixture, `store/projects.rs` necessary test initializer,
 and a narrow `pane.rs`/`store/panes.rs` real title-event capture path. Its needed
 remote title lookup lives in `remote_ssh/sessions.rs`, not general SSH exec.
+Rawls completed and is closed. Combined app reviewer Bohr
+`01a073cb-f945-7173-a9d6-ebcdfe8b97fc` owns that app slice and `app-review.md`.
+Main additionally authorized Agent freshness rendering only in `main.rs` and
+`jump_palette.rs`; module registration lines remain with their separate owners.
+Bohr found a pre-title in-flight inventory incorrectly usable as a post-title
+foreground sample and is adding a request-scheduling-time fence. Lower fixes
+and the remaining monitor silence inference are coordinated with Leibniz.
 Resumed navigation checker James owns only `menu.rs` and the unused search-bar
 import for the current compiler diagnostic; there is no write overlap.
 That focused correction is now source-complete and James is closed again;
@@ -77,6 +84,13 @@ Parfit is now complete and closed. Reviewer Pauli
 `01a073b9-fd9f-77f2-9d28-fd32e7eadd70` owns those files and the narrow
 `remote_ssh/transfer.rs` epoch-pinned upload variants needed by FileTree. Legacy
 upload callers are preserved. It records `file-tree-review.md`.
+Its first review fixed upload pins, clipboard ownership and checked remote path
+text but found three P1 end-to-end gaps. Main extended its ownership to Files-only
+`dirs.rs` listing/create/rename, `delete.rs`, copy/download in `transfer.rs`, and
+narrow `file_ops.rs` if required. Preserve Raman's browser API and legacy callers.
+Producing epoch/cache provenance, pinned retained mutations/download prompts,
+and exact operation/presentation ownership through ABA are being repaired.
+Switching sources must never clear a dispatched operation's busy reservation.
 
 Git domain implementer `01a0737f-42ef-73f2-8e2a-49b1ec476efb` (Turing) owns
 only `mt-project` Git plans/parsers and narrow DTO/diff exports/tests, recording
@@ -88,6 +102,10 @@ and `domain-review.md`. Turing now owns new `git_backend` and
 `remote_ssh/git_ops.rs` modules, narrow execution-host helpers and module wiring.
 It records `backend-handoff.md`; full Git UI and worktree finalization are a
 later separately owned slice. No UI remote guard is enabled prematurely.
+McClintock completed the domain follow-up and is closed. The new
+`RepositoryStatus.untracked_directories` preserves exact trailing-slash entries
+outside file-action DTOs; files/directories share duplicate/count validation.
+The 35 tests remain unrun. Main relayed local-adapter projection obligations.
 
 Tasks domain implementer `01a07384-8b00-7363-9f9b-84b36d2b9c8e` (Copernicus)
 owns only transport-free `mt-github` account plans/models/parsers/errors and
@@ -102,6 +120,16 @@ Copernicus is now resumed for its domain final source pass, then new
 `tasks_account_executor` and narrowly `remote_ssh/tasks_accounts.rs` plus module
 wiring. It may not edit Turing's execution_host.rs; helper requests go through
 main. Config/Tasks UI/store and generic SSH libraries remain outside its scope.
+The domain final pass is complete with 20 authored tests, released for later
+independent review. Executor API is declared in `tasks_account_executor`; Turing
+has exposed only existing `ProcessTree` cleanup visibility for its private
+credential pipes. Native stays Rust-only; WSL/SSH host isolation requires
+Python 3.8+ and reports missing capability rather than falling back.
+Tasks app implementer Herschel `01a073d6-79fa-7052-90c0-ecec15de3cfc` now owns
+`github_tasks.rs`/private children and narrow mt-config selection DTO/default/tests.
+It uses existing `AppStore::patch_config`, not shared store edits, and records
+Tasks `app-handoff.md`. Requests must retain selected-account/source/generation/
+epoch ownership; both directions of global gh synchronization remain forbidden.
 
 Resumed James `01a07327-8943-7030-85bc-3bbcd8f33159` now owns only the changed-
 rustfmt diagnostic script, focused Node tests, the corresponding added Actions
@@ -311,3 +339,23 @@ borrow an unbound Hook by provider alone. Exact process/session proof is needed;
 singleton weak-PTY upgrades require pre-batch uniqueness, and independent
 same-provider processes must survive in either order. Leibniz continues that
 bounded follow-up and authors production-login execution coverage for Actions.
+
+Main committed the complete formatting-artifact producer, four Node fixtures and
+Windows Files/browser test steps as `8f234c0`, then isolated Rawls's three Clippy
+repairs as `f7b8a7e74dc901203b1fd4606310a8ad78f3503f`. The index-only staging
+patch under `~/.cache/mini-term/actions/33996331503/` excluded both runtime title
+maps and all new sidebar Agent behavior. The worktree retained those additions.
+Both commits are pushed to the fork. New CI `33997336854` and Windows Package
+`33997336860` supersede cancelled `4947f55` runs. Latest observed Linux job
+`101390060323` passes all four artifact fixtures, format/i18n, staging/graphs,
+workspace/sidecar compilation and Clippy, and is running workspace tests.
+Windows job `101390060222` passed affected-package compilation and is running
+onboarding tests. No completed overall CI or accepted installer exists yet.
+
+Main authored combined Files locale integration: 13 browser keys plus 3 target
+errors in `USED_KEYS`, expected dictionary count 952 -> 968, and a Windows
+transfer epoch-test step. These remain unstaged with Files; the generated
+dictionary is untouched until an Actions-produced diagnostic patch is available.
+Main also updated the onboarding browser and lower Agent contracts, and added
+the source-backed Git CLI contract. Source documents do not establish execution
+evidence, and the remaining app/SSH boundaries are still being implemented.
