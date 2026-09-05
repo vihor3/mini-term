@@ -15,7 +15,7 @@
 
 | Child | State | Evidence |
 | --- | --- | --- |
-| native-terminal-navigation | Actions tests running | `f7b8a7e` format/i18n, Linux/Windows compilation and Linux Clippy pass; tests/package pending |
+| native-terminal-navigation | CI/package passed / Native pending | Full CI33997336854 and package33997336860 passed for `f7b8a7e`; ci.36 artifact accepted, native interaction remains open |
 | native-agent-ownership-status | Reviewing | App source complete under Bohr's combined check; lower correlation/silence follow-ups underway |
 | native-file-browser | Reviewing | Onboarding source-complete; FileTree review extends exact epoch/provenance through retained operations |
 | native-remote-git | Implementing | Domain independently reviewed, 35 tests authored; host adapter implementing; Git UI not dispatched |
@@ -359,3 +359,27 @@ dictionary is untouched until an Actions-produced diagnostic patch is available.
 Main also updated the onboarding browser and lower Agent contracts, and added
 the source-backed Git CLI contract. Source documents do not establish execution
 evidence, and the remaining app/SSH boundaries are still being implemented.
+
+Navigation CI `33997336854` is now SUCCESS for `f7b8a7e`. Linux job
+`101390060323` completed all gates at `2026-09-05T23:13:21Z`; Windows job
+`101390060222` completed all gates at `2026-09-05T23:21:14Z`. The navigation
+child's new `validation.md` records exact scope and native gaps. Package run
+`33997336860` is still pending at this checkpoint. Passing baseline Files or
+Tasks tests in that candidate does not validate uncommitted new feature code.
+
+Main committed the independently reviewed CLI domain as `71af516`, retaining all
+35 authored tests and its contract/handoffs. It is not pushed yet, to avoid
+cancelling the navigation package before its result. Turing now also owns narrow
+new mt-project local read helpers so remote parity does not silently require
+system Git for formerly libgit2-only local reads; the committed CLI domain is
+otherwise released and unchanged.
+
+The navigation package also completed SUCCESS at `2026-09-05T23:21:50Z`.
+Artifact `9978757862` (`Mini-Term_1.2.2-ci.36_windows-x64`) and its manifest were
+downloaded under `~/.cache/mini-term/artifacts/f7b8a7e-navigation/`. The manifest
+has the exact f7b8a7e commit/run and passed staged/extracted payload validation;
+main did not hash-check or launch it locally. A clearly navigation-only download
+link was shared with the user; native acceptance still requires observations.
+After both runs finished, main pushed `71af516e938003a678d8f532b79bb51f43aa6c60`.
+CI `33998592134` and package `33998592120` now validate the reviewed CLI domain
+candidate, not the uncommitted Git app adapter or other feature slices.

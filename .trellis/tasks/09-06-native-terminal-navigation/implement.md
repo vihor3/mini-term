@@ -29,7 +29,7 @@ other agents. Inherit every parent Actions-only and scoped-commit requirement.
 
 Source reviews and follow-up lifecycle/tools corrections are complete in
 `final-review.md` and the linked handoffs. The flat interface is ready for the
-Agent child, which remains unactivated at this checkpoint. Actions validation
+Agent child, which is now implementing against it. Actions validation
 and native artifact acceptance are still outstanding. Windows CI now also runs
 the terminal-host package's all-target regression suite.
 
