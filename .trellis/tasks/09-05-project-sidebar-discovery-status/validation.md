@@ -1,13 +1,14 @@
 # Integration Validation Record
 
-Recorded: 2026-09-05 (Asia/Shanghai)
+Recorded: 2026-09-05; updated: 2026-09-06 (Asia/Shanghai)
 
 ## Current State
 
 Both child implementations and their bounded independent static reviews are
-complete at source level. No passing test, build, package, or native acceptance
-result is claimed for this task yet. Commit/push authorization was received;
-exact-commit Actions and native acceptance remain pending. Tasks are not archived.
+complete. Exact-product CI and Windows packaging passed for
+`1ee49b8a4504ccf24b24f891bf8f7020420195cc`. The matching installer and runner
+validation report are downloaded. Native interaction/startup acceptance remains
+pending; neither child nor the integration parent is archived.
 
 ## Baseline and Ownership
 
@@ -110,6 +111,73 @@ The checker completed its bounded static handoff. Root cause:
 used by mt-app tests cannot call it. The correction matches that wrapper's
 delegation exactly, and the cross-crate testing contract now records this
 boundary. No local checks ran.
+
+### Third Actions Submission
+
+- Product SHA: `1ee49b8a4504ccf24b24f891bf8f7020420195cc`.
+- Commit: `fix: use public tracker input API in regression tests`.
+- CI: <https://github.com/vihor3/mini-term/actions/runs/33977857810>.
+- Windows Package:
+  <https://github.com/vihor3/mini-term/actions/runs/33977857790>, run number 30.
+- Two HTTPS push attempts failed with transport-only TLS errors. The retry
+  succeeded and the GitHub branch API confirmed the exact SHA above.
+- Formatting, generated i18n, staging tests, locked graph checks, Linux and
+  Windows all-target compilation, sidecar compilation, and affected Clippy
+  passed. Complete test suites and installer verification remain in progress
+  at this checkpoint. The previous package run was cancelled by the newer
+  push and is not evidence for this product SHA.
+
+## Final Actions Evidence
+
+Product SHA: `1ee49b8a4504ccf24b24f891bf8f7020420195cc`.
+Any subsequent evidence-only documentation commit does not change this tested
+product tree or claim a different binary SHA.
+
+| Workflow/job | Run/job ID | Conclusion |
+| --- | --- | --- |
+| CI | `33977857810` | success |
+| Rust workspace | `101337624846` | success |
+| Windows MSVC check | `101337624768` | success |
+| Windows Package | `33977857790` | success |
+| Build and verify Windows installer | `101337641881` | success |
+
+- CI: <https://github.com/vihor3/mini-term/actions/runs/33977857810>.
+- Package: <https://github.com/vihor3/mini-term/actions/runs/33977857790>.
+- Both workflow `headSha` values and the package report's `commit` match the
+  exact product SHA. Both jobs of CI passed, including root/sidecar locked
+  graphs and checks, affected Clippy, formatting/i18n, staging tests, full
+  root/sidecar tests, whitespace, Windows checks, and focused Windows tests.
+- Windows focused tests report 72 onboarding tests and 3 SSH project-operation
+  tests passed, including all nine visibility onboarding regressions.
+- Linux mt-app: 1027 passed, zero failed/ignored. Logs explicitly confirm
+  visibility/settings/database persistence, refresh fencing, accepted-state
+  projection, Hook exit ownership, retirement/teardown, and sidebar cases.
+- Linux mt-ai: 200 passed, zero failed/ignored. Linux mt-ssh: 63 passed,
+  zero failed, one intentionally ignored subprocess entry point. All three
+  generated-command parent tests executed and passed, including exact route
+  matching, provider arguments, and literal wildcard arguments. The ignored
+  entry point is explicitly launched by those parent tests, not omitted probe
+  coverage. A separate pre-existing mt-ui debug preview is also ignored.
+- No local compile, test, fixture, formatter, generator, lint, whitespace
+  check, installer verification, or automated native harness was run.
+
+## Downloaded Artifact
+
+- Name: `Mini-Term_1.2.2-ci.30_windows-x64`.
+- GitHub artifact ID: `9973159120`; archive size: 18367455 bytes.
+- GitHub-reported archive digest:
+  `sha256:c205c529a9945270c51266126e02f5c39fb6cea9a74652390605ce1f852d505e`.
+- Target: `x86_64-pc-windows-msvc`; package version: `1.2.2-ci.30`.
+- Download directory:
+  `/home/leo/Downloads/Mini-Term_1.2.2-ci.30_windows-x64/`.
+- Installer: `Mini-Term_1.2.2-ci.30_x64-setup.exe` (18376829 bytes).
+- Actions-reported installer SHA-256:
+  `b1147e246cf8139ffc6a49362e9a0926fc08f55876d97fa352533730c80bfda6`.
+- `windows-package-validation.json` reports `status: passed`, the exact
+  product commit/run, valid resources and expected machine types, all eight
+  staged/extracted payload hash matches, and the remote Agent feature marker.
+- Local work downloaded and read this runner-produced report; it did not
+  recalculate hashes, extract/verify the installer, or launch the native app.
 
 ## Static Integration Outcome
 

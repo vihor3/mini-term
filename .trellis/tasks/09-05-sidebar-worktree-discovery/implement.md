@@ -37,11 +37,13 @@
 Implementation and test source handed off on 2026-09-05. Checked source-writing
 items do not assert executed tests. Independent static review is complete.
 The Actions-generated dictionary patch was applied in `1d2ea0d`; its rerun
-passed the generated dictionary and formatting gates. Complete CI and native
-acceptance remain pending; see the parent validation record.
+passed the generated dictionary and formatting gates. Complete CI and Windows
+packaging now pass for `1ee49b8`; native acceptance remains pending. See the
+parent validation record.
 - [x] Run the Trellis reviewer on the exact scoped changes, self-fix its
   verified findings, and inspect the final diff for unrelated changes.
-- [ ] Obtain CI and native UI evidence before marking the child complete.
+- [x] Obtain exact-product CI and an Actions-produced native acceptance build.
+- [ ] Obtain native UI evidence before marking the child complete.
 
 ## Validation Commands
 
@@ -72,7 +74,8 @@ Added filters are `worktree_visibility::tests`, `project_settings::tests`, and
 `store::projects::project_onboarding_tests::visibility_`. Config/database and
 catalog tests are included by the workspace job. Static review finished after
 the typed configured-project exclusion correction; no additional confirmed
-defect remains in that bounded review. Actions/native gates are still pending.
+defect remains in that bounded review. Actions gates passed for `1ee49b8`;
+native settings interaction and startup cadence remain pending.
 
 This restriction is a hard user constraint: compilation, all tests/fixtures,
 lint/format/whitespace checks, generation, and packaging run only in Actions,

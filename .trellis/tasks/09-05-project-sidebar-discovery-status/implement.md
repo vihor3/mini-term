@@ -25,6 +25,9 @@ not the integration parent; no product changes preceded this approval.
   manifests and the visibility implementation handoff.
 - [x] Dispatch the status child's independent review after implementation and
   the serialized sidebar integration.
+- [x] Complete the approved scoped commits and Actions diagnostic corrections.
+  CI and Windows packaging passed for product SHA `1ee49b8`; the matching
+  `1.2.2-ci.30` installer is downloaded with runner validation evidence.
 - [ ] Review process-probe execution, accepted-event ordering, lifecycle, and
   presentation evidence. Revisit planning if the required fix exceeds scope.
 - [ ] Validate the combined startup/refresh/hide/unhide flow, because parent

@@ -1,13 +1,14 @@
 # Worktree Visibility Validation Record
 
-Recorded: 2026-09-05 (Asia/Shanghai)
+Recorded: 2026-09-05; updated: 2026-09-06 (Asia/Shanghai)
 
 ## Implementation Handoff
 
 The implementation agent completed source changes against baseline
 `b166bd2b65549ef14bf0d6c3b9e1b31afb4f70e8`. Independent static review is
-complete. No compiler, test, formatter, generator, or native acceptance result
-is claimed yet. No local validation command was run during implementation.
+complete. At handoff no executable result was claimed. Exact-product Actions
+verification has now passed as recorded below; native acceptance is still
+pending. No local validation command was run during implementation.
 
 Changes are confined to `mt-config` typed exclusions and serialization,
 `mt-app` settings/visibility/catalog/sidebar/AppStore integration, locale
@@ -30,18 +31,24 @@ inputs, and required `ProjectConfig` construction sites in `mt-app` and
 - `mt-config` config/database tests: old records default to no exclusions and
   exclusions round-trip through the existing ConfigDb JSON owner.
 
-These are test-source references, not execution evidence. The existing Actions
-workspace test job includes these modules without adding a local test path.
+These modules subsequently executed in the successful Actions workspace job
+below. Unit/source coverage does not constitute native settings interaction
+or a real startup cadence trace.
 
-## Required Actions
+## Actions Evidence
 
-The user approved the scoped commit/push plan on 2026-09-05. Initial source
-commits are pushed and the current tracking fork's `CI` and `Windows Package`
-workflows are running; see the parent validation record. Record exact
-`headSha`, run URLs/conclusions, and
-artifact identity. Apply generated dictionary and formatting diagnostic patches
-from Actions only. The 14 new locale keys require generated dictionary
-synchronization; do not run the generator locally.
+The user approved the scoped commit/push plan on 2026-09-05. CI
+`33977857810` and Windows Package `33977857790` both passed for product SHA
+`1ee49b8a4504ccf24b24f891bf8f7020420195cc`. The Linux log confirms every
+module listed above, including the database round-trip and refresh fencing;
+all 1027 mt-app tests passed. Windows focused onboarding tests passed too.
+
+The 14 locale keys were synchronized with the Actions-generated dictionary
+patch, and the rerun passed dictionary/format checks. The matching installer
+is `Mini-Term_1.2.2-ci.30_x64-setup.exe`, downloaded under
+`/home/leo/Downloads/Mini-Term_1.2.2-ci.30_windows-x64/`. Exact job URLs,
+artifact identity, and runner-produced validation are in
+`../09-05-project-sidebar-discovery-status/validation.md`.
 
 ## First Static Review
 

@@ -1,14 +1,15 @@
 # Remote Agent Status Validation Record
 
-Recorded: 2026-09-05 (Asia/Shanghai)
+Recorded: 2026-09-05; updated: 2026-09-06 (Asia/Shanghai)
 
 ## Implementation Handoff
 
 The status implementer handed off changes in `mt-ssh/src/agent.rs`,
 `mt-ai/src/agent_runtime.rs`, and `mt-app/src/{ai.rs,pane.rs,orca_sidebar.rs,
 store/ai.rs,store/remote_agents.rs}`. Independent static review is complete.
-Only source/Git inspection occurred. Compilation, tests, fixtures, formatting,
-generation, and native verification have not run.
+Only source/Git inspection occurred during implementation. Exact-product
+compilation, tests/fixtures, formatting, and generation subsequently passed
+in Actions as recorded below. Native acceptance remains pending.
 
 The visibility/settings changes remain separately owned in their first commit.
 The status edit preserved the new sidebar header controls and visibility
@@ -33,11 +34,29 @@ predicate, and begins after the first visibility reviewer released that file.
   attention, completion/error, disconnected/stale work, and rich-state priority
   over legacy Working fallback.
 
-These are test-source references, not passing execution evidence. The existing
-Actions workspace job includes the tests. The user approved the scoped
-commit/push plan on 2026-09-05, and initial source commits are pushed. Both
-locked workspaces and Windows MSVC/package workflows are running; see the
-parent validation record. No successful result is implied before completion.
+These modules subsequently executed in the successful Actions workspace job.
+The user approved the scoped commit/push plan on 2026-09-05, and source plus
+bounded diagnostic corrections are pushed. Automated evidence does not
+substitute for the native acceptance described below.
+
+## Actions Evidence
+
+- Product SHA: `1ee49b8a4504ccf24b24f891bf8f7020420195cc`.
+- CI `33977857810`: Linux Rust workspace and Windows MSVC jobs both success.
+- Windows Package `33977857790`: success, artifact
+  `Mini-Term_1.2.2-ci.30_windows-x64` downloaded to the same-named directory
+  under `/home/leo/Downloads/` with its runner-produced validation report.
+- Linux logs confirm every accepted-projection, Hook-owner, retirement,
+  observer/poll teardown, and status presentation regression above. mt-ai
+  reports 200 passed; mt-app reports 1027 passed, with zero failed/ignored.
+- mt-ssh reports 63 passed and one intentionally ignored fixture entry point.
+  All three generated-command parent tests executed successfully and launched
+  the actual fixture, so this is execution evidence for the `/proc` fix.
+- Initial consumer tests called an mt-ai-local `#[cfg(test)]` helper.
+  Both calls now use its existing public delegate
+  `track_input_with_line_snapshot(..., None)` without weakening assertions.
+- Exact workflow/job URLs, artifact identity, diagnostic history, and native
+  limitations are in `../09-05-project-sidebar-discovery-status/validation.md`.
 
 ## Review Focus
 
@@ -78,8 +97,8 @@ sessions retain their existing bounded-inference limitations.
   Full Pane/AppStore event delivery and connectivity delivery remain pending;
   this source coverage is not a substitute for native integration evidence.
 - The bounded follow-up static review is complete with no further confirmed
-  code defect reported. Tests, probes, compilation, lint, formatting, and
-  native checks remain unverified pending Actions and native acceptance.
+  code defect reported. All required automated gates subsequently passed in
+  Actions. Native acceptance remains unverified.
 
 ## Bug Analysis
 
@@ -92,7 +111,8 @@ sessions retain their existing bounded-inference limitations.
    correcting event acceptance or process discovery, so it was not used.
 3. Prevention: actual generated-command fixtures in Actions, accepted-state
    projection boundaries, exact-route retirement/teardown guards, and pure
-   rich-state/connectivity presentation regressions. Test execution is pending.
+   rich-state/connectivity presentation regressions. These tests passed in
+   the matching Actions run; native delivery remains a separate pending gate.
 4. Related scope: inventory and PTY paths share the same acceptance boundary;
    ordinary catalog refresh is separately corrected by the visibility child.
 5. Knowledge captured in the mt-ssh inventory, mt-ai runtime, mt-app remote
