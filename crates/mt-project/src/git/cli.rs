@@ -13,9 +13,9 @@ use super::{BranchInfo, ChangeFileStatus, GitDiffResult};
 
 mod parse;
 pub use parse::{
-    parse_blob_size, parse_branches, parse_commit_files, parse_commit_parents,
-    parse_index_entry, parse_log, parse_object_id, parse_repository_authority,
-    parse_status, parse_tree_entry, parse_worktrees,
+    parse_blob_size, parse_branches, parse_commit_files, parse_commit_parents, parse_index_entry,
+    parse_log, parse_object_id, parse_repository_authority, parse_status, parse_tree_entry,
+    parse_worktrees,
 };
 
 pub const MAX_BLOB_BYTES: usize = super::MAX_DIFF_BYTES;
@@ -63,8 +63,7 @@ impl GitCommand {
             "Git command output was truncated"
         );
         ensure!(
-            output.stdout.len() <= self.stdout_limit
-                && output.stderr.len() <= self.stderr_limit,
+            output.stdout.len() <= self.stdout_limit && output.stderr.len() <= self.stderr_limit,
             "Git command output exceeded its limit"
         );
         match output.exit_code {
@@ -116,7 +115,9 @@ impl ObjectId {
 fn validate_oid(value: &str, allow_zero: bool) -> Result<()> {
     ensure!(
         matches!(value.len(), 40 | 64)
-            && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             && (allow_zero || value.bytes().any(|b| b != b'0')),
         "Expected a full nonzero lowercase Git object ID"
     );
@@ -140,7 +141,9 @@ impl GitRef {
                 && !name.contains("..")
                 && !name.contains("@{")
                 && value.len() <= MAX_PATH_BYTES
-                && !name.bytes().any(|b| b <= b' ' || b == 0x7f || b"~^:?*[\\".contains(&b))
+                && !name
+                    .bytes()
+                    .any(|b| b <= b' ' || b == 0x7f || b"~^:?*[\\".contains(&b))
                 && name.split('/').all(|part| {
                     !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock")
                 }),
@@ -160,7 +163,11 @@ impl GitRef {
     }
 
     pub fn from_branch(branch: &BranchInfo) -> Result<Self> {
-        let namespace = if branch.is_remote { "refs/remotes/" } else { "refs/heads/" };
+        let namespace = if branch.is_remote {
+            "refs/remotes/"
+        } else {
+            "refs/heads/"
+        };
         Self::parse(&format!("{namespace}{}", branch.name))
     }
 
@@ -195,9 +202,9 @@ pub fn validate_repo_path(path: &str) -> Result<()> {
         !path.is_empty()
             && path.len() <= MAX_PATH_BYTES
             && !path.contains('\0')
-            && path.split('/').all(|part| {
-                !part.is_empty() && part != "." && part != ".." && part != ".git"
-            }),
+            && path
+                .split('/')
+                .all(|part| { !part.is_empty() && part != "." && part != ".." && part != ".git" }),
         "Expected an exact repository-relative file path"
     );
     Ok(())
@@ -209,9 +216,9 @@ fn validate_absolute_path(path: &str) -> Result<()> {
             && path.len() <= MAX_PATH_BYTES
             && !path.contains('\0')
             && (path == "/"
-                || path[1..].split('/').all(|part| {
-                    !part.is_empty() && part != "." && part != ".."
-                })),
+                || path[1..]
+                    .split('/')
+                    .all(|part| { !part.is_empty() && part != "." && part != ".." })),
         "Expected an absolute canonical POSIX path"
     );
     Ok(())
@@ -225,7 +232,10 @@ fn with_paths(mut plan: GitCommand, paths: &[String]) -> Result<GitCommand> {
         validate_repo_path(path)?;
         bytes = bytes.saturating_add(path.len() + 1);
     }
-    ensure!(bytes <= MAX_ARG_BYTES, "Git path arguments exceed their limit");
+    ensure!(
+        bytes <= MAX_ARG_BYTES,
+        "Git path arguments exceed their limit"
+    );
     // This global option is inherited by child Git processes. Only path-targeted
     // plans need it; commit/sync/worktree hooks must keep normal pathspec rules.
     plan.args.insert(0, "--literal-pathspecs".to_string());
@@ -311,7 +321,10 @@ pub fn resolve_ref_plan(reference: &GitRef) -> GitCommand {
 /// Continuation tips are ALL parents of the last commit, never that commit or
 /// an offset. The consumer owns cross-page graph deduplication.
 pub fn log_plan(tips: &[ObjectId], limit: usize) -> Result<Option<GitCommand>> {
-    ensure!((1..=MAX_LOG_COMMITS).contains(&limit), "Invalid Git log page size");
+    ensure!(
+        (1..=MAX_LOG_COMMITS).contains(&limit),
+        "Invalid Git log page size"
+    );
     ensure!(tips.len() <= MAX_LOG_COMMITS, "Too many Git log tips");
     if tips.is_empty() {
         return Ok(None);
@@ -329,13 +342,20 @@ pub fn log_plan(tips: &[ObjectId], limit: usize) -> Result<Option<GitCommand>> {
         "--format=tformat:%H%x00%P%x00%an%x00%ct%x00%s%x00%b",
     ]);
     plan.args.push(format!("--max-count={limit}"));
-    plan.args.extend(tips.iter().map(|tip| tip.as_str().to_string()));
+    plan.args
+        .extend(tips.iter().map(|tip| tip.as_str().to_string()));
     plan.args.push("--".to_string());
     Ok(Some(plan))
 }
 
 pub fn commit_parents_plan(commit: &ObjectId) -> GitCommand {
-    read(&["rev-list", "--parents", "--max-count=1", commit.as_str(), "--"])
+    read(&[
+        "rev-list",
+        "--parents",
+        "--max-count=1",
+        commit.as_str(),
+        "--",
+    ])
 }
 
 /// Supply the selected commit's FIRST parent, or None only for a verified root.
@@ -398,7 +418,12 @@ pub fn index_entry_plan(path: &str) -> Result<GitCommand> {
 }
 
 pub fn blob_size_plan(oid: &ObjectId) -> GitCommand {
-    command(&["cat-file", "-s", oid.as_str()], CommandEffect::ReadOnly, 30, 32)
+    command(
+        &["cat-file", "-s", oid.as_str()],
+        CommandEffect::ReadOnly,
+        30,
+        32,
+    )
 }
 
 /// Read size first (ls-tree or cat-file -s). An oversized object must produce
@@ -415,10 +440,17 @@ pub fn blob_plan(oid: &ObjectId) -> GitCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlobLookup {
     Empty,
-    Tree { commit: ObjectId, path: String },
-    Index { path: String },
+    Tree {
+        commit: ObjectId,
+        path: String,
+    },
+    Index {
+        path: String,
+    },
     /// Bounded host filesystem read, not a local filesystem or Git diff call.
-    Worktree { path: String },
+    Worktree {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,7 +461,10 @@ pub struct DiffPlan {
 
 fn tree_lookup(commit: Option<&ObjectId>, path: &str) -> BlobLookup {
     match commit {
-        Some(commit) => BlobLookup::Tree { commit: commit.clone(), path: path.to_string() },
+        Some(commit) => BlobLookup::Tree {
+            commit: commit.clone(),
+            path: path.to_string(),
+        },
         None => BlobLookup::Empty,
     }
 }
@@ -445,9 +480,13 @@ pub fn working_diff_plan(
     Ok(DiffPlan {
         old: tree_lookup(head, old_path.unwrap_or(path)),
         new: if staged {
-            BlobLookup::Index { path: path.to_string() }
+            BlobLookup::Index {
+                path: path.to_string(),
+            }
         } else {
-            BlobLookup::Worktree { path: path.to_string() }
+            BlobLookup::Worktree {
+                path: path.to_string(),
+            }
         },
     })
 }
@@ -525,7 +564,9 @@ pub enum DiscardPlan {
     Git(GitCommand),
     /// The host must remove this exact leaf nonrecursively, without following
     /// leaf symlinks; revalidate parent containment and current untracked status.
-    RemoveUntrackedFile { path: String },
+    RemoveUntrackedFile {
+        path: String,
+    },
 }
 
 /// `tracked` must come from a current exact index/status probe, not its display
@@ -533,11 +574,19 @@ pub enum DiscardPlan {
 pub fn discard_plan(path: &str, head: Option<&ObjectId>, tracked: bool) -> Result<DiscardPlan> {
     validate_repo_path(path)?;
     if !tracked {
-        return Ok(DiscardPlan::RemoveUntrackedFile { path: path.to_string() });
+        return Ok(DiscardPlan::RemoveUntrackedFile {
+            path: path.to_string(),
+        });
     }
     let command = match head {
         Some(head) => write(
-            &["restore", "--source", head.as_str(), "--staged", "--worktree"],
+            &[
+                "restore",
+                "--source",
+                head.as_str(),
+                "--staged",
+                "--worktree",
+            ],
             30,
         ),
         None => write(&["rm", "--force"], 30),
@@ -568,18 +617,29 @@ pub fn worktree_list_plan() -> GitCommand {
 /// Reuse the legacy DTO projection, retaining POSIX paths on every client OS.
 /// Native display_path/file_name would otherwise trim or split backslashes on
 /// Windows. Keep authoritative facts separately for catalog/cleanup decisions.
-pub fn project_worktrees(facts: &[crate::worktree::WorktreeFact]) -> Result<Vec<super::WorktreeInfo>> {
+pub fn project_worktrees(
+    facts: &[crate::worktree::WorktreeFact],
+) -> Result<Vec<super::WorktreeInfo>> {
     ensure!(facts.len() <= MAX_WORKTREES, "Too many Git worktrees");
-    facts.iter().map(|fact| {
-        let path = fact.path.to_str()
-            .ok_or_else(|| anyhow::anyhow!("Git worktree path is not valid UTF-8"))?;
-        validate_absolute_path(path)?;
-        let mut info = super::project_worktree_fact(fact);
-        info.path = path.to_string();
-        info.name = path.rsplit('/').next().filter(|name| !name.is_empty())
-            .unwrap_or("main").to_string();
-        Ok(info)
-    }).collect()
+    facts
+        .iter()
+        .map(|fact| {
+            let path = fact
+                .path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("Git worktree path is not valid UTF-8"))?;
+            validate_absolute_path(path)?;
+            let mut info = super::project_worktree_fact(fact);
+            info.path = path.to_string();
+            info.name = path
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or("main")
+                .to_string();
+            Ok(info)
+        })
+        .collect()
 }
 
 pub fn worktree_add_plan(
@@ -589,13 +649,20 @@ pub fn worktree_add_plan(
     base: Option<&ObjectId>,
 ) -> Result<GitCommand> {
     validate_absolute_path(target)?;
-    ensure!(target != "/", "Cannot create a worktree at the filesystem root");
+    ensure!(
+        target != "/",
+        "Cannot create a worktree at the filesystem root"
+    );
     ensure!(!branch.is_remote(), "A worktree must use a local branch");
     validate_branch_shorthand(branch.short_name())?;
-    ensure!(create_branch || base.is_none(), "Existing branch cannot have a new base");
+    ensure!(
+        create_branch || base.is_none(),
+        "Existing branch cannot have a new base"
+    );
     let mut plan = write(&["worktree", "add"], 120);
     if create_branch {
-        plan.args.extend(["-b".to_string(), branch.short_name().to_string()]);
+        plan.args
+            .extend(["-b".to_string(), branch.short_name().to_string()]);
     }
     plan.args.extend(["--".to_string(), target.to_string()]);
     if create_branch {
@@ -611,7 +678,10 @@ pub fn worktree_add_plan(
 pub fn worktree_remove_plan(target: &str, main_worktree: &str, force: bool) -> Result<GitCommand> {
     validate_absolute_path(target)?;
     validate_absolute_path(main_worktree)?;
-    ensure!(target != "/" && target != main_worktree, "Cannot remove the main worktree");
+    ensure!(
+        target != "/" && target != main_worktree,
+        "Cannot remove the main worktree"
+    );
     let mut plan = write(&["worktree", "remove"], 60);
     if force {
         plan.args.push("--force".to_string());
