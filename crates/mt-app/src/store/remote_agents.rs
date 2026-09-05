@@ -681,9 +681,7 @@ impl AppStore {
                 }
                 return;
             }
-            if is_empty
-                && let Some(state) = self.remote_agent_polls.get_mut(&request.pty_id)
-            {
+            if is_empty && let Some(state) = self.remote_agent_polls.get_mut(&request.pty_id) {
                 state.had_processes =
                     has_process_attested_run_for_route(&self.agent_runtime, &request.route);
             }
@@ -731,8 +729,8 @@ impl AppStore {
         connectivity: AgentConnectivity,
         now: i64,
     ) {
-        let connection_epoch = connection_epoch
-            .or_else(|| active_route_connection_epoch(&self.agent_runtime, &route));
+        let connection_epoch =
+            connection_epoch.or_else(|| active_route_connection_epoch(&self.agent_runtime, &route));
         if !active_route_connectivity_change_needed(
             &self.agent_runtime,
             &route,
@@ -771,7 +769,10 @@ impl AppStore {
         let projection = accepted_agent_projection(&self.agent_runtime, route, retained_attention);
         crate::git_watch::set_ai_pane(
             pty_id,
-            matches!(projection.status, PaneStatus::AiWorking | PaneStatus::AiIdle),
+            matches!(
+                projection.status,
+                PaneStatus::AiWorking | PaneStatus::AiIdle
+            ),
         );
         for state in self.project_states.values_mut() {
             let updated = state
@@ -1015,7 +1016,11 @@ mod tests {
             inventory(&request, 1, vec![process(10)]),
         )
         .unwrap();
-        let old_run = registry.active_run_for_route(&request.route).unwrap().run_id.clone();
+        let old_run = registry
+            .active_run_for_route(&request.route)
+            .unwrap()
+            .run_id
+            .clone();
         let mut poll = RemoteAgentPollState::from_request(
             &request,
             has_process_attested_run_for_route(&registry, &request.route),
@@ -1063,7 +1068,13 @@ mod tests {
             inventory(&request, 4, vec![process(20)]),
         )
         .unwrap();
-        assert_ne!(registry.active_run_for_route(&request.route).unwrap().run_id, old_run);
+        assert_ne!(
+            registry
+                .active_run_for_route(&request.route)
+                .unwrap()
+                .run_id,
+            old_run
+        );
     }
 
     #[test]
@@ -1098,7 +1109,10 @@ mod tests {
         )
         .unwrap();
         assert!(tracker.is_ai_session(request.pty_id));
-        assert!(has_process_attested_run_for_route(&registry, &request.route));
+        assert!(has_process_attested_run_for_route(
+            &registry,
+            &request.route
+        ));
 
         registry.observe(mt_ai::AgentObservation {
             event_id: AgentEventId::new(),
@@ -1166,7 +1180,10 @@ mod tests {
             inventory(&request, 10, vec![process(10), other]),
         )
         .unwrap();
-        let hook = registry.runs().find(|run| run.evidence == AgentEvidence::Hook).unwrap();
+        let hook = registry
+            .runs()
+            .find(|run| run.evidence == AgentEvidence::Hook)
+            .unwrap();
         assert_eq!(hook.last_sequence, 11);
         assert_eq!(hook.activity, AgentActivity::Done);
         assert_eq!(registry.runs().count(), 2);
@@ -1179,13 +1196,21 @@ mod tests {
     fn retired_terminal_polling_fences_completion_and_preserves_other_owners() {
         let request = request();
         let mut registry = AgentRuntimeRegistry::default();
-        registry.apply_process_inventory(inventory(&request, 1, vec![process(10)])).unwrap();
+        registry
+            .apply_process_inventory(inventory(&request, 1, vec![process(10)]))
+            .unwrap();
         let mut other = request.clone();
         other.pty_id += 1;
         other.route.terminal_incarnation_id = mt_identity::TerminalIncarnationId::new();
         let mut polls = HashMap::from([
-            (request.pty_id, RemoteAgentPollState::from_request(&request, true)),
-            (other.pty_id, RemoteAgentPollState::from_request(&other, false)),
+            (
+                request.pty_id,
+                RemoteAgentPollState::from_request(&request, true),
+            ),
+            (
+                other.pty_id,
+                RemoteAgentPollState::from_request(&other, false),
+            ),
         ]);
         let mut exited_ptys = HashSet::new();
         retire_terminal_polling(request.pty_id, &mut exited_ptys, &mut polls);
@@ -1193,18 +1218,23 @@ mod tests {
         assert_eq!(exited_ptys, HashSet::from([request.pty_id]));
         assert_eq!(polls.len(), 1);
         assert!(polls.get(&other.pty_id).unwrap().owns(&other));
-        registry.mark_connectivity(AgentConnectivityObservation {
-            event_id: AgentEventId::new(),
-            route: request.route.clone(),
-            sequence: 2,
-            connection_epoch: active_route_connection_epoch(&registry, &request.route),
-            connectivity: AgentConnectivity::Disconnected,
-            received_at_unix_ms: 2,
-        }).unwrap();
+        registry
+            .mark_connectivity(AgentConnectivityObservation {
+                event_id: AgentEventId::new(),
+                route: request.route.clone(),
+                sequence: 2,
+                connection_epoch: active_route_connection_epoch(&registry, &request.route),
+                connectivity: AgentConnectivity::Disconnected,
+                received_at_unix_ms: 2,
+            })
+            .unwrap();
         assert!(!request_facts_match(
             &request,
             polls.get(&request.pty_id),
-            Some((request.project_path.as_str(), request.connection_id.as_str())),
+            Some((
+                request.project_path.as_str(),
+                request.connection_id.as_str()
+            )),
             Some(request.connection_fingerprint),
             Some(&request.route),
             Some((&request.route, request.connection_epoch)),

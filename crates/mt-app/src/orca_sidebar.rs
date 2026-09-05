@@ -166,7 +166,10 @@ impl SidebarIndicator {
                 _ => SidebarActivity::Idle,
             }
         };
-        Self { activity, connectivity: Some(connectivity) }
+        Self {
+            activity,
+            connectivity: Some(connectivity),
+        }
     }
 
     fn merge(&mut self, other: Self) {
@@ -561,11 +564,21 @@ impl OrcaProjectSidebar {
                     .when(project.refreshing, |lane| {
                         lane.child(
                             div()
-                                .id(SharedString::from(format!("orca-refresh-{}", project.root_project_id)))
+                                .id(SharedString::from(format!(
+                                    "orca-refresh-{}",
+                                    project.root_project_id
+                                )))
                                 .tooltip(|window, cx| {
-                                    Tooltip::new(t("worktree", "settings.refreshing")).build(window, cx)
+                                    Tooltip::new(t("worktree", "settings.refreshing"))
+                                        .build(window, cx)
                                 })
-                                .child(VectorIcon::new(mt_ui::icons::usage_glyphs::ICON_REFRESH, px(12.0)).ink(ui::text_muted())),
+                                .child(
+                                    VectorIcon::new(
+                                        mt_ui::icons::usage_glyphs::ICON_REFRESH,
+                                        px(12.0),
+                                    )
+                                    .ink(ui::text_muted()),
+                                ),
                         )
                     }),
             )
@@ -611,7 +624,10 @@ impl OrcaProjectSidebar {
             )
             .child(
                 small_icon_button(
-                    SharedString::from(format!("orca-project-settings-{}", project.root_project_id)),
+                    SharedString::from(format!(
+                        "orca-project-settings-{}",
+                        project.root_project_id
+                    )),
                     t("worktree", "settings.title").into(),
                     VectorIcon::new(MORE_ICON, px(13.0))
                         .ink(ui::text_muted())
@@ -619,16 +635,28 @@ impl OrcaProjectSidebar {
                 )
                 .on_click(move |event: &gpui::ClickEvent, window, cx| {
                     cx.stop_propagation();
-                    let Some(target) = ProjectSettingsTarget::capture(settings_store.read(cx), &settings_project_id) else {
+                    let Some(target) = ProjectSettingsTarget::capture(
+                        settings_store.read(cx),
+                        &settings_project_id,
+                    ) else {
                         return;
                     };
                     let store = settings_store.clone();
                     let catalog = settings_catalog.clone();
                     menu::show(
                         event.position(),
-                        vec![menu::item(t("worktree", "settings.title"), move |window, cx| {
-                            crate::project_settings::open(store.clone(), catalog.clone(), target.clone(), window, cx);
-                        })],
+                        vec![menu::item(
+                            t("worktree", "settings.title"),
+                            move |window, cx| {
+                                crate::project_settings::open(
+                                    store.clone(),
+                                    catalog.clone(),
+                                    target.clone(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )],
                         window,
                         cx,
                     );
@@ -686,7 +714,9 @@ impl OrcaProjectSidebar {
         detail_parts.push(path_text.clone());
         let detail = detail_parts.join(" | ");
         let status_lane = div()
-            .id(SharedString::from(format!("orca-worktree-status-{parent_id}-{path_text}")))
+            .id(SharedString::from(format!(
+                "orca-worktree-status-{parent_id}-{path_text}"
+            )))
             .w(px(18.0))
             .h(px(14.0))
             .flex_none()
@@ -706,17 +736,22 @@ impl OrcaProjectSidebar {
             .when(indicator.activity != SidebarActivity::Idle, |lane| {
                 lane.child(indicator.icon())
             })
-            .when(indicator.activity == SidebarActivity::Idle && needs_attention, |lane| {
-                lane.child(
-                    div()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded_full()
-                        .bg(ui::color_success()),
-                )
-            })
             .when(
-                indicator.activity == SidebarActivity::Idle && !needs_attention && worktree.last_known,
+                indicator.activity == SidebarActivity::Idle && needs_attention,
+                |lane| {
+                    lane.child(
+                        div()
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .rounded_full()
+                            .bg(ui::color_success()),
+                    )
+                },
+            )
+            .when(
+                indicator.activity == SidebarActivity::Idle
+                    && !needs_attention
+                    && worktree.last_known,
                 |lane| {
                     lane.child(
                         div()
@@ -1000,21 +1035,31 @@ impl Render for OrcaProjectSidebar {
             let expanded = !self.collapsed_projects.contains(&project.root_project_id);
             rows = rows.child(self.render_project_row(&project, expanded, cx));
             if expanded {
-                let hidden = self.store.read(cx).project(&project.root_project_id)
-                    .map(|root| root.hidden_worktrees.clone()).unwrap_or_default();
+                let hidden = self
+                    .store
+                    .read(cx)
+                    .project(&project.root_project_id)
+                    .map(|root| root.hidden_worktrees.clone())
+                    .unwrap_or_default();
                 for worktree in &project.rows {
                     if !sidebar_visible(worktree, &hidden) {
                         continue;
                     }
-                    rows = rows.child(self.render_worktree_row(
-                        &project.root_project_id,
-                        worktree,
-                        active_project_id.as_deref(),
-                        worktree.target.configured_project_id.as_deref()
-                            .and_then(|id| agents_by_project.get(id))
-                            .map(Vec::as_slice).unwrap_or(&[]),
-                        cx,
-                    ));
+                    rows = rows.child(
+                        self.render_worktree_row(
+                            &project.root_project_id,
+                            worktree,
+                            active_project_id.as_deref(),
+                            worktree
+                                .target
+                                .configured_project_id
+                                .as_deref()
+                                .and_then(|id| agents_by_project.get(id))
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]),
+                            cx,
+                        ),
+                    );
                     if let Some(project_id) = worktree.target.configured_project_id.as_deref()
                         && let Some(agents) = agents_by_project.remove(project_id)
                     {
@@ -1100,11 +1145,31 @@ mod status_tests {
     #[test]
     fn rich_evidence_overrides_legacy_working_fallback() {
         for (activity, connectivity, expected) in [
-            (AgentActivity::Working, AgentConnectivity::Disconnected, SidebarActivity::LastKnownWork),
-            (AgentActivity::Working, AgentConnectivity::Stale, SidebarActivity::LastKnownWork),
-            (AgentActivity::Waiting, AgentConnectivity::Live, SidebarActivity::Waiting),
-            (AgentActivity::Blocked, AgentConnectivity::Live, SidebarActivity::Attention),
-            (AgentActivity::Failed, AgentConnectivity::Live, SidebarActivity::Failed),
+            (
+                AgentActivity::Working,
+                AgentConnectivity::Disconnected,
+                SidebarActivity::LastKnownWork,
+            ),
+            (
+                AgentActivity::Working,
+                AgentConnectivity::Stale,
+                SidebarActivity::LastKnownWork,
+            ),
+            (
+                AgentActivity::Waiting,
+                AgentConnectivity::Live,
+                SidebarActivity::Waiting,
+            ),
+            (
+                AgentActivity::Blocked,
+                AgentConnectivity::Live,
+                SidebarActivity::Attention,
+            ),
+            (
+                AgentActivity::Failed,
+                AgentConnectivity::Live,
+                SidebarActivity::Failed,
+            ),
         ] {
             let agent = target(activity, connectivity);
             let pane = pane_for_target(&agent, PaneStatus::AiWorking);
@@ -1159,10 +1224,26 @@ mod status_tests {
     #[test]
     fn same_pane_hook_does_not_suppress_independent_process_activity() {
         for (hook_activity, process_activity, expected) in [
-            (AgentActivity::Done, AgentActivity::Working, SidebarActivity::Working),
-            (AgentActivity::Done, AgentActivity::Waiting, SidebarActivity::Waiting),
-            (AgentActivity::Blocked, AgentActivity::Working, SidebarActivity::Attention),
-            (AgentActivity::Failed, AgentActivity::Working, SidebarActivity::Failed),
+            (
+                AgentActivity::Done,
+                AgentActivity::Working,
+                SidebarActivity::Working,
+            ),
+            (
+                AgentActivity::Done,
+                AgentActivity::Waiting,
+                SidebarActivity::Waiting,
+            ),
+            (
+                AgentActivity::Blocked,
+                AgentActivity::Working,
+                SidebarActivity::Attention,
+            ),
+            (
+                AgentActivity::Failed,
+                AgentActivity::Working,
+                SidebarActivity::Failed,
+            ),
         ] {
             let mut hook = target(hook_activity, AgentConnectivity::Live);
             hook.evidence = AgentEvidence::Hook;
@@ -1234,24 +1315,27 @@ mod status_tests {
 
     #[test]
     fn attention_and_error_override_work_without_rewriting_connectivity() {
-        let mut indicator = SidebarIndicator::from_agent(
-            AgentActivity::Working,
-            AgentConnectivity::Live,
-            false,
-        );
+        let mut indicator =
+            SidebarIndicator::from_agent(AgentActivity::Working, AgentConnectivity::Live, false);
         indicator.merge(SidebarIndicator::from_agent(
             AgentActivity::Blocked,
             AgentConnectivity::Disconnected,
             false,
         ));
         assert_eq!(indicator.activity, SidebarActivity::Attention);
-        assert_eq!(indicator.connectivity, Some(AgentConnectivity::Disconnected));
+        assert_eq!(
+            indicator.connectivity,
+            Some(AgentConnectivity::Disconnected)
+        );
         indicator.merge(SidebarIndicator::from_agent(
             AgentActivity::Failed,
             AgentConnectivity::Live,
             false,
         ));
         assert_eq!(indicator.activity, SidebarActivity::Failed);
-        assert_eq!(indicator.connectivity, Some(AgentConnectivity::Disconnected));
+        assert_eq!(
+            indicator.connectivity,
+            Some(AgentConnectivity::Disconnected)
+        );
     }
 }

@@ -764,7 +764,10 @@ mod tests {
             process.provider = provider.parse().unwrap();
             process.process = AgentProcessIdentity::new(43, 200);
             process.received_at_unix_ms = 2;
-            let AgentApplyOutcome::Applied { run_id: peer, created: true } = registry.observe(process)
+            let AgentApplyOutcome::Applied {
+                run_id: peer,
+                created: true,
+            } = registry.observe(process)
             else {
                 panic!("independent process should be created");
             };
@@ -772,7 +775,10 @@ mod tests {
             assert_eq!(registry.active_run_for_route(&route).unwrap().run_id, peer);
             assert_eq!(
                 registry.observe_hook_exit(route, AgentEventId::new(), 3, None, 3),
-                AgentApplyOutcome::Applied { run_id: owner.clone(), created: false }
+                AgentApplyOutcome::Applied {
+                    run_id: owner.clone(),
+                    created: false
+                }
             );
             let ended = registry.run(&owner).unwrap();
             assert_eq!(ended.activity, AgentActivity::Exited);
@@ -800,8 +806,10 @@ mod tests {
             };
             let mut process = observation(route.clone(), 2, AgentEvidence::ProcessAttested);
             process.process = AgentProcessIdentity::new(43, 200);
-            let AgentApplyOutcome::Applied { run_id: peer, created: true } =
-                registry.observe(process.clone())
+            let AgentApplyOutcome::Applied {
+                run_id: peer,
+                created: true,
+            } = registry.observe(process.clone())
             else {
                 panic!("independent process should be created");
             };
@@ -816,16 +824,28 @@ mod tests {
             if accepted {
                 assert_eq!(
                     outcome,
-                    AgentApplyOutcome::Applied { run_id: owner.clone(), created: false }
+                    AgentApplyOutcome::Applied {
+                        run_id: owner.clone(),
+                        created: false
+                    }
                 );
-                assert_eq!(registry.run(&owner).unwrap().activity, AgentActivity::Exited);
-                assert_eq!(registry.run(&owner).unwrap().provider_session_id.as_deref(), session_id);
+                assert_eq!(
+                    registry.run(&owner).unwrap().activity,
+                    AgentActivity::Exited
+                );
+                assert_eq!(
+                    registry.run(&owner).unwrap().provider_session_id.as_deref(),
+                    session_id
+                );
             } else {
                 assert_eq!(
                     outcome,
                     AgentApplyOutcome::Ignored(AgentObservationIgnored::UnresolvedHookOwner)
                 );
-                assert_eq!(registry.run(&owner).unwrap().activity, AgentActivity::Working);
+                assert_eq!(
+                    registry.run(&owner).unwrap().activity,
+                    AgentActivity::Working
+                );
             }
             assert_eq!(registry.run(&peer), Some(&before));
         }
@@ -843,11 +863,36 @@ mod tests {
         };
         let before = registry.run(&run_id).unwrap().clone();
         for (event_id, sequence, epoch, reason) in [
-            (event_id, 11, Some(2), AgentObservationIgnored::DuplicateEvent),
-            (AgentEventId::new(), 0, Some(2), AgentObservationIgnored::InvalidSequence),
-            (AgentEventId::new(), 11, Some(0), AgentObservationIgnored::InvalidConnectionEpoch),
-            (AgentEventId::new(), 11, Some(1), AgentObservationIgnored::StaleConnectionEpoch),
-            (AgentEventId::new(), 9, Some(2), AgentObservationIgnored::OutOfOrder),
+            (
+                event_id,
+                11,
+                Some(2),
+                AgentObservationIgnored::DuplicateEvent,
+            ),
+            (
+                AgentEventId::new(),
+                0,
+                Some(2),
+                AgentObservationIgnored::InvalidSequence,
+            ),
+            (
+                AgentEventId::new(),
+                11,
+                Some(0),
+                AgentObservationIgnored::InvalidConnectionEpoch,
+            ),
+            (
+                AgentEventId::new(),
+                11,
+                Some(1),
+                AgentObservationIgnored::StaleConnectionEpoch,
+            ),
+            (
+                AgentEventId::new(),
+                9,
+                Some(2),
+                AgentObservationIgnored::OutOfOrder,
+            ),
         ] {
             assert_eq!(
                 registry.observe_hook_exit(route.clone(), event_id, sequence, epoch, 11),

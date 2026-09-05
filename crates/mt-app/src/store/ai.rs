@@ -448,8 +448,7 @@ impl AppStore {
         change: &mt_ai::StatusChange,
     ) -> Option<AgentApplyOutcome> {
         let route = route?;
-        let activity =
-            mt_ai::activity_from_legacy_status(&change.status, change.cause.as_deref())?;
+        let activity = mt_ai::activity_from_legacy_status(&change.status, change.cause.as_deref())?;
         let connection_epoch = self.current_agent_connection_epoch(project_id, &route);
         if change.agent.is_none() && change.cause.is_some() && activity.is_ended() {
             return Some(self.agent_runtime.observe_hook_exit(
@@ -570,13 +569,8 @@ impl AppStore {
                     .cause
                     .as_deref()
                     .is_some_and(mt_ai::is_attention_cause);
-                let outcome = self.observe_agent_status(
-                    &owner,
-                    route.clone(),
-                    event_id,
-                    sequence,
-                    &change,
-                );
+                let outcome =
+                    self.observe_agent_status(&owner, route.clone(), event_id, sequence, &change);
                 let agent_observation = outcome.is_some();
                 let projection = project_status_observation(
                     &self.agent_runtime,
@@ -662,8 +656,8 @@ impl AppStore {
                 ) {
                     return None;
                 }
-                let current_owner = find_pane_of_pty(&self.project_states, identity.pty_id)
-                    .map(|(owner, _)| owner);
+                let current_owner =
+                    find_pane_of_pty(&self.project_states, identity.pty_id).map(|(owner, _)| owner);
                 if matches!(
                     self.observe_agent_session(
                         current_owner.as_deref(),
@@ -985,10 +979,22 @@ mod route_tests {
     fn captured_route_rejects_reused_pty_and_missing_identity() {
         let captured = route();
         let mut current = captured.clone();
-        assert!(captured_route_matches(Some(&captured), Some(&current), false));
-        assert!(!captured_route_matches(Some(&captured), Some(&current), true));
+        assert!(captured_route_matches(
+            Some(&captured),
+            Some(&current),
+            false
+        ));
+        assert!(!captured_route_matches(
+            Some(&captured),
+            Some(&current),
+            true
+        ));
         current.terminal_incarnation_id = TerminalIncarnationId::new();
-        assert!(!captured_route_matches(Some(&captured), Some(&current), false));
+        assert!(!captured_route_matches(
+            Some(&captured),
+            Some(&current),
+            false
+        ));
         assert!(!captured_route_matches(Some(&captured), None, false));
         assert!(!captured_route_matches(None, Some(&current), false));
         assert!(captured_route_matches(None, None, false));
@@ -1031,12 +1037,18 @@ mod route_tests {
         let route = route();
         let mut registry = AgentRuntimeRegistry::default();
         let mut hook = status_observation(
-            route.clone(), 1, AgentActivity::Blocked, AgentEvidence::Hook,
+            route.clone(),
+            1,
+            AgentActivity::Blocked,
+            AgentEvidence::Hook,
         );
         hook.provider_session_id = Some("hook-session".into());
         registry.observe(hook);
         let mut process = status_observation(
-            route.clone(), 2, AgentActivity::Working, AgentEvidence::ProcessAttested,
+            route.clone(),
+            2,
+            AgentActivity::Working,
+            AgentEvidence::ProcessAttested,
         );
         process.provider = "claude".parse().unwrap();
         process.process = mt_ai::AgentProcessIdentity::new(20, 200);
@@ -1048,10 +1060,9 @@ mod route_tests {
             cause: Some("SessionEnd".into()),
             agent: None,
         };
-        let projection = project_status_observation(
-            &registry, Some(&route), Some(outcome), &change, true, true,
-        )
-        .unwrap();
+        let projection =
+            project_status_observation(&registry, Some(&route), Some(outcome), &change, true, true)
+                .unwrap();
         assert_eq!(projection.status, PaneStatus::AiWorking);
         assert_eq!(projection.provider.as_deref(), Some("claude"));
         assert!(!projection.attention);
@@ -1067,21 +1078,26 @@ mod route_tests {
             let mut registry = AgentRuntimeRegistry::default();
             for pid in 1..=owner_count {
                 let mut hook = status_observation(
-                    route.clone(), pid as u64, AgentActivity::Blocked, AgentEvidence::Hook,
+                    route.clone(),
+                    pid as u64,
+                    AgentActivity::Blocked,
+                    AgentEvidence::Hook,
                 );
                 hook.process = mt_ai::AgentProcessIdentity::new(pid, 100);
                 registry.observe(hook);
             }
             let mut process = status_observation(
-                route.clone(), 3, AgentActivity::Working, AgentEvidence::ProcessAttested,
+                route.clone(),
+                3,
+                AgentActivity::Working,
+                AgentEvidence::ProcessAttested,
             );
             process.provider = "claude".parse().unwrap();
             process.process = mt_ai::AgentProcessIdentity::new(20, 200);
             registry.observe(process);
             let before: Vec<_> = registry.runs().cloned().collect();
-            let outcome = registry.observe_hook_exit(
-                route.clone(), AgentEventId::new(), 4, Some(1), 4,
-            );
+            let outcome =
+                registry.observe_hook_exit(route.clone(), AgentEventId::new(), 4, Some(1), 4);
             assert_eq!(
                 outcome,
                 AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::UnresolvedHookOwner)
@@ -1092,10 +1108,17 @@ mod route_tests {
                 cause: Some("SessionEnd".into()),
                 agent: None,
             };
-            assert!(project_status_observation(
-                &registry, Some(&route), Some(outcome), &change, true, true,
-            )
-            .is_none());
+            assert!(
+                project_status_observation(
+                    &registry,
+                    Some(&route),
+                    Some(outcome),
+                    &change,
+                    true,
+                    true,
+                )
+                .is_none()
+            );
             for run in before {
                 assert_eq!(registry.run(&run.run_id), Some(&run));
             }
@@ -1133,15 +1156,17 @@ mod route_tests {
         );
         // The caller must have a projection before touching status, attention,
         // git-watcher flags, or DoneTracker.
-        assert!(project_status_observation(
-            &registry,
-            Some(&route),
-            Some(outcome),
-            &status_change("ai-working"),
-            false,
-            false,
-        )
-        .is_none());
+        assert!(
+            project_status_observation(
+                &registry,
+                Some(&route),
+                Some(outcome),
+                &status_change("ai-working"),
+                false,
+                false,
+            )
+            .is_none()
+        );
         assert_eq!(accepted_agent_projection(&registry, &route, false), before);
         assert_eq!(before.status, PaneStatus::AiIdle);
     }
@@ -1156,7 +1181,12 @@ mod route_tests {
         ] {
             let route = route();
             let mut registry = AgentRuntimeRegistry::default();
-            registry.observe(status_observation(route.clone(), 1, activity, AgentEvidence::Hook));
+            registry.observe(status_observation(
+                route.clone(),
+                1,
+                activity,
+                AgentEvidence::Hook,
+            ));
             let outcome = registry.observe(status_observation(
                 route.clone(),
                 2,
@@ -1276,7 +1306,10 @@ mod route_tests {
                 .unwrap();
             let mut hook = status_observation(route.clone(), 2, activity, AgentEvidence::Hook);
             hook.process = mt_ai::AgentProcessIdentity::new(10, 100);
-            assert!(matches!(registry.observe(hook), AgentApplyOutcome::Applied { .. }));
+            assert!(matches!(
+                registry.observe(hook),
+                AgentApplyOutcome::Applied { .. }
+            ));
             let projection = accepted_agent_projection(&registry, &route, false);
             assert_eq!(projection.status, status);
             assert_eq!(projection.attention, attention);

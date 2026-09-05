@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
-use mt_identity::{ExecutionHostId, PaneKey, TabId, TerminalIncarnationId, TerminalSessionId, WorktreeId};
+use mt_identity::{
+    ExecutionHostId, PaneKey, TabId, TerminalIncarnationId, TerminalSessionId, WorktreeId,
+};
 use serde::{Deserialize, Serialize};
 
 /// SSH 连接(`config.json` 的 `sshConnections` 数组元素)。
@@ -418,10 +420,16 @@ pub struct ProjectEnvVar {
 
 /// Durable execution namespace. Connection epochs and credentials are not preferences.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum WorktreeVisibilityBackend {
     Local,
-    Wsl { distro: String },
+    Wsl {
+        distro: String,
+    },
     Ssh {
         connection_id: String,
         host: String,
@@ -452,7 +460,9 @@ pub struct HiddenWorktree {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(untagged, rename_all_fields = "camelCase")]
 pub enum WorktreeVisibilityLocation {
-    CanonicalWorktree { canonical_path: String },
+    CanonicalWorktree {
+        canonical_path: String,
+    },
     ConfiguredProject {
         configured_project_id: String,
         configured_path: String,
@@ -463,7 +473,9 @@ impl WorktreeVisibilityLocation {
     pub fn path(&self) -> &str {
         match self {
             Self::CanonicalWorktree { canonical_path } => canonical_path,
-            Self::ConfiguredProject { configured_path, .. } => configured_path,
+            Self::ConfiguredProject {
+                configured_path, ..
+            } => configured_path,
         }
     }
 }
@@ -1515,7 +1527,12 @@ mod tests {
         assert_eq!(config.projects.len(), 1);
         assert!(config.projects[0].saved_layout.is_none());
         assert!(config.projects[0].hidden_worktrees.is_empty());
-        assert!(serde_json::to_value(&config.projects[0]).unwrap().get("hiddenWorktrees").is_none());
+        assert!(
+            serde_json::to_value(&config.projects[0])
+                .unwrap()
+                .get("hiddenWorktrees")
+                .is_none()
+        );
     }
 
     #[test]

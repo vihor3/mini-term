@@ -299,7 +299,10 @@ mod tests {
             cwd: None,
         });
         assert_eq!(sink.next_sequence.load(Ordering::Relaxed), 1);
-        let AiEvent::Status { route: captured, .. } = rx.try_recv().unwrap() else {
+        let AiEvent::Status {
+            route: captured, ..
+        } = rx.try_recv().unwrap()
+        else {
             panic!("expected the event queued before exit");
         };
         assert_eq!(captured, Some(route));
@@ -307,6 +310,9 @@ mod tests {
 
         bridge.add_pane(7, None);
         sink.status_changed(change);
-        assert!(matches!(rx.try_recv().unwrap(), AiEvent::Status { route: None, .. }));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AiEvent::Status { route: None, .. }
+        ));
     }
 }

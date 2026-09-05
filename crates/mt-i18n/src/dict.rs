@@ -12,9 +12,9 @@ use crate::Namespace;
 /// 命名空间总数（生成器对账用，测试断言防漂移）
 pub const NAMESPACE_COUNT: usize = 33;
 /// 中文条目总数
-pub const ZH_ENTRY_COUNT: usize = 938;
+pub const ZH_ENTRY_COUNT: usize = 952;
 /// 英文条目总数
-pub const EN_ENTRY_COUNT: usize = 938;
+pub const EN_ENTRY_COUNT: usize = 952;
 
 #[rustfmt::skip]
 static APP_ZH: &[(&str, &str)] = &[
@@ -2075,6 +2075,20 @@ static WORKTREE_ZH: &[(&str, &str)] = &[
     ("selectBranch", "选择分支…"),
     ("selectRepoHint", "请先勾选要新建 worktree 的仓库"),
     ("selectedCount", "已勾选 {count} 个"),
+    ("settings.available", "可用"),
+    ("settings.bare", "裸仓库"),
+    ("settings.detached", "分离 HEAD"),
+    ("settings.lastKnown", "上次已知状态"),
+    ("settings.locked", "锁定"),
+    ("settings.missing", "目录缺失"),
+    ("settings.notInInventory", "未在当前列表中"),
+    ("settings.prunable", "失效注册"),
+    ("settings.refreshing", "正在刷新工作树"),
+    ("settings.save", "保存"),
+    ("settings.savedWorktree", "已保存的工作树"),
+    ("settings.staleSource", "项目或执行来源已更改，请重新打开项目设置。"),
+    ("settings.title", "项目设置"),
+    ("settings.unresolved", "身份未确认"),
     ("switchToProject", "切换到项目"),
     ("title", "Worktree 管理 — {name}"),
 ];
@@ -2119,6 +2133,20 @@ static WORKTREE_EN: &[(&str, &str)] = &[
     ("selectBranch", "Select branch…"),
     ("selectRepoHint", "Check at least one repository first"),
     ("selectedCount", "{count} selected"),
+    ("settings.available", "Available"),
+    ("settings.bare", "Bare"),
+    ("settings.detached", "Detached HEAD"),
+    ("settings.lastKnown", "Last known"),
+    ("settings.locked", "Locked"),
+    ("settings.missing", "Missing path"),
+    ("settings.notInInventory", "Not in inventory"),
+    ("settings.prunable", "Prunable"),
+    ("settings.refreshing", "Refreshing worktrees"),
+    ("settings.save", "Save"),
+    ("settings.savedWorktree", "Saved worktree"),
+    ("settings.staleSource", "The project or execution source changed. Reopen Project Settings."),
+    ("settings.title", "Project Settings"),
+    ("settings.unresolved", "Unresolved identity"),
     ("switchToProject", "Switch to project"),
     ("title", "Worktrees — {name}"),
 ];

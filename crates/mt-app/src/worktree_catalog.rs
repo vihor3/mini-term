@@ -1139,17 +1139,12 @@ fn build_groups(
                         &location.row_key,
                         snapshot_target,
                     );
-                    let mut row = row_from_fact(
-                        root,
-                        &config_key,
-                        snapshot,
-                        location,
-                        fact,
-                        configured,
+                    let mut row =
+                        row_from_fact(root, &config_key, snapshot, location, fact, configured);
+                    apply_refresh_eligibility(
+                        &mut row,
+                        entry.is_some_and(|entry| entry.in_flight_revision.is_some()),
                     );
-                    apply_refresh_eligibility(&mut row, entry.is_some_and(|entry| {
-                        entry.in_flight_revision.is_some()
-                    }));
                     rows.push(row);
                 }
             }
@@ -1192,9 +1187,11 @@ fn build_groups(
             // never infer a relationship between unmatched aliases and facts.
             for row in &mut rows {
                 if let Some(id) = row.target.configured_project_id.as_deref() {
-                    row.configured_visibility_key = store.configured_project_visibility_key(&root_project_id, id);
+                    row.configured_visibility_key =
+                        store.configured_project_visibility_key(&root_project_id, id);
                     if row.target.owner.is_none() {
-                        row.visibility_key = store.configured_worktree_visibility_key(&root_project_id, id);
+                        row.visibility_key =
+                            store.configured_worktree_visibility_key(&root_project_id, id);
                     }
                 }
             }
@@ -1239,9 +1236,13 @@ fn row_from_fact(
             && fact.prunable.is_none()
             && fact.path_state != WorktreePathState::Missing);
     WorktreeCatalogRow {
-        visibility_key: snapshot.target.visibility_source.as_ref().and_then(|source| {
-            crate::worktree_visibility::preference_key(source, &location.execution_path)
-        }),
+        visibility_key: snapshot
+            .target
+            .visibility_source
+            .as_ref()
+            .and_then(|source| {
+                crate::worktree_visibility::preference_key(source, &location.execution_path)
+            }),
         configured_visibility_key: None,
         target: WorktreeCatalogTarget {
             root_project_id: root.id.clone(),
@@ -1395,12 +1396,15 @@ pub(crate) mod tests {
                 }),
                 warning: None,
             };
-            entries.insert(root_project_id.to_string(), CatalogEntry {
-                root_config_key: target.root_config_key.clone(),
-                desired: Some(target),
-                snapshot: Some(snapshot),
-                ..Default::default()
-            });
+            entries.insert(
+                root_project_id.to_string(),
+                CatalogEntry {
+                    root_config_key: target.root_config_key.clone(),
+                    desired: Some(target),
+                    snapshot: Some(snapshot),
+                    ..Default::default()
+                },
+            );
         }
         build_groups(store, &entries)
     }
@@ -1515,7 +1519,12 @@ pub(crate) mod tests {
         };
         let row = |snapshot: &CatalogSnapshot| {
             row_from_fact(
-                &root, "config", snapshot, fact_location(&target, &fact).unwrap(), &fact, None,
+                &root,
+                "config",
+                snapshot,
+                fact_location(&target, &fact).unwrap(),
+                &fact,
+                None,
             )
         };
         let initial_target = row(entry.snapshot.as_ref().unwrap()).target;
@@ -1537,15 +1546,22 @@ pub(crate) mod tests {
         let mut snapshot = entry.snapshot.unwrap();
         let configured = project("child", "/feature", Some("p"));
         let mut configured_row = row_from_fact(
-            &root, "config", &snapshot, fact_location(&target, &fact).unwrap(),
-            &fact, Some(&configured),
+            &root,
+            "config",
+            &snapshot,
+            fact_location(&target, &fact).unwrap(),
+            &fact,
+            Some(&configured),
         );
         apply_refresh_eligibility(&mut configured_row, true);
         assert!(configured_row.selectable);
         assert!(!configured_row.last_known);
 
         let hidden = vec![row(&snapshot).visibility_key.unwrap()];
-        assert!(!crate::worktree_visibility::sidebar_visible(&row(&snapshot), &hidden));
+        assert!(!crate::worktree_visibility::sidebar_visible(
+            &row(&snapshot),
+            &hidden
+        ));
         assert!(row(&snapshot).selectable);
         assert_eq!(row(&snapshot).target, initial_target);
         mark_snapshot_last_known(Some(&mut snapshot), "offline");

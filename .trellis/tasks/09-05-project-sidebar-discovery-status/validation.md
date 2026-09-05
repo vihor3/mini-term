@@ -47,6 +47,33 @@ completion notification. Commits and Actions verification are now proceeding;
 no passing Actions evidence is claimed before a matching run completes.
 The exact file grouping and dirty-work exclusions are in `commit-plan.md`.
 
+## Initial Actions Submission
+
+- `02adf2d`: `feat: add per-project worktree visibility`.
+- `8ccba04469b61e682b242393d5881cd6c63ec2a0`:
+  `fix: stabilize remote agent status`.
+- Both commits pushed to `fork/feat/remote-file-management` after approval.
+- CI: <https://github.com/vihor3/mini-term/actions/runs/33976393533>.
+- Windows Package:
+  <https://github.com/vihor3/mini-term/actions/runs/33976393554>.
+- Both runs target `8ccba04469b61e682b242393d5881cd6c63ec2a0` and were
+  in progress at submission. No successful executable result is implied.
+- Only the new Actions-only hunk of the mixed quality-guidelines file was
+  staged. The pre-existing Windows section and all unrelated dirty work
+  remain outside the commits. Git hooks were disabled for these Git
+  operations so no local verification could be invoked implicitly.
+
+### First Diagnostic Correction
+
+The initial Linux job failed changed-line rustfmt and generated i18n checks;
+its subsequent compile/test steps were skipped. Applied the runner-produced
+`changed-rustfmt.patch` (not the full historical formatting patch) and
+`generated-i18n.patch` locally without invoking any formatter or generator.
+Artifact IDs are `9972444604` (`rustfmt-diagnostics-33976393533`) and
+`9972444868` (`generated-i18n-33976393533`). The dictionary now contains the
+14 source keys and reports 952 entries per language. This patch application
+is not a passing validation result; the correction requires another run.
+
 ## Static Integration Outcome
 
 - Worktree settings use typed canonical/configured exclusions, retain new

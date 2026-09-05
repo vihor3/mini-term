@@ -6,11 +6,11 @@ Recorded: 2026-09-05 (Asia/Shanghai)
 
 The status implementer handed off changes in `mt-ssh/src/agent.rs`,
 `mt-ai/src/agent_runtime.rs`, and `mt-app/src/{ai.rs,pane.rs,orca_sidebar.rs,
-store/ai.rs,store/remote_agents.rs}`. Independent static review is in progress.
+store/ai.rs,store/remote_agents.rs}`. Independent static review is complete.
 Only source/Git inspection occurred. Compilation, tests, fixtures, formatting,
 generation, and native verification have not run.
 
-The visibility/settings changes remain separately owned and uncommitted.
+The visibility/settings changes remain separately owned in their first commit.
 The status edit preserved the new sidebar header controls and visibility
 predicate, and begins after the first visibility reviewer released that file.
 
@@ -34,8 +34,10 @@ predicate, and begins after the first visibility reviewer released that file.
   over legacy Working fallback.
 
 These are test-source references, not passing execution evidence. The existing
-Actions workspace job includes the tests. Both locked workspaces and Windows
-MSVC/package workflows remain required after commit/push consent.
+Actions workspace job includes the tests. The user approved the scoped
+commit/push plan on 2026-09-05, and initial source commits are pushed. Both
+locked workspaces and Windows MSVC/package workflows are running; see the
+parent validation record. No successful result is implied before completion.
 
 ## Review Focus
 
@@ -77,7 +79,7 @@ sessions retain their existing bounded-inference limitations.
   this source coverage is not a substitute for native integration evidence.
 - The bounded follow-up static review is complete with no further confirmed
   code defect reported. Tests, probes, compilation, lint, formatting, and
-  native checks remain unexecuted pending Actions and user authorization.
+  native checks remain unverified pending Actions and native acceptance.
 
 ## Bug Analysis
 

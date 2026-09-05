@@ -52,7 +52,11 @@ pub fn source_from_snapshot(
         ExecutionBackend::Ssh { connection, .. } => WorktreeVisibilityBackend::Ssh {
             connection_id: connection.id.clone(),
             host: connection.host.clone(),
-            port: if connection.port == 0 { 22 } else { connection.port },
+            port: if connection.port == 0 {
+                22
+            } else {
+                connection.port
+            },
             user: connection.user.clone(),
         },
     };
@@ -115,7 +119,9 @@ pub fn sidebar_visible(row: &WorktreeCatalogRow, hidden: &[HiddenWorktree]) -> b
 }
 
 pub fn visibility_keys(row: &WorktreeCatalogRow) -> impl Iterator<Item = &HiddenWorktree> {
-    row.visibility_key.iter().chain(row.configured_visibility_key.iter())
+    row.visibility_key
+        .iter()
+        .chain(row.configured_visibility_key.iter())
 }
 
 #[derive(Clone, Default)]
@@ -175,7 +181,10 @@ impl VisibilityDraft {
         // captured project/path, even though only the canonical key is written.
         let edited = keys.iter().any(|key| self.edits.contains_key(key));
         for key in keys {
-            if matches!(key.location, WorktreeVisibilityLocation::ConfiguredProject { .. }) {
+            if matches!(
+                key.location,
+                WorktreeVisibilityLocation::ConfiguredProject { .. }
+            ) {
                 if edited {
                     self.configured_targets.insert(key.clone());
                 } else {
@@ -210,7 +219,9 @@ pub(crate) mod tests {
     use mt_identity::{ExecutionHostId, HostInstallId, RepoId, WorktreeId};
 
     pub(crate) fn source() -> WorktreeVisibilitySource {
-        let install: HostInstallId = "install-v1:123e4567-e89b-42d3-a456-426614174000".parse().unwrap();
+        let install: HostInstallId = "install-v1:123e4567-e89b-42d3-a456-426614174000"
+            .parse()
+            .unwrap();
         WorktreeVisibilitySource {
             execution_host_id: ExecutionHostId::derive("visibility", &install),
             root_path: "/repo".into(),
@@ -253,16 +264,29 @@ pub(crate) mod tests {
 
     #[test]
     fn default_show_is_uncapped_and_keeps_separate_example_inventories() {
-        let v26 = (0..3).map(|i| row(&format!("/cyberbase-v26-{i}"))).collect::<Vec<_>>();
-        let aicos = (0..12).map(|i| {
-            let mut row = row(&format!("/aicos-{i}"));
-            row.is_prunable = i >= 9;
-            row
-        }).collect::<Vec<_>>();
-        assert_eq!(v26.iter().filter(|row| sidebar_visible(row, &[])).count(), 3);
-        assert_eq!(aicos.iter().filter(|row| sidebar_visible(row, &[])).count(), 9);
+        let v26 = (0..3)
+            .map(|i| row(&format!("/cyberbase-v26-{i}")))
+            .collect::<Vec<_>>();
+        let aicos = (0..12)
+            .map(|i| {
+                let mut row = row(&format!("/aicos-{i}"));
+                row.is_prunable = i >= 9;
+                row
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            v26.iter().filter(|row| sidebar_visible(row, &[])).count(),
+            3
+        );
+        assert_eq!(
+            aicos.iter().filter(|row| sidebar_visible(row, &[])).count(),
+            9
+        );
         let hidden = vec![aicos[1].visibility_key.clone().unwrap()];
-        assert!(sidebar_visible(&row("/repo/.claude/worktrees/new"), &hidden));
+        assert!(sidebar_visible(
+            &row("/repo/.claude/worktrees/new"),
+            &hidden
+        ));
         assert!(sidebar_visible(&row("/repo/codex/new"), &hidden));
         assert_eq!(aicos.len(), 12);
     }
@@ -320,8 +344,13 @@ pub(crate) mod tests {
     #[test]
     fn source_keys_keep_host_root_namespace_and_posix_case() {
         let mut a = source();
-        a.backend = WorktreeVisibilityBackend::Wsl { distro: "ubuntu".into() };
-        assert_eq!(preference_key(&a, "/Repo/./feature/").unwrap(), preference_key(&a, "/Repo/feature").unwrap());
+        a.backend = WorktreeVisibilityBackend::Wsl {
+            distro: "ubuntu".into(),
+        };
+        assert_eq!(
+            preference_key(&a, "/Repo/./feature/").unwrap(),
+            preference_key(&a, "/Repo/feature").unwrap()
+        );
         assert_ne!(preference_key(&a, "/Repo"), preference_key(&a, "/repo"));
         assert_ne!(preference_key(&a, "/repo\\"), preference_key(&a, "/repo"));
         let key = preference_key(&a, "/repo").unwrap();
@@ -332,7 +361,9 @@ pub(crate) mod tests {
         other.execution_host_id = ExecutionHostId::derive("other", &HostInstallId::new());
         assert_ne!(key, preference_key(&other, "/repo").unwrap());
         other = a;
-        other.backend = WorktreeVisibilityBackend::Wsl { distro: "debian".into() };
+        other.backend = WorktreeVisibilityBackend::Wsl {
+            distro: "debian".into(),
+        };
         assert_ne!(key, preference_key(&other, "/repo").unwrap());
         assert!(preference_key(&other, "relative").is_none());
         assert!(preference_key(&other, "/../escape").is_none());
@@ -341,30 +372,58 @@ pub(crate) mod tests {
     #[test]
     fn configured_locations_are_distinct_and_source_path_and_project_qualified() {
         let mut source = source();
-        source.backend = WorktreeVisibilityBackend::Wsl { distro: "ubuntu".into() };
+        source.backend = WorktreeVisibilityBackend::Wsl {
+            distro: "ubuntu".into(),
+        };
         let key = configured_preference_key(&source, "root", "/Repo/./link/").unwrap();
-        assert_eq!(key, configured_preference_key(&source, "root", "/Repo/link").unwrap());
+        assert_eq!(
+            key,
+            configured_preference_key(&source, "root", "/Repo/link").unwrap()
+        );
         assert_ne!(key, preference_key(&source, "/Repo/link").unwrap());
-        assert_ne!(key, configured_preference_key(&source, "other-project", "/Repo/link").unwrap());
-        assert_ne!(key, configured_preference_key(&source, "root", "/repo/link").unwrap());
+        assert_ne!(
+            key,
+            configured_preference_key(&source, "other-project", "/Repo/link").unwrap()
+        );
+        assert_ne!(
+            key,
+            configured_preference_key(&source, "root", "/repo/link").unwrap()
+        );
         let mut other = source.clone();
         other.root_path = "/another-root".into();
-        assert_ne!(key, configured_preference_key(&other, "root", "/Repo/link").unwrap());
+        assert_ne!(
+            key,
+            configured_preference_key(&other, "root", "/Repo/link").unwrap()
+        );
         other = source.clone();
         other.execution_host_id = ExecutionHostId::derive("other", &HostInstallId::new());
-        assert_ne!(key, configured_preference_key(&other, "root", "/Repo/link").unwrap());
+        assert_ne!(
+            key,
+            configured_preference_key(&other, "root", "/Repo/link").unwrap()
+        );
         other = source.clone();
-        other.backend = WorktreeVisibilityBackend::Wsl { distro: "debian".into() };
-        assert_ne!(key, configured_preference_key(&other, "root", "/Repo/link").unwrap());
+        other.backend = WorktreeVisibilityBackend::Wsl {
+            distro: "debian".into(),
+        };
+        assert_ne!(
+            key,
+            configured_preference_key(&other, "root", "/Repo/link").unwrap()
+        );
         other.backend = WorktreeVisibilityBackend::Ssh {
-            connection_id: "ssh-a".into(), host: "host".into(), port: 22, user: "user".into(),
+            connection_id: "ssh-a".into(),
+            host: "host".into(),
+            port: 22,
+            user: "user".into(),
         };
         let ssh_key = configured_preference_key(&other, "root", "/Repo/link").unwrap();
         assert_ne!(key, ssh_key);
         if let WorktreeVisibilityBackend::Ssh { connection_id, .. } = &mut other.backend {
             *connection_id = "ssh-b".into();
         }
-        assert_ne!(ssh_key, configured_preference_key(&other, "root", "/Repo/link").unwrap());
+        assert_ne!(
+            ssh_key,
+            configured_preference_key(&other, "root", "/Repo/link").unwrap()
+        );
         assert!(configured_preference_key(&source, "", "/Repo/link").is_none());
         assert!(configured_preference_key(&source, "root", "relative").is_none());
     }
@@ -381,8 +440,14 @@ pub(crate) mod tests {
             root_source_path: "/repo".into(),
             backend: ExecutionBackend::Ssh {
                 connection: mt_config::SshConnection {
-                    id: "ssh".into(), name: "name".into(), host: "host".into(), port: 0,
-                    user: "user".into(), password: None, identity_file: None, group: None,
+                    id: "ssh".into(),
+                    name: "name".into(),
+                    host: "host".into(),
+                    port: 0,
+                    user: "user".into(),
+                    password: None,
+                    identity_file: None,
+                    group: None,
                 },
                 connection_fingerprint: 1,
                 connection_epoch: Some(1),
@@ -390,7 +455,12 @@ pub(crate) mod tests {
             host_label: "SSH".into(),
         };
         let before = source_from_snapshot(&snapshot, "/repo-link").unwrap();
-        if let ExecutionBackend::Ssh { connection, connection_fingerprint, connection_epoch } = &mut snapshot.backend {
+        if let ExecutionBackend::Ssh {
+            connection,
+            connection_fingerprint,
+            connection_epoch,
+        } = &mut snapshot.backend
+        {
             connection.name = "renamed".into();
             connection.password = Some("new password".into());
             connection.identity_file = Some("new key path".into());
@@ -398,11 +468,20 @@ pub(crate) mod tests {
             *connection_fingerprint = 99;
             *connection_epoch = Some(9);
         }
-        assert_eq!(before, source_from_snapshot(&snapshot, "/repo-link").unwrap());
-        assert_ne!(before, source_from_snapshot(&snapshot, "/different-root").unwrap());
+        assert_eq!(
+            before,
+            source_from_snapshot(&snapshot, "/repo-link").unwrap()
+        );
+        assert_ne!(
+            before,
+            source_from_snapshot(&snapshot, "/different-root").unwrap()
+        );
         if let ExecutionBackend::Ssh { connection, .. } = &mut snapshot.backend {
             connection.id = "other".into();
         }
-        assert_ne!(before, source_from_snapshot(&snapshot, "/repo-link").unwrap());
+        assert_ne!(
+            before,
+            source_from_snapshot(&snapshot, "/repo-link").unwrap()
+        );
     }
 }

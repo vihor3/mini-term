@@ -12,7 +12,9 @@ use crate::prompt::{close_guarded, kind, open_guarded_with_close};
 use crate::store::AppStore;
 use crate::ui;
 use crate::worktree_catalog::{ProjectWorktreeGroup, WorktreeCatalog};
-use crate::worktree_visibility::{ProjectSettingsTarget, VisibilityDraft, is_invalid, visibility_keys};
+use crate::worktree_visibility::{
+    ProjectSettingsTarget, VisibilityDraft, is_invalid, visibility_keys,
+};
 
 const ROW_HEIGHT: f32 = 54.0;
 
@@ -61,38 +63,43 @@ fn settings_rows(
     target: &ProjectSettingsTarget,
     hidden: &[HiddenWorktree],
 ) -> Vec<SettingsRow> {
-    let mut rows = group.rows.iter().map(|row| {
-        let keys = visibility_keys(row).filter(|key| {
-            Some(&key.source) == target.source.as_ref()
-        }).cloned().collect::<Vec<_>>();
-        let invalid = is_invalid(row);
-        let state = if row.is_prunable {
-            "settings.prunable"
-        } else if invalid {
-            "settings.missing"
-        } else if keys.is_empty() || row.visibility_key.is_none() {
-            "settings.unresolved"
-        } else if row.last_known {
-            "settings.lastKnown"
-        } else if row.is_bare {
-            "settings.bare"
-        } else if row.is_locked {
-            "settings.locked"
-        } else if row.is_detached {
-            "settings.detached"
-        } else {
-            "settings.available"
-        };
-        SettingsRow {
-            saved_only: false,
-            editable: !keys.is_empty() && !invalid,
-            invalid,
-            keys,
-            label: row.label.clone(),
-            path: row.target.execution_path.clone(),
-            state,
-        }
-    }).collect::<Vec<_>>();
+    let mut rows = group
+        .rows
+        .iter()
+        .map(|row| {
+            let keys = visibility_keys(row)
+                .filter(|key| Some(&key.source) == target.source.as_ref())
+                .cloned()
+                .collect::<Vec<_>>();
+            let invalid = is_invalid(row);
+            let state = if row.is_prunable {
+                "settings.prunable"
+            } else if invalid {
+                "settings.missing"
+            } else if keys.is_empty() || row.visibility_key.is_none() {
+                "settings.unresolved"
+            } else if row.last_known {
+                "settings.lastKnown"
+            } else if row.is_bare {
+                "settings.bare"
+            } else if row.is_locked {
+                "settings.locked"
+            } else if row.is_detached {
+                "settings.detached"
+            } else {
+                "settings.available"
+            };
+            SettingsRow {
+                saved_only: false,
+                editable: !keys.is_empty() && !invalid,
+                invalid,
+                keys,
+                label: row.label.clone(),
+                path: row.target.execution_path.clone(),
+                state,
+            }
+        })
+        .collect::<Vec<_>>();
     // Saved exclusions remain recoverable even when their rows are offline or
     // absent from Git. No new identity is inferred from the unavailable row.
     for key in hidden {
@@ -149,13 +156,19 @@ pub fn open(
         );
         return;
     }
-    let Some(group) = catalog.read(cx).groups(cx).into_iter()
+    let Some(group) = catalog
+        .read(cx)
+        .groups(cx)
+        .into_iter()
         .find(|group| group.root_project_id == target.root_project_id)
     else {
         return;
     };
-    let hidden = store.read(cx).project(&target.root_project_id)
-        .map(|project| project.hidden_worktrees.clone()).unwrap_or_default();
+    let hidden = store
+        .read(cx)
+        .project(&target.root_project_id)
+        .map(|project| project.hidden_worktrees.clone())
+        .unwrap_or_default();
     let previous_focus = window.focused(cx);
     let restore_focus = previous_focus.clone();
     let panel = cx.new(|cx| {
@@ -185,12 +198,18 @@ pub fn open(
         cx,
         move |dialog, window, _cx| {
             let viewport = window.viewport_size();
-            dialog.p_0()
+            dialog
+                .p_0()
                 .w(px(680.0).min(viewport.width * 0.96))
                 .margin_top(viewport.height * 0.10)
                 .overlay_closable(false)
                 .on_ok(|_, _, _| false)
-                .child(div().w_full().h(px(600.0).min(viewport.height * 0.80)).child(panel.clone()))
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(600.0).min(viewport.height * 0.80))
+                        .child(panel.clone()),
+                )
         },
         move |window, _cx| {
             if let Some(focus) = restore_focus.as_ref() {
@@ -203,17 +222,34 @@ pub fn open(
 
 impl ProjectSettings {
     fn rows(&self, cx: &App) -> Vec<SettingsRow> {
-        let group = self.catalog.read(cx).groups(cx).into_iter()
+        let group = self
+            .catalog
+            .read(cx)
+            .groups(cx)
+            .into_iter()
             .find(|group| group.root_project_id == self.target.root_project_id);
-        let mut rows = settings_rows(group.as_ref().unwrap_or(&self.initial_group), &self.target, &self.initial_hidden);
+        let mut rows = settings_rows(
+            group.as_ref().unwrap_or(&self.initial_group),
+            &self.target,
+            &self.initial_hidden,
+        );
         for row in &mut rows {
             if row.saved_only {
                 continue;
             }
             row.editable &= row.keys.iter().all(|key| match &key.location {
-                WorktreeVisibilityLocation::ConfiguredProject { configured_project_id, .. } => {
-                    self.store.read(cx).configured_project_visibility_key(&self.target.root_project_id, configured_project_id)
-                        .as_ref() == Some(key)
+                WorktreeVisibilityLocation::ConfiguredProject {
+                    configured_project_id,
+                    ..
+                } => {
+                    self.store
+                        .read(cx)
+                        .configured_project_visibility_key(
+                            &self.target.root_project_id,
+                            configured_project_id,
+                        )
+                        .as_ref()
+                        == Some(key)
                 }
                 WorktreeVisibilityLocation::CanonicalWorktree { .. } => true,
             });
@@ -270,7 +306,8 @@ impl ProjectSettings {
         let offset = self.scroll.offset();
         let visible_top = -f32::from(offset.y);
         let next_top = scroll_top_for_cursor(self.cursor, visible_top, self.list_height);
-        self.scroll.set_offset(gpui::point(offset.x, px(-next_top.max(0.0))));
+        self.scroll
+            .set_offset(gpui::point(offset.x, px(-next_top.max(0.0))));
         window.focus(&self.focus);
         cx.notify();
     }
@@ -282,10 +319,16 @@ impl Render for ProjectSettings {
         let stale = !self.target.is_current(self.store.read(cx));
         let error = self.error.or(stale.then_some("settings.staleSource"));
         self.cursor = self.cursor.min(rows.len().saturating_sub(1));
-        self.list_height = (f32::from(px(600.0).min(window.viewport_size().height * 0.80)) - 170.0).max(0.0);
-        let mut list = div().id("project-settings-list")
-            .flex_1().min_h(px(0.0)).overflow_y_scroll().track_scroll(&self.scroll)
-            .track_focus(&self.focus).tab_index(0)
+        self.list_height =
+            (f32::from(px(600.0).min(window.viewport_size().height * 0.80)) - 170.0).max(0.0);
+        let mut list = div()
+            .id("project-settings-list")
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .track_focus(&self.focus)
+            .tab_index(0)
             .on_key_down(cx.listener(Self::key_down));
         for (index, row) in rows.into_iter().enumerate() {
             let checked = row.checked(&self.draft);
@@ -293,18 +336,56 @@ impl Render for ProjectSettings {
             let selected = self.cursor == index && self.focus.is_focused(window);
             let detail = format!("{} | {}", self.initial_group.host_label, row.path);
             list = list.child(
-                div().id(SharedString::from(format!("project-settings-row-{index}")))
-                    .h(px(ROW_HEIGHT)).flex_none().flex().items_center().gap(px(12.0)).px(px(20.0))
+                div()
+                    .id(SharedString::from(format!("project-settings-row-{index}")))
+                    .h(px(ROW_HEIGHT))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .px(px(20.0))
                     .when(selected, |el| el.bg(ui::accent_subtle()))
-                    .when(editable, |el| el.cursor_pointer().hover(|el| el.bg(ui::border_subtle())))
+                    .when(editable, |el| {
+                        el.cursor_pointer().hover(|el| el.bg(ui::border_subtle()))
+                    })
                     .when(!editable, |el| el.opacity(0.55))
-                    .tooltip(move |window, cx| mt_ui::tooltip::Tooltip::new(detail.clone()).build(window, cx))
-                    .child(ui::checkbox(SharedString::from(format!("project-settings-check-{index}")), checked))
-                    .child(div().flex_1().min_w(px(0.0)).flex().flex_col().gap(px(3.0))
-                        .child(div().truncate().text_size(ui::font_px(12.0)).child(row.label.clone()))
-                        .child(div().truncate().text_size(ui::font_px(10.0)).text_color(ui::text_muted()).child(row.path.clone())))
-                    .child(div().w(px(100.0)).flex_none().truncate().text_size(ui::font_px(10.0))
-                        .text_color(ui::text_muted()).child(t("worktree", row.state)))
+                    .tooltip(move |window, cx| {
+                        mt_ui::tooltip::Tooltip::new(detail.clone()).build(window, cx)
+                    })
+                    .child(ui::checkbox(
+                        SharedString::from(format!("project-settings-check-{index}")),
+                        checked,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(ui::font_px(12.0))
+                                    .child(row.label.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(ui::font_px(10.0))
+                                    .text_color(ui::text_muted())
+                                    .child(row.path.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(100.0))
+                            .flex_none()
+                            .truncate()
+                            .text_size(ui::font_px(10.0))
+                            .text_color(ui::text_muted())
+                            .child(t("worktree", row.state)),
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.cursor = index;
                         window.focus(&this.focus);
@@ -313,37 +394,91 @@ impl Render for ProjectSettings {
                     })),
             );
         }
-        div().h_full().w_full().flex().flex_col().overflow_hidden()
+        div()
+            .h_full()
+            .w_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
             .text_color(ui::text_primary())
-            .child(div().h(px(96.0)).flex_none().px(px(20.0)).py(px(12.0)).flex().flex_col().gap(px(4.0))
-                .child(div().text_size(ui::font_px(16.0)).child(t("worktree", "settings.title")))
-                .child(div().truncate().text_size(ui::font_px(12.0)).child(self.initial_group.root_project_name.clone()))
-                .child(div().truncate().text_size(ui::font_px(10.0)).text_color(ui::text_muted())
-                    .child(format!("{} | {}", self.initial_group.host_label, self.initial_group.root_project_path))))
+            .child(
+                div()
+                    .h(px(96.0))
+                    .flex_none()
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(ui::font_px(16.0))
+                            .child(t("worktree", "settings.title")),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(ui::font_px(12.0))
+                            .child(self.initial_group.root_project_name.clone()),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(ui::font_px(10.0))
+                            .text_color(ui::text_muted())
+                            .child(format!(
+                                "{} | {}",
+                                self.initial_group.host_label, self.initial_group.root_project_path
+                            )),
+                    ),
+            )
             .child(list)
-            .child(div().h(px(26.0)).flex_none().px(px(20.0)).truncate()
-                .text_size(ui::font_px(10.0)).text_color(ui::color_error())
-                .when_some(error, |el, error| el.child(t("worktree", error))))
-            .child(div().h(px(48.0)).flex_none().flex().items_center().justify_end().gap(px(8.0))
-                .px(px(20.0)).border_t_1().border_color(ui::border_subtle())
-                .child(ui::ghost_button("project-settings-cancel", t("worktree", "cancel"))
-                    .track_focus(&self.cancel_focus).tab_index(0)
-                    .on_click(cx.listener(|this, _, window, cx| this.close(window, cx)))
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            cx.stop_propagation();
-                            this.close(window, cx);
-                        }
-                    })))
-                .child(ui::primary_button("project-settings-save", t("worktree", "settings.save"))
-                    .track_focus(&self.save_focus).tab_index(0)
-                    .on_click(cx.listener(|this, _, window, cx| this.save(window, cx)))
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            cx.stop_propagation();
-                            this.save(window, cx);
-                        }
-                    }))))
+            .child(
+                div()
+                    .h(px(26.0))
+                    .flex_none()
+                    .px(px(20.0))
+                    .truncate()
+                    .text_size(ui::font_px(10.0))
+                    .text_color(ui::color_error())
+                    .when_some(error, |el, error| el.child(t("worktree", error))),
+            )
+            .child(
+                div()
+                    .h(px(48.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .px(px(20.0))
+                    .border_t_1()
+                    .border_color(ui::border_subtle())
+                    .child(
+                        ui::ghost_button("project-settings-cancel", t("worktree", "cancel"))
+                            .track_focus(&self.cancel_focus)
+                            .tab_index(0)
+                            .on_click(cx.listener(|this, _, window, cx| this.close(window, cx)))
+                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    cx.stop_propagation();
+                                    this.close(window, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        ui::primary_button("project-settings-save", t("worktree", "settings.save"))
+                            .track_focus(&self.save_focus)
+                            .tab_index(0)
+                            .on_click(cx.listener(|this, _, window, cx| this.save(window, cx)))
+                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    cx.stop_propagation();
+                                    this.save(window, cx);
+                                }
+                            })),
+                    ),
+            )
     }
 }
 
@@ -392,7 +527,8 @@ mod tests {
     fn invalid_rows_are_unchecked_disabled_and_cannot_override_visibility() {
         let mut group = group();
         group.rows[0].is_prunable = true;
-        group.rows[0].configured_visibility_key = configured_preference_key(&source(), "root", "/repo");
+        group.rows[0].configured_visibility_key =
+            configured_preference_key(&source(), "root", "/repo");
         group.rows[1].path_state = WorktreePathState::Missing;
         let mut draft = VisibilityDraft::new(&[]);
         for row in settings_rows(&group, &target(), &[]) {
@@ -417,8 +553,11 @@ mod tests {
     fn all_hidden_rows_and_absent_saved_choices_remain_recoverable() {
         let group = group();
         let original = group.clone();
-        let mut hidden = group.rows.iter()
-            .map(|row| row.visibility_key.clone().unwrap()).collect::<Vec<_>>();
+        let mut hidden = group
+            .rows
+            .iter()
+            .map(|row| row.visibility_key.clone().unwrap())
+            .collect::<Vec<_>>();
         hidden.push(preference_key(&source(), "/absent").unwrap());
         let rows = settings_rows(&group, &target(), &hidden);
         let mut draft = VisibilityDraft::new(&hidden);
@@ -447,7 +586,11 @@ mod tests {
         assert!(rows[2].editable && rows[2].checked(&draft));
         let mut other_source = target();
         other_source.source.as_mut().unwrap().root_path = "/other-root".into();
-        assert!(settings_rows(&group, &other_source, &hidden).iter().all(|row| !row.editable));
+        assert!(
+            settings_rows(&group, &other_source, &hidden)
+                .iter()
+                .all(|row| !row.editable)
+        );
     }
 
     #[test]
@@ -455,7 +598,8 @@ mod tests {
         let mut group = group();
         group.rows.truncate(1);
         group.rows[0].visibility_key = None;
-        group.rows[0].configured_visibility_key = configured_preference_key(&source(), "root", "/repo");
+        group.rows[0].configured_visibility_key =
+            configured_preference_key(&source(), "root", "/repo");
         group.rows[0].authoritative = false;
         group.rows[0].path_state = WorktreePathState::Unknown;
         let row = settings_rows(&group, &target(), &[]).remove(0);

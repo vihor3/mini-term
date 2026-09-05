@@ -5,8 +5,8 @@ Recorded: 2026-09-05 (Asia/Shanghai)
 ## Implementation Handoff
 
 The implementation agent completed source changes against baseline
-`b166bd2b65549ef14bf0d6c3b9e1b31afb4f70e8`. Independent static review is in
-progress. No compiler, test, formatter, generator, or native acceptance result
+`b166bd2b65549ef14bf0d6c3b9e1b31afb4f70e8`. Independent static review is
+complete. No compiler, test, formatter, generator, or native acceptance result
 is claimed yet. No local validation command was run during implementation.
 
 Changes are confined to `mt-config` typed exclusions and serialization,
@@ -35,8 +35,10 @@ workspace test job includes these modules without adding a local test path.
 
 ## Required Actions
 
-After scoped commit/push approval, use the current tracking fork's `CI` and
-`Windows Package` workflows. Record exact `headSha`, run URLs/conclusions, and
+The user approved the scoped commit/push plan on 2026-09-05. Initial source
+commits are pushed and the current tracking fork's `CI` and `Windows Package`
+workflows are running; see the parent validation record. Record exact
+`headSha`, run URLs/conclusions, and
 artifact identity. Apply generated dictionary and formatting diagnostic patches
 from Actions only. The 14 new locale keys require generated dictionary
 synchronization; do not run the generator locally.

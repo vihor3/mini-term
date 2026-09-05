@@ -588,12 +588,21 @@ mod tests {
                     ])
                     .env_clear()
                     .env("MINITERM_PROBE_TEST_FIXTURE", "1")
-                    .env("MINITERM_AGENT_PROTOCOL_VERSION", route.protocol_version.to_string())
-                    .env("MINITERM_EXECUTION_HOST_ID", route.execution_host_id.as_str())
+                    .env(
+                        "MINITERM_AGENT_PROTOCOL_VERSION",
+                        route.protocol_version.to_string(),
+                    )
+                    .env(
+                        "MINITERM_EXECUTION_HOST_ID",
+                        route.execution_host_id.as_str(),
+                    )
                     .env("MINITERM_WORKTREE_ID", route.worktree_id.as_str())
                     .env("MINITERM_TAB_ID", route.tab_id.as_str())
                     .env("MINITERM_PANE_KEY", route.pane_key.as_str())
-                    .env("MINITERM_TERMINAL_SESSION_ID", route.terminal_session_id.as_str())
+                    .env(
+                        "MINITERM_TERMINAL_SESSION_ID",
+                        route.terminal_session_id.as_str(),
+                    )
                     .env(
                         "MINITERM_TERMINAL_INCARNATION_ID",
                         route.terminal_incarnation_id.as_str(),
@@ -619,7 +628,10 @@ mod tests {
                     let _ = tx.send(false);
                 }
             });
-            assert!(rx.recv_timeout(TIMEOUT).expect("fixture readiness timed out"));
+            assert!(
+                rx.recv_timeout(TIMEOUT)
+                    .expect("fixture readiness timed out")
+            );
             child
         }
 
