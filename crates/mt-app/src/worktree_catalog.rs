@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use gpui::{App, Context, Entity, Global, Task, Window};
-use mt_config::{ProjectConfig, ProjectTreeItem};
+use mt_config::{HiddenWorktree, ProjectConfig, ProjectTreeItem, WorktreeVisibilitySource};
 use mt_github::{CommandOutput, CommandPlan};
 use mt_identity::ExecutionHostId;
 use mt_project::worktree::{
@@ -72,6 +72,8 @@ pub struct WorktreeCatalogTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeCatalogRow {
     pub target: WorktreeCatalogTarget,
+    pub visibility_key: Option<HiddenWorktree>,
+    pub configured_visibility_key: Option<HiddenWorktree>,
     pub label: String,
     pub branch: Option<String>,
     pub head: Option<String>,
@@ -115,6 +117,7 @@ struct ScanTarget {
     snapshot: ProjectExecutionSnapshot,
     backend: CatalogBackend,
     local_generation: Option<u64>,
+    visibility_source: Option<WorktreeVisibilitySource>,
 }
 
 impl ScanTarget {
@@ -156,6 +159,13 @@ struct CatalogEntry {
     warning: Option<String>,
     in_flight_revision: Option<u64>,
     dirty: bool,
+}
+
+impl CatalogEntry {
+    fn begin_scan(&mut self, revision: u64) {
+        self.in_flight_revision = Some(revision);
+        self.dirty = false;
+    }
 }
 
 fn enqueue_scan_once(queue: &mut VecDeque<String>, root_project_id: &str) {
@@ -415,9 +425,7 @@ impl WorktreeCatalog {
             };
             self.next_revision = revision;
             self.in_flight += 1;
-            entry.in_flight_revision = Some(revision);
-            entry.dirty = false;
-            mark_snapshot_last_known(entry.snapshot.as_mut(), "worktree inventory is refreshing");
+            entry.begin_scan(revision);
 
             cx.spawn(async move |this, cx| {
                 let task_target = target.clone();
@@ -500,6 +508,10 @@ impl WorktreeCatalog {
                         entry.warning = None;
                     } else {
                         retry_stale = current_target_exists;
+                        mark_snapshot_last_known(
+                            entry.snapshot.as_mut(),
+                            "worktree inventory source changed",
+                        );
                     }
                 }
                 Err(error) => {
@@ -510,6 +522,7 @@ impl WorktreeCatalog {
         }
 
         if retry_stale && current_target_exists {
+            mark_snapshot_last_known(entry.snapshot.as_mut(), "worktree inventory source changed");
             entry.dirty = true;
         }
         queue_dirty_rerun(entry, &mut self.queue, &completion.target.root_project_id);
@@ -629,6 +642,7 @@ fn build_scan_target(store: &AppStore, project: &ProjectConfig) -> Result<ScanTa
         snapshot,
         backend,
         local_generation,
+        visibility_source: store.worktree_visibility_source(&project.id),
     })
 }
 
@@ -810,7 +824,7 @@ fn catalog_backend(backend: &ExecutionBackend) -> CatalogBackend {
     }
 }
 
-fn root_config_key(project: &ProjectConfig) -> String {
+pub(crate) fn root_config_key(project: &ProjectConfig) -> String {
     format!(
         "{}\0{}\0{}",
         project.id,
@@ -1125,14 +1139,18 @@ fn build_groups(
                         &location.row_key,
                         snapshot_target,
                     );
-                    rows.push(row_from_fact(
+                    let mut row = row_from_fact(
                         root,
                         &config_key,
                         snapshot,
                         location,
                         fact,
                         configured,
-                    ));
+                    );
+                    apply_refresh_eligibility(&mut row, entry.is_some_and(|entry| {
+                        entry.in_flight_revision.is_some()
+                    }));
+                    rows.push(row);
                 }
             }
 
@@ -1166,6 +1184,17 @@ fn build_groups(
                             false,
                             snapshot,
                         ));
+                    }
+                }
+            }
+
+            // Configured preferences survive later canonical resolution, but
+            // never infer a relationship between unmatched aliases and facts.
+            for row in &mut rows {
+                if let Some(id) = row.target.configured_project_id.as_deref() {
+                    row.configured_visibility_key = store.configured_project_visibility_key(&root_project_id, id);
+                    if row.target.owner.is_none() {
+                        row.visibility_key = store.configured_worktree_visibility_key(&root_project_id, id);
                     }
                 }
             }
@@ -1210,6 +1239,10 @@ fn row_from_fact(
             && fact.prunable.is_none()
             && fact.path_state != WorktreePathState::Missing);
     WorktreeCatalogRow {
+        visibility_key: snapshot.target.visibility_source.as_ref().and_then(|source| {
+            crate::worktree_visibility::preference_key(source, &location.execution_path)
+        }),
+        configured_visibility_key: None,
         target: WorktreeCatalogTarget {
             root_project_id: root.id.clone(),
             row_key: location.row_key,
@@ -1257,6 +1290,8 @@ fn configured_row(
     snapshot: Option<&CatalogSnapshot>,
 ) -> WorktreeCatalogRow {
     WorktreeCatalogRow {
+        visibility_key: None,
+        configured_visibility_key: None,
         target: WorktreeCatalogTarget {
             root_project_id: root_project_id.to_string(),
             row_key: location.row_key.clone(),
@@ -1288,6 +1323,16 @@ fn configured_row(
             )
         }),
         selectable: true,
+    }
+}
+
+/// Refreshing is an activation fence, not evidence that the last scan failed.
+fn apply_refresh_eligibility(row: &mut WorktreeCatalogRow, refreshing: bool) {
+    if refreshing {
+        row.authoritative = false;
+        if row.target.configured_project_id.is_none() {
+            row.selectable = false;
+        }
     }
 }
 
@@ -1324,9 +1369,41 @@ fn mark_snapshot_last_known(snapshot: Option<&mut CatalogSnapshot>, warning: &st
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mt_config::{ProjectGroup, SshConnection};
+
+    pub(crate) fn groups_for_visibility_test(
+        store: &AppStore,
+        root_project_id: &str,
+        canonical_path: Option<&str>,
+    ) -> Vec<ProjectWorktreeGroup> {
+        let mut entries = HashMap::new();
+        if let Some(path) = canonical_path {
+            let target = build_scan_target(store, store.project(root_project_id).unwrap()).unwrap();
+            let mut fact = worktree_fact(path);
+            fact.is_main = true;
+            let snapshot = CatalogSnapshot {
+                owner: target.owner(1, None),
+                target: target.clone(),
+                inventory: CatalogInventory::Git(WorktreeScan {
+                    generation: 1,
+                    source: WorktreeScanSource::PorcelainZ,
+                    authoritative: true,
+                    worktrees: vec![fact],
+                    warning: None,
+                }),
+                warning: None,
+            };
+            entries.insert(root_project_id.to_string(), CatalogEntry {
+                root_config_key: target.root_config_key.clone(),
+                desired: Some(target),
+                snapshot: Some(snapshot),
+                ..Default::default()
+            });
+        }
+        build_groups(store, &entries)
+    }
 
     fn output(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> CommandOutput {
         CommandOutput {
@@ -1349,6 +1426,7 @@ mod tests {
             ssh_cli_token: None,
             ssh_connection_ids: None,
             env_vars: Vec::new(),
+            hidden_worktrees: Vec::new(),
             wsl_sessions_distro: None,
             ssh_connection_id: None,
             parent_project_id: parent.map(str::to_string),
@@ -1408,7 +1486,75 @@ mod tests {
                 connection_id: "ssh-a".into(),
             },
             local_generation: None,
+            visibility_source: None,
         }
+    }
+
+    #[test]
+    fn routine_refresh_fences_registration_without_last_known_warning_churn() {
+        let mut target = ssh_scan_target("/repo", 4);
+        target.visibility_source =
+            crate::worktree_visibility::source_from_snapshot(&target.snapshot, "/repo");
+        let fact = worktree_fact("/feature");
+        let root = project("p", "/repo", None);
+        let snapshot = CatalogSnapshot {
+            owner: target.owner(7, Some(4)),
+            target: target.clone(),
+            inventory: CatalogInventory::Git(WorktreeScan {
+                generation: 2,
+                source: WorktreeScanSource::PorcelainZ,
+                authoritative: true,
+                worktrees: vec![fact.clone()],
+                warning: None,
+            }),
+            warning: None,
+        };
+        let mut entry = CatalogEntry {
+            snapshot: Some(snapshot),
+            ..Default::default()
+        };
+        let row = |snapshot: &CatalogSnapshot| {
+            row_from_fact(
+                &root, "config", snapshot, fact_location(&target, &fact).unwrap(), &fact, None,
+            )
+        };
+        let initial_target = row(entry.snapshot.as_ref().unwrap()).target;
+        for revision in 8..11 {
+            entry.begin_scan(revision);
+            let snapshot = entry.snapshot.as_ref().unwrap();
+            let mut refreshing = row(snapshot);
+            apply_refresh_eligibility(&mut refreshing, entry.in_flight_revision.is_some());
+            assert!(!refreshing.authoritative);
+            assert!(!refreshing.selectable);
+            assert!(!refreshing.last_known);
+            assert!(snapshot.warning.is_none());
+            assert_eq!(refreshing.target, initial_target);
+            let fresh = row(snapshot);
+            assert!(fresh.authoritative && fresh.selectable && !fresh.last_known);
+            assert!(!should_project_configured_children(Some(snapshot)));
+            entry.in_flight_revision = None;
+        }
+        let mut snapshot = entry.snapshot.unwrap();
+        let configured = project("child", "/feature", Some("p"));
+        let mut configured_row = row_from_fact(
+            &root, "config", &snapshot, fact_location(&target, &fact).unwrap(),
+            &fact, Some(&configured),
+        );
+        apply_refresh_eligibility(&mut configured_row, true);
+        assert!(configured_row.selectable);
+        assert!(!configured_row.last_known);
+
+        let hidden = vec![row(&snapshot).visibility_key.unwrap()];
+        assert!(!crate::worktree_visibility::sidebar_visible(&row(&snapshot), &hidden));
+        assert!(row(&snapshot).selectable);
+        assert_eq!(row(&snapshot).target, initial_target);
+        mark_snapshot_last_known(Some(&mut snapshot), "offline");
+        let mut retrying = row(&snapshot);
+        apply_refresh_eligibility(&mut retrying, true);
+        assert!(retrying.last_known);
+        assert!(!retrying.selectable);
+        assert_eq!(snapshot.warning.as_deref(), Some("offline"));
+        assert_eq!(retrying.visibility_key, hidden.first().cloned());
     }
 
     #[test]
@@ -1720,6 +1866,7 @@ mod tests {
             },
             backend: CatalogBackend::Local,
             local_generation: Some(4),
+            visibility_source: None,
         };
         let owner = target.owner(9, None);
         let snapshot = CatalogSnapshot {
@@ -1787,6 +1934,7 @@ mod tests {
             },
             backend: CatalogBackend::Local,
             local_generation: Some(2),
+            visibility_source: None,
         };
         let fact = worktree_fact("/linked");
         let mut snapshot = CatalogSnapshot {

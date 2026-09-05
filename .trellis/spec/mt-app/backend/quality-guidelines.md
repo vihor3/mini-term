@@ -57,8 +57,32 @@ updates, project switches, overlays, and late async completions.
 - Add pure tests for operation-token ownership, source-identity comparisons,
   blank-area targeting, conflict planning, and stale request rejection.
 - Cover project switching and directory refresh during active operations.
-- Run Rust compilation, Clippy, and tests in GitHub Actions for this repository;
-  local static inspection does not replace the workflow gate.
+
+### Hard Constraint: GitHub Actions Only
+
+The user explicitly requires all CI and build-related execution to happen in
+GitHub Actions. This applies to the main agent, every sub-agent, and every
+package/sidecar, including one-off reproduction or diagnostic commands.
+
+- Run compilation, `cargo check`/metadata, tests/fixtures, Clippy/lint,
+  formatting/checks, generated-code/i18n commands, packaging, installer checks,
+  and CI scripts only in the existing GitHub Actions workflows. Do not run
+  them locally, in a local container, through `act`, or manually over SSH.
+- Local work is source/configuration editing, code reading, and read-only Git
+  status/diff review. Static review is not passing CI evidence. Automated
+  whitespace checks such as `git diff --check` belong to the Actions gate.
+- On failure, inspect Actions logs and artifacts, apply scoped source or
+  generated diagnostic patches, and rerun Actions. A missing runner, slow
+  workflow, or convenient local toolchain is not an exception to this rule.
+- Require workflow evidence for the exact product commit: run URL/ID,
+  `headSha`, job conclusions, and relevant artifact identity. Use
+  `.github/workflows/ci.yml`, `windows-package.yml`, or `release.yml` as
+  appropriate; an unrelated green run does not validate current changes.
+- Any manual native acceptance uses an Actions-produced artifact. Automated
+  UI/regression harnesses and their fixture processes remain Actions-only.
+
+This constraint overrides older troubleshooting examples that suggest a
+local Cargo/test run. Do not silently skip a gate or claim an unrun check.
 
 ---
 

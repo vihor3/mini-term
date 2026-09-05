@@ -7,12 +7,16 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use gpui::Context;
-use mt_config::ProjectConfig;
+use mt_config::{HiddenWorktree, ProjectConfig, WorktreeVisibilityLocation, WorktreeVisibilitySource};
 use mt_identity::WorktreeId;
 use mt_ui::icons::ProjectKind;
 
 use crate::project_tree;
 use crate::tree::gen_id;
+use crate::worktree_visibility::{
+    ProjectSettingsTarget, VisibilityDraft, configured_preference_key, merge_edits, preference_key,
+    source_from_snapshot,
+};
 
 use super::pure::remove_from_tree;
 use super::{AppStore, ProjectState};
@@ -159,6 +163,7 @@ impl AppStore {
             ssh_cli_token: None,
             ssh_connection_ids: None,
             env_vars: Vec::new(),
+            hidden_worktrees: Vec::new(),
             wsl_sessions_distro: None,
             ssh_connection_id: None,
             parent_project_id: parent_ok.map(str::to_string),
@@ -250,6 +255,147 @@ impl AppStore {
         project.env_vars = vars;
         self.save_config_now();
         cx.notify();
+    }
+
+    /// Reuse persisted host identity offline, but never borrow SSH authority
+    /// after an endpoint/path change or from a never-authenticated binding.
+    pub fn worktree_visibility_source(
+        &self,
+        root_project_id: &str,
+    ) -> Option<WorktreeVisibilitySource> {
+        let root = self.project(root_project_id)?;
+        if root.parent_project_id.is_some() {
+            return None;
+        }
+        let binding = self.project_worktree_bindings.get(root_project_id)?;
+        if root.ssh_connection_id.is_some() {
+            use mt_project::worktree::WorktreeIdentitySource;
+            if ![
+                WorktreeIdentitySource::AuthoritativeRemoteGit.as_str(),
+                WorktreeIdentitySource::AuthoritativeRemoteDirectory.as_str(),
+            ]
+            .contains(&binding.identity_source.as_str())
+            {
+                return None;
+            }
+            self.trusted_canonical_worktree_path_for_project(root_project_id)?;
+        }
+        let snapshot = self.project_execution_snapshot(root_project_id).ok()?;
+        source_from_snapshot(&snapshot, &root.path)
+    }
+
+    pub fn configured_worktree_visibility_key(
+        &self,
+        root_project_id: &str,
+        project_id: &str,
+    ) -> Option<HiddenWorktree> {
+        use mt_project::worktree::WorktreeIdentitySource;
+
+        let root = self.project(root_project_id)?;
+        let source = self.worktree_visibility_source(root_project_id)?;
+        let binding = self.project_worktree_bindings.get(project_id)?;
+        let snapshot = self.project_execution_snapshot(project_id).ok()?;
+        if source_from_snapshot(&snapshot, &root.path).as_ref() != Some(&source) {
+            return None;
+        }
+        let path = self.trusted_canonical_worktree_path_for_project(project_id).or_else(|| {
+            (binding.identity_source == WorktreeIdentitySource::PersistedFallback.as_str())
+                .then_some(binding.canonical_worktree_path.as_deref())
+                .flatten()
+        })?;
+        let path = crate::execution_host::configured_execution_path(&snapshot.backend, path).ok()?;
+        let key = preference_key(&source, &path)?;
+        let provisional = [
+            WorktreeIdentitySource::ProvisionalLocal.as_str(),
+            WorktreeIdentitySource::ProvisionalWsl.as_str(),
+            WorktreeIdentitySource::ProvisionalSsh.as_str(),
+        ].contains(&binding.identity_source.as_str());
+        // A saved exact exclusion is usable after restart, but a provisional
+        // configured fallback cannot establish a new canonical preference.
+        (!provisional || root.hidden_worktrees.contains(&key)).then_some(key)
+    }
+
+    pub fn configured_project_visibility_key(
+        &self,
+        root_project_id: &str,
+        project_id: &str,
+    ) -> Option<HiddenWorktree> {
+        let root = self.project(root_project_id)?;
+        let project = self.project(project_id)?;
+        if project.id != root.id && project.parent_project_id.as_deref() != Some(root_project_id) {
+            return None;
+        }
+        let source = self.worktree_visibility_source(root_project_id)?;
+        let snapshot = self.project_execution_snapshot(project_id).ok()?;
+        if source_from_snapshot(&snapshot, &root.path).as_ref() != Some(&source) {
+            return None;
+        }
+        if project.ssh_connection_id.is_some() {
+            self.trusted_canonical_worktree_path_for_project(project_id)?;
+        }
+        let path = crate::execution_host::configured_execution_path(&snapshot.backend, &project.path).ok()?;
+        configured_preference_key(&source, project_id, &path)
+    }
+
+    pub fn set_project_worktree_visibility(
+        &mut self,
+        target: &ProjectSettingsTarget,
+        draft: &VisibilityDraft,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        if self.apply_project_worktree_visibility(target, draft)? {
+            self.save_config_now();
+            cx.notify();
+        }
+        Ok(())
+    }
+
+    fn apply_project_worktree_visibility(
+        &mut self,
+        target: &ProjectSettingsTarget,
+        draft: &VisibilityDraft,
+    ) -> Result<bool, &'static str> {
+        let valid_key = |key: &HiddenWorktree| {
+            Some(&key.source) == target.source.as_ref()
+                && match &key.location {
+                    WorktreeVisibilityLocation::CanonicalWorktree { canonical_path } => {
+                        preference_key(&key.source, canonical_path).as_ref() == Some(key)
+                    }
+                    WorktreeVisibilityLocation::ConfiguredProject { configured_project_id, configured_path } => {
+                        configured_preference_key(&key.source, configured_project_id, configured_path)
+                            .as_ref() == Some(key)
+                    }
+                }
+        };
+        let current_configured_target = |key: &HiddenWorktree| match &key.location {
+            WorktreeVisibilityLocation::ConfiguredProject { configured_project_id, .. } => {
+                self.configured_project_visibility_key(&target.root_project_id, configured_project_id)
+                    .as_ref() == Some(key)
+            }
+            WorktreeVisibilityLocation::CanonicalWorktree { .. } => true,
+        };
+        // Saved-only cleanup removes an exact stored preference. Guards from
+        // live-row edits must still match, even when that preference is stored.
+        if !target.is_current(self)
+            || draft.edits().iter().any(|(key, visible)| {
+                !valid_key(key)
+                    || (!current_configured_target(key)
+                        && !(*visible && self.project(&target.root_project_id)
+                            .is_some_and(|root| root.hidden_worktrees.contains(key))))
+            })
+            || draft.configured_targets().iter().any(|key| {
+                !valid_key(key) || !current_configured_target(key)
+            })
+        {
+            return Err("settings.staleSource");
+        }
+        let root = self
+            .config
+            .projects
+            .iter_mut()
+            .find(|project| project.id == target.root_project_id)
+            .ok_or("settings.staleSource")?;
+        Ok(merge_edits(&mut root.hidden_worktrees, draft.edits()))
     }
 
     /// 项目类型徽标覆盖:`None` = 自动探测,`Some("none")` = 不显示,
@@ -657,6 +803,7 @@ impl AppStore {
             ssh_cli_token: None,
             ssh_connection_ids: None,
             env_vars: Vec::new(),
+            hidden_worktrees: Vec::new(),
             wsl_sessions_distro: None,
             ssh_connection_id,
             parent_project_id: parent_project_id.clone(),
@@ -860,6 +1007,7 @@ mod project_onboarding_tests {
             ssh_cli_token: None,
             ssh_connection_ids: None,
             env_vars: Vec::new(),
+            hidden_worktrees: Vec::new(),
             wsl_sessions_distro: None,
             ssh_connection_id: ssh_connection_id.map(str::to_string),
             parent_project_id: None,
@@ -1001,6 +1149,286 @@ mod project_onboarding_tests {
             )
             .unwrap(),
         }
+    }
+
+    fn visibility_store() -> AppStore {
+        let a = project("a", "/repo", Some("ssh-a"));
+        let b = project("b", "/repo", Some("ssh-b"));
+        let ca = ssh_connection("ssh-a");
+        let cb = ssh_connection("ssh-b");
+        let bindings = HashMap::from([
+            (a.id.clone(), authoritative_remote_binding(&a.id, &a.path, &a.path, &ca)),
+            (b.id.clone(), authoritative_remote_binding(&b.id, &b.path, &b.path, &cb)),
+        ]);
+        let (ai, _events) = crate::ai::AiBridge::new(false);
+        test_store(
+            AppConfig {
+                projects: vec![a, b],
+                ssh_connections: vec![ca, cb],
+                last_active_project_id: Some("a".into()),
+                ..Default::default()
+            },
+            bindings,
+            ai,
+        )
+    }
+
+    #[test]
+    fn visibility_save_targets_clicked_inactive_project_and_preserves_workbench() {
+        let mut store = visibility_store();
+        let target = ProjectSettingsTarget::capture(&store, "b").unwrap();
+        let active = store.active_worktree_id.clone();
+        let binding = store.worktree_id_for_project("b").cloned();
+        let key = preference_key(target.source.as_ref().unwrap(), "/repo").unwrap();
+        let mut draft = VisibilityDraft::new(&[]);
+        draft.set_visible(key.clone(), false);
+        let panel = crate::tree::ProjectPanel::new(crate::tree::SplitNode::leaf(
+            crate::tree::PaneState::new("shell"),
+        ));
+        store.project_states.get_mut("a").unwrap().panels.push(panel.clone());
+        store.project_states.get_mut("a").unwrap().active_panel_id = Some(panel.id.clone());
+        store.config.projects[1].description = Some("changed while settings is open".into());
+        store.project_states.get_mut("a").unwrap().needs_attention = true;
+
+        assert!(store.apply_project_worktree_visibility(&target, &draft).unwrap());
+        assert!(!store.apply_project_worktree_visibility(&target, &draft).unwrap());
+        assert_eq!(store.config.projects[1].hidden_worktrees, vec![key]);
+        assert!(store.config.projects[0].hidden_worktrees.is_empty());
+        assert_eq!(
+            store.config.projects[1].description.as_deref(),
+            Some("changed while settings is open"),
+        );
+        assert_eq!(store.active_project_id.as_deref(), Some("a"));
+        assert_eq!(store.active_worktree_id, active);
+        assert_eq!(store.worktree_id_for_project("b"), binding.as_ref());
+        assert!(store.project_states["a"].needs_attention);
+        assert!(store.layout_dirty_projects.is_empty());
+        assert_eq!(store.project_states["a"].panels, vec![panel.clone()]);
+
+        let active_target = ProjectSettingsTarget::capture(&store, "a").unwrap();
+        let mut active_draft = VisibilityDraft::new(&[]);
+        active_draft.set_visible(
+            preference_key(active_target.source.as_ref().unwrap(), "/repo").unwrap(),
+            false,
+        );
+        assert!(store.apply_project_worktree_visibility(&active_target, &active_draft).unwrap());
+        assert_eq!(store.active_worktree_id, active);
+        assert_eq!(store.active_project_id.as_deref(), Some("a"));
+        assert!(store.project_states["a"].needs_attention);
+        assert_eq!(store.project_states["a"].panels, vec![panel]);
+    }
+
+    #[test]
+    fn visibility_save_rejects_removed_reconfigured_rebound_or_cross_host_targets() {
+        for change in 0..6 {
+            let mut store = visibility_store();
+            let target = ProjectSettingsTarget::capture(&store, "b").unwrap();
+            let mut draft = VisibilityDraft::new(&[]);
+            draft.set_visible(
+                preference_key(target.source.as_ref().unwrap(), "/feature").unwrap(),
+                false,
+            );
+            match change {
+                0 => { store.config.projects.remove(1); }
+                1 => store.config.projects[1].path = "/different-root".into(),
+                2 => store.config.projects[1].parent_project_id = Some("a".into()),
+                3 => store.config.ssh_connections[1].host = "different-host".into(),
+                4 => {
+                    store.project_worktree_bindings.get_mut("b").unwrap().execution_host_id =
+                        ExecutionHostId::derive("other", &host_install_id());
+                }
+                5 => {
+                    let other = store.worktree_visibility_source("a").unwrap();
+                    draft.set_visible(preference_key(&other, "/feature").unwrap(), false);
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                store.apply_project_worktree_visibility(&target, &draft),
+                Err("settings.staleSource"),
+            );
+            assert!(store.config.projects.iter().all(|root| root.hidden_worktrees.is_empty()));
+        }
+    }
+
+    #[test]
+    fn visibility_source_uses_offline_authority_but_not_provisional_ssh() {
+        let mut store = visibility_store();
+        let target = ProjectSettingsTarget::capture(&store, "b").unwrap();
+        let key = preference_key(target.source.as_ref().unwrap(), "/repo").unwrap();
+        store.config.projects[1].hidden_worktrees.push(key.clone());
+        assert!(store.remote_runtime_projects.is_empty());
+        assert_eq!(store.configured_worktree_visibility_key("b", "b"), Some(key));
+        store.config.ssh_connections[1].password = Some("changed password".into());
+        store.config.ssh_connections[1].name = "Changed label".into();
+        assert!(target.is_current(&store));
+        store.project_worktree_bindings.get_mut("b").unwrap().identity_source =
+            WorktreeIdentitySource::ProvisionalSsh.as_str().into();
+        assert!(store.worktree_visibility_source("b").is_none());
+        assert!(store.configured_project_visibility_key("b", "b").is_none());
+        assert!(!target.is_current(&store));
+        assert_eq!(store.config.projects[1].hidden_worktrees.len(), 1);
+    }
+
+    #[test]
+    fn visibility_wsl_fallback_reuses_only_previously_saved_exact_paths() {
+        let project = project("wsl", r"\\wsl.localhost\Ubuntu\repo", None);
+        let binding = super::super::identity::binding_from_resolved(
+            project.id.clone(),
+            mt_project::worktree::resolve_provisional_wsl(
+                &host_install_id(), "Ubuntu", &project.path,
+            ).unwrap(),
+        );
+        let (ai, _events) = crate::ai::AiBridge::new(false);
+        let mut store = test_store(
+            AppConfig { projects: vec![project], ..Default::default() },
+            HashMap::from([("wsl".into(), binding)]),
+            ai,
+        );
+        assert!(store.configured_worktree_visibility_key("wsl", "wsl").is_none());
+        let source = store.worktree_visibility_source("wsl").unwrap();
+        let key = preference_key(&source, "/repo").unwrap();
+        store.config.projects[0].hidden_worktrees.push(key.clone());
+        assert_eq!(store.configured_worktree_visibility_key("wsl", "wsl"), Some(key));
+        store.config.projects[0].path = r"\\wsl.localhost\Debian\repo".into();
+        assert!(store.configured_worktree_visibility_key("wsl", "wsl").is_none());
+    }
+
+    fn visibility_wsl_store() -> AppStore {
+        let root = project("wsl", r"\\wsl.localhost\Ubuntu\repo-link", None);
+        let mut child = project("child", r"\\wsl.localhost\Ubuntu\child", None);
+        child.parent_project_id = Some(root.id.clone());
+        let projects = vec![root, child];
+        let bindings = projects.iter().map(|project| {
+            (project.id.clone(), super::super::identity::binding_from_resolved(
+                project.id.clone(),
+                mt_project::worktree::resolve_provisional_wsl(&host_install_id(), "Ubuntu", &project.path).unwrap(),
+            ))
+        }).collect();
+        let (ai, _events) = crate::ai::AiBridge::new(false);
+        test_store(AppConfig { projects, ..Default::default() }, bindings, ai)
+    }
+
+    #[test]
+    fn visibility_wsl_alias_hides_without_resolving_or_merging_canonical_facts() {
+        use crate::worktree_catalog::tests::groups_for_visibility_test;
+        use crate::worktree_visibility::{sidebar_visible, visibility_keys};
+
+        let mut store = visibility_wsl_store();
+        let target = ProjectSettingsTarget::capture(&store, "wsl").unwrap();
+        let groups = groups_for_visibility_test(&store, "wsl", Some("/repo-real"));
+        assert_eq!(groups[0].rows.len(), 2);
+        let alias = groups[0].rows.iter()
+            .find(|row| row.target.configured_project_id.as_deref() == Some("wsl")).unwrap();
+        assert!(alias.visibility_key.is_none());
+        assert_eq!(alias.configured_visibility_key, store.configured_project_visibility_key("wsl", "wsl"));
+        assert!(alias.configured_visibility_key.is_some());
+        let mut draft = VisibilityDraft::new(&[]);
+        draft.set_row_visible(&visibility_keys(alias).cloned().collect::<Vec<_>>(), false);
+        assert!(store.apply_project_worktree_visibility(&target, &draft).unwrap());
+        let after = groups_for_visibility_test(&store, "wsl", Some("/repo-real"));
+        assert_eq!(groups, after);
+        assert!(!sidebar_visible(alias, &store.config.projects[0].hidden_worktrees));
+        assert!(sidebar_visible(&after[0].rows[0], &store.config.projects[0].hidden_worktrees));
+    }
+
+    #[test]
+    fn visibility_resolved_configured_row_keeps_its_exclusion() {
+        use crate::worktree_catalog::tests::groups_for_visibility_test;
+        use crate::worktree_visibility::sidebar_visible;
+
+        let mut store = visibility_wsl_store();
+        let key = store.configured_project_visibility_key("wsl", "wsl").unwrap();
+        store.config.projects[0].hidden_worktrees.push(key.clone());
+        let unresolved = groups_for_visibility_test(&store, "wsl", None);
+        assert!(!sidebar_visible(&unresolved[0].rows[0], &store.config.projects[0].hidden_worktrees));
+        let resolved = groups_for_visibility_test(&store, "wsl", Some("/repo-link"));
+        assert_eq!(resolved[0].rows.len(), 1);
+        let row = &resolved[0].rows[0];
+        assert!(row.visibility_key.is_some());
+        assert_eq!(row.configured_visibility_key, Some(key));
+        assert!(!sidebar_visible(row, &store.config.projects[0].hidden_worktrees));
+        assert!(row.authoritative && row.selectable && !row.last_known);
+    }
+
+    #[test]
+    fn visibility_configured_child_edits_revalidate_path_parent_and_source() {
+        for canonical in [false, true] {
+            for change in 0..5 {
+                let mut store = visibility_wsl_store();
+                let target = ProjectSettingsTarget::capture(&store, "wsl").unwrap();
+                let configured = store.configured_project_visibility_key("wsl", "child").unwrap();
+                let mut keys = Vec::new();
+                if canonical {
+                    keys.push(preference_key(target.source.as_ref().unwrap(), "/child").unwrap());
+                }
+                keys.push(configured);
+                let mut draft = VisibilityDraft::new(&[]);
+                draft.set_row_visible(&keys, false);
+                if canonical {
+                    assert_eq!(draft.edits().len(), 1);
+                    assert_eq!(draft.configured_targets().len(), 1);
+                }
+                match change {
+                    0 => store.config.projects[1].path = r"\\wsl.localhost\Ubuntu\other".into(),
+                    1 => store.config.projects[1].parent_project_id = None,
+                    2 => { store.config.projects.remove(1); }
+                    3 => store.config.projects[1].path = r"\\wsl.localhost\Debian\child".into(),
+                    4 => store.project_worktree_bindings.get_mut("child").unwrap().execution_host_id =
+                        ExecutionHostId::derive("other-host", &host_install_id()),
+                    _ => unreachable!(),
+                }
+                assert!(target.is_current(&store));
+                assert_eq!(store.apply_project_worktree_visibility(&target, &draft), Err("settings.staleSource"));
+                assert!(store.config.projects[0].hidden_worktrees.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn visibility_saved_only_configured_cleanup_preserves_unrelated_exclusions() {
+        for removed in [false, true] {
+            let mut store = visibility_wsl_store();
+            let key = store.configured_project_visibility_key("wsl", "child").unwrap();
+            let unrelated = configured_preference_key(&key.source, "absent", "/absent").unwrap();
+            store.config.projects[0].hidden_worktrees = vec![key.clone(), unrelated.clone()];
+            if removed {
+                store.config.projects.remove(1);
+            } else {
+                store.config.projects[1].path = r"\\wsl.localhost\Ubuntu\repointed".into();
+            }
+            let target = ProjectSettingsTarget::capture(&store, "wsl").unwrap();
+            let mut draft = VisibilityDraft::new(&store.config.projects[0].hidden_worktrees);
+            draft.set_visible(key.clone(), true);
+            assert!(draft.configured_targets().is_empty());
+            assert!(store.apply_project_worktree_visibility(&target, &draft).unwrap());
+            assert_eq!(store.config.projects[0].hidden_worktrees, vec![unrelated.clone()]);
+
+            let mut stale_hide = VisibilityDraft::new(&store.config.projects[0].hidden_worktrees);
+            stale_hide.set_visible(key, false);
+            assert_eq!(store.apply_project_worktree_visibility(&target, &stale_hide), Err("settings.staleSource"));
+
+            let mut foreign = unrelated.clone();
+            foreign.source.root_path = "/other-root".into();
+            store.config.projects[0].hidden_worktrees.push(foreign.clone());
+            let mut foreign_cleanup = VisibilityDraft::new(&store.config.projects[0].hidden_worktrees);
+            foreign_cleanup.set_visible(foreign.clone(), true);
+            assert_eq!(store.apply_project_worktree_visibility(&target, &foreign_cleanup), Err("settings.staleSource"));
+            assert_eq!(store.config.projects[0].hidden_worktrees, vec![unrelated, foreign]);
+        }
+    }
+
+    #[test]
+    fn visibility_live_unhide_rejects_repoint_even_when_the_exclusion_is_stored() {
+        let mut store = visibility_wsl_store();
+        let target = ProjectSettingsTarget::capture(&store, "wsl").unwrap();
+        let key = store.configured_project_visibility_key("wsl", "child").unwrap();
+        store.config.projects[0].hidden_worktrees.push(key.clone());
+        let mut draft = VisibilityDraft::new(&store.config.projects[0].hidden_worktrees);
+        draft.set_row_visible(std::slice::from_ref(&key), true);
+        store.config.projects[1].path = r"\\wsl.localhost\Ubuntu\repointed".into();
+        assert_eq!(store.apply_project_worktree_visibility(&target, &draft), Err("settings.staleSource"));
+        assert_eq!(store.config.projects[0].hidden_worktrees, vec![key]);
     }
 
     fn project_occurrences(items: &[ProjectTreeItem], project_id: &str) -> usize {

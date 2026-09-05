@@ -696,6 +696,7 @@ mod tests {
             ssh_cli_token: None,
             ssh_connection_ids: None,
             env_vars: Vec::new(),
+            hidden_worktrees: Vec::new(),
             wsl_sessions_distro: None,
             ssh_connection_id: ssh_connection_id.map(str::to_string),
             parent_project_id: None,

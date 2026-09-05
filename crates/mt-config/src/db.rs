@@ -449,6 +449,7 @@ mod tests {
             ssh_cli_token: None,
             ssh_connection_ids: None,
             env_vars: vec![],
+            hidden_worktrees: Vec::new(),
             wsl_sessions_distro: None,
             ssh_connection_id: None,
             parent_project_id: None,
@@ -467,6 +468,70 @@ mod tests {
             identity_file: None,
             group: None,
         }
+    }
+
+    #[test]
+    fn hidden_worktrees_round_trip_through_config_database() {
+        use crate::{
+            HiddenWorktree, WorktreeVisibilityBackend, WorktreeVisibilityLocation,
+            WorktreeVisibilitySource,
+        };
+        use mt_identity::{ExecutionHostId, HostInstallId};
+
+        let dir = temp_dir("worktree-visibility");
+        let host = ExecutionHostId::derive("visibility", &HostInstallId::new());
+        let backends = [
+            WorktreeVisibilityBackend::Local,
+            WorktreeVisibilityBackend::Wsl { distro: "ubuntu".into() },
+            WorktreeVisibilityBackend::Ssh {
+                connection_id: "remote".into(),
+                host: "host.example".into(),
+                port: 22,
+                user: "deploy".into(),
+            },
+        ];
+        let mut root = project("root", "Project");
+        root.hidden_worktrees = backends.into_iter().flat_map(|backend| {
+            let source = WorktreeVisibilitySource {
+                execution_host_id: host.clone(),
+                root_path: "/repo".into(),
+                backend,
+            };
+            let legacy = serde_json::json!({
+                "source": &source,
+                "canonicalPath": "/repo-feature",
+            });
+            let canonical: HiddenWorktree = serde_json::from_value(legacy.clone()).unwrap();
+            assert!(matches!(canonical.location, WorktreeVisibilityLocation::CanonicalWorktree { .. }));
+            assert_eq!(serde_json::to_value(&canonical).unwrap(), legacy);
+            let configured = HiddenWorktree {
+                source,
+                location: WorktreeVisibilityLocation::ConfiguredProject {
+                    configured_project_id: "root".into(),
+                    configured_path: "/repo-link".into(),
+                },
+            };
+            assert_eq!(
+                serde_json::from_value::<HiddenWorktree>(serde_json::to_value(&configured).unwrap()).unwrap(),
+                configured,
+            );
+            [canonical, configured]
+        }).collect();
+        let expected = root.hidden_worktrees.clone();
+        {
+            let db = ConfigDb::open_at(&dir).unwrap();
+            db.save(&AppConfig { projects: vec![root, project("other", "Other")], ..Default::default() }).unwrap();
+        }
+        {
+            let db = ConfigDb::open_at(&dir).unwrap();
+            let mut loaded = db.load().unwrap().unwrap();
+            assert_eq!(loaded.projects[0].hidden_worktrees, expected);
+            assert!(loaded.projects[1].hidden_worktrees.is_empty());
+            loaded.projects[0].name = "Renamed".into();
+            db.save(&loaded).unwrap();
+            assert_eq!(db.load().unwrap().unwrap().projects[0].hidden_worktrees, expected);
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

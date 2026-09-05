@@ -92,6 +92,7 @@ mod persist;
 mod pricing;
 mod project_kind;
 mod project_list;
+mod project_settings;
 mod project_onboarding;
 mod project_tree;
 mod prompt;
@@ -121,6 +122,7 @@ mod update_check;
 mod usage_panel;
 mod workbench_area;
 mod worktree_catalog;
+mod worktree_visibility;
 
 use std::path::PathBuf;
 use std::sync::Arc;

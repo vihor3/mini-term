@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
-use mt_identity::{PaneKey, TabId, TerminalIncarnationId, TerminalSessionId, WorktreeId};
+use mt_identity::{ExecutionHostId, PaneKey, TabId, TerminalIncarnationId, TerminalSessionId, WorktreeId};
 use serde::{Deserialize, Serialize};
 
 /// SSH 连接(`config.json` 的 `sshConnections` 数组元素)。
@@ -416,6 +416,58 @@ pub struct ProjectEnvVar {
     pub enabled: bool,
 }
 
+/// Durable execution namespace. Connection epochs and credentials are not preferences.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum WorktreeVisibilityBackend {
+    Local,
+    Wsl { distro: String },
+    Ssh {
+        connection_id: String,
+        host: String,
+        port: u16,
+        user: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeVisibilitySource {
+    pub execution_host_id: ExecutionHostId,
+    pub root_path: String,
+    pub backend: WorktreeVisibilityBackend,
+}
+
+/// A sidebar exclusion, scoped to its owning project's configured source.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiddenWorktree {
+    pub source: WorktreeVisibilitySource,
+    #[serde(flatten)]
+    pub location: WorktreeVisibilityLocation,
+}
+
+/// Separate preference namespaces; configured paths do not assert Git identity.
+/// Flattening retains the original `canonicalPath` JSON representation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub enum WorktreeVisibilityLocation {
+    CanonicalWorktree { canonical_path: String },
+    ConfiguredProject {
+        configured_project_id: String,
+        configured_path: String,
+    },
+}
+
+impl WorktreeVisibilityLocation {
+    pub fn path(&self) -> &str {
+        match self {
+            Self::CanonicalWorktree { canonical_path } => canonical_path,
+            Self::ConfiguredProject { configured_path, .. } => configured_path,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
@@ -446,6 +498,8 @@ pub struct ProjectConfig {
     /// 项目级环境变量列表,新建终端时注入。空 Vec 时序列化跳过保持文件干净。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_vars: Vec<ProjectEnvVar>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_worktrees: Vec<HiddenWorktree>,
     /// WSL 会话来源发行版名(「WSL 关联项目」的声明)。`None` = 未启用。
     /// WSL 根项目(UNC 路径)不落此配置,distro 从路径自动推导。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1460,6 +1514,8 @@ mod tests {
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.projects.len(), 1);
         assert!(config.projects[0].saved_layout.is_none());
+        assert!(config.projects[0].hidden_worktrees.is_empty());
+        assert!(serde_json::to_value(&config.projects[0]).unwrap().get("hiddenWorktrees").is_none());
     }
 
     #[test]
@@ -1520,6 +1576,7 @@ mod tests {
                 ssh_cli_token: None,
                 ssh_connection_ids: None,
                 env_vars: vec![],
+                hidden_worktrees: Vec::new(),
                 wsl_sessions_distro: None,
                 ssh_connection_id: None,
                 parent_project_id: None,
@@ -2317,6 +2374,7 @@ mod tests {
             ssh_cli_token: None,
             ssh_connection_ids: None,
             env_vars: vec![],
+            hidden_worktrees: Vec::new(),
             wsl_sessions_distro: None,
             ssh_connection_id: None,
             parent_project_id: None,
