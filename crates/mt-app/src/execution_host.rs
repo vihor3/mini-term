@@ -140,16 +140,16 @@ impl ProjectExecutionSnapshot {
 /// semantics. WSL and SSH paths are case-sensitive and may not escape root.
 pub fn normalize_absolute_posix_path(path: &str) -> Result<String, String> {
     if !path.starts_with('/') || path.contains('\0') {
-        return Err(format!("execution-host path must be absolute POSIX: {path}"));
+        return Err(format!(
+            "execution-host path must be absolute POSIX: {path}"
+        ));
     }
     let mut segments = Vec::new();
     for segment in path.split('/') {
         match segment {
             "" | "." => {}
             ".." => {
-                return Err(format!(
-                    "execution-host path cannot contain `..`: {path}"
-                ));
+                return Err(format!("execution-host path cannot contain `..`: {path}"));
             }
             value => segments.push(value),
         }
@@ -1071,10 +1071,7 @@ mod tests {
     fn host_visible_project_keys_collapse_wsl_unc_aliases_only() {
         assert_eq!(
             normalize_host_visible_project_path(r"\\wsl$\Ubuntu\home\User\repo").unwrap(),
-            normalize_host_visible_project_path(
-                r"\\wsl.localhost\ubuntu\home\User\repo\"
-            )
-            .unwrap()
+            normalize_host_visible_project_path(r"\\wsl.localhost\ubuntu\home\User\repo\").unwrap()
         );
         assert_ne!(
             normalize_host_visible_project_path(r"\\wsl$\Ubuntu\home\User\repo").unwrap(),

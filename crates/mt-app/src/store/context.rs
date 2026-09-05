@@ -536,7 +536,8 @@ impl AppStore {
             }
             None => false,
         };
-        pane.pty_id.is_none_or(|_| live)
+        pane.pty_id
+            .is_none_or(|_| live)
             .then(|| (pane.id.clone(), live))
     }
 
@@ -550,7 +551,8 @@ impl AppStore {
             return false;
         };
         self.set_active_project_without_hydration(&target.project_id, cx);
-        let Some((current_pane_id, current_live)) = self.resolve_terminal_jump_target(target) else {
+        let Some((current_pane_id, current_live)) = self.resolve_terminal_jump_target(target)
+        else {
             return false;
         };
         if pane_id != current_pane_id || live != current_live {

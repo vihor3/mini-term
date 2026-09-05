@@ -27,21 +27,12 @@ use crate::i18n::t;
 use crate::overlay::kind;
 use crate::prompt::{autofocus, close_guarded, open_guarded_with_close};
 use crate::settings::SettingsPage;
-use crate::store::{
-    AgentTargetView, AppStore, TerminalJumpTarget, TerminalJumpView,
-};
+use crate::store::{AgentTargetView, AppStore, TerminalJumpTarget, TerminalJumpView};
 use crate::tree::PaneStatus;
 use crate::ui;
 use crate::worktree_catalog::{CatalogBackend, WorktreeCatalog, WorktreeCatalogTarget};
 
-actions!(
-    mini_term,
-    [
-        JumpPrev,
-        JumpNext,
-        JumpToggleFilter,
-    ]
-);
+actions!(mini_term, [JumpPrev, JumpNext, JumpToggleFilter,]);
 
 #[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
 #[action(namespace = mini_term, no_json)]
@@ -210,16 +201,10 @@ impl JumpRecency {
         let (terminal, worktree) = active_recency_targets(store.read(cx));
         let subscription = cx.observe(&store, |this, _, cx| {
             let (terminal, worktree) = active_recency_targets(this.store.read(cx));
-            let terminal_changed = record_recency(
-                terminal,
-                &mut this.last_terminal,
-                &mut this.terminals,
-            );
-            let worktree_changed = record_recency(
-                worktree,
-                &mut this.last_worktree,
-                &mut this.worktrees,
-            );
+            let terminal_changed =
+                record_recency(terminal, &mut this.last_terminal, &mut this.terminals);
+            let worktree_changed =
+                record_recency(worktree, &mut this.last_worktree, &mut this.worktrees);
             if terminal_changed || worktree_changed {
                 cx.notify();
             }
@@ -375,12 +360,8 @@ impl FilterState {
             .retain(|family| options.families.contains(family));
         self.hosts
             .retain(|host| options.hosts.iter().any(|option| &option.key == host));
-        self.projects.retain(|project| {
-            options
-                .projects
-                .iter()
-                .any(|option| &option.key == project)
-        });
+        self.projects
+            .retain(|project| options.projects.iter().any(|option| &option.key == project));
         previous_counts != (self.families.len(), self.hosts.len(), self.projects.len())
     }
 
@@ -551,14 +532,21 @@ fn build_candidates(
                 agent_activity_label(agent.activity).to_string(),
             ],
             vec![provider.clone(), format!("{provider} chat")],
-            vec![agent.project_name.clone(), provider, agent.host_label.clone()],
+            vec![
+                agent.project_name.clone(),
+                provider,
+                agent.host_label.clone(),
+            ],
             Some(project),
             Some(host),
             source_order,
         );
         candidate.attention = agent.attention
             || agent.unread
-            || matches!(agent.activity, AgentActivity::Blocked | AgentActivity::Failed);
+            || matches!(
+                agent.activity,
+                AgentActivity::Blocked | AgentActivity::Failed
+            );
         candidate.active = active;
         candidate.timestamp = (agent.received_at_unix_ms > 0).then_some(agent.received_at_unix_ms);
         candidate.warning = agent.connectivity != AgentConnectivity::Live;
@@ -679,17 +667,17 @@ fn build_candidates(
             let subtitle = subtitle_parts.join(" | ");
             let mut badges = vec![group.root_project_name.clone(), branch.clone()];
             badges.push(group.host_label.clone());
-            let configured_worktree = row
-                .target
-                .configured_project_id
-                .as_ref()
-                .and_then(|project_id| {
-                    store
-                        .read(cx)
-                        .worktree_id_for_project(project_id)
-                        .cloned()
-                        .map(|worktree_id| (project_id.clone(), worktree_id))
-                });
+            let configured_worktree =
+                row.target
+                    .configured_project_id
+                    .as_ref()
+                    .and_then(|project_id| {
+                        store
+                            .read(cx)
+                            .worktree_id_for_project(project_id)
+                            .cloned()
+                            .map(|worktree_id| (project_id.clone(), worktree_id))
+                    });
             let mut search_fields = vec![
                 group.root_project_name.clone(),
                 group.root_project_path.clone(),
@@ -703,10 +691,7 @@ fn build_candidates(
             }
             search_fields.extend(state_terms);
             let mut candidate = JumpCandidate::new(
-                format!(
-                    "worktree:{}:{}",
-                    group.root_project_id, row.target.row_key
-                ),
+                format!("worktree:{}:{}", group.root_project_id, row.target.row_key),
                 JumpItem::Worktree(row.target.clone()),
                 row.label.clone(),
                 subtitle,
@@ -1126,9 +1111,7 @@ pub fn open(
     }
     let previous_focus = window.focused(cx);
     let on_command: CommandHandler = Rc::new(on_command);
-    let view = cx.new(|cx| {
-        JumpPalette::new(store, catalog, recency, on_command, window, cx)
-    });
+    let view = cx.new(|cx| JumpPalette::new(store, catalog, recency, on_command, window, cx));
     let input = view.read(cx).query.clone();
     let restore_focus = previous_focus.clone();
     open_guarded_with_close(
@@ -1167,9 +1150,8 @@ impl JumpPalette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let query = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(t("projectSwitcher", "placeholder"))
-        });
+        let query = cx
+            .new(|cx| InputState::new(window, cx).placeholder(t("projectSwitcher", "placeholder")));
         let input_subscription = cx.subscribe_in(
             &query,
             window,
@@ -1181,12 +1163,8 @@ impl JumpPalette {
         );
         let store_subscription = cx.observe(&store, |_this, _, cx| cx.notify());
         let catalog_subscription = cx.observe(&catalog, |_this, _, cx| cx.notify());
-        let frozen = FrozenEmptyOrder::capture(&build_candidates(
-            &store,
-            &catalog,
-            recency.read(cx),
-            cx,
-        ));
+        let frozen =
+            FrozenEmptyOrder::capture(&build_candidates(&store, &catalog, recency.read(cx), cx));
         Self {
             store,
             catalog,
@@ -1198,11 +1176,7 @@ impl JumpPalette {
             scroll: ScrollHandle::new(),
             frozen,
             on_command,
-            _subscriptions: vec![
-                input_subscription,
-                store_subscription,
-                catalog_subscription,
-            ],
+            _subscriptions: vec![input_subscription, store_subscription, catalog_subscription],
         }
     }
 
@@ -1218,12 +1192,7 @@ impl JumpPalette {
     }
 
     fn model(&mut self, cx: &App) -> VisibleModel {
-        let candidates = build_candidates(
-            &self.store,
-            &self.catalog,
-            self.recency.read(cx),
-            cx,
-        );
+        let candidates = build_candidates(&self.store, &self.catalog, self.recency.read(cx), cx);
         let options = FilterOptions::from_candidates(&candidates);
         if self.filters.reconcile(&options) {
             self.cursor = 0;
@@ -1244,21 +1213,16 @@ impl JumpPalette {
             .collect();
         let mut rows = Vec::new();
         if query.tokens.is_empty() {
-            let conversations = frozen_candidates(
-                &filtered,
-                &self.frozen.conversations,
-                |candidate| {
+            let conversations =
+                frozen_candidates(&filtered, &self.frozen.conversations, |candidate| {
                     matches!(
                         candidate.item.family(),
                         JumpFamily::Agent | JumpFamily::Terminal
                     )
-                },
-            );
-            let worktrees = frozen_candidates(
-                &filtered,
-                &self.frozen.worktrees,
-                |candidate| candidate.item.family() == JumpFamily::Worktree,
-            );
+                });
+            let worktrees = frozen_candidates(&filtered, &self.frozen.worktrees, |candidate| {
+                candidate.item.family() == JumpFamily::Worktree
+            });
             push_section(
                 &mut rows,
                 t("projectSwitcher", "sectionRecentTargets"),
@@ -1302,10 +1266,7 @@ impl JumpPalette {
             push_section(
                 &mut rows,
                 t("projectSwitcher", "sectionResults"),
-                ranked
-                    .into_iter()
-                    .map(|(_, candidate)| candidate)
-                    .collect(),
+                ranked.into_iter().map(|(_, candidate)| candidate).collect(),
                 QUERY_RESULT_CAP,
             );
         }
@@ -1398,12 +1359,9 @@ impl JumpPalette {
             JumpItem::Agent(agent) => {
                 AppStore::activate_agent_run(&self.store, &agent.run_id, window, cx)
             }
-            JumpItem::Terminal(terminal) => AppStore::activate_terminal_jump_target(
-                &self.store,
-                &terminal.target,
-                window,
-                cx,
-            ),
+            JumpItem::Terminal(terminal) => {
+                AppStore::activate_terminal_jump_target(&self.store, &terminal.target, window, cx)
+            }
             JumpItem::Worktree(target) => crate::worktree_catalog::activate_target(
                 &self.catalog,
                 &self.store,
@@ -1434,17 +1392,12 @@ impl JumpPalette {
     }
 
     fn render_filters(&self, cx: &mut Context<Self>) -> AnyElement {
-        let candidates = build_candidates(
-            &self.store,
-            &self.catalog,
-            self.recency.read(cx),
-            cx,
-        );
+        let candidates = build_candidates(&self.store, &self.catalog, self.recency.read(cx), cx);
         let options = FilterOptions::from_candidates(&candidates);
         let mut families = div().flex().flex_wrap().gap(px(5.0));
         for family in options.families {
-            let selected = self.filters.families.is_empty()
-                || self.filters.families.contains(&family);
+            let selected =
+                self.filters.families.is_empty() || self.filters.families.contains(&family);
             families = families.child(
                 filter_chip(
                     SharedString::from(format!("jump-family-{family:?}")),
@@ -1460,8 +1413,8 @@ impl JumpPalette {
 
         let mut hosts = div().flex().flex_wrap().gap(px(5.0));
         for option in options.hosts {
-            let selected = self.filters.hosts.is_empty()
-                || self.filters.hosts.contains(&option.key);
+            let selected =
+                self.filters.hosts.is_empty() || self.filters.hosts.contains(&option.key);
             let key = option.key.clone();
             hosts = hosts.child(
                 filter_chip(
@@ -1478,8 +1431,8 @@ impl JumpPalette {
 
         let mut projects = div().flex().flex_wrap().gap(px(5.0));
         for option in options.projects {
-            let selected = self.filters.projects.is_empty()
-                || self.filters.projects.contains(&option.key);
+            let selected =
+                self.filters.projects.is_empty() || self.filters.projects.contains(&option.key);
             let key = option.key.clone();
             projects = projects.child(
                 filter_chip(
@@ -1495,6 +1448,7 @@ impl JumpPalette {
         }
 
         div()
+            .id("jump-filter-scroll")
             .w_full()
             .max_h(px(190.0))
             .overflow_y_scroll()
@@ -1505,7 +1459,10 @@ impl JumpPalette {
             .bg(ui::bg_elevated())
             .child(filter_group(t("projectSwitcher", "filterType"), families))
             .child(filter_group(t("projectSwitcher", "filterHost"), hosts))
-            .child(filter_group(t("projectSwitcher", "filterProject"), projects))
+            .child(filter_group(
+                t("projectSwitcher", "filterProject"),
+                projects,
+            ))
             .when(self.filters.is_active(), |panel| {
                 panel.child(
                     div()
@@ -1554,7 +1511,12 @@ impl JumpPalette {
             .max_w(gpui::relative(0.48))
             .overflow_hidden()
             .flex_none();
-        for badge in candidate.badges.iter().filter(|badge| !badge.is_empty()).take(3) {
+        for badge in candidate
+            .badges
+            .iter()
+            .filter(|badge| !badge.is_empty())
+            .take(3)
+        {
             badges = badges.child(
                 div()
                     .max_w(px(112.0))
@@ -1581,7 +1543,10 @@ impl JumpPalette {
         }
 
         let mut row = div()
-            .id(SharedString::from(format!("jump-row-{}", candidate.source_order)))
+            .id(SharedString::from(format!(
+                "jump-row-{}",
+                candidate.source_order
+            )))
             .h(px(56.0))
             .flex_none()
             .flex()
@@ -1720,15 +1685,15 @@ impl Render for JumpPalette {
         let filter_active = self.filters.is_active();
         div()
             .key_context("JumpPalette")
-            .on_action(cx.listener(|this, _: &JumpPrev, window, cx| {
-                this.move_cursor(-1, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &JumpNext, window, cx| {
-                this.move_cursor(1, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &JumpToggleFilter, _window, cx| {
-                this.toggle_filters(cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &JumpPrev, window, cx| this.move_cursor(-1, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &JumpNext, window, cx| this.move_cursor(1, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &JumpToggleFilter, _window, cx| this.toggle_filters(cx)),
+            )
             .on_action(cx.listener(|this, action: &JumpDirect, window, cx| {
                 this.commit_direct(action.0, window, cx)
             }))
@@ -1747,10 +1712,13 @@ impl Render for JumpPalette {
                     .px(px(13.0))
                     .border_b_1()
                     .border_color(ui::border_subtle())
+                    .child(VectorIcon::new(SEARCH_ICON, px(17.0)).ink(ui::text_muted()))
                     .child(
-                        VectorIcon::new(SEARCH_ICON, px(17.0)).ink(ui::text_muted()),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&self.query).cleanable(false)),
                     )
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.query).cleanable(false)))
                     .child(
                         div()
                             .id("jump-filter-toggle")
@@ -1783,9 +1751,9 @@ impl Render for JumpPalette {
                                 }),
                             )
                             .child(t("projectSwitcher", "filter"))
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.toggle_filters(cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _event, _window, cx| this.toggle_filters(cx)),
+                            ),
                     ),
             )
             .when(self.filters_open, |palette| {
@@ -1930,9 +1898,17 @@ fn render_status(candidate: &JumpCandidate) -> AnyElement {
 }
 
 fn agent_status_color(agent: &AgentTargetView) -> gpui::Hsla {
-    if agent.attention || matches!(agent.activity, AgentActivity::Blocked | AgentActivity::Failed) {
+    if agent.attention
+        || matches!(
+            agent.activity,
+            AgentActivity::Blocked | AgentActivity::Failed
+        )
+    {
         ui::color_warning()
-    } else if matches!(agent.activity, AgentActivity::Starting | AgentActivity::Working) {
+    } else if matches!(
+        agent.activity,
+        AgentActivity::Starting | AgentActivity::Working
+    ) {
         ui::accent()
     } else if agent.connectivity != AgentConnectivity::Live {
         ui::text_muted()
@@ -2132,18 +2108,14 @@ mod tests {
     #[test]
     fn terminal_agent_dedupe_uses_the_complete_runtime_route() {
         use mt_identity::{
-            ExecutionHostId, HostInstallId, PaneKey, RepoId, TabId,
-            TerminalIncarnationId, TerminalSessionId,
+            ExecutionHostId, HostInstallId, PaneKey, RepoId, TabId, TerminalIncarnationId,
+            TerminalSessionId,
         };
 
         let host = ExecutionHostId::derive("jump-test", &HostInstallId::new());
         let route = AgentRoute {
             execution_host_id: host.clone(),
-            worktree_id: WorktreeId::derive(
-                &RepoId::derive(&host, "/repo/.git"),
-                "/repo",
-                None,
-            ),
+            worktree_id: WorktreeId::derive(&RepoId::derive(&host, "/repo/.git"), "/repo", None),
             tab_id: TabId::new(),
             pane_key: PaneKey::new(),
             terminal_session_id: TerminalSessionId::new(),
@@ -2200,7 +2172,12 @@ mod tests {
         active.active = true;
         let mut attention = candidate("Attention", &[], 3);
         attention.attention = true;
-        let mut rows = vec![source.clone(), mru.clone(), active.clone(), attention.clone()];
+        let mut rows = vec![
+            source.clone(),
+            mru.clone(),
+            active.clone(),
+            attention.clone(),
+        ];
         rows.sort_by(compare_recent);
         assert_eq!(
             rows.into_iter().map(|row| row.title).collect::<Vec<_>>(),
@@ -2237,10 +2214,8 @@ mod tests {
         assert!(bindings[0].action().partial_eq(&InputMoveUp));
 
         let workspace_stack = context_stack(&["Workspace"]);
-        let (bindings, _) = keymap.bindings_for_input(
-            &[Keystroke::parse("ctrl-1").unwrap()],
-            &workspace_stack,
-        );
+        let (bindings, _) =
+            keymap.bindings_for_input(&[Keystroke::parse("ctrl-1").unwrap()], &workspace_stack);
         assert!(!bindings.is_empty());
         assert!(bindings[0].action().partial_eq(&WorkspaceDirect));
     }

@@ -537,15 +537,18 @@ impl OrcaProjectSidebar {
                         .bg(ui::color_success()),
                 )
             })
-            .when(status == PaneStatus::Idle && !needs_attention && worktree.last_known, |lane| {
-                lane.child(
-                    div()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded_full()
-                        .bg(ui::color_warning()),
-                )
-            });
+            .when(
+                status == PaneStatus::Idle && !needs_attention && worktree.last_known,
+                |lane| {
+                    lane.child(
+                        div()
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .rounded_full()
+                            .bg(ui::color_warning()),
+                    )
+                },
+            );
 
         let parent_id = parent_id.to_string();
         let target = worktree.target.clone();
@@ -807,9 +810,7 @@ impl Render for OrcaProjectSidebar {
             .overflow_y_scroll()
             .py(px(3.0));
         for project in projects {
-            let expanded = !self
-                .collapsed_projects
-                .contains(&project.root_project_id);
+            let expanded = !self.collapsed_projects.contains(&project.root_project_id);
             rows = rows.child(self.render_project_row(&project, expanded, cx));
             if expanded {
                 for worktree in &project.rows {

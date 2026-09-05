@@ -583,9 +583,8 @@ impl Workspace {
             cx.new(|cx| worktree_catalog::WorktreeCatalog::new(store.clone(), cx));
         worktree_catalog::install(worktree_catalog.clone(), cx);
         let jump_recency = cx.new(|cx| jump_palette::JumpRecency::new(store.clone(), cx));
-        let orca_sidebar = cx.new(|cx| {
-            OrcaProjectSidebar::new(store.clone(), worktree_catalog.clone(), cx)
-        });
+        let orca_sidebar =
+            cx.new(|cx| OrcaProjectSidebar::new(store.clone(), worktree_catalog.clone(), cx));
         let project_list = cx.new(|cx| ProjectList::new(store.clone(), cx));
         let file_tree = cx.new(|cx| FileTree::new(store.clone(), cx));
         file_tree::install(file_tree.clone(), cx);

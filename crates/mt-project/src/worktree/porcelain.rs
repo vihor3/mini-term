@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::{
-    GitAnnotation, WorktreeFact, WorktreePathSemantics, WorktreePathState, paths_equal,
-};
+use super::{GitAnnotation, WorktreeFact, WorktreePathSemantics, WorktreePathState, paths_equal};
 
 #[derive(Default)]
 struct RecordBuilder {
@@ -131,10 +129,7 @@ pub(super) fn parse_porcelain_text_with_path_semantics(
     Ok(records)
 }
 
-fn validate_records(
-    records: &[WorktreeFact],
-    path_semantics: WorktreePathSemantics,
-) -> Result<()> {
+fn validate_records(records: &[WorktreeFact], path_semantics: WorktreePathSemantics) -> Result<()> {
     for (index, record) in records.iter().enumerate() {
         if records[..index]
             .iter()

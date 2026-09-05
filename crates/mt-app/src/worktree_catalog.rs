@@ -21,9 +21,7 @@ use crate::execution_host::{
     configured_execution_path, execute_host_command, normalize_absolute_posix_path,
     normalize_host_visible_project_path, wsl_host_visible_path,
 };
-use crate::store::{
-    AppStore, ProjectLocationKey, ProjectPlacement, ProjectRegistrationOutcome,
-};
+use crate::store::{AppStore, ProjectLocationKey, ProjectPlacement, ProjectRegistrationOutcome};
 
 const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
@@ -166,11 +164,7 @@ fn enqueue_scan_once(queue: &mut VecDeque<String>, root_project_id: &str) {
     }
 }
 
-fn request_scan(
-    entry: &mut CatalogEntry,
-    queue: &mut VecDeque<String>,
-    root_project_id: &str,
-) {
+fn request_scan(entry: &mut CatalogEntry, queue: &mut VecDeque<String>, root_project_id: &str) {
     if entry.in_flight_revision.is_some() {
         entry.dirty = true;
     } else {
@@ -255,15 +249,17 @@ impl WorktreeCatalog {
         })
         .detach();
 
-        let poll_task = cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(REMOTE_POLL_INTERVAL).await;
-            let Ok(()) = this.update(cx, |catalog: &mut WorktreeCatalog, cx| {
-                if catalog.store.read(cx).window_focused() {
-                    catalog.refresh(true, true, cx);
-                }
-            }) else {
-                return;
-            };
+        let poll_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(REMOTE_POLL_INTERVAL).await;
+                let Ok(()) = this.update(cx, |catalog: &mut WorktreeCatalog, cx| {
+                    if catalog.store.read(cx).window_focused() {
+                        catalog.refresh(true, true, cx);
+                    }
+                }) else {
+                    return;
+                };
+            }
         });
 
         let was_focused = store.read(cx).window_focused();
@@ -298,12 +294,7 @@ impl WorktreeCatalog {
             .groups(cx)
             .into_iter()
             .find(|group| group.root_project_id == target.root_project_id)
-            .and_then(|group| {
-                group
-                    .rows
-                    .into_iter()
-                    .find(|row| row.target == *target)
-            })?;
+            .and_then(|group| group.rows.into_iter().find(|row| row.target == *target))?;
         if let Some(owner) = row.target.owner.as_ref() {
             let store = self.store.read(cx);
             let current = store
@@ -328,18 +319,15 @@ impl WorktreeCatalog {
     fn refresh(&mut self, force: bool, remote_only: bool, cx: &mut Context<Self>) {
         let roots = {
             let store = self.store.read(cx);
-            ordered_top_level_project_ids(
-                store.projects(),
-                store.config().project_tree.as_deref(),
-            )
-            .into_iter()
-            .filter_map(|root_project_id| {
-                let project = store.project(&root_project_id)?.clone();
-                let config_key = root_config_key(&project);
-                let target = build_scan_target(store, &project);
-                Some((root_project_id, config_key, target))
-            })
-            .collect::<Vec<_>>()
+            ordered_top_level_project_ids(store.projects(), store.config().project_tree.as_deref())
+                .into_iter()
+                .filter_map(|root_project_id| {
+                    let project = store.project(&root_project_id)?.clone();
+                    let config_key = root_config_key(&project);
+                    let target = build_scan_target(store, &project);
+                    Some((root_project_id, config_key, target))
+                })
+                .collect::<Vec<_>>()
         };
         let live_roots: HashSet<String> = roots
             .iter()
@@ -438,12 +426,15 @@ impl WorktreeCatalog {
                     .spawn(async move { scan_target(&task_target, revision) })
                     .await;
                 let _ = this.update(cx, |catalog: &mut WorktreeCatalog, cx| {
-                    catalog.finish_scan(ScanCompletion {
-                        target,
-                        target_generation,
-                        revision,
-                        result,
-                    }, cx);
+                    catalog.finish_scan(
+                        ScanCompletion {
+                            target,
+                            target_generation,
+                            revision,
+                            result,
+                        },
+                        cx,
+                    );
                 });
             })
             .detach();
@@ -521,11 +512,7 @@ impl WorktreeCatalog {
         if retry_stale && current_target_exists {
             entry.dirty = true;
         }
-        queue_dirty_rerun(
-            entry,
-            &mut self.queue,
-            &completion.target.root_project_id,
-        );
+        queue_dirty_rerun(entry, &mut self.queue, &completion.target.root_project_id);
         self.start_queued(cx);
         cx.notify();
     }
@@ -579,7 +566,11 @@ pub fn activate_target(
         let current = configured_project
             .as_ref()
             .and_then(|project| configured_location(store.read(cx), project).ok())
-            .or_else(|| configured_project.as_ref().and_then(fallback_configured_location))
+            .or_else(|| {
+                configured_project
+                    .as_ref()
+                    .and_then(fallback_configured_location)
+            })
             .ok_or_else(|| "Configured worktree no longer exists".to_string())?;
         if current.row_key != row.target.row_key {
             return Err("Configured worktree location changed".into());
@@ -593,9 +584,7 @@ pub fn activate_target(
         },
         CatalogBackend::Ssh { connection_id } => ProjectLocationKey::Ssh {
             connection_id: connection_id.clone(),
-            normalized_posix_path: normalize_absolute_posix_path(
-                &row.target.host_visible_path,
-            )?,
+            normalized_posix_path: normalize_absolute_posix_path(&row.target.host_visible_path)?,
         },
     };
     let outcome = store.update(cx, |store, cx| {
@@ -632,9 +621,8 @@ fn build_scan_target(store: &AppStore, project: &ProjectConfig) -> Result<ScanTa
     snapshot.canonical_path = configured_path.clone();
     snapshot.root_source_path = configured_path;
     let backend = catalog_backend(&snapshot.backend);
-    let local_generation = matches!(backend, CatalogBackend::Local).then(|| {
-        mt_project::worktree::current_generation(Path::new(&project.path))
-    });
+    let local_generation = matches!(backend, CatalogBackend::Local)
+        .then(|| mt_project::worktree::current_generation(Path::new(&project.path)));
     Ok(ScanTarget {
         root_project_id: project.id.clone(),
         root_config_key: root_config_key(project),
@@ -646,21 +634,21 @@ fn build_scan_target(store: &AppStore, project: &ProjectConfig) -> Result<ScanTa
 
 fn scan_target(target: &ScanTarget, revision: u64) -> Result<ScanTaskResult, String> {
     match &target.backend {
-        CatalogBackend::Local => match mt_project::worktree::scan(Path::new(
-            &target.snapshot.canonical_path,
-        )) {
-            Ok(scan) => Ok(ScanTaskResult {
-                inventory: ScanInventoryResult::Git(scan),
-                observed_connection_epoch: None,
-            }),
-            Err(error) if is_not_repository(error.to_string().as_bytes(), &[]) => {
-                Ok(ScanTaskResult {
-                    inventory: ScanInventoryResult::NonGit,
+        CatalogBackend::Local => {
+            match mt_project::worktree::scan(Path::new(&target.snapshot.canonical_path)) {
+                Ok(scan) => Ok(ScanTaskResult {
+                    inventory: ScanInventoryResult::Git(scan),
                     observed_connection_epoch: None,
-                })
+                }),
+                Err(error) if is_not_repository(error.to_string().as_bytes(), &[]) => {
+                    Ok(ScanTaskResult {
+                        inventory: ScanInventoryResult::NonGit,
+                        observed_connection_epoch: None,
+                    })
+                }
+                Err(error) => Err(bounded_warning(&format!("{error:#}"))),
             }
-            Err(error) => Err(bounded_warning(&format!("{error:#}"))),
-        },
+        }
         CatalogBackend::Wsl { .. } | CatalogBackend::Ssh { .. } => {
             scan_host_porcelain(target, revision)
         }
@@ -674,7 +662,7 @@ fn scan_host_porcelain(target: &ScanTarget, revision: u64) -> Result<ScanTaskRes
         SCAN_TIMEOUT,
         OUTPUT_LIMIT,
     )
-    .map_err(|error| bounded_warning(&error.to_string()))?;
+    .map_err(|error| bounded_warning(&error.message))?;
     match parse_captured_output(WorktreePorcelainMode::Nul, &nul.output, revision)? {
         CapturedInventory::Git(scan) => {
             validate_execution_host_scan(&scan)?;
@@ -694,7 +682,7 @@ fn scan_host_porcelain(target: &ScanTarget, revision: u64) -> Result<ScanTaskRes
                 SCAN_TIMEOUT,
                 OUTPUT_LIMIT,
             )
-            .map_err(|error| bounded_warning(&error.to_string()))?;
+            .map_err(|error| bounded_warning(&error.message))?;
             match parse_captured_output(WorktreePorcelainMode::Text, &text.output, revision)? {
                 CapturedInventory::Git(scan) => {
                     validate_execution_host_scan(&scan)?;
@@ -760,9 +748,7 @@ fn parse_captured_output(
             &output.stdout,
             WorktreePathSemantics::Posix,
         )
-        .map_err(|error| {
-            bounded_warning(&format!("invalid Git worktree porcelain: {error:#}"))
-        })?;
+        .map_err(|error| bounded_warning(&format!("invalid Git worktree porcelain: {error:#}")))?;
         return Ok(CapturedInventory::Git(WorktreeScan {
             generation,
             source: match mode {
@@ -1000,9 +986,8 @@ fn configured_location_for_projection(
     configured_location(store, project)
         .ok()
         .or_else(|| {
-            target.and_then(|target| {
-                captured_configured_location(target, project, host_visible_path)
-            })
+            target
+                .and_then(|target| captured_configured_location(target, project, host_visible_path))
         })
         .or_else(|| fallback_configured_location(project))
 }
@@ -1031,19 +1016,14 @@ fn row_key(
     ))
 }
 
-fn fact_location(
-    target: &ScanTarget,
-    fact: &WorktreeFact,
-) -> Result<ConfiguredLocation, String> {
+fn fact_location(target: &ScanTarget, fact: &WorktreeFact) -> Result<ConfiguredLocation, String> {
     let execution_path = match &target.backend {
         CatalogBackend::Local => fact.path.to_string_lossy().to_string(),
-        CatalogBackend::Wsl { .. } | CatalogBackend::Ssh { .. } => {
-            normalize_absolute_posix_path(
-                fact.path
-                    .to_str()
-                    .ok_or_else(|| "Git returned a non-UTF-8 remote worktree path".to_string())?,
-            )?
-        }
+        CatalogBackend::Wsl { .. } | CatalogBackend::Ssh { .. } => normalize_absolute_posix_path(
+            fact.path
+                .to_str()
+                .ok_or_else(|| "Git returned a non-UTF-8 remote worktree path".to_string())?,
+        )?,
     };
     let host_visible_path = match &target.backend {
         CatalogBackend::Wsl { distro } => wsl_host_visible_path(distro, &execution_path)?,
@@ -1066,9 +1046,12 @@ fn configured_project_for_row<'a>(
 ) -> Option<&'a ProjectConfig> {
     let root = store.project(root_project_id);
     root.into_iter()
-        .chain(store.projects().iter().filter(|project| {
-            project.parent_project_id.as_deref() == Some(root_project_id)
-        }))
+        .chain(
+            store
+                .projects()
+                .iter()
+                .filter(|project| project.parent_project_id.as_deref() == Some(root_project_id)),
+        )
         .chain(store.projects().iter())
         .find(|project| {
             configured_location_for_projection(store, project, Some(target))
@@ -1103,11 +1086,19 @@ fn build_groups(
             let root_location = configured_location_for_projection(store, root, target);
             let backend = target
                 .map(|target| target.backend.clone())
-                .or_else(|| root_location.as_ref().map(|location| location.backend.clone()))
+                .or_else(|| {
+                    root_location
+                        .as_ref()
+                        .map(|location| location.backend.clone())
+                })
                 .unwrap_or(CatalogBackend::Local);
             let host_label = target
                 .map(|target| target.snapshot.host_label.clone())
-                .or_else(|| root_location.as_ref().map(|location| location.host_label.clone()))
+                .or_else(|| {
+                    root_location
+                        .as_ref()
+                        .map(|location| location.host_label.clone())
+                })
                 .unwrap_or_else(|| backend.label().to_string());
             let mut rows = Vec::new();
             let mut seen = HashSet::new();
@@ -1183,8 +1174,7 @@ fn build_groups(
                 root_project_id,
                 root_project_name: root.name.clone(),
                 root_project_path: root.path.clone(),
-                execution_host_id: target
-                    .map(|target| target.snapshot.execution_host_id.clone()),
+                execution_host_id: target.map(|target| target.snapshot.execution_host_id.clone()),
                 host_label,
                 backend,
                 warning: entry
@@ -1240,7 +1230,10 @@ fn row_from_fact(
         is_sparse: fact.is_sparse,
         is_locked: fact.locked.is_some(),
         is_prunable: fact.prunable.is_some(),
-        locked_reason: fact.locked.as_ref().and_then(|annotation| annotation.reason.clone()),
+        locked_reason: fact
+            .locked
+            .as_ref()
+            .and_then(|annotation| annotation.reason.clone()),
         prunable_reason: fact
             .prunable
             .as_ref()
@@ -1400,11 +1393,7 @@ mod tests {
             snapshot: ProjectExecutionSnapshot {
                 project_id: "p".into(),
                 root_project_id: "p".into(),
-                worktree_id: mt_identity::WorktreeId::derive(
-                    &repo_id,
-                    configured_path,
-                    None,
-                ),
+                worktree_id: mt_identity::WorktreeId::derive(&repo_id, configured_path, None),
                 execution_host_id,
                 canonical_path: configured_path.into(),
                 root_source_path: configured_path.into(),
@@ -1443,9 +1432,7 @@ mod tests {
 
         let mut truncated = output(0, b"worktree /repo\0\0", b"");
         truncated.stdout_truncated = true;
-        assert!(
-            parse_captured_output(WorktreePorcelainMode::Nul, &truncated, 8).is_err()
-        );
+        assert!(parse_captured_output(WorktreePorcelainMode::Nul, &truncated, 8).is_err());
         assert!(
             parse_captured_output(
                 WorktreePorcelainMode::Nul,
@@ -1457,14 +1444,10 @@ mod tests {
 
         let mut timed_out = output(0, b"worktree /repo\0\0", b"");
         timed_out.timed_out = true;
-        assert!(
-            parse_captured_output(WorktreePorcelainMode::Nul, &timed_out, 10).is_err()
-        );
+        assert!(parse_captured_output(WorktreePorcelainMode::Nul, &timed_out, 10).is_err());
         let mut no_status = output(0, b"worktree /repo\0\0", b"");
         no_status.exit_code = None;
-        assert!(
-            parse_captured_output(WorktreePorcelainMode::Nul, &no_status, 11).is_err()
-        );
+        assert!(parse_captured_output(WorktreePorcelainMode::Nul, &no_status, 11).is_err());
         assert!(!is_unsupported_nul_option(
             b"error: unknown option `--format'\nusage: git worktree list [-z]",
             b"",
@@ -1482,10 +1465,7 @@ mod tests {
         };
         assert!(validate_execution_host_scan(&scan).is_err());
 
-        scan.worktrees = vec![
-            worktree_fact("/srv/Repo"),
-            worktree_fact("/srv/repo"),
-        ];
+        scan.worktrees = vec![worktree_fact("/srv/Repo"), worktree_fact("/srv/repo")];
         assert!(validate_execution_host_scan(&scan).is_ok());
 
         scan.worktrees.push(worktree_fact("/srv/./Repo"));
@@ -1676,10 +1656,7 @@ mod tests {
 
     #[test]
     fn row_keys_keep_host_and_posix_case_in_identity() {
-        let host = mt_identity::ExecutionHostId::derive(
-            "test",
-            &mt_identity::HostInstallId::new(),
-        );
+        let host = mt_identity::ExecutionHostId::derive("test", &mt_identity::HostInstallId::new());
         let worktree = mt_identity::WorktreeId::derive(
             &mt_identity::RepoId::derive(&host, "/repo/.git"),
             "/repo",
@@ -1752,10 +1729,7 @@ mod tests {
             warning: None,
         };
         assert!(snapshot_owner_matches_current(
-            &snapshot,
-            &owner,
-            "config-a",
-            &target,
+            &snapshot, &owner, "config-a", &target,
         ));
 
         let mut changed_generation = target.clone();
@@ -1783,10 +1757,7 @@ mod tests {
             &target,
         ));
         assert!(!snapshot_owner_matches_current(
-            &snapshot,
-            &owner,
-            "config-b",
-            &target,
+            &snapshot, &owner, "config-b", &target,
         ));
     }
 

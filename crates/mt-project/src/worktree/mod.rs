@@ -160,15 +160,9 @@ mod tests {
             .is_err()
         );
         assert!(
-            parse_porcelain(
-                WorktreePorcelainMode::Text,
-                b"worktree \"/repo\\q\"\n\n",
-            )
-            .is_err()
+            parse_porcelain(WorktreePorcelainMode::Text, b"worktree \"/repo\\q\"\n\n",).is_err()
         );
-        assert!(
-            parse_porcelain(WorktreePorcelainMode::Nul, b"worktree \xff\0\0").is_err()
-        );
+        assert!(parse_porcelain(WorktreePorcelainMode::Nul, b"worktree \xff\0\0").is_err());
     }
 
     #[test]

@@ -795,7 +795,9 @@ fn validate_child_worktree_placement(
     match location {
         ProjectLocationKey::Ssh { connection_id, .. } => {
             if root.ssh_connection_id.as_deref() != Some(connection_id.as_str()) {
-                return Err("discovered SSH worktree does not belong to the root connection".into());
+                return Err(
+                    "discovered SSH worktree does not belong to the root connection".into(),
+                );
             }
             if mt_core::parse_wsl_unc(&canonical_path.replace('/', "\\")).is_some() {
                 return Err("discovered SSH worktree path cannot be a WSL path".into());
@@ -811,9 +813,7 @@ fn validate_child_worktree_placement(
                 (Some(root_wsl), Some(child_wsl))
                     if root_wsl.distro.eq_ignore_ascii_case(&child_wsl.distro) => {}
                 (Some(_), Some(_)) => {
-                    return Err(
-                        "discovered WSL worktree belongs to another distribution".into(),
-                    );
+                    return Err("discovered WSL worktree belongs to another distribution".into());
                 }
                 (Some(_), None) | (None, Some(_)) => {
                     return Err("discovered worktree host does not match the root project".into());
@@ -995,8 +995,10 @@ mod project_onboarding_tests {
 
     fn local_location(path: &str) -> ProjectLocationKey {
         ProjectLocationKey::Local {
-            normalized_canonical_path:
-                crate::execution_host::normalize_host_visible_project_path(path).unwrap(),
+            normalized_canonical_path: crate::execution_host::normalize_host_visible_project_path(
+                path,
+            )
+            .unwrap(),
         }
     }
 
@@ -1033,10 +1035,11 @@ mod project_onboarding_tests {
         } else {
             "/home/leo/repo"
         };
-        let location = ProjectLocationKey::Local {
-            normalized_canonical_path:
-                crate::execution_host::normalize_host_visible_project_path(canonical).unwrap(),
-        };
+        let location =
+            ProjectLocationKey::Local {
+                normalized_canonical_path:
+                    crate::execution_host::normalize_host_visible_project_path(canonical).unwrap(),
+            };
 
         assert!(project_matches_location(
             &project("local", &format!("{canonical}/"), None),
@@ -1603,7 +1606,10 @@ mod project_onboarding_tests {
                 None,
             )
             .unwrap();
-        assert_eq!(child.disposition, ProjectRegistrationDisposition::RegisteredNew);
+        assert_eq!(
+            child.disposition,
+            ProjectRegistrationDisposition::RegisteredNew
+        );
         assert_eq!(
             store
                 .project(&child.project_id)
@@ -1646,7 +1652,10 @@ mod project_onboarding_tests {
             .unwrap();
         assert_eq!(top_level_alias.project_id, alias.id);
         assert_eq!(
-            store.project(&top_level_alias.project_id).unwrap().parent_project_id,
+            store
+                .project(&top_level_alias.project_id)
+                .unwrap()
+                .parent_project_id,
             None
         );
         assert_eq!(
