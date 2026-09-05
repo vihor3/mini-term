@@ -849,7 +849,7 @@ fn project_menu(
                         // 项目里可能挂着多个仓库,与原版的项目级入口同口径
                         true,
                         Some(id.clone()),
-                        |cx| crate::worktree_catalog::force_refresh_global(cx),
+                        crate::worktree_catalog::force_refresh_global,
                         window,
                         cx,
                     );

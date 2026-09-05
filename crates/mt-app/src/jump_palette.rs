@@ -329,8 +329,8 @@ impl FilterOptions {
             .into_iter()
             .map(|(key, label)| FilterOption { key, label })
             .collect();
-        hosts.sort_by(|left, right| compare_filter_options(left, right));
-        projects.sort_by(|left, right| compare_filter_options(left, right));
+        hosts.sort_by(compare_filter_options);
+        projects.sort_by(compare_filter_options);
         Self {
             families,
             hosts,
@@ -391,9 +391,7 @@ impl FilterState {
 }
 
 fn toggle_selected<T: Clone + Eq + std::hash::Hash>(selected: &mut HashSet<T>, value: T) {
-    if selected.is_empty() {
-        selected.insert(value);
-    } else if !selected.remove(&value) {
+    if !selected.remove(&value) {
         selected.insert(value);
     }
 }
@@ -1038,7 +1036,7 @@ fn compare_recent(left: &JumpCandidate, right: &JumpCandidate) -> Ordering {
 #[derive(Clone)]
 enum PaletteRow {
     Header(String),
-    Item(JumpCandidate),
+    Item(Box<JumpCandidate>),
     Overflow(String),
     Empty(String),
 }
@@ -1053,7 +1051,7 @@ impl VisibleModel {
         self.rows
             .iter()
             .filter_map(|row| match row {
-                PaletteRow::Item(candidate) if candidate.selectable => Some(candidate),
+                PaletteRow::Item(candidate) if candidate.selectable => Some(candidate.as_ref()),
                 _ => None,
             })
             .nth(selectable_index)
@@ -1262,7 +1260,7 @@ impl JumpPalette {
                     search_rank(&candidate, &query).map(|rank| (rank, candidate))
                 })
                 .collect();
-            ranked.sort_by(|(left, _), (right, _)| left.cmp(right));
+            ranked.sort_by_key(|(rank, _)| *rank);
             push_section(
                 &mut rows,
                 t("projectSwitcher", "sectionResults"),
@@ -1813,7 +1811,12 @@ fn push_section(
     }
     rows.push(PaletteRow::Header(label.to_string()));
     let hidden = candidates.len().saturating_sub(cap);
-    rows.extend(candidates.into_iter().take(cap).map(PaletteRow::Item));
+    rows.extend(
+        candidates
+            .into_iter()
+            .take(cap)
+            .map(|candidate| PaletteRow::Item(Box::new(candidate))),
+    );
     if hidden > 0 {
         rows.push(PaletteRow::Overflow(format!(
             "+{hidden} {}",
@@ -2155,8 +2158,8 @@ mod tests {
         let model = VisibleModel {
             rows: vec![
                 PaletteRow::Header("Section".into()),
-                PaletteRow::Item(disabled),
-                PaletteRow::Item(candidate("Selectable", &[], 1)),
+                PaletteRow::Item(Box::new(disabled)),
+                PaletteRow::Item(Box::new(candidate("Selectable", &[], 1))),
             ],
             selectable_count: 1,
         };

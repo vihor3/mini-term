@@ -533,6 +533,7 @@ impl AppStore {
 
     /// `activation_cx` is always present in production. Tests may omit it to
     /// exercise the registration transaction without starting a GPUI runtime.
+    #[cfg(test)]
     fn register_or_activate_project_inner(
         &mut self,
         location: ProjectLocationKey,
