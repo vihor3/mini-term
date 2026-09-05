@@ -624,7 +624,7 @@ impl OrcaProjectSidebar {
                         project_path.clone(),
                         true,
                         Some(project_id.clone()),
-                        move |cx| crate::worktree_catalog::force_refresh_global(cx),
+                        crate::worktree_catalog::force_refresh_global,
                         window,
                         cx,
                     );

@@ -441,311 +441,6 @@ impl ProjectState {
     }
 }
 
-#[cfg(test)]
-mod flat_terminal_tests {
-    use super::*;
-    use crate::tree::{AiSessionRef, SplitDirection, gen_id};
-    use mt_identity::{TabId, TerminalIncarnationId};
-
-    fn legacy_state() -> ProjectState {
-        let mut panes = (0..6)
-            .map(|index| {
-                let mut pane = PaneState::new(format!("shell-{index}"));
-                pane.cwd = Some(format!("/worktree/{index}"));
-                if index % 2 == 0 {
-                    pane.pty_id = Some(index + 10);
-                    pane.terminal_incarnation_id = Some(TerminalIncarnationId::new());
-                }
-                pane
-            })
-            .collect::<Vec<_>>();
-        panes[1].ai_session = Some(AiSessionRef {
-            agent: Some("codex".into()),
-            session_id: "saved-provider-session".into(),
-            cwd: Some("/worktree/1".into()),
-        });
-        panes[2].status = PaneStatus::Error;
-        let mut first_leaf = SplitNode::leaf(panes[0].clone());
-        first_leaf.append_pane(None, panes[1].clone());
-        first_leaf.activate_pane(&panes[0].id);
-        let split = |direction, children| SplitNode::Split {
-            id: gen_id("split"),
-            direction,
-            children,
-            sizes: vec![37.0, 63.0],
-        };
-        let mut first = ProjectPanel::new(split(
-            SplitDirection::Horizontal,
-            vec![first_leaf, SplitNode::leaf(panes[2].clone())],
-        ));
-        first.custom_title = Some("legacy owner title".into());
-        let second = ProjectPanel::new(split(
-            SplitDirection::Vertical,
-            vec![
-                SplitNode::leaf(panes[3].clone()),
-                split(
-                    SplitDirection::Horizontal,
-                    vec![
-                        SplitNode::leaf(panes[4].clone()),
-                        SplitNode::leaf(panes[5].clone()),
-                    ],
-                ),
-            ],
-        ));
-        let mut state = ProjectState::new();
-        state.active_panel_id = Some(first.id.clone());
-        state.panels = vec![first, second];
-        state
-    }
-
-    fn keys(state: &ProjectState) -> Vec<PaneKey> {
-        state
-            .ordered_terminal_panes()
-            .iter()
-            .map(|pane| pane.pane_key.clone())
-            .collect()
-    }
-
-    fn owned_panes(state: &ProjectState) -> Vec<(TabId, PaneState)> {
-        state
-            .panels
-            .iter()
-            .flat_map(|panel| {
-                panel
-                    .layout
-                    .panes()
-                    .into_iter()
-                    .map(move |pane| (panel.tab_id.clone(), pane.clone()))
-            })
-            .collect()
-    }
-
-    #[test]
-    fn inventory_includes_all_legacy_owners_leaves_dormant_and_exited_records() {
-        let state = legacy_state();
-        let original = state.panels.clone();
-        let panes = state.ordered_terminal_panes();
-        assert_eq!(panes.len(), 6);
-        assert_eq!(panes.iter().filter(|pane| pane.pty_id.is_some()).count(), 3);
-        assert_eq!(
-            panes
-                .iter()
-                .filter(|pane| pane.status == PaneStatus::Error)
-                .count(),
-            1
-        );
-        assert_eq!(
-            panes[1].ai_session.as_ref().unwrap().session_id,
-            "saved-provider-session"
-        );
-        assert_eq!(
-            state.panels, original,
-            "inventory reads cannot mutate route owners"
-        );
-    }
-
-    #[test]
-    fn nonfirst_owner_and_leaf_selection_survives_save_restore_without_shells() {
-        let mut state = legacy_state();
-        let target = keys(&state)[5].clone();
-        state.normalize_terminal_navigation(Some(target.as_str()));
-        assert_eq!(state.selected_terminal().unwrap().pane_key, target);
-        let saved = state.saved_layout();
-        assert_eq!(saved.selected_terminal_pane_key.as_ref(), Some(&target));
-        assert_eq!(saved.active_tab_id.as_ref(), Some(&state.panels[1].tab_id));
-        assert_eq!(saved.active_tab_index, 1);
-        let json = serde_json::to_string(&saved).unwrap();
-        let saved: mt_config::SavedProjectLayout = serde_json::from_str(&json).unwrap();
-        let mut config = AppConfig::default();
-        config.available_shells.clear();
-        let (panels, active) = persist::restore_layout(&saved, &config);
-        let mut restored = ProjectState::new();
-        restored.panels = panels;
-        restored.active_panel_id = active;
-        restored.restore_terminal_navigation(&saved);
-        assert_eq!(restored.selected_terminal().unwrap().pane_key, target);
-        assert_eq!(restored.active_panel_id, state.active_panel_id);
-        assert_eq!(keys(&restored), keys(&state));
-        assert_eq!(
-            restored.panels[0].custom_title,
-            state.panels[0].custom_title
-        );
-        for ((old_owner, old), (owner, pane)) in
-            owned_panes(&state).into_iter().zip(owned_panes(&restored))
-        {
-            assert_eq!(owner, old_owner);
-            assert_eq!(pane.pane_key, old.pane_key);
-            assert_eq!(pane.terminal_session_id, old.terminal_session_id);
-            assert_eq!(pane.terminal_incarnation_id, old.terminal_incarnation_id);
-            assert_eq!(pane.shell_name, old.shell_name);
-            assert_eq!(pane.cwd, old.cwd);
-            assert_eq!(pane.ai_session, old.ai_session);
-            assert!(pane.pty_id.is_none());
-        }
-        assert_eq!(
-            serde_json::to_string(&restored.saved_layout()).unwrap(),
-            json,
-            "a second snapshot must preserve selection, order, geometry and saved records"
-        );
-    }
-
-    #[test]
-    fn selecting_a_leaf_sibling_updates_compatibility_before_save_and_background_append() {
-        let mut state = legacy_state();
-        state.normalize_terminal_navigation(None);
-        let original = keys(&state);
-        let selected = &original[1];
-        let processes = owned_panes(&state);
-        assert!(state.select_terminal(selected.as_str()));
-        let SplitNode::Leaf { active_pane_id, .. } = state.leaf_of_pane(selected.as_str()).unwrap()
-        else {
-            panic!("selected pane must remain in its original leaf");
-        };
-        assert_eq!(active_pane_id, selected.as_str());
-        assert_eq!(state.selected_terminal_pane_key.as_ref(), Some(selected));
-        assert_eq!(owned_panes(&state), processes);
-        let snapshot = state.saved_layout();
-        assert_eq!(snapshot.selected_terminal_pane_key.as_ref(), Some(selected));
-        assert_eq!(
-            snapshot.active_tab_id.as_ref(),
-            Some(&state.panels[0].tab_id)
-        );
-        assert_eq!(snapshot.terminal_order.as_ref(), Some(&original));
-        assert!(!state.select_terminal("missing-pane"));
-        assert_eq!(
-            serde_json::to_value(&state.saved_layout()).unwrap(),
-            serde_json::to_value(&snapshot).unwrap()
-        );
-
-        let owner = state.panels[0].tab_id.clone();
-        assert!(state.append_background_terminal(owner, PaneState::new("background")));
-        let SplitNode::Leaf { active_pane_id, .. } = state.leaf_of_pane(selected.as_str()).unwrap()
-        else {
-            panic!("background append must preserve the leaf");
-        };
-        assert_eq!(active_pane_id, selected.as_str());
-        assert_eq!(state.selected_terminal_pane_key.as_ref(), Some(selected));
-        assert_eq!(state.all_panes().len(), original.len() + 1);
-    }
-
-    #[test]
-    fn stale_duplicate_and_missing_preferences_are_lossless_and_idempotent() {
-        let mut state = legacy_state();
-        let original = keys(&state);
-        state.selected_terminal_pane_key = Some(PaneKey::new());
-        state.terminal_order = vec![original[4].clone(), PaneKey::new(), original[4].clone()];
-        state.normalize_terminal_navigation(None);
-        assert_eq!(state.selected_terminal().unwrap().pane_key, original[0]);
-        let expected = [
-            vec![original[4].clone()],
-            original
-                .iter()
-                .filter(|key| **key != original[4])
-                .cloned()
-                .collect(),
-        ]
-        .concat();
-        assert_eq!(keys(&state), expected);
-        let before = serde_json::to_value(state.saved_layout()).unwrap();
-        state.normalize_terminal_navigation(Some(original[5].as_str()));
-        assert_eq!(
-            serde_json::to_value(state.saved_layout()).unwrap(),
-            before,
-            "valid selection wins over window-global focus"
-        );
-    }
-
-    #[test]
-    fn reorder_cycle_and_index_share_flat_order_without_changing_routes() {
-        let mut state = legacy_state();
-        state.normalize_terminal_navigation(None);
-        let original = keys(&state);
-        state.select_terminal(original[4].as_str());
-        let owners = state.panels.clone();
-        assert!(state.reorder_terminal(&original[5], &original[0], false));
-        assert_eq!(keys(&state)[0], original[5]);
-        assert_eq!(
-            state.panels, owners,
-            "cross-owner drag changes no legacy tree or process identity"
-        );
-        assert_eq!(state.selected_terminal().unwrap().pane_key, original[4]);
-        assert_eq!(
-            state
-                .cycle_terminal_target(original[5].as_str(), 1)
-                .as_deref(),
-            Some(original[0].as_str())
-        );
-        assert_eq!(
-            state
-                .cycle_terminal_target(original[5].as_str(), -1)
-                .as_deref(),
-            Some(original[4].as_str())
-        );
-        assert_eq!(state.terminal_at_index(1).unwrap().pane_key, original[5]);
-        assert!(state.terminal_at_index(0).is_none());
-        assert!(state.terminal_at_index(7).is_none());
-        assert!(state.cycle_terminal_target("missing", 1).is_none());
-        assert!(!state.reorder_terminal(&PaneKey::new(), &original[0], true));
-        assert!(!state.reorder_terminal(&original[5], &original[0], false));
-        assert_eq!(state.panels, owners);
-        let saved = state.saved_layout();
-        assert_eq!(saved.terminal_order, Some(keys(&state)));
-    }
-
-    #[test]
-    fn closing_one_terminal_preserves_hidden_siblings_and_uses_flat_neighbors() {
-        let mut state = legacy_state();
-        state.normalize_terminal_navigation(None);
-        let original = keys(&state);
-        state.select_terminal(original[0].as_str());
-        state.remove_pane(original[1].as_str());
-        assert_eq!(state.selected_terminal().unwrap().pane_key, original[0]);
-        assert_eq!(state.all_panes().len(), 5);
-        state.reorder_terminal(&original[5], &original[0], true);
-        state.remove_pane(original[0].as_str());
-        assert_eq!(state.selected_terminal().unwrap().pane_key, original[5]);
-        assert!(state.pane(original[2].as_str()).is_some());
-        state.select_terminal(original[4].as_str());
-        state.remove_pane(original[4].as_str());
-        assert_eq!(state.selected_terminal().unwrap().pane_key, original[3]);
-        for key in keys(&state) {
-            state.remove_pane(key.as_str());
-        }
-        assert!(state.panels.is_empty());
-        assert!(state.selected_terminal_pane_key.is_none());
-        assert!(state.terminal_order.is_empty());
-        assert!(state.active_panel_id.is_none());
-    }
-
-    #[test]
-    fn background_append_preserves_selection_order_and_existing_processes() {
-        let mut state = legacy_state();
-        let original = keys(&state);
-        state.select_terminal(original[5].as_str());
-        state.normalize_terminal_navigation(None);
-        let processes = owned_panes(&state);
-        let owner = state.active_panel().unwrap().tab_id.clone();
-        let mut added = PaneState::new("mobile-shell");
-        added.pty_id = Some(99);
-        let added_key = added.pane_key.clone();
-        assert!(state.append_background_terminal(owner.clone(), added));
-        assert_eq!(state.selected_terminal().unwrap().pane_key, original[5]);
-        assert_eq!(keys(&state).last(), Some(&added_key));
-        assert_eq!(state.all_panes().len(), 7);
-        for (owner, pane) in processes {
-            assert_eq!(state.pane(&pane.id), Some(&pane));
-            assert_eq!(state.panel_id_of_pane(&pane.id), Some(owner.as_str()));
-        }
-        let before = state.panels.clone();
-        assert!(!state.append_background_terminal(TabId::new(), PaneState::new("lost-owner")));
-        assert_eq!(state.panels, before);
-        let mut empty = ProjectState::new();
-        assert!(empty.append_background_terminal(owner, PaneState::new("mobile-shell")));
-        assert_eq!(empty.all_panes().len(), 1);
-        assert!(empty.selected_terminal().is_some());
-    }
-}
-
 struct GlobalStore(Entity<AppStore>);
 impl Global for GlobalStore {}
 
@@ -1263,5 +958,310 @@ impl AppStore {
     /// 这个 PTY 已经退出了吗(`exitedPtyIds.has`)。
     pub fn is_pty_exited(&self, pty_id: u32) -> bool {
         self.exited_ptys.contains(&pty_id)
+    }
+}
+
+#[cfg(test)]
+mod flat_terminal_tests {
+    use super::*;
+    use crate::tree::{AiSessionRef, SplitDirection, gen_id};
+    use mt_identity::{TabId, TerminalIncarnationId};
+
+    fn legacy_state() -> ProjectState {
+        let mut panes = (0..6)
+            .map(|index| {
+                let mut pane = PaneState::new(format!("shell-{index}"));
+                pane.cwd = Some(format!("/worktree/{index}"));
+                if index % 2 == 0 {
+                    pane.pty_id = Some(index + 10);
+                    pane.terminal_incarnation_id = Some(TerminalIncarnationId::new());
+                }
+                pane
+            })
+            .collect::<Vec<_>>();
+        panes[1].ai_session = Some(AiSessionRef {
+            agent: Some("codex".into()),
+            session_id: "saved-provider-session".into(),
+            cwd: Some("/worktree/1".into()),
+        });
+        panes[2].status = PaneStatus::Error;
+        let mut first_leaf = SplitNode::leaf(panes[0].clone());
+        first_leaf.append_pane(None, panes[1].clone());
+        first_leaf.activate_pane(&panes[0].id);
+        let split = |direction, children| SplitNode::Split {
+            id: gen_id("split"),
+            direction,
+            children,
+            sizes: vec![37.0, 63.0],
+        };
+        let mut first = ProjectPanel::new(split(
+            SplitDirection::Horizontal,
+            vec![first_leaf, SplitNode::leaf(panes[2].clone())],
+        ));
+        first.custom_title = Some("legacy owner title".into());
+        let second = ProjectPanel::new(split(
+            SplitDirection::Vertical,
+            vec![
+                SplitNode::leaf(panes[3].clone()),
+                split(
+                    SplitDirection::Horizontal,
+                    vec![
+                        SplitNode::leaf(panes[4].clone()),
+                        SplitNode::leaf(panes[5].clone()),
+                    ],
+                ),
+            ],
+        ));
+        let mut state = ProjectState::new();
+        state.active_panel_id = Some(first.id.clone());
+        state.panels = vec![first, second];
+        state
+    }
+
+    fn keys(state: &ProjectState) -> Vec<PaneKey> {
+        state
+            .ordered_terminal_panes()
+            .iter()
+            .map(|pane| pane.pane_key.clone())
+            .collect()
+    }
+
+    fn owned_panes(state: &ProjectState) -> Vec<(TabId, PaneState)> {
+        state
+            .panels
+            .iter()
+            .flat_map(|panel| {
+                panel
+                    .layout
+                    .panes()
+                    .into_iter()
+                    .map(move |pane| (panel.tab_id.clone(), pane.clone()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inventory_includes_all_legacy_owners_leaves_dormant_and_exited_records() {
+        let state = legacy_state();
+        let original = state.panels.clone();
+        let panes = state.ordered_terminal_panes();
+        assert_eq!(panes.len(), 6);
+        assert_eq!(panes.iter().filter(|pane| pane.pty_id.is_some()).count(), 3);
+        assert_eq!(
+            panes
+                .iter()
+                .filter(|pane| pane.status == PaneStatus::Error)
+                .count(),
+            1
+        );
+        assert_eq!(
+            panes[1].ai_session.as_ref().unwrap().session_id,
+            "saved-provider-session"
+        );
+        assert_eq!(
+            state.panels, original,
+            "inventory reads cannot mutate route owners"
+        );
+    }
+
+    #[test]
+    fn nonfirst_owner_and_leaf_selection_survives_save_restore_without_shells() {
+        let mut state = legacy_state();
+        let target = keys(&state)[5].clone();
+        state.normalize_terminal_navigation(Some(target.as_str()));
+        assert_eq!(state.selected_terminal().unwrap().pane_key, target);
+        let saved = state.saved_layout();
+        assert_eq!(saved.selected_terminal_pane_key.as_ref(), Some(&target));
+        assert_eq!(saved.active_tab_id.as_ref(), Some(&state.panels[1].tab_id));
+        assert_eq!(saved.active_tab_index, 1);
+        let json = serde_json::to_string(&saved).unwrap();
+        let saved: mt_config::SavedProjectLayout = serde_json::from_str(&json).unwrap();
+        let mut config = AppConfig::default();
+        config.available_shells.clear();
+        let (panels, active) = persist::restore_layout(&saved, &config);
+        let mut restored = ProjectState::new();
+        restored.panels = panels;
+        restored.active_panel_id = active;
+        restored.restore_terminal_navigation(&saved);
+        assert_eq!(restored.selected_terminal().unwrap().pane_key, target);
+        assert_eq!(restored.active_panel_id, state.active_panel_id);
+        assert_eq!(keys(&restored), keys(&state));
+        assert_eq!(
+            restored.panels[0].custom_title,
+            state.panels[0].custom_title
+        );
+        for ((old_owner, old), (owner, pane)) in
+            owned_panes(&state).into_iter().zip(owned_panes(&restored))
+        {
+            assert_eq!(owner, old_owner);
+            assert_eq!(pane.pane_key, old.pane_key);
+            assert_eq!(pane.terminal_session_id, old.terminal_session_id);
+            assert_eq!(pane.terminal_incarnation_id, old.terminal_incarnation_id);
+            assert_eq!(pane.shell_name, old.shell_name);
+            assert_eq!(pane.cwd, old.cwd);
+            assert_eq!(pane.ai_session, old.ai_session);
+            assert!(pane.pty_id.is_none());
+        }
+        assert_eq!(
+            serde_json::to_string(&restored.saved_layout()).unwrap(),
+            json,
+            "a second snapshot must preserve selection, order, geometry and saved records"
+        );
+    }
+
+    #[test]
+    fn selecting_a_leaf_sibling_updates_compatibility_before_save_and_background_append() {
+        let mut state = legacy_state();
+        state.normalize_terminal_navigation(None);
+        let original = keys(&state);
+        let selected = &original[1];
+        let processes = owned_panes(&state);
+        assert!(state.select_terminal(selected.as_str()));
+        let SplitNode::Leaf { active_pane_id, .. } = state.leaf_of_pane(selected.as_str()).unwrap()
+        else {
+            panic!("selected pane must remain in its original leaf");
+        };
+        assert_eq!(active_pane_id, selected.as_str());
+        assert_eq!(state.selected_terminal_pane_key.as_ref(), Some(selected));
+        assert_eq!(owned_panes(&state), processes);
+        let snapshot = state.saved_layout();
+        assert_eq!(snapshot.selected_terminal_pane_key.as_ref(), Some(selected));
+        assert_eq!(
+            snapshot.active_tab_id.as_ref(),
+            Some(&state.panels[0].tab_id)
+        );
+        assert_eq!(snapshot.terminal_order.as_ref(), Some(&original));
+        assert!(!state.select_terminal("missing-pane"));
+        assert_eq!(
+            serde_json::to_value(state.saved_layout()).unwrap(),
+            serde_json::to_value(&snapshot).unwrap()
+        );
+
+        let owner = state.panels[0].tab_id.clone();
+        assert!(state.append_background_terminal(owner, PaneState::new("background")));
+        let SplitNode::Leaf { active_pane_id, .. } = state.leaf_of_pane(selected.as_str()).unwrap()
+        else {
+            panic!("background append must preserve the leaf");
+        };
+        assert_eq!(active_pane_id, selected.as_str());
+        assert_eq!(state.selected_terminal_pane_key.as_ref(), Some(selected));
+        assert_eq!(state.all_panes().len(), original.len() + 1);
+    }
+
+    #[test]
+    fn stale_duplicate_and_missing_preferences_are_lossless_and_idempotent() {
+        let mut state = legacy_state();
+        let original = keys(&state);
+        state.selected_terminal_pane_key = Some(PaneKey::new());
+        state.terminal_order = vec![original[4].clone(), PaneKey::new(), original[4].clone()];
+        state.normalize_terminal_navigation(None);
+        assert_eq!(state.selected_terminal().unwrap().pane_key, original[0]);
+        let expected = [
+            vec![original[4].clone()],
+            original
+                .iter()
+                .filter(|key| **key != original[4])
+                .cloned()
+                .collect(),
+        ]
+        .concat();
+        assert_eq!(keys(&state), expected);
+        let before = serde_json::to_value(state.saved_layout()).unwrap();
+        state.normalize_terminal_navigation(Some(original[5].as_str()));
+        assert_eq!(
+            serde_json::to_value(state.saved_layout()).unwrap(),
+            before,
+            "valid selection wins over window-global focus"
+        );
+    }
+
+    #[test]
+    fn reorder_cycle_and_index_share_flat_order_without_changing_routes() {
+        let mut state = legacy_state();
+        state.normalize_terminal_navigation(None);
+        let original = keys(&state);
+        state.select_terminal(original[4].as_str());
+        let owners = state.panels.clone();
+        assert!(state.reorder_terminal(&original[5], &original[0], false));
+        assert_eq!(keys(&state)[0], original[5]);
+        assert_eq!(
+            state.panels, owners,
+            "cross-owner drag changes no legacy tree or process identity"
+        );
+        assert_eq!(state.selected_terminal().unwrap().pane_key, original[4]);
+        assert_eq!(
+            state
+                .cycle_terminal_target(original[5].as_str(), 1)
+                .as_deref(),
+            Some(original[0].as_str())
+        );
+        assert_eq!(
+            state
+                .cycle_terminal_target(original[5].as_str(), -1)
+                .as_deref(),
+            Some(original[4].as_str())
+        );
+        assert_eq!(state.terminal_at_index(1).unwrap().pane_key, original[5]);
+        assert!(state.terminal_at_index(0).is_none());
+        assert!(state.terminal_at_index(7).is_none());
+        assert!(state.cycle_terminal_target("missing", 1).is_none());
+        assert!(!state.reorder_terminal(&PaneKey::new(), &original[0], true));
+        assert!(!state.reorder_terminal(&original[5], &original[0], false));
+        assert_eq!(state.panels, owners);
+        let saved = state.saved_layout();
+        assert_eq!(saved.terminal_order, Some(keys(&state)));
+    }
+
+    #[test]
+    fn closing_one_terminal_preserves_hidden_siblings_and_uses_flat_neighbors() {
+        let mut state = legacy_state();
+        state.normalize_terminal_navigation(None);
+        let original = keys(&state);
+        state.select_terminal(original[0].as_str());
+        state.remove_pane(original[1].as_str());
+        assert_eq!(state.selected_terminal().unwrap().pane_key, original[0]);
+        assert_eq!(state.all_panes().len(), 5);
+        state.reorder_terminal(&original[5], &original[0], true);
+        state.remove_pane(original[0].as_str());
+        assert_eq!(state.selected_terminal().unwrap().pane_key, original[5]);
+        assert!(state.pane(original[2].as_str()).is_some());
+        state.select_terminal(original[4].as_str());
+        state.remove_pane(original[4].as_str());
+        assert_eq!(state.selected_terminal().unwrap().pane_key, original[3]);
+        for key in keys(&state) {
+            state.remove_pane(key.as_str());
+        }
+        assert!(state.panels.is_empty());
+        assert!(state.selected_terminal_pane_key.is_none());
+        assert!(state.terminal_order.is_empty());
+        assert!(state.active_panel_id.is_none());
+    }
+
+    #[test]
+    fn background_append_preserves_selection_order_and_existing_processes() {
+        let mut state = legacy_state();
+        let original = keys(&state);
+        state.select_terminal(original[5].as_str());
+        state.normalize_terminal_navigation(None);
+        let processes = owned_panes(&state);
+        let owner = state.active_panel().unwrap().tab_id.clone();
+        let mut added = PaneState::new("mobile-shell");
+        added.pty_id = Some(99);
+        let added_key = added.pane_key.clone();
+        assert!(state.append_background_terminal(owner.clone(), added));
+        assert_eq!(state.selected_terminal().unwrap().pane_key, original[5]);
+        assert_eq!(keys(&state).last(), Some(&added_key));
+        assert_eq!(state.all_panes().len(), 7);
+        for (owner, pane) in processes {
+            assert_eq!(state.pane(&pane.id), Some(&pane));
+            assert_eq!(state.panel_id_of_pane(&pane.id), Some(owner.as_str()));
+        }
+        let before = state.panels.clone();
+        assert!(!state.append_background_terminal(TabId::new(), PaneState::new("lost-owner")));
+        assert_eq!(state.panels, before);
+        let mut empty = ProjectState::new();
+        assert!(empty.append_background_terminal(owner, PaneState::new("mobile-shell")));
+        assert_eq!(empty.all_panes().len(), 1);
+        assert!(empty.selected_terminal().is_some());
     }
 }
