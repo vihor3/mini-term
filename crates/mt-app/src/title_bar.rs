@@ -7,9 +7,9 @@ use std::collections::HashMap;
 
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClickEvent, Context, Div, Entity, FocusHandle,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
-    Render, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled,
-    Window, WindowControlArea, canvas, div, point, prelude::FluentBuilder, px,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Render,
+    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Window,
+    WindowControlArea, canvas, div, point, prelude::FluentBuilder, px,
 };
 use mt_identity::{PaneKey, WorktreeId};
 use mt_ui::icon_tooltip::IconTooltips;
@@ -302,7 +302,11 @@ pub fn toggle_maximize(window: &mut Window, _cx: &mut App) {
 
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Control { Min, Max, Close }
+enum Control {
+    Min,
+    Max,
+    Close,
+}
 
 fn revealed_offset(current: f32, viewport: f32, index: usize, tab_width: f32) -> f32 {
     let left = index as f32 * tab_width;
@@ -376,8 +380,14 @@ impl TitleBar {
             Control::Max => "titlebar-max",
             Control::Close => "titlebar-close",
         };
-        let button = div().id(id).w(px(BUTTON_WIDTH)).h_full().flex_none()
-            .flex().items_center().justify_center()
+        let button = div()
+            .id(id)
+            .w(px(BUTTON_WIDTH))
+            .h_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
             .hover(move |el| {
                 el.bg(if which == Control::Close {
                     rgb8(CLOSE_HOVER_BG.0, CLOSE_HOVER_BG.1, CLOSE_HOVER_BG.2)
@@ -386,27 +396,48 @@ impl TitleBar {
                 })
             })
             .child(VectorIcon::new(shapes, px(10.0)).ink(ui::text_primary()));
-        IconTooltips::button(&self.window_tooltips, SharedString::from(format!("{id}-description")), t("app", tip), button, window, cx)
+        IconTooltips::button(
+            &self.window_tooltips,
+            SharedString::from(format!("{id}-description")),
+            t("app", tip),
+            button,
+            window,
+            cx,
+        )
     }
 
     fn open_tab_overflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         IconTooltips::reset(&self.navigation_tooltips, window, cx);
         let titlebar = cx.entity();
-        let entries = self.store.read(cx).active_project_id.as_ref()
-            .map(|project| self.store.read(cx).terminal_tab_views(project)).unwrap_or_default()
-            .into_iter().enumerate().map(|(index, view)| {
+        let entries = self
+            .store
+            .read(cx)
+            .active_project_id
+            .as_ref()
+            .map(|project| self.store.read(cx).terminal_tab_views(project))
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(index, view)| {
                 let store = self.store.clone();
                 let titlebar = titlebar.clone();
-                menu::item(format!("{}. {}", index + 1, view.pane_label), move |window, cx| {
-                    if AppStore::activate_terminal_jump_target(&store, &view.target, window, cx) {
-                        titlebar.update(cx, |bar, cx| {
-                            bar.reveal_selected = true;
-                            cx.notify();
-                        });
-                    }
-                })
-            }).collect();
-        let position = self.tabs_bounds.map(|bounds| point(bounds.right() + px(32.0), bounds.bottom()))
+                menu::item(
+                    format!("{}. {}", index + 1, view.pane_label),
+                    move |window, cx| {
+                        if AppStore::activate_terminal_jump_target(&store, &view.target, window, cx)
+                        {
+                            titlebar.update(cx, |bar, cx| {
+                                bar.reveal_selected = true;
+                                cx.notify();
+                            });
+                        }
+                    },
+                )
+            })
+            .collect();
+        let position = self
+            .tabs_bounds
+            .map(|bounds| point(bounds.right() + px(32.0), bounds.bottom()))
             .unwrap_or_else(|| window.mouse_position());
         menu::show(position, entries, window, cx);
     }
@@ -420,14 +451,22 @@ impl TitleBar {
     ) -> AnyElement {
         let target = view.target.clone();
         let key = target.pane_key.clone();
-        let focus = self.tab_focus.entry(key.clone()).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone();
+        let focus = self
+            .tab_focus
+            .entry(key.clone())
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
         let vendor = {
             let store = self.store.read(cx);
-            store.project_state(&target.project_id)
+            store
+                .project_state(&target.project_id)
                 .and_then(|state| state.pane(target.pane_key.as_str()))
                 .filter(|pane| pane.shows_ai_session(store.config().ai_auto_resume.unwrap_or(true)))
                 .and_then(|pane| pane.ai_agent())
-                .and_then(|agent| AiVendor::from_session_type(agent).or_else(|| AiVendor::infer(Some(agent), None)))
+                .and_then(|agent| {
+                    AiVendor::from_session_type(agent)
+                        .or_else(|| AiVendor::infer(Some(agent), None))
+                })
         };
         let unread = self.store.read(cx).is_pane_unread_done(key.as_str());
         let active = view.active && self.workbench.read(cx).is_terminal_active(cx);
@@ -437,31 +476,71 @@ impl TitleBar {
         let target_menu = target.clone();
         let target_close = target.clone();
         let label_menu = label.clone();
-        let drop_side = self.tab_drop.as_ref().filter(|(candidate, _)| candidate == &target).map(|(_, after)| *after);
+        let drop_side = self
+            .tab_drop
+            .as_ref()
+            .filter(|(candidate, _)| candidate == &target)
+            .map(|(_, after)| *after);
         let close = IconTooltips::button(
             &self.navigation_tooltips,
             SharedString::from(format!("terminal-close-description-{key}")),
             t("paneGroup", "closeTab"),
-            div().id(SharedString::from(format!("terminal-close-{key}")))
-                .w(px(24.0)).h(px(24.0)).flex_none().flex().items_center().justify_center()
-                .rounded(px(3.0)).cursor_pointer()
+            div()
+                .id(SharedString::from(format!("terminal-close-{key}")))
+                .w(px(24.0))
+                .h(px(24.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.0))
+                .cursor_pointer()
                 .hover(|el| el.bg(ui::border_subtle()))
                 .child(VectorIcon::new(ICON_CLOSE, px(10.0)).ink(ui::text_muted()))
-                .on_mouse_down(MouseButton::Left, |_event, _window, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                    cx.stop_propagation()
+                })
                 .on_click(cx.listener(move |this, _event, window, cx| {
                     cx.stop_propagation();
-                    pane_actions::close_terminal_target(this.store.clone(), target_close.clone(), window, cx);
+                    pane_actions::close_terminal_target(
+                        this.store.clone(),
+                        target_close.clone(),
+                        window,
+                        cx,
+                    );
                 })),
-            window, cx,
+            window,
+            cx,
         );
-        div().id(SharedString::from(format!("terminal-tab-{key}")))
-            .relative().w(px(TAB_WIDTH)).h_full().flex_none()
-            .px(px(8.0)).flex().items_center().gap(px(6.0))
-            .track_focus(&focus).tab_index(0)
-            .cursor_pointer().border_t_2()
-            .border_color(if active { ui::accent() } else { ui::with_alpha(ui::accent(), 0.0) })
-            .bg(if active { ui::bg_terminal() } else { ui::bg_surface() })
-            .text_color(if active { ui::text_primary() } else { ui::text_muted() })
+        div()
+            .id(SharedString::from(format!("terminal-tab-{key}")))
+            .relative()
+            .w(px(TAB_WIDTH))
+            .h_full()
+            .flex_none()
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .track_focus(&focus)
+            .tab_index(0)
+            .cursor_pointer()
+            .border_t_2()
+            .border_color(if active {
+                ui::accent()
+            } else {
+                ui::with_alpha(ui::accent(), 0.0)
+            })
+            .bg(if active {
+                ui::bg_terminal()
+            } else {
+                ui::bg_surface()
+            })
+            .text_color(if active {
+                ui::text_primary()
+            } else {
+                ui::text_muted()
+            })
             .text_size(ui::font_px(13.0))
             .hover(|el| el.bg(ui::bg_overlay()))
             .on_mouse_down(MouseButton::Left, |_event, window, _cx| {
@@ -476,43 +555,66 @@ impl TitleBar {
             }))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 cx.stop_propagation();
-                if !AppStore::activate_terminal_jump_target(&this.store, &target_click, window, cx) {
+                if !AppStore::activate_terminal_jump_target(&this.store, &target_click, window, cx)
+                {
                     return;
                 }
                 if event.click_count() >= 2 {
                     crate::modal::open_rename_pane(
-                        this.store.clone(), target_click.project_id.clone(),
-                        target_click.pane_key.to_string(), label.clone(), window, cx,
+                        this.store.clone(),
+                        target_click.project_id.clone(),
+                        target_click.pane_key.to_string(),
+                        label.clone(),
+                        window,
+                        cx,
                     );
                 }
             }))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                IconTooltips::reset(&this.navigation_tooltips, window, cx);
-                let entries = tab_menu(&this.store, &target_menu, &label_menu, cx);
-                if !entries.is_empty() {
-                    menu::show(event.position, entries, window, cx);
-                }
-            }))
-            .on_drag(DragTerminalTab { target: target.clone() }, {
-                let label = view.pane_label.clone();
-                move |_item, _offset, _window, cx| dnd::preview(label.clone(), dnd::PreviewIcon::Terminal, cx)
-            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    IconTooltips::reset(&this.navigation_tooltips, window, cx);
+                    let entries = tab_menu(&this.store, &target_menu, &label_menu, cx);
+                    if !entries.is_empty() {
+                        menu::show(event.position, entries, window, cx);
+                    }
+                }),
+            )
+            .on_drag(
+                DragTerminalTab {
+                    target: target.clone(),
+                },
+                {
+                    let label = view.pane_label.clone();
+                    move |_item, _offset, _window, cx| {
+                        dnd::preview(label.clone(), dnd::PreviewIcon::Terminal, cx)
+                    }
+                },
+            )
             .on_drag_move(cx.listener({
                 let target = target.clone();
                 move |this, event: &gpui::DragMoveEvent<DragTerminalTab>, _window, cx| {
                     let source = &event.drag(cx).target;
                     let store = this.store.read(cx);
                     let after = dnd::terminal_tab_drop_after(event.bounds, event.event.position)
-                        .filter(|_| this.tabs_bounds.is_some_and(|bounds| bounds.contains(&event.event.position))
-                            && source.project_id == target.project_id
-                            && source.worktree_id == target.worktree_id
-                            && source.pane_key != target.pane_key
-                            && store.active_project_id.as_deref() == Some(target.project_id.as_str())
-                            && store.resolve_terminal_jump_target(source).is_some()
-                            && store.resolve_terminal_jump_target(&target).is_some());
+                        .filter(|_| {
+                            this.tabs_bounds
+                                .is_some_and(|bounds| bounds.contains(&event.event.position))
+                                && source.project_id == target.project_id
+                                && source.worktree_id == target.worktree_id
+                                && source.pane_key != target.pane_key
+                                && store.active_project_id.as_deref()
+                                    == Some(target.project_id.as_str())
+                                && store.resolve_terminal_jump_target(source).is_some()
+                                && store.resolve_terminal_jump_target(&target).is_some()
+                        });
                     let next = after.map(|after| (target.clone(), after));
-                    if (next.is_some() || this.tab_drop.as_ref().is_some_and(|(candidate, _)| candidate == &target))
+                    if (next.is_some()
+                        || this
+                            .tab_drop
+                            .as_ref()
+                            .is_some_and(|(candidate, _)| candidate == &target))
                         && this.tab_drop != next
                     {
                         this.tab_drop = next;
@@ -523,7 +625,9 @@ impl TitleBar {
             .on_drop(cx.listener({
                 let target = target.clone();
                 move |this, item: &DragTerminalTab, _window, cx| {
-                    let Some((destination, after)) = this.tab_drop.take() else { return; };
+                    let Some((destination, after)) = this.tab_drop.take() else {
+                        return;
+                    };
                     if destination == target {
                         this.store.update(cx, |store, cx| {
                             store.reorder_terminal_tabs(&item.target, &destination, after, cx);
@@ -532,24 +636,58 @@ impl TitleBar {
                     cx.notify();
                 }
             }))
-            .child(div().w(px(24.0)).flex_none().truncate().text_size(ui::font_px(10.0)).child((index + 1).to_string()))
+            .child(
+                div()
+                    .w(px(24.0))
+                    .flex_none()
+                    .truncate()
+                    .text_size(ui::font_px(10.0))
+                    .child((index + 1).to_string()),
+            )
             .when_some(vendor, |el, vendor| {
-                el.child(BrandIcon::new(Some(vendor)).size(px(14.0)).color(ui::text_muted()))
+                el.child(
+                    BrandIcon::new(Some(vendor))
+                        .size(px(14.0))
+                        .color(ui::text_muted()),
+                )
             })
-            .child(div().id(SharedString::from(format!("terminal-label-{key}")))
-                .min_w(px(0.0)).flex_1().truncate().child(view.pane_label.clone())
-                .tooltip({
-                    let title = view.pane_label.clone();
-                    move |window, cx| Tooltip::new(title.clone()).build(window, cx)
-                }))
-            .child(div().w(px(5.0)).h(px(5.0)).flex_none().rounded_full()
-                .when(unread, |el| el.bg(ui::color_success()))
-                .when(view.status == crate::tree::PaneStatus::Error, |el| el.bg(ui::color_error())))
+            .child(
+                div()
+                    .id(SharedString::from(format!("terminal-label-{key}")))
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .truncate()
+                    .child(view.pane_label.clone())
+                    .tooltip({
+                        let title = view.pane_label.clone();
+                        move |window, cx| Tooltip::new(title.clone()).build(window, cx)
+                    }),
+            )
+            .child(
+                div()
+                    .w(px(5.0))
+                    .h(px(5.0))
+                    .flex_none()
+                    .rounded_full()
+                    .when(unread, |el| el.bg(ui::color_success()))
+                    .when(view.status == crate::tree::PaneStatus::Error, |el| {
+                        el.bg(ui::color_error())
+                    }),
+            )
             .child(close)
             .when_some(drop_side, |el, after| {
-                el.child(div().absolute().top_0().bottom_0().w(px(3.0)).bg(ui::accent())
-                    .when(after, |el| el.right_0()).when(!after, |el| el.left_0()))
-            }).into_any_element()
+                el.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(3.0))
+                        .bg(ui::accent())
+                        .when(after, |el| el.right_0())
+                        .when(!after, |el| el.left_0()),
+                )
+            })
+            .into_any_element()
     }
 }
 
@@ -557,12 +695,24 @@ impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (scope, views) = {
             let store = self.store.read(cx);
-            let scope = store.active_project_id.clone().zip(store.active_worktree_id().cloned());
-            let views = scope.as_ref().map(|(project, _)| store.terminal_tab_views(project)).unwrap_or_default();
+            let scope = store
+                .active_project_id
+                .clone()
+                .zip(store.active_worktree_id().cloned());
+            let views = scope
+                .as_ref()
+                .map(|(project, _)| store.terminal_tab_views(project))
+                .unwrap_or_default();
             (scope, views)
         };
-        let order: Vec<_> = views.iter().map(|view| view.target.pane_key.clone()).collect();
-        let selected = views.iter().find(|view| view.active).map(|view| view.target.pane_key.clone());
+        let order: Vec<_> = views
+            .iter()
+            .map(|view| view.target.pane_key.clone())
+            .collect();
+        let selected = views
+            .iter()
+            .find(|view| view.active)
+            .map(|view| view.target.pane_key.clone());
         let terminal_page_active = self.workbench.read(cx).is_terminal_active(cx);
         if self.last_terminal_page_active != terminal_page_active {
             self.last_terminal_page_active = terminal_page_active;
@@ -580,85 +730,155 @@ impl Render for TitleBar {
             self.last_order = order;
             self.reveal_selected = true;
         }
-        self.tab_focus.retain(|key, _| self.last_order.contains(key));
+        self.tab_focus
+            .retain(|key, _| self.last_order.contains(key));
         if !cx.has_active_drag() {
             self.tab_drop = None;
         }
         let selected_index = views.iter().position(|view| view.active);
         let this = cx.entity();
-        let mut tabs = div().id("titlebar-terminal-tabs").relative().w_full().min_w(px(0.0))
-            .h_full().flex().items_center().overflow_x_scroll().track_scroll(&self.scroll)
-            .on_drag_move(cx.listener(|this, event: &gpui::DragMoveEvent<DragTerminalTab>, _window, cx| {
-                if !event.bounds.contains(&event.event.position) { return; }
-                let offset = this.scroll.offset();
-                let max_scroll = (this.last_order.len() as f32 * TAB_WIDTH - f32::from(event.bounds.size.width)).max(0.0);
-                let step = if event.event.position.x < event.bounds.origin.x + px(20.0) {
-                    -16.0
-                } else if event.event.position.x > event.bounds.right() - px(20.0) {
-                    16.0
-                } else {
-                    return;
-                };
-                let next = (-f32::from(offset.x) + step).clamp(0.0, max_scroll);
-                if (f32::from(offset.x) + next).abs() > 0.5 {
-                    this.scroll.set_offset(point(px(-next), offset.y));
-                    cx.notify();
-                }
-            }));
+        let mut tabs = div()
+            .id("titlebar-terminal-tabs")
+            .relative()
+            .w_full()
+            .min_w(px(0.0))
+            .h_full()
+            .flex()
+            .items_center()
+            .overflow_x_scroll()
+            .track_scroll(&self.scroll)
+            .on_drag_move(cx.listener(
+                |this, event: &gpui::DragMoveEvent<DragTerminalTab>, _window, cx| {
+                    if !event.bounds.contains(&event.event.position) {
+                        return;
+                    }
+                    let offset = this.scroll.offset();
+                    let max_scroll = (this.last_order.len() as f32 * TAB_WIDTH
+                        - f32::from(event.bounds.size.width))
+                    .max(0.0);
+                    let step = if event.event.position.x < event.bounds.origin.x + px(20.0) {
+                        -16.0
+                    } else if event.event.position.x > event.bounds.right() - px(20.0) {
+                        16.0
+                    } else {
+                        return;
+                    };
+                    let next = (-f32::from(offset.x) + step).clamp(0.0, max_scroll);
+                    if (f32::from(offset.x) + next).abs() > 0.5 {
+                        this.scroll.set_offset(point(px(-next), offset.y));
+                        cx.notify();
+                    }
+                },
+            ));
         for (index, view) in views.iter().enumerate() {
             tabs = tabs.child(self.render_tab(view, index, window, cx));
         }
-        let tabs = div().id("titlebar-tabs-viewport").relative().flex_1().min_w(px(0.0))
-            .h_full().overflow_hidden().child(tabs)
-            .child(canvas(move |bounds: Bounds<Pixels>, _window, cx| {
-                this.update(cx, |bar, cx| {
-                    bar.tabs_bounds = Some(bounds);
-                    if bar.tabs_width != bounds.size.width || bar.reveal_selected {
-                        bar.tabs_width = bounds.size.width;
-                        bar.reveal_selected = false;
-                        if let Some(index) = selected_index {
-                            let offset = bar.scroll.offset();
-                            let current = (-f32::from(offset.x)).max(0.0);
-                            let next = revealed_offset(current, f32::from(bounds.size.width), index, TAB_WIDTH);
-                            if (next - current).abs() > 0.5 {
-                                bar.scroll.set_offset(point(px(-next), offset.y));
-                                cx.notify();
+        let tabs = div()
+            .id("titlebar-tabs-viewport")
+            .relative()
+            .flex_1()
+            .min_w(px(0.0))
+            .h_full()
+            .overflow_hidden()
+            .child(tabs)
+            .child(
+                canvas(
+                    move |bounds: Bounds<Pixels>, _window, cx| {
+                        this.update(cx, |bar, cx| {
+                            bar.tabs_bounds = Some(bounds);
+                            if bar.tabs_width != bounds.size.width || bar.reveal_selected {
+                                bar.tabs_width = bounds.size.width;
+                                bar.reveal_selected = false;
+                                if let Some(index) = selected_index {
+                                    let offset = bar.scroll.offset();
+                                    let current = (-f32::from(offset.x)).max(0.0);
+                                    let next = revealed_offset(
+                                        current,
+                                        f32::from(bounds.size.width),
+                                        index,
+                                        TAB_WIDTH,
+                                    );
+                                    if (next - current).abs() > 0.5 {
+                                        bar.scroll.set_offset(point(px(-next), offset.y));
+                                        cx.notify();
+                                    }
+                                }
                             }
-                        }
-                    }
-                });
-            }, |_, _, _, _| {}).absolute().size_full());
-        let mut navigation = div().id("titlebar-terminal-navigation").flex_1().min_w(px(0.0))
-            .h_full().flex().items_center().child(tabs);
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
+        let mut navigation = div()
+            .id("titlebar-terminal-navigation")
+            .flex_1()
+            .min_w(px(0.0))
+            .h_full()
+            .flex()
+            .items_center()
+            .child(tabs);
         if scope.is_some() {
-            let add = div().id("titlebar-new-terminal").w(px(32.0)).h(px(32.0))
-                .track_focus(&self.add_focus).tab_index(0)
-                .flex_none().flex().items_center().justify_center().cursor_pointer()
-                .rounded(px(3.0)).text_color(ui::text_muted()).text_size(px(20.0))
-                .hover(|el| el.bg(ui::border_subtle())).child("+")
+            let add = div()
+                .id("titlebar-new-terminal")
+                .w(px(32.0))
+                .h(px(32.0))
+                .track_focus(&self.add_focus)
+                .tab_index(0)
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .rounded(px(3.0))
+                .text_color(ui::text_muted())
+                .text_size(px(20.0))
+                .hover(|el| el.bg(ui::border_subtle()))
+                .child("+")
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         cx.stop_propagation();
                         IconTooltips::reset(&this.navigation_tooltips, window, cx);
-                        let position = this.tabs_bounds.map(|bounds| point(bounds.right(), bounds.bottom()))
+                        let position = this
+                            .tabs_bounds
+                            .map(|bounds| point(bounds.right(), bounds.bottom()))
                             .unwrap_or_else(|| window.mouse_position());
                         open_new_terminal_menu(this.store.clone(), position, window, cx);
                     }
                 }))
                 .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
                     IconTooltips::reset(&this.navigation_tooltips, window, cx);
-                    open_new_terminal_menu(this.store.clone(), click_position(event, window), window, cx);
+                    open_new_terminal_menu(
+                        this.store.clone(),
+                        click_position(event, window),
+                        window,
+                        cx,
+                    );
                 }));
             navigation = navigation.child(IconTooltips::button(
-                &self.navigation_tooltips, "titlebar-new-description",
-                t("terminalArea", "newTerminal"), add, window, cx,
+                &self.navigation_tooltips,
+                "titlebar-new-description",
+                t("terminalArea", "newTerminal"),
+                add,
+                window,
+                cx,
             ));
         }
         if !views.is_empty() {
-            let overflow = div().id("titlebar-terminal-overflow").w(px(32.0)).h(px(32.0))
-                .track_focus(&self.overflow_focus).tab_index(0)
-                .flex_none().flex().items_center().justify_center().cursor_pointer()
-                .rounded(px(3.0)).hover(|el| el.bg(ui::border_subtle()))
+            let overflow = div()
+                .id("titlebar-terminal-overflow")
+                .w(px(32.0))
+                .h(px(32.0))
+                .track_focus(&self.overflow_focus)
+                .tab_index(0)
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .rounded(px(3.0))
+                .hover(|el| el.bg(ui::border_subtle()))
                 .child(VectorIcon::new(ICON_CHEVRON_DOWN, px(12.0)).ink(ui::text_muted()))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
@@ -666,38 +886,88 @@ impl Render for TitleBar {
                         this.open_tab_overflow(window, cx);
                     }
                 }))
-                .on_click(cx.listener(|this, _event, window, cx| this.open_tab_overflow(window, cx)));
+                .on_click(
+                    cx.listener(|this, _event, window, cx| this.open_tab_overflow(window, cx)),
+                );
             navigation = navigation.child(IconTooltips::button(
-                &self.navigation_tooltips, "titlebar-overflow-description",
-                t("paneGroup", "tablistLabel"), overflow, window, cx,
+                &self.navigation_tooltips,
+                "titlebar-overflow-description",
+                t("paneGroup", "tablistLabel"),
+                overflow,
+                window,
+                cx,
             ));
         }
         let navigation = IconTooltips::group(&self.navigation_tooltips, navigation, window, cx);
         let (max_shapes, max_tip) = max_button_face(window.is_maximized());
         let click_fallback = cfg!(target_os = "linux");
         let is_mac = cfg!(target_os = "macos");
-        let controls = div().id("titlebar-window-controls").flex().h_full().flex_none()
-            .child(self.control_button(Control::Min, ICON_MINIMIZE, "titleBar.minimize", window, cx)
-                .window_control_area(WindowControlArea::Min)
-                .when(click_fallback, |el| el.on_click(|_, window, cx| minimize(window, cx))))
-            .child(self.control_button(Control::Max, max_shapes, max_tip, window, cx)
-                .window_control_area(WindowControlArea::Max)
-                .when(click_fallback, |el| el.on_click(|_, window, cx| toggle_maximize(window, cx))))
-            .child(self.control_button(Control::Close, ICON_CLOSE, "titleBar.close", window, cx)
-                .window_control_area(WindowControlArea::Close)
-                .when(click_fallback, |el| el.on_click(|_, window, cx| request_close_window(window, cx))));
+        let controls = div()
+            .id("titlebar-window-controls")
+            .flex()
+            .h_full()
+            .flex_none()
+            .child(
+                self.control_button(Control::Min, ICON_MINIMIZE, "titleBar.minimize", window, cx)
+                    .window_control_area(WindowControlArea::Min)
+                    .when(click_fallback, |el| {
+                        el.on_click(|_, window, cx| minimize(window, cx))
+                    }),
+            )
+            .child(
+                self.control_button(Control::Max, max_shapes, max_tip, window, cx)
+                    .window_control_area(WindowControlArea::Max)
+                    .when(click_fallback, |el| {
+                        el.on_click(|_, window, cx| toggle_maximize(window, cx))
+                    }),
+            )
+            .child(
+                self.control_button(Control::Close, ICON_CLOSE, "titleBar.close", window, cx)
+                    .window_control_area(WindowControlArea::Close)
+                    .when(click_fallback, |el| {
+                        el.on_click(|_, window, cx| request_close_window(window, cx))
+                    }),
+            );
         let controls = IconTooltips::group(&self.window_tooltips, controls, window, cx);
-        div().w_full().h(px(HEIGHT)).flex_none().flex().items_center()
-            .bg(ui::bg_surface()).border_b_1().border_color(ui::border_subtle())
-            .when(is_mac, |el| el.child(div().w(px(MAC_TRAFFIC_LIGHT_WIDTH)).h_full().flex_none()))
-            .child(div().h_full().px(px(12.0)).flex_none().flex().items_center().gap(px(6.0))
-                .window_control_area(WindowControlArea::Drag)
-                .child(VectorIcon::new(ICON_LOGO, px(14.0)).ink(ui::text_muted()))
-                .when(window.viewport_size().width > px(760.0), |el| {
-                    el.child(div().text_size(ui::font_px(12.0)).text_color(ui::text_secondary()).child("Mini-Term"))
-                }))
+        div()
+            .w_full()
+            .h(px(HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .bg(ui::bg_surface())
+            .border_b_1()
+            .border_color(ui::border_subtle())
+            .when(is_mac, |el| {
+                el.child(div().w(px(MAC_TRAFFIC_LIGHT_WIDTH)).h_full().flex_none())
+            })
+            .child(
+                div()
+                    .h_full()
+                    .px(px(12.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .window_control_area(WindowControlArea::Drag)
+                    .child(VectorIcon::new(ICON_LOGO, px(14.0)).ink(ui::text_muted()))
+                    .when(window.viewport_size().width > px(760.0), |el| {
+                        el.child(
+                            div()
+                                .text_size(ui::font_px(12.0))
+                                .text_color(ui::text_secondary())
+                                .child("Mini-Term"),
+                        )
+                    }),
+            )
             .child(navigation)
-            .child(div().w(px(28.0)).h_full().flex_none().window_control_area(WindowControlArea::Drag))
+            .child(
+                div()
+                    .w(px(28.0))
+                    .h_full()
+                    .flex_none()
+                    .window_control_area(WindowControlArea::Drag),
+            )
             .when(!is_mac, |el| el.child(controls))
     }
 }
@@ -814,5 +1084,4 @@ mod tests {
             assert!((0.0..=1.0).contains(&v), "相位越界 {v}");
         }
     }
-
 }

@@ -133,14 +133,12 @@ impl SettingsView {
                     )
                     .child(ui::hint(t("settings", "terminal.defaultHint"))),
             )
-            .child(
-                section("terminal.behavior").child(number_row(
-                    "terminal.scrollback",
-                    "terminal.scrollbackDesc",
-                    &self.num_scrollback,
-                    false,
-                )),
-            )
+            .child(section("terminal.behavior").child(number_row(
+                "terminal.scrollback",
+                "terminal.scrollbackDesc",
+                &self.num_scrollback,
+                false,
+            )))
             .into_any_element()
     }
 

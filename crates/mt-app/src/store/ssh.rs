@@ -23,7 +23,10 @@ fn reconnect_plan(
     pane_id: &str,
     resolve_shell: impl FnOnce(&str) -> Option<ShellConfig>,
 ) -> Option<ReconnectPlan> {
-    let panel = state.panels.iter().find(|panel| panel.layout.pane(pane_id).is_some())?;
+    let panel = state
+        .panels
+        .iter()
+        .find(|panel| panel.layout.pane(pane_id).is_some())?;
     let pane = panel.layout.pane(pane_id)?;
     Some(ReconnectPlan {
         shell: resolve_shell(&pane.shell_name)?,
@@ -357,7 +360,10 @@ impl AppStore {
         let project = self.project(project_id)?.clone();
         let target = self.terminal_jump_target_for_pane(project_id, pane_id)?;
         self.resolve_terminal_jump_target(&target)?;
-        if self.pending_terminal_closes.contains(&target.terminal_session_id) {
+        if self
+            .pending_terminal_closes
+            .contains(&target.terminal_session_id)
+        {
             return None;
         }
         // Capture every fallible prerequisite before disposing the current view.
@@ -416,12 +422,17 @@ mod reconnect_tests {
         let unchanged = state.pane(&pane.id).unwrap();
         assert_eq!(unchanged.pty_id, Some(42));
         assert_eq!(unchanged.terminal_session_id, pane.terminal_session_id);
-        assert_eq!(unchanged.terminal_incarnation_id, pane.terminal_incarnation_id);
+        assert_eq!(
+            unchanged.terminal_incarnation_id,
+            pane.terminal_incarnation_id
+        );
         assert_eq!(unchanged.status, PaneStatus::Error);
         assert_eq!(state.panels[0].tab_id, owner);
 
         let shell = ShellConfig {
-            name: "replacement".into(), command: "shell".into(), args: None,
+            name: "replacement".into(),
+            command: "shell".into(),
+            args: None,
         };
         let plan = reconnect_plan(&state, &pane.id, |_| Some(shell.clone())).unwrap();
         assert_eq!(plan.old_pty, Some(42));
@@ -435,8 +446,11 @@ mod reconnect_tests {
 
     #[test]
     fn reconnect_preflight_never_resolves_a_shell_for_a_missing_original_pane() {
-        assert!(reconnect_plan(&ProjectState::new(), "missing", |_| {
-            panic!("missing route must be rejected before shell resolution")
-        }).is_none());
+        assert!(
+            reconnect_plan(&ProjectState::new(), "missing", |_| {
+                panic!("missing route must be rejected before shell resolution")
+            })
+            .is_none()
+        );
     }
 }

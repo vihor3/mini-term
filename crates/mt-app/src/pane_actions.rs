@@ -180,7 +180,10 @@ pub fn close_pane(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(target) = store.read(cx).terminal_jump_target_for_pane(&project_id, &pane_id) else {
+    let Some(target) = store
+        .read(cx)
+        .terminal_jump_target_for_pane(&project_id, &pane_id)
+    else {
         return;
     };
     close_terminal_target(store, target, window, cx);
@@ -219,17 +222,24 @@ pub fn close_terminal_target(
 
     Confirm::new(title, message).open(
         move |window, cx| {
-            let close = store.update(cx, |store, cx| store.close_terminal_target(request.clone(), cx));
+            let close = store.update(cx, |store, cx| {
+                store.close_terminal_target(request.clone(), cx)
+            });
             let target = target.clone();
-            window.spawn(cx, async move |cx| {
-                if close.await {
-                    let _ = cx.update(|window, cx| {
-                        crate::workbench_area::reactivate_active_page(
-                            &target.project_id, &target.worktree_id, window, cx,
-                        );
-                    });
-                }
-            }).detach();
+            window
+                .spawn(cx, async move |cx| {
+                    if close.await {
+                        let _ = cx.update(|window, cx| {
+                            crate::workbench_area::reactivate_active_page(
+                                &target.project_id,
+                                &target.worktree_id,
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                })
+                .detach();
         },
         window,
         cx,
@@ -254,11 +264,17 @@ pub fn fork_pane_session(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(target) = store.read(cx).terminal_jump_target_for_pane(&project_id, &pane_id) else {
+    let Some(target) = store
+        .read(cx)
+        .terminal_jump_target_for_pane(&project_id, &pane_id)
+    else {
         return;
     };
     if store.read(cx).active_project_id.as_deref() != Some(project_id.as_str())
-        || store.read(cx).resolve_terminal_jump_target(&target).is_none()
+        || store
+            .read(cx)
+            .resolve_terminal_jump_target(&target)
+            .is_none()
     {
         return;
     }
@@ -275,7 +291,10 @@ pub fn fork_pane_session(
     let Some(session) = source_snapshot.ai_session.clone() else {
         return;
     };
-    let Some(shell) = store.read(cx).resolve_shell(Some(&source_snapshot.shell_name)) else {
+    let Some(shell) = store
+        .read(cx)
+        .resolve_shell(Some(&source_snapshot.shell_name))
+    else {
         return;
     };
     // 命令与归一化 agent 都由菜单那份判据产出 —— 菜单出得来的项,动作就跑得通
@@ -309,7 +328,10 @@ pub fn fork_pane_session(
                     {
                         return false;
                     }
-                    let Some(source) = store.project_state(&project_id).and_then(|state| state.pane(&pane_id)) else {
+                    let Some(source) = store
+                        .project_state(&project_id)
+                        .and_then(|state| state.pane(&pane_id))
+                    else {
                         return false;
                     };
                     if !fork_source_unchanged(&source_snapshot, source) {
@@ -356,7 +378,9 @@ mod tests {
         source.terminal_incarnation_id = Some(TerminalIncarnationId::new());
         source.cwd = Some("/source/cwd".into());
         source.ai_session = Some(AiSessionRef {
-            agent: Some("codex".into()), session_id: "parent".into(), cwd: Some("/session/cwd".into()),
+            agent: Some("codex".into()),
+            session_id: "parent".into(),
+            cwd: Some("/session/cwd".into()),
         });
         let mut current = source.clone();
         current.status = PaneStatus::AiWorking;

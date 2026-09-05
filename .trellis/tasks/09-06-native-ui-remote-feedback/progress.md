@@ -15,15 +15,43 @@
 
 | Child | State | Evidence |
 | --- | --- | --- |
-| native-terminal-navigation | Actions candidate ready | Full source review complete; no remaining concrete scoped blocker |
-| native-agent-ownership-status | Pending | Approved, not activated |
-| native-file-browser | Pending | Approved, not activated |
+| native-terminal-navigation | Actions corrections | `d50f616` format/i18n diagnostics applied; Windows menu type error under correction |
+| native-agent-ownership-status | Implementing | Activated; lower-layer implementation dispatched without overlapping navigation files |
+| native-file-browser | Implementing | Activated for disjoint onboarding/browser slice while Agent integration continues |
 | native-remote-git | Pending | Approved, not activated |
 | native-tasks-gh-accounts | Pending | Approved, not activated |
 
 ## Current Dispatch
 
-Main active task: `.trellis/tasks/09-06-native-terminal-navigation`.
+Main active task: `.trellis/tasks/09-06-native-file-browser`.
+Navigation remains open pending Actions and native acceptance, not archived.
+Agent implementation remains in progress under the explicit owners below.
+The default serialized delivery order is relaxed only for disjoint onboarding
+files; shared store/main/execution-host ownership and integrated review remain
+serialized. This changes scheduling, not the approved product scope.
+
+Current lower-layer implementer: `01a07372-7fd4-7420-9760-88ef3afa4b70`
+(Epicurus), owning `mt-ai/src` plus focused tests, `mt-ssh/src/agent.rs` and
+narrow exports/tests, and `mt-pty/src/ssh.rs` plus needed exports/tests. It may
+not edit mt-app/config/layout/ui, workflows or task metadata. It must hand off
+bounded ownership/activity APIs in the Agent child's `lower-layer-handoff.md`.
+App implementer: `01a07379-8615-7cd1-a4a2-68701d4cbb35` (Rawls), owning
+`store/{remote_agents,ai,context}.rs`, catalog/sidebar/Sessions/remote_ssh and
+narrow store declarations. It coordinates lower-layer APIs directly with
+Epicurus and records `app-handoff.md`. Navigation formatting was staged before
+this dispatch, keeping its CI correction separate from new Agent changes.
+Resumed navigation checker James owns only `menu.rs` and the unused search-bar
+import for the current compiler diagnostic; there is no write overlap.
+That focused correction is now source-complete and James is closed again;
+`ci-followup.md` records the explicit SharedString comparison and import fix.
+
+Onboarding implementer `01a0737c-6d5f-7152-9936-5707a1867101` (Raman) owns
+`remote_directory_picker.rs` and `project_onboarding/` plus narrowly scoped
+locale sources, recording `onboarding-handoff.md`. It may not edit FileTree,
+store/main, remote_ssh, execution-host code, specs or workflows. Agent owners
+were notified that their captured task/scope remains unchanged by this pointer.
+
+### Completed Navigation Dispatches
 
 - State implementer `01a0730b-46a5-7752-91f2-bcac7a659d63` (Avicenna) implemented flat
   terminal layout/persistence, selection/order, store lifecycle and fork/close
@@ -105,8 +133,9 @@ Main active task: `.trellis/tasks/09-06-native-terminal-navigation`.
 - `core-handoff.md` is available and has been relayed. It exposes
   `terminal_tab_views`, full-target activation/reorder and
   `pane_actions::close_terminal_target`; UI callers must retain captured targets.
-- This is disjoint work within the first child, not overlapping child activation.
-  Main owns specs, task metadata, review dispatch, scoped commits and Actions.
+- All navigation implementation/check agents listed above are closed. Only its
+  Actions jobs remain active. Main owns specs, metadata, CI fixes/review dispatch,
+  scoped commits and Actions while lower-layer Agent work proceeds separately.
 
 ## Execution Constraint
 
@@ -118,13 +147,29 @@ the matching Actions artifact and the user's observed result.
 
 ## Validation
 
-No new product commit or Actions run exists yet for this scope. Earlier green
-runs and the old `1.2.2-ci.30` installer are not evidence for these changes.
+First scoped candidate: `d50f616034f8d17b5100be68e804c66f0af90edc`, committed and
+pushed to `fork/feat/remote-file-management`. Git hooks were disabled per command
+to prevent local verification. No unrelated initial dirty files were staged.
+
+- CI: https://github.com/vihor3/mini-term/actions/runs/33992637822
+- Windows Package: https://github.com/vihor3/mini-term/actions/runs/33992637938
+- Both refer to `d50f616`; no result/artifact acceptance is claimed yet. Earlier
+  green runs and the old `1.2.2-ci.30` installer are not evidence for these changes.
+
+The first CI completed with failures. Linux stopped at changed-line rustfmt and
+generated i18n gates, so Linux compilation/tests did not execute. Windows reached
+the affected-package compile and failed one `menu.rs` anchor comparison type
+error. Main downloaded and mechanically applied the Actions diagnostic patches
+under `~/.cache/mini-term/actions/33992637822/`; the i18n patch changes four
+split/pane captions to terminal captions. No formatter or generator ran locally.
+The menu error and directly related unused search import are assigned to James.
+Windows packaging is still running on the first candidate, not accepted.
 Main has updated the existing workbench identity and worktree layout specs for
 the implemented flat navigation boundary. Reviewer/source follow-ups may refine
 them; documentation is not execution evidence.
 The terminal-host and shared-tooltip contracts are also updated. Main added a
 Windows terminal-host all-target test step to existing CI after confirming the
 unit fixtures choose `cmd.exe` on Windows; Unix IPC integration stays Unix-only.
-No workflow, test or fixture was executed locally. First source candidate is
-ready to be scoped, committed and pushed for Actions diagnostics.
+No workflow, test or fixture was executed locally. Apply only Actions-produced
+formatting/i18n diagnostic patches and coordinated source fixes, then obtain
+fresh exact-commit evidence before claiming validation.

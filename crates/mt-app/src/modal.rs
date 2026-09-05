@@ -55,7 +55,12 @@ pub fn open_rename_pane(
     let Some(target) = store
         .read(cx)
         .terminal_jump_target_for_pane(&project_id, &pane_id)
-        .filter(|target| store.read(cx).resolve_terminal_jump_target(target).is_some())
+        .filter(|target| {
+            store
+                .read(cx)
+                .resolve_terminal_jump_target(target)
+                .is_some()
+        })
     else {
         return;
     };
@@ -97,12 +102,7 @@ pub fn open_rename_pane(
                 let title = input_for_ok.read(cx).value().to_string();
                 store.update(cx, |store, cx| {
                     if store.resolve_terminal_jump_target(&target).is_some() {
-                        store.rename_pane(
-                            &target.project_id,
-                            target.pane_key.as_str(),
-                            &title,
-                            cx,
-                        );
+                        store.rename_pane(&target.project_id, target.pane_key.as_str(), &title, cx);
                     }
                 });
                 true

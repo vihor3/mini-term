@@ -236,10 +236,8 @@ impl ProjectState {
         else {
             return false;
         };
-        self.selected_terminal_pane_key = panel
-            .layout
-            .pane(pane_id)
-            .map(|pane| pane.pane_key.clone());
+        self.selected_terminal_pane_key =
+            panel.layout.pane(pane_id).map(|pane| pane.pane_key.clone());
         panel.layout.activate_pane(pane_id);
         self.active_panel_id = Some(panel.id.clone());
         true
@@ -285,29 +283,54 @@ impl ProjectState {
     }
 
     pub(super) fn terminal_at_index(&self, index: usize) -> Option<&PaneState> {
-        self.ordered_terminal_panes().get(index.checked_sub(1)?).copied()
+        self.ordered_terminal_panes()
+            .get(index.checked_sub(1)?)
+            .copied()
     }
 
-    pub(super) fn reorder_terminal(&mut self, source: &PaneKey, target: &PaneKey, after: bool) -> bool {
-        if source == target || self.pane(source.as_str()).is_none() || self.pane(target.as_str()).is_none() {
+    pub(super) fn reorder_terminal(
+        &mut self,
+        source: &PaneKey,
+        target: &PaneKey,
+        after: bool,
+    ) -> bool {
+        if source == target
+            || self.pane(source.as_str()).is_none()
+            || self.pane(target.as_str()).is_none()
+        {
             return false;
         }
         self.normalize_terminal_navigation(None);
         let previous = self.terminal_order.clone();
         self.terminal_order.retain(|key| key != source);
-        let index = self.terminal_order.iter().position(|key| key == target).expect("target was validated");
-        self.terminal_order.insert(index + usize::from(after), source.clone());
+        let index = self
+            .terminal_order
+            .iter()
+            .position(|key| key == target)
+            .expect("target was validated");
+        self.terminal_order
+            .insert(index + usize::from(after), source.clone());
         self.terminal_order != previous
     }
 
     pub(super) fn saved_layout(&self) -> mt_config::SavedProjectLayout {
         let mut saved = persist::serialize_layout(&self.panels, self.active_panel_index());
-        saved.selected_terminal_pane_key = self.selected_terminal().map(|pane| pane.pane_key.clone());
-        saved.terminal_order = Some(self.ordered_terminal_panes().iter().map(|pane| pane.pane_key.clone()).collect());
+        saved.selected_terminal_pane_key =
+            self.selected_terminal().map(|pane| pane.pane_key.clone());
+        saved.terminal_order = Some(
+            self.ordered_terminal_panes()
+                .iter()
+                .map(|pane| pane.pane_key.clone())
+                .collect(),
+        );
         saved
     }
 
-    pub(super) fn append_background_terminal(&mut self, tab_id: mt_identity::TabId, pane: PaneState) -> bool {
+    pub(super) fn append_background_terminal(
+        &mut self,
+        tab_id: mt_identity::TabId,
+        pane: PaneState,
+    ) -> bool {
         if self.panels.is_empty() {
             let panel = ProjectPanel::with_tab_id(tab_id, SplitNode::leaf(pane));
             self.active_panel_id = Some(panel.id.clone());
@@ -425,35 +448,50 @@ mod flat_terminal_tests {
     use mt_identity::{TabId, TerminalIncarnationId};
 
     fn legacy_state() -> ProjectState {
-        let mut panes = (0..6).map(|index| {
-            let mut pane = PaneState::new(format!("shell-{index}"));
-            pane.cwd = Some(format!("/worktree/{index}"));
-            if index % 2 == 0 {
-                pane.pty_id = Some(index + 10);
-                pane.terminal_incarnation_id = Some(TerminalIncarnationId::new());
-            }
-            pane
-        }).collect::<Vec<_>>();
+        let mut panes = (0..6)
+            .map(|index| {
+                let mut pane = PaneState::new(format!("shell-{index}"));
+                pane.cwd = Some(format!("/worktree/{index}"));
+                if index % 2 == 0 {
+                    pane.pty_id = Some(index + 10);
+                    pane.terminal_incarnation_id = Some(TerminalIncarnationId::new());
+                }
+                pane
+            })
+            .collect::<Vec<_>>();
         panes[1].ai_session = Some(AiSessionRef {
-            agent: Some("codex".into()), session_id: "saved-provider-session".into(), cwd: Some("/worktree/1".into()),
+            agent: Some("codex".into()),
+            session_id: "saved-provider-session".into(),
+            cwd: Some("/worktree/1".into()),
         });
         panes[2].status = PaneStatus::Error;
         let mut first_leaf = SplitNode::leaf(panes[0].clone());
         first_leaf.append_pane(None, panes[1].clone());
         first_leaf.activate_pane(&panes[0].id);
         let split = |direction, children| SplitNode::Split {
-            id: gen_id("split"), direction, children, sizes: vec![37.0, 63.0],
+            id: gen_id("split"),
+            direction,
+            children,
+            sizes: vec![37.0, 63.0],
         };
-        let mut first = ProjectPanel::new(split(SplitDirection::Horizontal, vec![
-            first_leaf, SplitNode::leaf(panes[2].clone()),
-        ]));
+        let mut first = ProjectPanel::new(split(
+            SplitDirection::Horizontal,
+            vec![first_leaf, SplitNode::leaf(panes[2].clone())],
+        ));
         first.custom_title = Some("legacy owner title".into());
-        let second = ProjectPanel::new(split(SplitDirection::Vertical, vec![
-            SplitNode::leaf(panes[3].clone()),
-            split(SplitDirection::Horizontal, vec![
-                SplitNode::leaf(panes[4].clone()), SplitNode::leaf(panes[5].clone()),
-            ]),
-        ]));
+        let second = ProjectPanel::new(split(
+            SplitDirection::Vertical,
+            vec![
+                SplitNode::leaf(panes[3].clone()),
+                split(
+                    SplitDirection::Horizontal,
+                    vec![
+                        SplitNode::leaf(panes[4].clone()),
+                        SplitNode::leaf(panes[5].clone()),
+                    ],
+                ),
+            ],
+        ));
         let mut state = ProjectState::new();
         state.active_panel_id = Some(first.id.clone());
         state.panels = vec![first, second];
@@ -461,13 +499,25 @@ mod flat_terminal_tests {
     }
 
     fn keys(state: &ProjectState) -> Vec<PaneKey> {
-        state.ordered_terminal_panes().iter().map(|pane| pane.pane_key.clone()).collect()
+        state
+            .ordered_terminal_panes()
+            .iter()
+            .map(|pane| pane.pane_key.clone())
+            .collect()
     }
 
     fn owned_panes(state: &ProjectState) -> Vec<(TabId, PaneState)> {
-        state.panels.iter().flat_map(|panel| {
-            panel.layout.panes().into_iter().map(move |pane| (panel.tab_id.clone(), pane.clone()))
-        }).collect()
+        state
+            .panels
+            .iter()
+            .flat_map(|panel| {
+                panel
+                    .layout
+                    .panes()
+                    .into_iter()
+                    .map(move |pane| (panel.tab_id.clone(), pane.clone()))
+            })
+            .collect()
     }
 
     #[test]
@@ -477,9 +527,21 @@ mod flat_terminal_tests {
         let panes = state.ordered_terminal_panes();
         assert_eq!(panes.len(), 6);
         assert_eq!(panes.iter().filter(|pane| pane.pty_id.is_some()).count(), 3);
-        assert_eq!(panes.iter().filter(|pane| pane.status == PaneStatus::Error).count(), 1);
-        assert_eq!(panes[1].ai_session.as_ref().unwrap().session_id, "saved-provider-session");
-        assert_eq!(state.panels, original, "inventory reads cannot mutate route owners");
+        assert_eq!(
+            panes
+                .iter()
+                .filter(|pane| pane.status == PaneStatus::Error)
+                .count(),
+            1
+        );
+        assert_eq!(
+            panes[1].ai_session.as_ref().unwrap().session_id,
+            "saved-provider-session"
+        );
+        assert_eq!(
+            state.panels, original,
+            "inventory reads cannot mutate route owners"
+        );
     }
 
     #[test]
@@ -504,8 +566,13 @@ mod flat_terminal_tests {
         assert_eq!(restored.selected_terminal().unwrap().pane_key, target);
         assert_eq!(restored.active_panel_id, state.active_panel_id);
         assert_eq!(keys(&restored), keys(&state));
-        assert_eq!(restored.panels[0].custom_title, state.panels[0].custom_title);
-        for ((old_owner, old), (owner, pane)) in owned_panes(&state).into_iter().zip(owned_panes(&restored)) {
+        assert_eq!(
+            restored.panels[0].custom_title,
+            state.panels[0].custom_title
+        );
+        for ((old_owner, old), (owner, pane)) in
+            owned_panes(&state).into_iter().zip(owned_panes(&restored))
+        {
             assert_eq!(owner, old_owner);
             assert_eq!(pane.pane_key, old.pane_key);
             assert_eq!(pane.terminal_session_id, old.terminal_session_id);
@@ -530,8 +597,7 @@ mod flat_terminal_tests {
         let selected = &original[1];
         let processes = owned_panes(&state);
         assert!(state.select_terminal(selected.as_str()));
-        let SplitNode::Leaf { active_pane_id, .. } =
-            state.leaf_of_pane(selected.as_str()).unwrap()
+        let SplitNode::Leaf { active_pane_id, .. } = state.leaf_of_pane(selected.as_str()).unwrap()
         else {
             panic!("selected pane must remain in its original leaf");
         };
@@ -540,7 +606,10 @@ mod flat_terminal_tests {
         assert_eq!(owned_panes(&state), processes);
         let snapshot = state.saved_layout();
         assert_eq!(snapshot.selected_terminal_pane_key.as_ref(), Some(selected));
-        assert_eq!(snapshot.active_tab_id.as_ref(), Some(&state.panels[0].tab_id));
+        assert_eq!(
+            snapshot.active_tab_id.as_ref(),
+            Some(&state.panels[0].tab_id)
+        );
         assert_eq!(snapshot.terminal_order.as_ref(), Some(&original));
         assert!(!state.select_terminal("missing-pane"));
         assert_eq!(
@@ -550,8 +619,7 @@ mod flat_terminal_tests {
 
         let owner = state.panels[0].tab_id.clone();
         assert!(state.append_background_terminal(owner, PaneState::new("background")));
-        let SplitNode::Leaf { active_pane_id, .. } =
-            state.leaf_of_pane(selected.as_str()).unwrap()
+        let SplitNode::Leaf { active_pane_id, .. } = state.leaf_of_pane(selected.as_str()).unwrap()
         else {
             panic!("background append must preserve the leaf");
         };
@@ -568,11 +636,23 @@ mod flat_terminal_tests {
         state.terminal_order = vec![original[4].clone(), PaneKey::new(), original[4].clone()];
         state.normalize_terminal_navigation(None);
         assert_eq!(state.selected_terminal().unwrap().pane_key, original[0]);
-        let expected = [vec![original[4].clone()], original.iter().filter(|key| **key != original[4]).cloned().collect()].concat();
+        let expected = [
+            vec![original[4].clone()],
+            original
+                .iter()
+                .filter(|key| **key != original[4])
+                .cloned()
+                .collect(),
+        ]
+        .concat();
         assert_eq!(keys(&state), expected);
         let before = serde_json::to_value(state.saved_layout()).unwrap();
         state.normalize_terminal_navigation(Some(original[5].as_str()));
-        assert_eq!(serde_json::to_value(state.saved_layout()).unwrap(), before, "valid selection wins over window-global focus");
+        assert_eq!(
+            serde_json::to_value(state.saved_layout()).unwrap(),
+            before,
+            "valid selection wins over window-global focus"
+        );
     }
 
     #[test]
@@ -584,10 +664,23 @@ mod flat_terminal_tests {
         let owners = state.panels.clone();
         assert!(state.reorder_terminal(&original[5], &original[0], false));
         assert_eq!(keys(&state)[0], original[5]);
-        assert_eq!(state.panels, owners, "cross-owner drag changes no legacy tree or process identity");
+        assert_eq!(
+            state.panels, owners,
+            "cross-owner drag changes no legacy tree or process identity"
+        );
         assert_eq!(state.selected_terminal().unwrap().pane_key, original[4]);
-        assert_eq!(state.cycle_terminal_target(original[5].as_str(), 1).as_deref(), Some(original[0].as_str()));
-        assert_eq!(state.cycle_terminal_target(original[5].as_str(), -1).as_deref(), Some(original[4].as_str()));
+        assert_eq!(
+            state
+                .cycle_terminal_target(original[5].as_str(), 1)
+                .as_deref(),
+            Some(original[0].as_str())
+        );
+        assert_eq!(
+            state
+                .cycle_terminal_target(original[5].as_str(), -1)
+                .as_deref(),
+            Some(original[4].as_str())
+        );
         assert_eq!(state.terminal_at_index(1).unwrap().pane_key, original[5]);
         assert!(state.terminal_at_index(0).is_none());
         assert!(state.terminal_at_index(7).is_none());
@@ -615,7 +708,9 @@ mod flat_terminal_tests {
         state.select_terminal(original[4].as_str());
         state.remove_pane(original[4].as_str());
         assert_eq!(state.selected_terminal().unwrap().pane_key, original[3]);
-        for key in keys(&state) { state.remove_pane(key.as_str()); }
+        for key in keys(&state) {
+            state.remove_pane(key.as_str());
+        }
         assert!(state.panels.is_empty());
         assert!(state.selected_terminal_pane_key.is_none());
         assert!(state.terminal_order.is_empty());

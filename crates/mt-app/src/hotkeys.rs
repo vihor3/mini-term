@@ -29,10 +29,9 @@
 use gpui::{App, KeyBinding, NoAction};
 
 use crate::{
-    ClosePane, GlobalSearch, JumpAttention, MarkerNext,
-    MarkerPrev, NewTerminal, NextPane, OpenTerminalSettings, PrevPane, RenamePane, SelectPane,
-    SwitchProject, TerminalSearch, ToggleMiddleColumn, ToggleSessions,
-    ToggleUsage, git_changes, jump_palette,
+    ClosePane, GlobalSearch, JumpAttention, MarkerNext, MarkerPrev, NewTerminal, NextPane,
+    OpenTerminalSettings, PrevPane, RenamePane, SelectPane, SwitchProject, TerminalSearch,
+    ToggleMiddleColumn, ToggleSessions, ToggleUsage, git_changes, jump_palette,
 };
 
 /// 应用级动作的 key context(与 `Workspace::render` 的 `key_context` 一致)。
@@ -568,7 +567,14 @@ mod tests {
 
     #[test]
     fn split_and_directional_shortcuts_are_not_registered() {
-        for id in ["splitRight", "splitDown", "focusLeft", "focusRight", "focusUp", "focusDown"] {
+        for id in [
+            "splitRight",
+            "splitDown",
+            "focusLeft",
+            "focusRight",
+            "focusUp",
+            "focusDown",
+        ] {
             assert!(HOTKEYS.iter().all(|entry| entry.id != id));
             assert!(binding_for(id, "alt-left").is_none());
         }

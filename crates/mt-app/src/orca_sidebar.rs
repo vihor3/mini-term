@@ -10,8 +10,7 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, AppContext, Bounds, Context, Entity, EventEmitter, FocusHandle, FontWeight,
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement, Styled, Window, canvas, div,
-    prelude::FluentBuilder as _, px,
+    StatefulInteractiveElement, Styled, Window, canvas, div, prelude::FluentBuilder as _, px,
 };
 use mt_ai::{AgentActivity, AgentConnectivity, AgentEvidence};
 use mt_project::worktree::WorktreePathState;
@@ -556,15 +555,18 @@ impl OrcaProjectSidebar {
         menu::show_anchored(
             project_menu_anchor(project_id),
             bounds,
-            vec![menu::item(t("worktree", "settings.title"), move |window, cx| {
-                crate::project_settings::open(
-                    store.clone(),
-                    catalog.clone(),
-                    target.clone(),
-                    window,
-                    cx,
-                );
-            })],
+            vec![menu::item(
+                t("worktree", "settings.title"),
+                move |window, cx| {
+                    crate::project_settings::open(
+                        store.clone(),
+                        catalog.clone(),
+                        target.clone(),
+                        window,
+                        cx,
+                    );
+                },
+            )],
             window,
             cx,
         );
@@ -611,10 +613,7 @@ impl OrcaProjectSidebar {
                 )),
                 t("worktree", "createTitle"),
                 small_icon_button(
-                    SharedString::from(format!(
-                        "orca-add-worktree-{}",
-                        project.root_project_id
-                    )),
+                    SharedString::from(format!("orca-add-worktree-{}", project.root_project_id)),
                     VectorIcon::new(PLUS_ICON, px(12.0))
                         .ink(ui::text_muted())
                         .into_any_element(),
@@ -1154,8 +1153,7 @@ impl Render for OrcaProjectSidebar {
             .collect();
         let menu = menu::layer(cx);
         let removed_open_anchor = self.project_controls.keys().any(|id| {
-            !live_projects.contains(id)
-                && menu.read(cx).is_anchored_to(&project_menu_anchor(id))
+            !live_projects.contains(id) && menu.read(cx).is_anchored_to(&project_menu_anchor(id))
         });
         if removed_open_anchor {
             menu::close(window, cx);

@@ -1320,10 +1320,19 @@ fn salvage_project_layout(value: &Value, stats: &mut SalvageStats) -> Option<Sav
     Some(SavedProjectLayout {
         worktree_id: salvage_optional_id(object.get("worktreeId"), stats),
         active_tab_id: salvage_optional_id(object.get("activeTabId"), stats),
-        selected_terminal_pane_key: salvage_optional_id(object.get("selectedTerminalPaneKey"), stats),
-        terminal_order: object.get("terminalOrder").and_then(Value::as_array).map(|values| {
-            values.iter().filter_map(|value| salvage_optional_id(Some(value), stats)).collect()
-        }),
+        selected_terminal_pane_key: salvage_optional_id(
+            object.get("selectedTerminalPaneKey"),
+            stats,
+        ),
+        terminal_order: object
+            .get("terminalOrder")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| salvage_optional_id(Some(value), stats))
+                    .collect()
+            }),
         tabs,
         active_tab_index,
     })
@@ -2513,21 +2522,45 @@ mod tests {
         let binding = binding("flat", "/repo/flat");
         let mut saved = layout("first-shell");
         saved.tabs.extend(layout("second-shell").tabs);
-        normalize_saved_layout_stable_ids(&mut saved, Some(&binding.worktree_id), &mut SalvageStats::default());
+        normalize_saved_layout_stable_ids(
+            &mut saved,
+            Some(&binding.worktree_id),
+            &mut SalvageStats::default(),
+        );
         let keys = saved.terminal_order.clone().unwrap();
         assert_eq!(keys.len(), 4);
         let records = serde_json::to_value(&saved.tabs).unwrap();
         saved.selected_terminal_pane_key = Some(keys[3].clone());
-        saved.terminal_order = Some(vec![keys[3].clone(), PaneKey::new(), keys[3].clone(), keys[1].clone()]);
-        normalize_saved_layout_stable_ids(&mut saved, Some(&binding.worktree_id), &mut SalvageStats::default());
-        assert_eq!(saved.terminal_order, Some(vec![keys[3].clone(), keys[1].clone(), keys[0].clone(), keys[2].clone()]));
+        saved.terminal_order = Some(vec![
+            keys[3].clone(),
+            PaneKey::new(),
+            keys[3].clone(),
+            keys[1].clone(),
+        ]);
+        normalize_saved_layout_stable_ids(
+            &mut saved,
+            Some(&binding.worktree_id),
+            &mut SalvageStats::default(),
+        );
+        assert_eq!(
+            saved.terminal_order,
+            Some(vec![
+                keys[3].clone(),
+                keys[1].clone(),
+                keys[0].clone(),
+                keys[2].clone()
+            ])
+        );
         assert_eq!(saved.selected_terminal_pane_key.as_ref(), Some(&keys[3]));
         assert_eq!(saved.active_tab_index, 1);
         assert_eq!(saved.active_tab_id, saved.tabs[1].tab_id);
         assert_eq!(serde_json::to_value(&saved.tabs).unwrap(), records);
         let json = serde_json::to_string(&saved).unwrap();
         let again = decode_saved_layout(&json, Some(&binding.worktree_id)).unwrap();
-        assert!(!again.repaired, "normalized metadata must not churn on reopen");
+        assert!(
+            !again.repaired,
+            "normalized metadata must not churn on reopen"
+        );
         assert_eq!(again.normalized_json, json);
     }
 
@@ -2557,7 +2590,10 @@ mod tests {
         let SavedSplitNode::Split { children, .. } = &mut expected_tabs[1].split_layout else {
             panic!("second owner must keep its split");
         };
-        let SavedSplitNode::Leaf { active_pane_key, .. } = &mut children[1] else {
+        let SavedSplitNode::Leaf {
+            active_pane_key, ..
+        } = &mut children[1]
+        else {
             panic!("selected owner must keep its leaf");
         };
         *active_pane_key = Some(keys[4].clone());
@@ -2595,7 +2631,10 @@ mod tests {
             candidate.terminal_order = Some(keys.iter().rev().cloned().collect());
             normalize_saved_layout_stable_ids(&mut candidate, None, &mut SalvageStats::default());
 
-            assert_eq!(candidate.selected_terminal_pane_key.as_ref(), Some(&keys[2]));
+            assert_eq!(
+                candidate.selected_terminal_pane_key.as_ref(),
+                Some(&keys[2])
+            );
             assert_eq!(candidate.active_tab_index, 1);
             assert_eq!(candidate.active_tab_id, candidate.tabs[1].tab_id);
             assert_eq!(candidate.terminal_order.as_ref().unwrap()[0], keys[3]);
@@ -2616,22 +2655,37 @@ mod tests {
         value["selectedTerminalPaneKey"] = serde_json::json!({"invalid": true});
         value["terminalOrder"] = serde_json::json!([false, keys[1], "bad-pane-key", keys[1], null]);
         let decoded = decode_saved_layout(&value.to_string(), None).unwrap();
-        assert_eq!(decoded.layout.terminal_order, Some(vec![keys[1].clone(), keys[0].clone()]));
-        assert_eq!(decoded.layout.selected_terminal_pane_key.as_ref(), Some(&keys[0]));
+        assert_eq!(
+            decoded.layout.terminal_order,
+            Some(vec![keys[1].clone(), keys[0].clone()])
+        );
+        assert_eq!(
+            decoded.layout.selected_terminal_pane_key.as_ref(),
+            Some(&keys[0])
+        );
         assert_eq!(serde_json::to_value(&decoded.layout.tabs).unwrap(), records);
         let mut stats = SalvageStats::default();
         let mut salvaged = salvage_project_layout(&value, &mut stats).unwrap();
         normalize_saved_layout_stable_ids(&mut salvaged, None, &mut stats);
-        assert_eq!(serde_json::to_value(&salvaged).unwrap(), serde_json::to_value(&decoded.layout).unwrap());
+        assert_eq!(
+            serde_json::to_value(&salvaged).unwrap(),
+            serde_json::to_value(&decoded.layout).unwrap()
+        );
         value["terminalOrder"] = serde_json::json!({"also": "invalid"});
         let decoded = decode_saved_layout(&value.to_string(), None).unwrap();
         assert_eq!(decoded.layout.terminal_order.as_ref(), Some(&keys));
         assert_eq!(serde_json::to_value(&decoded.layout.tabs).unwrap(), records);
         value.as_object_mut().unwrap().remove("terminalOrder");
-        value.as_object_mut().unwrap().remove("selectedTerminalPaneKey");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("selectedTerminalPaneKey");
         let legacy = decode_saved_layout(&value.to_string(), None).unwrap();
         assert_eq!(legacy.layout.terminal_order.as_ref(), Some(&keys));
-        assert_eq!(legacy.layout.selected_terminal_pane_key.as_ref(), Some(&keys[0]));
+        assert_eq!(
+            legacy.layout.selected_terminal_pane_key.as_ref(),
+            Some(&keys[0])
+        );
     }
 
     #[test]
@@ -2641,16 +2695,28 @@ mod tests {
         let first = binding("first", "/repo/shared");
         let latest = binding("latest", "/repo/shared");
         let mut saved = layout("sh");
-        normalize_saved_layout_stable_ids(&mut saved, Some(&first.worktree_id), &mut SalvageStats::default());
+        normalize_saved_layout_stable_ids(
+            &mut saved,
+            Some(&first.worktree_id),
+            &mut SalvageStats::default(),
+        );
         let keys = saved.terminal_order.clone().unwrap();
         store.save_worktree_layout(&first, &saved, 1).unwrap();
         saved.selected_terminal_pane_key = Some(keys[1].clone());
         saved.terminal_order = Some(vec![keys[1].clone(), keys[0].clone()]);
         store.save_worktree_layout(&latest, &saved, 2).unwrap();
         let destination = worktree_json(&store, &first.worktree_id).unwrap();
-        assert_eq!(legacy_json(&store, "latest").as_deref(), Some(destination.as_str()));
-        assert_ne!(legacy_json(&store, "first").as_deref(), Some(destination.as_str()));
-        let reconciled = store.reconcile_worktree_layouts(&[first.clone(), latest.clone()], 3).unwrap();
+        assert_eq!(
+            legacy_json(&store, "latest").as_deref(),
+            Some(destination.as_str())
+        );
+        assert_ne!(
+            legacy_json(&store, "first").as_deref(),
+            Some(destination.as_str())
+        );
+        let reconciled = store
+            .reconcile_worktree_layouts(&[first.clone(), latest.clone()], 3)
+            .unwrap();
         for alias in ["first", "latest"] {
             let layout = &reconciled.layouts[alias];
             assert_eq!(layout.selected_terminal_pane_key.as_ref(), Some(&keys[1]));
@@ -2658,7 +2724,10 @@ mod tests {
         }
         assert_eq!(worktree_updated_at(&store, &first.worktree_id), Some(2));
         store.delete_project_binding("first").unwrap();
-        assert_eq!(worktree_json(&store, &latest.worktree_id).as_deref(), Some(destination.as_str()));
+        assert_eq!(
+            worktree_json(&store, &latest.worktree_id).as_deref(),
+            Some(destination.as_str())
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

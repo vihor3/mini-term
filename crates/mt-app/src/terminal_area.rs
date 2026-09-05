@@ -3,9 +3,9 @@
 
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClickEvent, Context, Entity, FocusHandle,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled,
-    Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder, px,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement,
+    Pixels, Render, SharedString, StatefulInteractiveElement, Styled, Window, anchored, canvas,
+    deferred, div, point, prelude::FluentBuilder, px,
 };
 use mt_identity::WorktreeId;
 use mt_ui::icon_tooltip::IconTooltips;
@@ -59,7 +59,6 @@ const MARKER_SEQ_W: f32 = 32.0;
 /// 宁可把列撑开也别把字折了。
 const MARKER_TIME_W: f32 = 40.0;
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TabMenuAction {
     Rename,
@@ -87,17 +86,25 @@ pub(crate) fn tab_menu(
     label: &str,
     cx: &App,
 ) -> Vec<MenuEntry> {
-    if store.read(cx).resolve_terminal_jump_target(target).is_none() {
+    if store
+        .read(cx)
+        .resolve_terminal_jump_target(target)
+        .is_none()
+    {
         return Vec::new();
     }
-    let pane_state = store.read(cx)
+    let pane_state = store
+        .read(cx)
         .project_state(&target.project_id)
         .and_then(|state| state.pane(target.pane_key.as_str()));
     let segment = pane_state
         .map(|pane| branch_menu_segment(pane.ai_session.as_ref(), pane.detected_agent.as_deref()))
         .unwrap_or(BranchMenuSegment::None);
-    let project_path = store.read(cx).project(&target.project_id)
-        .map(|project| project.path.clone()).unwrap_or_default();
+    let project_path = store
+        .read(cx)
+        .project(&target.project_id)
+        .map(|project| project.path.clone())
+        .unwrap_or_default();
     let session_id = match &segment {
         BranchMenuSegment::Fork { session_id, .. } => session_id.clone(),
         _ => String::new(),
@@ -105,7 +112,9 @@ pub(crate) fn tab_menu(
     tab_menu_actions(
         matches!(segment, BranchMenuSegment::Fork { .. }),
         segment == BranchMenuSegment::NeedsIdentity,
-    ).into_iter().map(|action| {
+    )
+    .into_iter()
+    .map(|action| {
         let store = store.clone();
         let target = target.clone();
         match action {
@@ -115,25 +124,45 @@ pub(crate) fn tab_menu(
                 MenuItem::new(t("paneGroup", "rename"))
                     .shortcut(hotkey_label(false, false, false, "F2"))
                     .on_click(move |window, cx| {
-                        if store.read(cx).resolve_terminal_jump_target(&target).is_none() {
+                        if store
+                            .read(cx)
+                            .resolve_terminal_jump_target(&target)
+                            .is_none()
+                        {
                             return;
                         }
                         modal::open_rename_pane(
-                            store.clone(), target.project_id.clone(),
-                            target.pane_key.to_string(), label.clone(), window, cx,
+                            store.clone(),
+                            target.project_id.clone(),
+                            target.pane_key.to_string(),
+                            label.clone(),
+                            window,
+                            cx,
                         );
-                    }).into()
+                    })
+                    .into()
             }
-            Some(TabMenuAction::ForkSession) => menu::item(t("paneGroup", "forkSession"), move |window, cx| {
-                if store.read(cx).resolve_terminal_jump_target(&target).is_some() {
-                    pane_actions::fork_pane_session(
-                        store.clone(), target.project_id.clone(),
-                        target.pane_key.to_string(), window, cx,
-                    );
-                }
-            }),
+            Some(TabMenuAction::ForkSession) => {
+                menu::item(t("paneGroup", "forkSession"), move |window, cx| {
+                    if store
+                        .read(cx)
+                        .resolve_terminal_jump_target(&target)
+                        .is_some()
+                    {
+                        pane_actions::fork_pane_session(
+                            store.clone(),
+                            target.project_id.clone(),
+                            target.pane_key.to_string(),
+                            window,
+                            cx,
+                        );
+                    }
+                })
+            }
             Some(TabMenuAction::ViewSessionBranches) => branch_family::view_branches_menu_item(
-                &store, project_path.clone(), session_id.clone(),
+                &store,
+                project_path.clone(),
+                session_id.clone(),
             ),
             Some(TabMenuAction::ForkNeedsIdentity) => branch_family::needs_identity_menu_item(),
             Some(TabMenuAction::CloseTab) => MenuItem::new(t("paneGroup", "closeTab"))
@@ -141,9 +170,11 @@ pub(crate) fn tab_menu(
                 .shortcut(hotkey_label(true, true, false, "W"))
                 .on_click(move |window, cx| {
                     pane_actions::close_terminal_target(store.clone(), target.clone(), window, cx);
-                }).into(),
+                })
+                .into(),
         }
-    }).collect()
+    })
+    .collect()
 }
 
 fn new_terminal_scope_matches(
@@ -167,16 +198,27 @@ pub(crate) fn open_new_terminal_menu(
 ) {
     let (project_id, worktree_id, anchor, shells, launchers) = {
         let state = store.read(cx);
-        let Some(project_id) = state.active_project_id.clone() else { return; };
-        let Some(worktree_id) = state.active_worktree_id().cloned() else { return; };
-        let anchor = state.active_pane_id(&project_id)
+        let Some(project_id) = state.active_project_id.clone() else {
+            return;
+        };
+        let Some(worktree_id) = state.active_worktree_id().cloned() else {
+            return;
+        };
+        let anchor = state
+            .active_pane_id(&project_id)
             .and_then(|pane| state.terminal_jump_target_for_pane(&project_id, &pane));
         let (shells, launchers) = pane_actions::new_terminal_menu_data(state, &project_id);
         (project_id, worktree_id, anchor, shells, launchers)
     };
     if !pane_actions::should_show_new_terminal_menu(shells.len(), launchers.len()) {
         store.update(cx, |store, cx| {
-            store.new_terminal(&project_id, None, anchor.map(|target| target.pane_key.to_string()), window, cx);
+            store.new_terminal(
+                &project_id,
+                None,
+                anchor.map(|target| target.pane_key.to_string()),
+                window,
+                cx,
+            );
         });
         crate::workbench_area::activate_terminal_page(window, cx);
         return;
@@ -186,23 +228,46 @@ pub(crate) fn open_new_terminal_menu(
         launchers,
         {
             let store = store.clone();
-            let (project_id, worktree_id, anchor) = (project_id.clone(), worktree_id.clone(), anchor.clone());
+            let (project_id, worktree_id, anchor) =
+                (project_id.clone(), worktree_id.clone(), anchor.clone());
             move |shell, window, cx| {
-                if !new_terminal_scope_matches(store.read(cx), &project_id, &worktree_id, anchor.as_ref()) {
+                if !new_terminal_scope_matches(
+                    store.read(cx),
+                    &project_id,
+                    &worktree_id,
+                    anchor.as_ref(),
+                ) {
                     return;
                 }
                 store.update(cx, |store, cx| {
-                    store.new_terminal(&project_id, Some(shell), anchor.as_ref().map(|target| target.pane_key.to_string()), window, cx);
+                    store.new_terminal(
+                        &project_id,
+                        Some(shell),
+                        anchor.as_ref().map(|target| target.pane_key.to_string()),
+                        window,
+                        cx,
+                    );
                 });
                 crate::workbench_area::activate_terminal_page(window, cx);
             }
         },
         move |launcher, window, cx| {
-            if !new_terminal_scope_matches(store.read(cx), &project_id, &worktree_id, anchor.as_ref()) {
+            if !new_terminal_scope_matches(
+                store.read(cx),
+                &project_id,
+                &worktree_id,
+                anchor.as_ref(),
+            ) {
                 return;
             }
             store.update(cx, |store, cx| {
-                store.new_terminal_from_launcher(&project_id, &launcher, anchor.as_ref().map(|target| target.pane_key.to_string()), window, cx);
+                store.new_terminal_from_launcher(
+                    &project_id,
+                    &launcher,
+                    anchor.as_ref().map(|target| target.pane_key.to_string()),
+                    window,
+                    cx,
+                );
             });
             crate::workbench_area::activate_terminal_page(window, cx);
         },
@@ -230,15 +295,18 @@ pub struct TerminalArea {
 impl TerminalArea {
     pub fn new(store: Entity<AppStore>, cx: &mut Context<Self>) -> Self {
         cx.observe(&store, |area, _, cx| {
-            if area.marker_open.as_ref().is_some_and(|(target, _)| {
-                !selected_target_matches(area.store.read(cx), target)
-            }) {
+            if area
+                .marker_open
+                .as_ref()
+                .is_some_and(|(target, _)| !selected_target_matches(area.store.read(cx), target))
+            {
                 area.marker_open = None;
                 area.marker_prev_focus = None;
                 overlay::pop(overlay::key(overlay::kind::MARKER_LIST));
             }
             cx.notify();
-        }).detach();
+        })
+        .detach();
         Self {
             store,
             icon_tooltips: cx.new(|_| IconTooltips::default()),
@@ -278,7 +346,8 @@ impl TerminalArea {
         {
             return;
         }
-        self.store.update(cx, |store, cx| store.refresh_markers_for_pty(pty_id, cx));
+        self.store
+            .update(cx, |store, cx| store.refresh_markers_for_pty(pty_id, cx));
         self.marker_open = Some((target.clone(), pty_id));
         self.marker_prev_focus = window.focused(cx);
         window.focus(&self.marker_focus);
@@ -286,10 +355,14 @@ impl TerminalArea {
     }
 
     fn close_marker_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((target, _)) = self.marker_open.take() else { return; };
+        let Some((target, _)) = self.marker_open.take() else {
+            return;
+        };
         overlay::pop(overlay::key(overlay::kind::MARKER_LIST));
         let prev = self.marker_prev_focus.take();
-        if selected_target_matches(self.store.read(cx), &target) && let Some(prev) = prev {
+        if selected_target_matches(self.store.read(cx), &target)
+            && let Some(prev) = prev
+        {
             window.focus(&prev);
         }
         cx.notify();
@@ -493,7 +566,6 @@ impl TerminalArea {
         )
     }
 
-
     fn render_tools(
         &mut self,
         target: &TerminalJumpTarget,
@@ -507,41 +579,96 @@ impl TerminalArea {
             &self.icon_tooltips,
             "terminal-search-description",
             t("terminalSearch", "title"),
-            div().id("terminal-search").w(px(26.0)).h(px(26.0))
-                .flex().items_center().justify_center().rounded(px(3.0))
-                .cursor_pointer().hover(|el| el.bg(ui::border_subtle()))
+            div()
+                .id("terminal-search")
+                .w(px(26.0))
+                .h(px(26.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.0))
+                .cursor_pointer()
+                .hover(|el| el.bg(ui::border_subtle()))
                 .child(VectorIcon::new(ICON_SEARCH, px(14.0)).ink(ui::text_muted()))
                 .on_click(cx.listener(move |this, _event, window, cx| {
-                    if !selected_target_matches(this.store.read(cx), &target_search) { return; }
+                    if !selected_target_matches(this.store.read(cx), &target_search) {
+                        return;
+                    }
                     let pane = this.store.read(cx).terminal(pty_id).cloned();
                     if let Some(pane) = pane {
                         pane.update(cx, |pane, cx| pane.open_search(window, cx));
                     }
                 })),
-            window, cx,
+            window,
+            cx,
         );
-        let mut tools = div().id("terminal-tools")
-            .h(px(30.0)).flex_none().flex().items_center().justify_end()
-            .gap(px(4.0)).px(px(6.0)).child(search);
+        let mut tools = div()
+            .id("terminal-tools")
+            .h(px(30.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(4.0))
+            .px(px(6.0))
+            .child(search);
         if marker_count > 0 {
             let target = target.clone();
             let this = cx.entity();
-            let markers = div().id("terminal-markers")
-                .relative().h(px(24.0)).w(px(76.0)).flex_none().px(px(6.0))
-                .flex().items_center().justify_center().gap(px(4.0))
-                .rounded(px(3.0)).cursor_pointer().text_size(ui::font_px(12.0))
-                .text_color(ui::text_muted()).hover(|el| el.bg(ui::border_subtle()))
-                .child("⚑").child(div().min_w(px(0.0)).truncate().child(marker_count.to_string()))
-                .child(canvas(move |bounds, _window, cx| {
-                    this.update(cx, |area, _| area.marker_anchor = Some(bounds));
-                }, |_, _, _, _| {}).absolute().size_full())
+            let markers = div()
+                .id("terminal-markers")
+                .relative()
+                .h(px(24.0))
+                .w(px(76.0))
+                .flex_none()
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(4.0))
+                .rounded(px(3.0))
+                .cursor_pointer()
+                .text_size(ui::font_px(12.0))
+                .text_color(ui::text_muted())
+                .hover(|el| el.bg(ui::border_subtle()))
+                .child("⚑")
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .child(marker_count.to_string()),
+                )
+                .child(
+                    canvas(
+                        move |bounds, _window, cx| {
+                            this.update(cx, |area, _| area.marker_anchor = Some(bounds));
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
                 .on_click(cx.listener(move |this, _event, window, cx| {
                     this.toggle_marker_popover(&target, pty_id, window, cx);
                 }));
             tools = tools.child(IconTooltips::button(
-                &self.icon_tooltips, "terminal-markers-description",
-                mt_i18n::t_args("paneGroup", "markerTooltip", &[("mod", if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" })]),
-                markers, window, cx,
+                &self.icon_tooltips,
+                "terminal-markers-description",
+                mt_i18n::t_args(
+                    "paneGroup",
+                    "markerTooltip",
+                    &[(
+                        "mod",
+                        if cfg!(target_os = "macos") {
+                            "Cmd"
+                        } else {
+                            "Ctrl"
+                        },
+                    )],
+                ),
+                markers,
+                window,
+                cx,
             ));
         }
         IconTooltips::group(&self.icon_tooltips, tools, window, cx).into_any_element()
@@ -554,11 +681,12 @@ impl TerminalArea {
         position: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let next = if bounds.contains(&position) && selected_target_matches(self.store.read(cx), target) {
-            Some(target.clone())
-        } else {
-            None
-        };
+        let next =
+            if bounds.contains(&position) && selected_target_matches(self.store.read(cx), target) {
+                Some(target.clone())
+            } else {
+                None
+            };
         if self.file_drop_target != next {
             self.file_drop_target = next;
             cx.notify();
@@ -582,25 +710,47 @@ impl TerminalArea {
         cx.notify();
     }
 
-    fn render_reconnect(
-        &self,
-        target: &TerminalJumpTarget,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_reconnect(&self, target: &TerminalJumpTarget, cx: &mut Context<Self>) -> AnyElement {
         let target = target.clone();
-        div().id("terminal-reconnect").absolute().inset_0().occlude()
-            .flex().flex_col().items_center().justify_center().gap(px(12.0))
+        div()
+            .id("terminal-reconnect")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(12.0))
             .bg(gpui::rgba(0x0000008c))
-            .child(div().text_size(ui::font_px(12.0)).text_color(ui::text_secondary())
-                .child(t("paneGroup", "remoteDisconnected")))
-            .child(ui::ghost_button("terminal-reconnect-button", t("paneGroup", "reconnect"))
-                .on_click(cx.listener(move |this, _event, window, cx| {
-                    if !selected_target_matches(this.store.read(cx), &target) { return; }
-                    this.store.update(cx, |store, cx| {
-                        store.reset_pane_for_reconnect(&target.project_id, target.pane_key.as_str(), cx);
-                        store.focus_pane(&target.project_id, target.pane_key.as_str(), window, cx);
-                    });
-                }))).into_any_element()
+            .child(
+                div()
+                    .text_size(ui::font_px(12.0))
+                    .text_color(ui::text_secondary())
+                    .child(t("paneGroup", "remoteDisconnected")),
+            )
+            .child(
+                ui::ghost_button("terminal-reconnect-button", t("paneGroup", "reconnect"))
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        if !selected_target_matches(this.store.read(cx), &target) {
+                            return;
+                        }
+                        this.store.update(cx, |store, cx| {
+                            store.reset_pane_for_reconnect(
+                                &target.project_id,
+                                target.pane_key.as_str(),
+                                cx,
+                            );
+                            store.focus_pane(
+                                &target.project_id,
+                                target.pane_key.as_str(),
+                                window,
+                                cx,
+                            );
+                        });
+                    })),
+            )
+            .into_any_element()
     }
 }
 
@@ -609,9 +759,13 @@ impl Render for TerminalArea {
         let selected = {
             let store = self.store.read(cx);
             store.active_project_id.as_ref().and_then(|project_id| {
-                let pane = store.project_state(project_id)?.selected_terminal()?.clone();
+                let pane = store
+                    .project_state(project_id)?
+                    .selected_terminal()?
+                    .clone();
                 let target = store.terminal_jump_target_for_pane(project_id, &pane.id)?;
-                let terminal = store.resolve_terminal_jump_target(&target)
+                let terminal = store
+                    .resolve_terminal_jump_target(&target)
                     .filter(|(_, live)| *live)
                     .and_then(|_| pane.pty_id.and_then(|pty| store.terminal(pty)))
                     .cloned();
@@ -623,46 +777,91 @@ impl Render for TerminalArea {
         if !cx.has_active_drag() {
             self.file_drop_target = None;
         }
-        if self.marker_open.as_ref().is_some_and(|(target, _)| {
-            !selected_target_matches(self.store.read(cx), target)
-        }) {
+        if self
+            .marker_open
+            .as_ref()
+            .is_some_and(|(target, _)| !selected_target_matches(self.store.read(cx), target))
+        {
             self.close_marker_popover(window, cx);
         }
-        let mut root = div().size_full().min_w(px(0.0)).min_h(px(0.0))
-            .flex().flex_col().overflow_hidden().bg(ui::bg_terminal());
+        let mut root = div()
+            .size_full()
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .bg(ui::bg_terminal());
         let Some((target, pane, terminal, reconnect)) = selected else {
             if self.store.read(cx).active_project().is_none() {
                 return if self.store.read(cx).config().projects.is_empty() {
                     crate::first_run::guide(self.store.clone())
                 } else {
-                    root.items_center().justify_center().text_color(ui::text_muted())
+                    root.items_center()
+                        .justify_center()
+                        .text_color(ui::text_muted())
                         .child(t("app", "emptyState"))
                 };
             }
-            let project_name = self.store.read(cx).active_project().map(|project| project.name.clone());
-            return root.child(div().flex_1().flex().flex_col().items_center().justify_center()
-                .gap(px(12.0)).text_color(ui::text_muted())
-                .children(project_name.map(|name| {
-                    div().child(tr!("terminalArea", "emptyTitle", project = name))
-                }))
-                .when(self.store.read(cx).active_project_id.is_some(), |el| {
-                    el.child(ui::ghost_button("empty-new-terminal", t("terminalArea", "newTerminal"))
-                        .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                            open_new_terminal_menu(this.store.clone(), click_position(event, window), window, cx);
-                        })))
-                }));
+            let project_name = self
+                .store
+                .read(cx)
+                .active_project()
+                .map(|project| project.name.clone());
+            return root.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(12.0))
+                    .text_color(ui::text_muted())
+                    .children(
+                        project_name.map(|name| {
+                            div().child(tr!("terminalArea", "emptyTitle", project = name))
+                        }),
+                    )
+                    .when(self.store.read(cx).active_project_id.is_some(), |el| {
+                        el.child(
+                            ui::ghost_button(
+                                "empty-new-terminal",
+                                t("terminalArea", "newTerminal"),
+                            )
+                            .on_click(cx.listener(
+                                |this, event: &ClickEvent, window, cx| {
+                                    open_new_terminal_menu(
+                                        this.store.clone(),
+                                        click_position(event, window),
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        )
+                    }),
+            );
         };
         if let Some(pty_id) = pane.pty_id {
             root = root.child(self.render_tools(&target, pty_id, window, cx));
         }
         let file_drop_over = self.file_drop_target.as_ref() == Some(&target);
         let focus_target = target.clone();
-        let mut body = div().id("selected-terminal-body").flex_1().min_h(px(0.0))
-            .relative().overflow_hidden()
+        let mut body = div()
+            .id("selected-terminal-body")
+            .flex_1()
+            .min_h(px(0.0))
+            .relative()
+            .overflow_hidden()
             .on_click(cx.listener(move |this, _event, window, cx| {
                 if selected_target_matches(this.store.read(cx), &focus_target) {
                     this.store.update(cx, |store, cx| {
-                        store.focus_pane(&focus_target.project_id, focus_target.pane_key.as_str(), window, cx);
+                        store.focus_pane(
+                            &focus_target.project_id,
+                            focus_target.pane_key.as_str(),
+                            window,
+                            cx,
+                        );
                     });
                 }
             }))
@@ -681,29 +880,51 @@ impl Render for TerminalArea {
             .on_drop(cx.listener({
                 let target = target.clone();
                 move |this, item: &crate::dnd::DragFilePath, window, cx| {
-                    this.insert_path_into_pane(&target, &crate::dnd::quote_path(&item.0), window, cx);
+                    this.insert_path_into_pane(
+                        &target,
+                        &crate::dnd::quote_path(&item.0),
+                        window,
+                        cx,
+                    );
                 }
             }))
             .on_drop(cx.listener({
                 let target = target.clone();
                 move |this, item: &gpui::ExternalPaths, window, cx| {
-                    this.insert_path_into_pane(&target, &crate::dnd::quote_paths(item.paths()), window, cx);
+                    this.insert_path_into_pane(
+                        &target,
+                        &crate::dnd::quote_paths(item.paths()),
+                        window,
+                        cx,
+                    );
                 }
             }));
         // A selection change never mounts an outgoing live terminal.
         body = if let Some(terminal) = terminal {
             body.child(terminal)
         } else {
-            body.child(div().size_full().flex().items_center().justify_center()
-                .text_color(ui::text_muted()).child(t("paneGroup", if pane.status == crate::tree::PaneStatus::Error {
-                    "startFailed"
-                } else {
-                    "starting"
-                })))
+            body.child(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(ui::text_muted())
+                    .child(t(
+                        "paneGroup",
+                        if pane.status == crate::tree::PaneStatus::Error {
+                            "startFailed"
+                        } else {
+                            "starting"
+                        },
+                    )),
+            )
         };
-        root.child(body.when(file_drop_over, |el| el.child(drop_hint()))
-            .when(reconnect, |el| el.child(self.render_reconnect(&target, cx))))
-            .children(self.render_marker_popover(window, cx))
+        root.child(
+            body.when(file_drop_over, |el| el.child(drop_hint()))
+                .when(reconnect, |el| el.child(self.render_reconnect(&target, cx))),
+        )
+        .children(self.render_marker_popover(window, cx))
     }
 }
 
@@ -731,7 +952,6 @@ fn drop_hint() -> AnyElement {
         )
         .into_any_element()
 }
-
 
 pub(crate) fn click_position(event: &ClickEvent, window: &Window) -> gpui::Point<gpui::Pixels> {
     match event {
@@ -765,13 +985,31 @@ mod tests {
     #[test]
     fn terminal_menu_closes_only_one_terminal_and_never_offers_splits() {
         use TabMenuAction::*;
-        assert_eq!(tab_menu_actions(false, false), vec![Some(Rename), None, Some(CloseTab)]);
-        assert_eq!(tab_menu_actions(true, false), vec![
-            Some(Rename), None, Some(ForkSession), Some(ViewSessionBranches), None, Some(CloseTab),
-        ]);
-        assert_eq!(tab_menu_actions(false, true), vec![
-            Some(Rename), None, Some(ForkNeedsIdentity), None, Some(CloseTab),
-        ]);
+        assert_eq!(
+            tab_menu_actions(false, false),
+            vec![Some(Rename), None, Some(CloseTab)]
+        );
+        assert_eq!(
+            tab_menu_actions(true, false),
+            vec![
+                Some(Rename),
+                None,
+                Some(ForkSession),
+                Some(ViewSessionBranches),
+                None,
+                Some(CloseTab),
+            ]
+        );
+        assert_eq!(
+            tab_menu_actions(false, true),
+            vec![
+                Some(Rename),
+                None,
+                Some(ForkNeedsIdentity),
+                None,
+                Some(CloseTab),
+            ]
+        );
         assert!(!tab_menu_actions(true, true).contains(&Some(ForkNeedsIdentity)));
     }
 }

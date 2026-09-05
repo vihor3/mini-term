@@ -15,11 +15,9 @@ use mt_ui::{DwellConfig, TerminalStyle};
 use crate::pane::{HostedLaunch, PaneEvent, TerminalPane, TerminalRecovery};
 use crate::tree::{AiSessionRef, PaneState, PaneStatus, ProjectPanel, SplitNode};
 
-use super::{AppStore, ProjectState, TerminalJumpTarget};
 use super::identity::TerminalRoute;
 use super::pure::{
-    resolve_auto_resume_command, resolve_resume_cwd, resolve_scrollback,
-    terminal_style_from,
+    resolve_auto_resume_command, resolve_resume_cwd, resolve_scrollback, terminal_style_from,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,7 +52,10 @@ impl TerminalCloseRequest {
         // A completed flush forgets its owner. Divergent captured aliases are
         // therefore not proof that this source owns the latest saved layout.
         dirty_owner.is_none_or(|owner| owner == self.target.project_id.as_str())
-            && self.aliases.iter().all(|(_, saved)| saved == &self.source_layout)
+            && self
+                .aliases
+                .iter()
+                .all(|(_, saved)| saved == &self.source_layout)
     }
 }
 
@@ -110,8 +111,10 @@ fn close_has_other_attachment(
         &route.terminal_session_id == session_id && Some(*pty_id) != request.pty_id
     }) || states.iter().any(|(project_id, state)| {
         state.all_panes().iter().any(|pane| {
-            &pane.terminal_session_id == session_id && pane.pty_id.is_some()
-                && (project_id != &request.target.project_id || pane.pane_key != request.target.pane_key)
+            &pane.terminal_session_id == session_id
+                && pane.pty_id.is_some()
+                && (project_id != &request.target.project_id
+                    || pane.pane_key != request.target.pane_key)
         })
     })
 }
@@ -138,7 +141,11 @@ impl PendingTerminalCloses {
 
     fn finish(&mut self, request: &Arc<TerminalCloseRequest>) -> bool {
         let session_id = &request.target.terminal_session_id;
-        if !self.requests.get(session_id).is_some_and(|owner| Arc::ptr_eq(owner, request)) {
+        if !self
+            .requests
+            .get(session_id)
+            .is_some_and(|owner| Arc::ptr_eq(owner, request))
+        {
             return false;
         }
         self.requests.remove(session_id);
@@ -170,13 +177,18 @@ fn terminal_close_plan(request: &TerminalCloseRequest, host_available: bool) -> 
 
 fn dormant_close_error(code: Option<HostErrorCode>) -> &'static str {
     match code {
-        Some(HostErrorCode::IncarnationMismatch) =>
-            "Terminal identity changed. The saved terminal was kept.",
-        Some(HostErrorCode::SessionMissing | HostErrorCode::RecoveryUnavailable) =>
-            "Terminal history could not be safely closed. The saved terminal was kept.",
-        Some(HostErrorCode::ProtocolMismatch) =>
-            "Terminal host version mismatch. The saved terminal was kept.",
-        _ => "Terminal close was not confirmed. The saved terminal was kept; retry when the host is available.",
+        Some(HostErrorCode::IncarnationMismatch) => {
+            "Terminal identity changed. The saved terminal was kept."
+        }
+        Some(HostErrorCode::SessionMissing | HostErrorCode::RecoveryUnavailable) => {
+            "Terminal history could not be safely closed. The saved terminal was kept."
+        }
+        Some(HostErrorCode::ProtocolMismatch) => {
+            "Terminal host version mismatch. The saved terminal was kept."
+        }
+        _ => {
+            "Terminal close was not confirmed. The saved terminal was kept; retry when the host is available."
+        }
     }
 }
 
@@ -305,8 +317,14 @@ impl AppStore {
         Some(pane_id)
     }
 
-    pub(crate) fn terminal_close_request(&self, target: &TerminalJumpTarget) -> Option<TerminalCloseRequest> {
-        if self.pending_terminal_closes.contains(&target.terminal_session_id) {
+    pub(crate) fn terminal_close_request(
+        &self,
+        target: &TerminalJumpTarget,
+    ) -> Option<TerminalCloseRequest> {
+        if self
+            .pending_terminal_closes
+            .contains(&target.terminal_session_id)
+        {
             return None;
         }
         self.terminal_close_snapshot(target)
@@ -317,16 +335,25 @@ impl AppStore {
         let project = self.project(&target.project_id)?;
         let state = self.project_states.get(&target.project_id)?;
         let pane = state.pane(target.pane_key.as_str())?;
-        let binding = self.project_worktree_bindings.get(&target.project_id)?.clone();
-        let aliases = terminal_close_aliases(target, &self.project_worktree_bindings, &self.project_states)?;
+        let binding = self
+            .project_worktree_bindings
+            .get(&target.project_id)?
+            .clone();
+        let aliases = terminal_close_aliases(
+            target,
+            &self.project_worktree_bindings,
+            &self.project_states,
+        )?;
         Some(TerminalCloseRequest {
             target: target.clone(),
             pty_id: pane.pty_id,
             binding,
             project_path: project.path.clone(),
             ssh_connection_id: project.ssh_connection_id.clone(),
-            connection_fingerprint: self.remote_connection_of(&target.project_id)
-                .as_ref().map(crate::remote_ssh::connection_fingerprint),
+            connection_fingerprint: self
+                .remote_connection_of(&target.project_id)
+                .as_ref()
+                .map(crate::remote_ssh::connection_fingerprint),
             source_layout: serde_json::to_value(state.saved_layout()).ok()?,
             aliases,
         })
@@ -336,17 +363,30 @@ impl AppStore {
         close_has_other_attachment(request, &self.terminal_routes, &self.project_states)
     }
 
-    fn report_terminal_close_error(&self, target: &TerminalJumpTarget, message: &str, cx: &mut Context<Self>) {
+    fn report_terminal_close_error(
+        &self,
+        target: &TerminalJumpTarget,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(project) = self.project(&target.project_id) else {
             return;
         };
         crate::toast::push_message_deduped(
             crate::notify::ToastKind::PasteError,
-            target.project_id.clone(), project.name.clone(), message.to_string(), cx,
+            target.project_id.clone(),
+            project.name.clone(),
+            message.to_string(),
+            cx,
         );
     }
 
-    fn report_terminal_close_conflict(&mut self, target: &TerminalJumpTarget, message: &str, cx: &mut Context<Self>) {
+    fn report_terminal_close_conflict(
+        &mut self,
+        target: &TerminalJumpTarget,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(state) = self.project_states.get_mut(&target.project_id) {
             if let Some(pane) = state.pane_mut(target.pane_key.as_str()) {
                 pane.status = PaneStatus::Error;
@@ -364,22 +404,30 @@ impl AppStore {
         request: TerminalCloseRequest,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
-        if self.pending_terminal_closes.contains(&request.target.terminal_session_id)
-            || self.terminal_close_snapshot(&request.target)
+        if self
+            .pending_terminal_closes
+            .contains(&request.target.terminal_session_id)
+            || self
+                .terminal_close_snapshot(&request.target)
                 .is_none_or(|current| !request.matches_before_dispatch(&current))
         {
             return Task::ready(false);
         }
         if !request.may_replace_alias_layout(
-            self.layout_dirty_worktree_owners.get(&request.target.worktree_id).map(String::as_str),
+            self.layout_dirty_worktree_owners
+                .get(&request.target.worktree_id)
+                .map(String::as_str),
         ) {
             self.report_terminal_close_conflict(&request.target,
                 "Another project may own a newer layout. The terminal was kept; review the project aliases before closing it.", cx);
             return Task::ready(false);
         }
         if self.close_has_other_attachment(&request) {
-            self.report_terminal_close_error(&request.target,
-                "This terminal is attached through another project. The saved terminal was kept.", cx);
+            self.report_terminal_close_error(
+                &request.target,
+                "This terminal is attached through another project. The saved terminal was kept.",
+                cx,
+            );
             return Task::ready(false);
         }
         let incarnation = match terminal_close_plan(&request, self.terminal_host.is_some()) {
@@ -452,14 +500,17 @@ impl AppStore {
         // Closing a background terminal must not start unrelated dormant records.
         let hydrate_neighbor = was_selected
             && self.active_project_id.as_deref() == Some(project_id)
-            && self.project_states.get(project_id)
+            && self
+                .project_states
+                .get(project_id)
                 .and_then(|state| state.selected_terminal())
                 .is_some_and(|pane| pane.pty_id.is_none());
         if hydrate_neighbor {
             self.hydrate_project(project_id, cx);
         }
         self.after_layout_change(project_id, cx);
-        was_selected && self.active_project_id.as_deref() == Some(project_id)
+        was_selected
+            && self.active_project_id.as_deref() == Some(project_id)
             && self.active_worktree_id() == Some(&target.worktree_id)
     }
 
@@ -501,10 +552,15 @@ impl AppStore {
         else {
             return false;
         };
-        if self.pending_terminal_closes.contains(&pane.terminal_session_id) {
+        if self
+            .pending_terminal_closes
+            .contains(&pane.terminal_session_id)
+        {
             return false;
         }
-        let live = pane.pty_id.is_some_and(|id| self.terminals.contains_key(&id));
+        let live = pane
+            .pty_id
+            .is_some_and(|id| self.terminals.contains_key(&id));
         if !hydrate && !live {
             return false;
         }
@@ -603,8 +659,15 @@ impl AppStore {
     /// Remembered worktree terminal, with a focused-pane fallback for old live state.
     pub fn active_pane_id(&self, project_id: &str) -> Option<String> {
         let state = self.project_states.get(project_id)?;
-        state.selected_terminal_pane_key.as_ref().and_then(|key| state.pane(key.as_str()))
-            .or_else(|| self.focused_pane_id.as_deref().and_then(|id| state.pane(id)))
+        state
+            .selected_terminal_pane_key
+            .as_ref()
+            .and_then(|key| state.pane(key.as_str()))
+            .or_else(|| {
+                self.focused_pane_id
+                    .as_deref()
+                    .and_then(|id| state.pane(id))
+            })
             .or_else(|| state.selected_terminal())
             .map(|pane| pane.id.clone())
     }
@@ -726,7 +789,11 @@ impl AppStore {
                     .into_iter()
                     // Failed or exited records are not automatically restarted.
                     .filter(|p| p.pty_id.is_none() && p.status != PaneStatus::Error)
-                    .filter(|p| !self.pending_terminal_closes.contains(&p.terminal_session_id))
+                    .filter(|p| {
+                        !self
+                            .pending_terminal_closes
+                            .contains(&p.terminal_session_id)
+                    })
                     .map(|p| Pending {
                         pane_id: p.id.clone(),
                         tab_id: tab_id.clone(),
@@ -1174,7 +1241,10 @@ mod lifecycle_tests {
         pane.terminal_incarnation_id = request.target.terminal_incarnation_id.clone();
         pane.pty_id = request.pty_id;
         let mut state = ProjectState::new();
-        state.panels.push(ProjectPanel::with_tab_id(request.target.tab_id.clone(), SplitNode::leaf(pane)));
+        state.panels.push(ProjectPanel::with_tab_id(
+            request.target.tab_id.clone(),
+            SplitNode::leaf(pane),
+        ));
         state.select_terminal(request.target.pane_key.as_str());
         state
     }
@@ -1182,23 +1252,48 @@ mod lifecycle_tests {
     #[test]
     fn dormant_close_requires_host_confirmation_only_for_local_saved_incarnations() {
         let mut request = close_request();
-        assert_eq!(terminal_close_plan(&request, true), TerminalClosePlan::Hosted(request.target.terminal_incarnation_id.clone().unwrap()));
-        assert_eq!(terminal_close_plan(&request, false), TerminalClosePlan::HostUnavailable);
+        assert_eq!(
+            terminal_close_plan(&request, true),
+            TerminalClosePlan::Hosted(request.target.terminal_incarnation_id.clone().unwrap())
+        );
+        assert_eq!(
+            terminal_close_plan(&request, false),
+            TerminalClosePlan::HostUnavailable
+        );
         request.project_path = r"\\wsl.localhost\Ubuntu\repo".into();
-        assert!(matches!(terminal_close_plan(&request, true), TerminalClosePlan::Hosted(_)));
-        assert_eq!(terminal_close_plan(&request, false), TerminalClosePlan::HostUnavailable);
+        assert!(matches!(
+            terminal_close_plan(&request, true),
+            TerminalClosePlan::Hosted(_)
+        ));
+        assert_eq!(
+            terminal_close_plan(&request, false),
+            TerminalClosePlan::HostUnavailable
+        );
         request.ssh_connection_id = Some("ssh".into());
-        assert_eq!(terminal_close_plan(&request, true), TerminalClosePlan::RecordOnly);
-        assert_eq!(terminal_close_plan(&request, false), TerminalClosePlan::RecordOnly);
+        assert_eq!(
+            terminal_close_plan(&request, true),
+            TerminalClosePlan::RecordOnly
+        );
+        assert_eq!(
+            terminal_close_plan(&request, false),
+            TerminalClosePlan::RecordOnly
+        );
         request.ssh_connection_id = None;
         request.target.terminal_incarnation_id = None;
-        assert_eq!(terminal_close_plan(&request, false), TerminalClosePlan::RecordOnly);
+        assert_eq!(
+            terminal_close_plan(&request, false),
+            TerminalClosePlan::RecordOnly
+        );
         request.pty_id = Some(17);
-        assert_eq!(terminal_close_plan(&request, false), TerminalClosePlan::Attached(17));
+        assert_eq!(
+            terminal_close_plan(&request, false),
+            TerminalClosePlan::Attached(17)
+        );
     }
 
     #[test]
-    fn pending_close_excludes_alias_activation_reconnect_and_duplicate_close_until_its_owner_finishes() {
+    fn pending_close_excludes_alias_activation_reconnect_and_duplicate_close_until_its_owner_finishes()
+     {
         let request = close_request();
         let mut pending = PendingTerminalCloses::default();
         let first = pending.begin(request.clone()).unwrap();
@@ -1212,7 +1307,10 @@ mod lifecycle_tests {
         assert!(pending.finish(&first));
         assert!(!pending.contains(&request.target.terminal_session_id));
         let retry = pending.begin(request).unwrap();
-        assert!(!pending.finish(&first), "a late completion must not release the retry");
+        assert!(
+            !pending.finish(&first),
+            "a late completion must not release the retry"
+        );
         assert!(pending.contains(&retry.target.terminal_session_id));
         assert!(pending.finish(&other));
         assert!(pending.finish(&retry));
@@ -1221,13 +1319,26 @@ mod lifecycle_tests {
     #[test]
     fn close_never_deletes_on_missing_exited_transport_or_protocol_failure() {
         let request = close_request();
-        for code in [None, Some(HostErrorCode::SessionMissing), Some(HostErrorCode::SessionExited),
-            Some(HostErrorCode::ProtocolMismatch), Some(HostErrorCode::IncarnationMismatch),
-            Some(HostErrorCode::IoFailed), Some(HostErrorCode::HostBusy), Some(HostErrorCode::RecoveryUnavailable)] {
-            assert_eq!(terminal_close_completion(&request, Some(&request), false, Err(code)), TerminalCloseCompletion::Failed(code));
+        for code in [
+            None,
+            Some(HostErrorCode::SessionMissing),
+            Some(HostErrorCode::SessionExited),
+            Some(HostErrorCode::ProtocolMismatch),
+            Some(HostErrorCode::IncarnationMismatch),
+            Some(HostErrorCode::IoFailed),
+            Some(HostErrorCode::HostBusy),
+            Some(HostErrorCode::RecoveryUnavailable),
+        ] {
+            assert_eq!(
+                terminal_close_completion(&request, Some(&request), false, Err(code)),
+                TerminalCloseCompletion::Failed(code)
+            );
             assert!(dormant_close_error(code).len() < 180);
         }
-        assert_eq!(terminal_close_completion(&request, Some(&request), false, Ok(())), TerminalCloseCompletion::Remove);
+        assert_eq!(
+            terminal_close_completion(&request, Some(&request), false, Ok(())),
+            TerminalCloseCompletion::Remove
+        );
     }
 
     #[test]
@@ -1235,7 +1346,9 @@ mod lifecycle_tests {
         let request = close_request();
         let mutations: &[fn(&mut TerminalCloseRequest)] = &[
             |r| r.target.project_id = "different".into(),
-            |r| r.target.execution_host_id = ExecutionHostId::derive("other", &HostInstallId::new()),
+            |r| {
+                r.target.execution_host_id = ExecutionHostId::derive("other", &HostInstallId::new())
+            },
             |r| r.target.worktree_id = WorktreeId::derive(&r.binding.repo_id, "/different", None),
             |r| r.target.tab_id = TabId::new(),
             |r| r.target.pane_key = PaneKey::new(),
@@ -1250,10 +1363,19 @@ mod lifecycle_tests {
         for mutate in mutations {
             let mut current = request.clone();
             mutate(&mut current);
-            assert_eq!(terminal_close_completion(&request, Some(&current), false, Ok(())), TerminalCloseCompletion::Stale);
+            assert_eq!(
+                terminal_close_completion(&request, Some(&current), false, Ok(())),
+                TerminalCloseCompletion::Stale
+            );
         }
-        assert_eq!(terminal_close_completion(&request, None, false, Ok(())), TerminalCloseCompletion::Stale);
-        assert_eq!(terminal_close_completion(&request, Some(&request), true, Ok(())), TerminalCloseCompletion::Conflict);
+        assert_eq!(
+            terminal_close_completion(&request, None, false, Ok(())),
+            TerminalCloseCompletion::Stale
+        );
+        assert_eq!(
+            terminal_close_completion(&request, Some(&request), true, Ok(())),
+            TerminalCloseCompletion::Conflict
+        );
     }
 
     #[test]
@@ -1263,7 +1385,9 @@ mod lifecycle_tests {
         let neighbor = PaneState::new("neighbor");
         let neighbor_id = neighbor.id.clone();
         let neighbor_key = neighbor.pane_key.clone();
-        state.panels.push(ProjectPanel::new(SplitNode::leaf(neighbor)));
+        state
+            .panels
+            .push(ProjectPanel::new(SplitNode::leaf(neighbor)));
         state.normalize_terminal_navigation(None);
         let mut alias_state = state_for(&request);
         alias_state.panels = state.panels.clone();
@@ -1272,12 +1396,11 @@ mod lifecycle_tests {
         let mut alias_binding = request.binding.clone();
         alias_binding.project_id = "alias".into();
         let bindings = HashMap::from([
-            ("owner".into(), request.binding.clone()), ("alias".into(), alias_binding),
-        ]);
-        let mut states = HashMap::from([
-            ("owner".into(), state), ("alias".into(), alias_state),
+            ("owner".into(), request.binding.clone()),
+            ("alias".into(), alias_binding),
         ]);
         request.aliases = terminal_close_aliases(&request.target, &bindings, &states).unwrap();
+        let mut states = HashMap::from([("owner".into(), state), ("alias".into(), alias_state)]);
         assert!(request.may_replace_alias_layout(None));
         assert!(request.may_replace_alias_layout(Some("owner")));
         assert!(!request.may_replace_alias_layout(Some("alias")));
@@ -1290,19 +1413,33 @@ mod lifecycle_tests {
         assert_ne!(request.source_layout, current.source_layout);
         assert!(request.matches_before_dispatch(&current));
         assert!(request.may_replace_alias_layout(None));
-        assert_eq!(terminal_close_completion(&request, Some(&current), false, Ok(())), TerminalCloseCompletion::Remove);
         assert_eq!(
-            terminal_close_completion(&request, Some(&current), !request.may_replace_alias_layout(Some("alias")), Ok(())),
+            terminal_close_completion(&request, Some(&current), false, Ok(())),
+            TerminalCloseCompletion::Remove
+        );
+        assert_eq!(
+            terminal_close_completion(
+                &request,
+                Some(&current),
+                !request.may_replace_alias_layout(Some("alias")),
+                Ok(())
+            ),
             TerminalCloseCompletion::Conflict
         );
         let state = states.get_mut("owner").unwrap();
         state.remove_pane(request.target.pane_key.as_str());
         assert_eq!(state.selected_terminal().unwrap().id, neighbor_id);
-        assert!(state.selected_terminal().unwrap().pty_id.is_none(), "background close does not hydrate");
+        assert!(
+            state.selected_terminal().unwrap().pty_id.is_none(),
+            "background close does not hydrate"
+        );
 
         states.get_mut("alias").unwrap().panels[0].custom_title = Some("changed alias".into());
         current.aliases = terminal_close_aliases(&request.target, &bindings, &states).unwrap();
-        assert_eq!(terminal_close_completion(&request, Some(&current), false, Ok(())), TerminalCloseCompletion::Conflict);
+        assert_eq!(
+            terminal_close_completion(&request, Some(&current), false, Ok(())),
+            TerminalCloseCompletion::Conflict
+        );
     }
 
     #[test]
@@ -1320,22 +1457,48 @@ mod lifecycle_tests {
         let mut alias_binding = request.binding.clone();
         alias_binding.project_id = "alias".into();
         let bindings = HashMap::from([
-            ("owner".into(), request.binding.clone()), ("alias".into(), alias_binding),
+            ("owner".into(), request.binding.clone()),
+            ("alias".into(), alias_binding),
         ]);
         let states = HashMap::from([("owner".into(), source), ("alias".into(), alias)]);
         request.aliases = terminal_close_aliases(&request.target, &bindings, &states).unwrap();
 
         // The shared source stayed dormant; its attachment fence cannot see the
         // different terminal added before close captured the other alias.
-        assert!(!close_has_other_attachment(&request, &HashMap::new(), &states));
+        assert!(!close_has_other_attachment(
+            &request,
+            &HashMap::new(),
+            &states
+        ));
         assert!(request.matches_before_dispatch(&request));
         assert!(!request.may_replace_alias_layout(Some("alias")));
-        assert!(!request.may_replace_alias_layout(None), "flush has forgotten its owner");
-        assert!(!request.may_replace_alias_layout(Some("owner")), "selection cannot authorize an older inventory");
-        assert_eq!(serde_json::to_value(states["owner"].saved_layout()).unwrap(), source_before);
-        assert_eq!(serde_json::to_value(states["alias"].saved_layout()).unwrap(), alias_before);
-        assert_eq!(states["alias"].pane(mobile_key.as_str()).unwrap().pty_id, Some(83));
-        assert!(states["alias"].pane(request.target.pane_key.as_str()).unwrap().pty_id.is_none());
+        assert!(
+            !request.may_replace_alias_layout(None),
+            "flush has forgotten its owner"
+        );
+        assert!(
+            !request.may_replace_alias_layout(Some("owner")),
+            "selection cannot authorize an older inventory"
+        );
+        assert_eq!(
+            serde_json::to_value(states["owner"].saved_layout()).unwrap(),
+            source_before
+        );
+        assert_eq!(
+            serde_json::to_value(states["alias"].saved_layout()).unwrap(),
+            alias_before
+        );
+        assert_eq!(
+            states["alias"].pane(mobile_key.as_str()).unwrap().pty_id,
+            Some(83)
+        );
+        assert!(
+            states["alias"]
+                .pane(request.target.pane_key.as_str())
+                .unwrap()
+                .pty_id
+                .is_none()
+        );
     }
 
     #[test]
@@ -1344,11 +1507,23 @@ mod lifecycle_tests {
         let mut attached = request.clone();
         attached.pty_id = Some(7);
         let states = HashMap::from([("alias".into(), state_for(&attached))]);
-        assert!(close_has_other_attachment(&request, &HashMap::new(), &states));
+        assert!(close_has_other_attachment(
+            &request,
+            &HashMap::new(),
+            &states
+        ));
         request.pty_id = Some(7);
-        assert!(close_has_other_attachment(&request, &HashMap::new(), &states));
+        assert!(close_has_other_attachment(
+            &request,
+            &HashMap::new(),
+            &states
+        ));
         let states = HashMap::from([("owner".into(), state_for(&request))]);
-        assert!(!close_has_other_attachment(&request, &HashMap::new(), &states));
+        assert!(!close_has_other_attachment(
+            &request,
+            &HashMap::new(),
+            &states
+        ));
         let route = TerminalRoute {
             execution_host_id: request.target.execution_host_id.clone(),
             worktree_id: request.target.worktree_id.clone(),
@@ -1357,6 +1532,10 @@ mod lifecycle_tests {
             terminal_session_id: request.target.terminal_session_id.clone(),
             terminal_incarnation_id: request.target.terminal_incarnation_id.clone().unwrap(),
         };
-        assert!(close_has_other_attachment(&request, &HashMap::from([(8, route)]), &HashMap::new()));
+        assert!(close_has_other_attachment(
+            &request,
+            &HashMap::from([(8, route)]),
+            &HashMap::new()
+        ));
     }
 }

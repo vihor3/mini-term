@@ -1503,17 +1503,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let center = div()
-            .flex_1()
-            .min_w(px(0.0))
-            .h_full()
-            .flex()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(self.workbench_area.clone()),
-            );
+        let center = div().flex_1().min_w(px(0.0)).h_full().flex().child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(self.workbench_area.clone()),
+        );
         let context = self.render_context_sidebar(drawer_width, cx);
         let agents = self.render_agents_overlay(window, cx);
         div()
@@ -2117,15 +2112,7 @@ impl Render for Workspace {
         // 否则 gpui-component 会把还原进去的宽度按容器比例重算掉。
         self.reseed_resizables_on_viewport_change(window, cx);
 
-        let (
-            columns,
-            middle,
-            middle_visible,
-            drawer_width,
-            unread,
-            global_status,
-            background,
-        ) = {
+        let (columns, middle, middle_visible, drawer_width, unread, global_status, background) = {
             let store = self.store.read(cx);
             let config = store.config();
             let columns = config
@@ -2244,18 +2231,15 @@ impl Render for Workspace {
             )
             .child(
                 resizable_panel().child(
-                    div()
-                        .size_full()
-                        .flex()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                // ⚠️ 终端区**不套** [`cached_panel`]:它就是每一拍
-                                // 真在变的那块内容,套上等于每帧必然未命中,白付
-                                // 一次 cache_key 比较
-                                .child(self.workbench_area.clone()),
-                        ),
+                    div().size_full().flex().child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            // ⚠️ 终端区**不套** [`cached_panel`]:它就是每一拍
+                            // 真在变的那块内容,套上等于每帧必然未命中,白付
+                            // 一次 cache_key 比较
+                            .child(self.workbench_area.clone()),
+                    ),
                 ),
             )
             .on_resize(move |state, _window, cx| {
@@ -2680,11 +2664,7 @@ impl Render for Workspace {
         // `absolute` 于是不会盖到标题栏上。用量面板**不在这里**:它是 Modal
         // (原版 fixed inset-0,遮罩要盖住标题栏),挂根层与 Dialog 族同构。
         let body = if Self::orca_shell_enabled() {
-            self.render_orca_body(
-                orca_context_width,
-                window,
-                cx,
-            )
+            self.render_orca_body(orca_context_width, window, cx)
         } else {
             div()
                 .flex_1()

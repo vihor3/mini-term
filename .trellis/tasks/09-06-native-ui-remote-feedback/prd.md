@@ -97,7 +97,8 @@ selected right-side tool without mixing their data or terminal sessions.
 | `09-06-native-tasks-gh-accounts` | R15 |
 
 This parent owns source requirements, cross-child acceptance, and the final
-planning/integration review. These are planning tasks, not activated work.
+planning/integration review. The final scope is approved; child activation and
+execution evidence are tracked in `progress.md` and each child task.
 The earlier `09-05-project-sidebar-discovery-status` parent and its children
 remain separate; prior green Actions runs do not establish acceptance of this
 new feedback. Shared `mt-app` files need serialized or explicitly coordinated
@@ -167,7 +168,7 @@ ownership in the eventual implementation plan.
 - Split-screen terminal workflows, group tabs, cross-project terminal mixing,
   or synchronizing right-tool contents merely because tool selection is shared.
 
-## Planning Status
+## Approval Status
 
 Parent and all five children have converged PRDs, designs, execution plans, and
 curated implementation/check context for final review. Source-owned behavior and

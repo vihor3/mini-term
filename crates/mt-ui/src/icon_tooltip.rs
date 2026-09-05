@@ -8,9 +8,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnyTooltip, App, AppContext, AvailableSpace, Bounds, Context, Div, ElementId, Entity,
-    EntityId, FocusHandle, Hitbox, HitboxBehavior, IntoElement, KeyDownEvent, MouseDownEvent,
-    MouseExitEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Stateful,
+    AnyTooltip, App, AppContext, AvailableSpace, Bounds, Context, Div, ElementId, Entity, EntityId,
+    FocusHandle, Hitbox, HitboxBehavior, IntoElement, KeyDownEvent, MouseDownEvent, MouseExitEvent,
+    ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Stateful,
     StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window, canvas, div, point,
     px,
 };
@@ -289,25 +289,33 @@ impl IconTooltips {
                         }
                         let owner = paint_owner.clone();
                         window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
-                            if phase.capture() && let Some(owner) = owner.upgrade() {
+                            if phase.capture()
+                                && let Some(owner) = owner.upgrade()
+                            {
                                 Self::reset(&owner, window, cx);
                             }
                         });
                         let owner = paint_owner.clone();
                         window.on_mouse_event(move |_: &MouseDownEvent, phase, window, cx| {
-                            if phase.capture() && let Some(owner) = owner.upgrade() {
+                            if phase.capture()
+                                && let Some(owner) = owner.upgrade()
+                            {
                                 Self::reset(&owner, window, cx);
                             }
                         });
                         let owner = paint_owner.clone();
                         window.on_mouse_event(move |_: &ScrollWheelEvent, phase, window, cx| {
-                            if phase.capture() && let Some(owner) = owner.upgrade() {
+                            if phase.capture()
+                                && let Some(owner) = owner.upgrade()
+                            {
                                 Self::reset(&owner, window, cx);
                             }
                         });
                         let owner = paint_owner.clone();
                         window.on_key_event(move |_: &KeyDownEvent, phase, window, cx| {
-                            if phase.capture() && let Some(owner) = owner.upgrade() {
+                            if phase.capture()
+                                && let Some(owner) = owner.upgrade()
+                            {
                                 Self::reset(&owner, window, cx);
                             }
                         });
@@ -364,7 +372,9 @@ impl IconTooltips {
             self.cancel_delay();
         }
         self.focus = window.focused(cx);
-        if self.focus_out.is_none() && let Some(focus) = &self.focus {
+        if self.focus_out.is_none()
+            && let Some(focus) = &self.focus
+        {
             let owner = cx.weak_entity();
             self.focus_out = Some(window.on_focus_out(focus, cx, move |_, window, cx| {
                 if let Some(owner) = owner.upgrade() {
@@ -440,7 +450,10 @@ fn description_position(
     } else {
         anchor.top() - description.height - margin
     };
-    point(anchor.left().max(margin).min(max_x), y.max(margin).min(max_y))
+    point(
+        anchor.left().max(margin).min(max_x),
+        y.max(margin).min(max_y),
+    )
 }
 
 struct IconDescription(SharedString);

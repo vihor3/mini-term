@@ -168,13 +168,7 @@ impl Render for Tooltip {
         // 气泡本体。样式抄自 gpui-component 的 Tooltip,只改字号 ——
         // 外面那层 div 是上游留的:m_3 是相对鼠标的偏移,写在子级才生效。
         div()
-            .child(
-                surface(cx)
-                    .m_3()
-                    .justify_between()
-                    .gap_3()
-                    .child(content),
-            )
+            .child(surface(cx).m_3().justify_between().gap_3().child(content))
             .into_any_element()
     }
 }

@@ -438,10 +438,40 @@ mod tests {
     #[test]
     fn terminal_tab_reorder_uses_only_the_horizontal_midpoint() {
         let bounds = rect(100.0, 20.0, 176.0, 40.0);
-        assert_eq!(terminal_tab_drop_after(bounds, Point { x: px(120.0), y: px(30.0) }), Some(false));
-        assert_eq!(terminal_tab_drop_after(bounds, Point { x: px(188.0), y: px(30.0) }), Some(true));
-        assert_eq!(terminal_tab_drop_after(bounds, Point { x: px(120.0), y: px(80.0) }), None);
-        assert_eq!(terminal_tab_drop_after(rect(0.0, 0.0, 0.0, 0.0), Point::default()), None);
+        assert_eq!(
+            terminal_tab_drop_after(
+                bounds,
+                Point {
+                    x: px(120.0),
+                    y: px(30.0)
+                }
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            terminal_tab_drop_after(
+                bounds,
+                Point {
+                    x: px(188.0),
+                    y: px(30.0)
+                }
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            terminal_tab_drop_after(
+                bounds,
+                Point {
+                    x: px(120.0),
+                    y: px(80.0)
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            terminal_tab_drop_after(rect(0.0, 0.0, 0.0, 0.0), Point::default()),
+            None
+        );
     }
 
     // ─── 插入下标 ─────────────────────────────────────────────

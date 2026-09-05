@@ -49,9 +49,11 @@ animation disabling, a replacement runtime, or new remote Hook-secret forwarding
 Some providers expose no reliable semantic activity; unknown must remain distinct
 from Working. Process-only fixtures cannot establish actual native UI cadence.
 
-## Planning Status
+## Execution Status
 
-PRD, design, execution plan, and curated context are prepared for the parent final
-review. Implementation still requires subsequent approval and child activation.
+The user explicitly approved the final parent scope on 2026-09-06. This child is
+now activated after navigation's source-complete `d50f616` handoff. Lower-layer
+implementation starts while that navigation candidate runs in Actions; shared
+app files remain reserved until its diagnostics and API handoff are coordinated.
 No native reproduction or automated checks are claimed; all compilation,
 tests/probes, lint/format, and packaging remain Actions-only.

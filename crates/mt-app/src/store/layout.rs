@@ -13,7 +13,6 @@ use mt_config::ShellConfig;
 use mt_identity::WorktreeId;
 use mt_layout::ProjectWorktreeBinding;
 
-
 use super::AppStore;
 use super::pure::collect_node_ids;
 
@@ -631,10 +630,20 @@ mod tests {
         let mut owners = HashMap::new();
         mark_project_layout_dirty(&mut dirty, &mut owners, "first", Some(&worktree_id));
         mark_project_layout_dirty(&mut dirty, &mut owners, "latest", Some(&worktree_id));
-        assert!(!prepare_project_layout_removal(&mut dirty, &mut owners, &bindings, "first", true));
-        let saved = dirty.iter().filter(|project_id| {
-            should_flush_project_layout(&owners, project_id, bindings.get(project_id.as_str()))
-        }).map(|project_id| &snapshots[project_id.as_str()]).collect::<Vec<_>>();
+        assert!(!prepare_project_layout_removal(
+            &mut dirty,
+            &mut owners,
+            &bindings,
+            "first",
+            true
+        ));
+        let saved = dirty
+            .iter()
+            .filter(|project_id| {
+                should_flush_project_layout(&owners, project_id, bindings.get(project_id.as_str()))
+            })
+            .map(|project_id| &snapshots[project_id.as_str()])
+            .collect::<Vec<_>>();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].selected_terminal_pane_key.as_ref(), Some(&second));
         assert_eq!(saved[0].terminal_order, Some(vec![second, first]));

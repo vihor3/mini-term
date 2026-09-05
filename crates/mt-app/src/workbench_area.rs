@@ -1329,7 +1329,8 @@ impl Render for WorkbenchArea {
             self.last_rendered_worktree = Some(worktree_id.clone());
             self.last_rendered_page = Some(active.clone());
             if active != WorkbenchPage::Terminal {
-                self.terminal_area.update(cx, |area, cx| area.suspend(window, cx));
+                self.terminal_area
+                    .update(cx, |area, cx| area.suspend(window, cx));
             }
             match &active {
                 WorkbenchPage::Terminal => {

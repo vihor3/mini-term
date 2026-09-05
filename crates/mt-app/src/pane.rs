@@ -1640,7 +1640,10 @@ fn branch_entries_for_pty(pty_id: u32, cx: &mut gpui::App) -> Vec<menu::MenuEntr
     let Some((project_id, pane_id)) = store.read(cx).pane_of_pty(pty_id) else {
         return Vec::new();
     };
-    let Some(target) = store.read(cx).terminal_jump_target_for_pane(&project_id, &pane_id) else {
+    let Some(target) = store
+        .read(cx)
+        .terminal_jump_target_for_pane(&project_id, &pane_id)
+    else {
         return Vec::new();
     };
     let (segment, project_path) = {
@@ -1667,12 +1670,19 @@ fn branch_entries_for_pty(pty_id: u32, cx: &mut gpui::App) -> Vec<menu::MenuEntr
             menu::separator(),
             menu::item(t("paneGroup", "forkSession"), move |window, cx| {
                 // The menu may outlive a reconnect or project rebind.
-                if fork_store.read(cx).resolve_terminal_jump_target(&target).is_none() {
+                if fork_store
+                    .read(cx)
+                    .resolve_terminal_jump_target(&target)
+                    .is_none()
+                {
                     return;
                 }
                 crate::pane_actions::fork_pane_session(
-                    fork_store.clone(), target.project_id.clone(),
-                    target.pane_key.to_string(), window, cx,
+                    fork_store.clone(),
+                    target.project_id.clone(),
+                    target.pane_key.to_string(),
+                    window,
+                    cx,
                 );
             }),
             crate::branch_family::view_branches_menu_item(&store, project_path, session_id.clone()),

@@ -106,8 +106,8 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, Global, Hsla,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement,
-    Pixels, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
-    Window, anchored, deferred, div, point, prelude::FluentBuilder, px, relative,
+    Pixels, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Window,
+    anchored, deferred, div, point, prelude::FluentBuilder, px, relative,
 };
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 
@@ -648,7 +648,10 @@ fn with_alpha(color: Hsla, a: f32) -> Hsla {
 
 impl ContextMenu {
     pub fn is_anchored_to(&self, anchor: &str) -> bool {
-        self.open.as_ref().and_then(|open| open.anchor.as_deref()) == Some(anchor)
+        self.open
+            .as_ref()
+            .and_then(|open| open.anchor.as_ref())
+            .is_some_and(|stored_anchor| stored_anchor.as_str() == anchor)
     }
 
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {

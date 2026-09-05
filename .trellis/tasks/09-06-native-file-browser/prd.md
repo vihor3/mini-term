@@ -49,8 +49,10 @@ changing document save semantics, or adding replacement upload-menu commands.
 The scroll shell is a source-level candidate, not native reproduction. Browser
 navigation must honor Windows/WSL/remote path semantics and cancellation ownership.
 
-## Planning Status
+## Execution Status
 
-PRD, design, execution plan, and curated context are prepared for the parent final
-review, not implementation approval. Do not run the application, automated UI
-checks, builds, or tests locally; all such execution belongs in GitHub Actions.
+The user approved the final parent scope on 2026-09-06. This child is activated
+for its disjoint onboarding/browser slice while Agent integration continues.
+Shared store/main/execution-host files remain explicitly reserved. No native or
+automated acceptance is claimed: application execution, UI checks, builds,
+tests/probes, lint, formatting, and code generation remain GitHub Actions-only.

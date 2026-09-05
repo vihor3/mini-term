@@ -1178,7 +1178,10 @@ mod tests {
             selected_owner.as_ref()
         );
         let snapshot = state.saved_layout();
-        assert_eq!(snapshot.selected_terminal_pane_key.as_ref(), Some(&selected));
+        assert_eq!(
+            snapshot.selected_terminal_pane_key.as_ref(),
+            Some(&selected)
+        );
         assert_eq!(snapshot.terminal_order.as_ref(), Some(&order));
         assert_eq!(snapshot.active_tab_index, 1);
         assert_eq!(

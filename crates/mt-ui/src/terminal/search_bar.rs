@@ -133,7 +133,7 @@ use std::sync::Arc;
 use gpui::{
     App, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, div, px,
+    Styled, Subscription, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -437,14 +437,7 @@ fn with_tip(
     window: &mut Window,
     cx: &mut App,
 ) -> Stateful<Div> {
-    IconTooltips::button(
-        owner,
-        id,
-        tip,
-        tip_anchor(id, button),
-        window,
-        cx,
-    )
+    IconTooltips::button(owner, id, tip, tip_anchor(id, button), window, cx)
 }
 
 impl Render for TerminalSearchBar {

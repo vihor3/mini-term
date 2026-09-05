@@ -445,7 +445,11 @@ impl SavedProjectLayout {
         fn collect(node: &SavedSplitNode, keys: &mut Vec<PaneKey>) {
             match node {
                 SavedSplitNode::Leaf { panes, pane, .. } => {
-                    let panes = if panes.is_empty() { pane.as_slice() } else { panes };
+                    let panes = if panes.is_empty() {
+                        pane.as_slice()
+                    } else {
+                        panes
+                    };
                     keys.extend(panes.iter().filter_map(|pane| pane.pane_key.clone()));
                 }
                 SavedSplitNode::Split { children, .. } => {
@@ -457,11 +461,23 @@ impl SavedProjectLayout {
         }
         fn active(node: &SavedSplitNode) -> Option<PaneKey> {
             match node {
-                SavedSplitNode::Leaf { active_pane_key, panes, pane } => {
-                    let panes = if panes.is_empty() { pane.as_slice() } else { panes };
+                SavedSplitNode::Leaf {
+                    active_pane_key,
+                    panes,
+                    pane,
+                } => {
+                    let panes = if panes.is_empty() {
+                        pane.as_slice()
+                    } else {
+                        panes
+                    };
                     active_pane_key
                         .as_ref()
-                        .filter(|key| panes.iter().any(|pane| pane.pane_key.as_ref() == Some(*key)))
+                        .filter(|key| {
+                            panes
+                                .iter()
+                                .any(|pane| pane.pane_key.as_ref() == Some(*key))
+                        })
                         .cloned()
                         .or_else(|| panes.first().and_then(|pane| pane.pane_key.clone()))
                 }
@@ -470,8 +486,16 @@ impl SavedProjectLayout {
         }
         fn select(node: &mut SavedSplitNode, key: &PaneKey) -> bool {
             match node {
-                SavedSplitNode::Leaf { active_pane_key, panes, pane } => {
-                    let panes = if panes.is_empty() { pane.as_slice() } else { panes };
+                SavedSplitNode::Leaf {
+                    active_pane_key,
+                    panes,
+                    pane,
+                } => {
+                    let panes = if panes.is_empty() {
+                        pane.as_slice()
+                    } else {
+                        panes
+                    };
                     if panes.iter().any(|pane| pane.pane_key.as_ref() == Some(key)) {
                         *active_pane_key = Some(key.clone());
                         true
@@ -488,11 +512,19 @@ impl SavedProjectLayout {
         for tab in &self.tabs {
             collect(&tab.split_layout, &mut inventory);
         }
-        let valid = inventory.iter().cloned().collect::<std::collections::HashSet<_>>();
+        let valid = inventory
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
         let mut order = self.terminal_order.take().unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
         order.retain(|key| valid.contains(key) && seen.insert(key.clone()));
-        order.extend(inventory.iter().filter(|key| seen.insert((*key).clone())).cloned());
+        order.extend(
+            inventory
+                .iter()
+                .filter(|key| seen.insert((*key).clone()))
+                .cloned(),
+        );
         self.terminal_order = Some(order);
         let legacy = self
             .active_tab_id
@@ -2536,7 +2568,9 @@ mod tests {
         normalize_saved_layout(&mut layout);
         layout.normalize_terminal_navigation();
         assert_eq!(layout.selected_terminal_pane_key.as_ref(), Some(&key));
-        let SavedSplitNode::Leaf { panes, .. } = &layout.tabs[0].split_layout else { panic!("leaf"); };
+        let SavedSplitNode::Leaf { panes, .. } = &layout.tabs[0].split_layout else {
+            panic!("leaf");
+        };
         assert_eq!(panes.len(), 1);
         assert_eq!(panes[0].cwd.as_deref(), Some("/saved/cwd"));
         value["terminalOrder"] = serde_json::json!("wrong-type");

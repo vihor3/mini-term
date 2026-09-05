@@ -537,7 +537,8 @@ pub(crate) fn stored_incarnation(
     if !directory.is_dir() || directory.file_type().is_symlink() {
         bail!("terminal history is not a regular directory");
     }
-    let metadata = fs::symlink_metadata(&paths.meta).context("inspect terminal history metadata")?;
+    let metadata =
+        fs::symlink_metadata(&paths.meta).context("inspect terminal history metadata")?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         bail!("terminal history metadata is not a regular file");
     }
@@ -955,10 +956,19 @@ mod tests {
         fs::write(&paths.meta, vec![b' '; 64 * 1024 + 1]).unwrap();
         assert!(stored_incarnation(&root, &session_id).is_err());
 
-        write_meta(&paths, &TerminalSessionId::new(), &worktree_id(), &generation).unwrap();
+        write_meta(
+            &paths,
+            &TerminalSessionId::new(),
+            &worktree_id(),
+            &generation,
+        )
+        .unwrap();
         assert!(stored_incarnation(&root, &session_id).is_err());
         write_meta(&paths, &session_id, &worktree_id(), &generation).unwrap();
-        assert_eq!(stored_incarnation(&root, &session_id).unwrap(), Some(generation));
+        assert_eq!(
+            stored_incarnation(&root, &session_id).unwrap(),
+            Some(generation)
+        );
         assert_eq!(fs::read(&paths.log).unwrap(), b"unidentified history");
         let _ = fs::remove_dir_all(root);
     }
