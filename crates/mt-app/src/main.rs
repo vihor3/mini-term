@@ -21,9 +21,8 @@
 //!      │   │       ├─ ProjectList                    ← 项目列表(上)
 //!      │   │       └─ FileTree                       ← 文件树(下)
 //!      │   ├─ panel
-//!      │   │   ├─ TerminalArea                       ← 活动面板的 SplitNode 树 → 嵌套 resizable
-//!      │   │   │   └─ (leaf) tab 栏 + TerminalPane 实体
-//!      │   │   └─ TerminalsPanel                     ← 项目级面板切换竖条(44px 图标列,可开合)
+//!      │   │   └─ WorkbenchArea                      ← documents/details or one terminal
+//!      │   │       └─ TerminalArea                   ← selected TerminalPane entity only
 //!      │   └─ panel(可折叠)
 //!      │       └─ SessionPanel                       ← AI 历史(右侧抽屉)
 //!      ├─ UsagePanel(浮层)                           ← 用量统计
@@ -62,7 +61,6 @@ mod file_ops;
 mod file_tree;
 mod file_viewer;
 mod first_run;
-mod focus_nav;
 mod frost;
 mod fs_ops;
 mod git_changes;
@@ -111,7 +109,6 @@ mod ssh_registry;
 mod startup_trace;
 mod store;
 mod terminal_area;
-mod terminals_panel;
 mod theme;
 mod title_bar;
 mod toast;
@@ -147,7 +144,6 @@ use crate::agent_activity::{
 };
 use crate::ai::AiBridge;
 use crate::file_tree::FileTree;
-use crate::focus_nav::Direction;
 use crate::github_tasks::{GitHubTaskService, GitHubTasksPanel, github_project_tasks_enabled};
 use crate::i18n::{t, tr};
 use crate::orca_sidebar::{OrcaProjectSidebar, OrcaSidebarEvent};
@@ -157,7 +153,6 @@ use crate::store::{AgentTargetView, AppStore, DoneScope, PendingAlert};
 use crate::terminal_area::TerminalArea;
 use crate::title_bar::TitleBar;
 use crate::tray::{Tray, TrayEvent};
-use crate::tree::SplitDirection;
 use crate::usage_panel::UsagePanel;
 use crate::workbench_area::WorkbenchArea;
 
@@ -166,20 +161,13 @@ actions!(
     [
         /// 新建终端标签(Ctrl+Shift+T)
         NewTerminal,
-        /// 关闭当前**整组**(Ctrl+Shift+W)。
-        ///
-        /// 原版 `closePane` 调的是 `closeLeaf` —— 关的是当前分屏格里的全部 tab,
-        /// 不是单个 tab(单个 tab 走 tab 上的 × )。
+        /// Close the selected terminal, after confirmation (Ctrl+Shift+W).
         ClosePane,
-        /// 向右分屏(Ctrl+Shift+D)
-        SplitRight,
-        /// 向下分屏(Ctrl+Shift+E)
-        SplitDown,
         /// 折叠/展开中间栏(Ctrl+Shift+B)
         ToggleMiddleColumn,
-        /// 叶内切到下一个 tab(Ctrl+Tab)
+        /// Select the next terminal (Ctrl+Tab).
         NextPane,
-        /// 叶内切到上一个 tab(Ctrl+Shift+Tab)
+        /// Select the previous terminal (Ctrl+Shift+Tab).
         PrevPane,
         /// 重命名当前标签(F2)
         RenamePane,
@@ -191,14 +179,6 @@ actions!(
         ToggleUsage,
         /// 跳到下一件待办(Ctrl+Shift+J)
         JumpAttention,
-        /// 焦点移到左侧分屏(Alt+←)
-        FocusLeft,
-        /// 焦点移到右侧分屏(Alt+→)
-        FocusRight,
-        /// 焦点移到上方分屏(Alt+↑)
-        FocusUp,
-        /// 焦点移到下方分屏(Alt+↓)
-        FocusDown,
         /// 终端内查找(Ctrl+F)
         TerminalSearch,
         /// 全局搜索(Ctrl+Shift+F,toggle)
@@ -235,7 +215,7 @@ fn yields_to_overlay(window: &mut Window, cx: &mut App) -> bool {
     yields_to_typing(window, cx) || !overlay::allows(overlay::Yield::ToOverlay)
 }
 
-/// 选中叶内第 N 个 tab(Ctrl+1..9,**1-based**;越界不动)。
+/// Select the 1-based flat terminal index (Ctrl+1..9); out-of-range requests are inert.
 ///
 /// 带数据的 action 必须走 `derive(Action)`(`actions!` 只生成单元结构),
 /// `no_json` 让它不要求 serde/schemars —— 这个 action 只从代码里绑,不进键位 JSON。
@@ -483,7 +463,7 @@ struct Workspace {
     /// 右键菜单浮层。状态住在全局(任何视图都能 `menu::show`),这里只是把它
     /// **画出来**的那个位置 —— 与 `Root::render_dialog_layer` 同一种分工。
     menu_layer: Entity<menu::ContextMenu>,
-    /// 自绘标题栏(无边框窗口的拖拽区 + 三键 + 项目胶囊 + 全局状态灯)。
+    /// Native window controls and the current worktree's individual terminal tabs.
     title_bar: Entity<TitleBar>,
     /// 自建 toast 层。与 [`Self::menu_layer`] 同一种分工:状态住在全局
     /// (AI 泵 / pane / store 三处都要往里推),这里只是把它**画出来**的位置。
@@ -496,12 +476,8 @@ struct Workspace {
     jump_recency: Entity<jump_palette::JumpRecency>,
     project_list: Entity<ProjectList>,
     file_tree: Entity<FileTree>,
-    terminal_area: Entity<TerminalArea>,
     /// 常驻终端页与运行时文件页签的宿主。文件页不进入终端布局持久化。
     workbench_area: Entity<WorkbenchArea>,
-    /// 终端区右缘的「项目级终端面板」切换竖条。显隐住在 store
-    /// (`terminals_panel_visible`,落 layout.db),收起时整个不进元素树。
-    terminals_panel: Entity<terminals_panel::TerminalsPanel>,
     session_panel: Entity<SessionPanel>,
     /// Git 面板(抽屉的第二块)。与会话面板一样常驻实体,靠
     /// [`GitPanel::set_visible`](git_panel::GitPanel::set_visible) 闸住扫盘与
@@ -580,7 +556,6 @@ impl Workspace {
         })
         .detach();
 
-        let title_bar = cx.new(|cx| TitleBar::new(store.clone(), cx));
         let worktree_catalog =
             cx.new(|cx| worktree_catalog::WorktreeCatalog::new(store.clone(), cx));
         worktree_catalog::install(worktree_catalog.clone(), cx);
@@ -594,7 +569,7 @@ impl Workspace {
         let workbench_area =
             cx.new(|cx| WorkbenchArea::new(store.clone(), terminal_area.clone(), cx));
         workbench_area::install(workbench_area.clone(), cx);
-        let terminals_panel = cx.new(|cx| terminals_panel::TerminalsPanel::new(store.clone(), cx));
+        let title_bar = cx.new(|cx| TitleBar::new(store.clone(), workbench_area.clone(), cx));
         let session_panel = cx.new(|cx| SessionPanel::new(store.clone(), cx));
         let git_panel = cx.new(|cx| git_panel::GitPanel::new(store.clone(), window, cx));
         let github_task_service = cx.new(|_| GitHubTaskService::new(store.clone()));
@@ -610,6 +585,7 @@ impl Workspace {
                 OrcaSidebarEvent::OpenJumpPalette => this.open_jump_palette(window, cx),
                 OrcaSidebarEvent::ToggleAgents => this.toggle_agents(window, cx),
                 OrcaSidebarEvent::OpenUsage => this.toggle_usage(window, cx),
+                OrcaSidebarEvent::OpenMobile => crate::mobile_panel::open(window, cx),
                 OrcaSidebarEvent::OpenSettings => {
                     settings::open_settings(this.store.clone(), None, window, cx)
                 }
@@ -706,11 +682,10 @@ impl Workspace {
         // 否则用户得先点一下终端才能打字。
         let initial = {
             let s = store.read(cx);
-            s.active_project_id.clone().zip(
-                s.active_layout()
-                    .and_then(|l| l.first_active_pane())
-                    .map(|p| p.id.clone()),
-            )
+            s.active_project_id.as_ref().and_then(|project_id| {
+                s.active_pane_id(project_id)
+                    .map(|pane_id| (project_id.clone(), pane_id))
+            })
         };
         if let Some((project_id, pane_id)) = initial {
             store.update(cx, |store, cx| {
@@ -744,9 +719,7 @@ impl Workspace {
             jump_recency,
             project_list,
             file_tree,
-            terminal_area,
             workbench_area,
-            terminals_panel,
             session_panel,
             git_panel,
             github_tasks_panel,
@@ -1108,7 +1081,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.agents_open && event.keystroke.key == "escape" {
+        if event.keystroke.key == "escape" && cx.has_active_drag() {
+            cx.stop_active_drag(window);
+            cx.stop_propagation();
+            cx.notify();
+        } else if self.agents_open && event.keystroke.key == "escape" {
             cx.stop_propagation();
             self.close_agents(true, window, cx);
         } else {
@@ -1523,8 +1500,6 @@ impl Workspace {
     fn render_orca_body(
         &mut self,
         drawer_width: f64,
-        terminals_visible: bool,
-        terminal_page_active: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -1538,16 +1513,7 @@ impl Workspace {
                     .flex_1()
                     .min_w(px(0.0))
                     .child(self.workbench_area.clone()),
-            )
-            .when(terminals_visible && terminal_page_active, |el| {
-                el.child(cached_panel(
-                    &self.terminals_panel,
-                    StyleRefinement::default()
-                        .w(px(terminals_panel::WIDTH))
-                        .h_full()
-                        .flex_none(),
-                ))
-            });
+            );
         let context = self.render_context_sidebar(drawer_width, cx);
         let agents = self.render_agents_overlay(window, cx);
         div()
@@ -1571,7 +1537,7 @@ impl Workspace {
     }
 
     fn on_new_terminal(&mut self, _: &NewTerminal, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
+        if yields_to_overlay(window, cx) {
             return;
         }
         let Some(project_id) = self.store.read(cx).active_project_id.clone() else {
@@ -1581,13 +1547,9 @@ impl Workspace {
         self.store.update(cx, |store, cx| {
             store.new_terminal(&project_id, None, anchor, window, cx);
         });
+        workbench_area::activate_terminal_page(window, cx);
     }
 
-    /// Ctrl+Shift+W = 关**整组**(原版 `closePane` 调的是 `closeLeaf`),
-    /// 不是关当前这一个 tab —— 单个 tab 走 tab 上的 ×。
-    ///
-    /// 走 [`pane_actions::close_leaf_of_pane`] 而不是直接调 store:关闭前要盘点
-    /// 组里活着的 AI 会话并确认(三条关闭路径共用同一个入口)。
     fn on_close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
         if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
             return;
@@ -1595,18 +1557,18 @@ impl Workspace {
         let Some((project_id, pane_id)) = self.target_pane(cx) else {
             return;
         };
-        pane_actions::close_leaf_of_pane(self.store.clone(), project_id, pane_id, window, cx);
+        pane_actions::close_pane(self.store.clone(), project_id, pane_id, window, cx);
     }
 
     fn on_next_pane(&mut self, _: &NextPane, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
+        if yields_to_overlay(window, cx) {
             return;
         }
         self.cycle_pane(1, window, cx);
     }
 
     fn on_prev_pane(&mut self, _: &PrevPane, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
+        if yields_to_overlay(window, cx) {
             return;
         }
         self.cycle_pane(-1, window, cx);
@@ -1619,42 +1581,30 @@ impl Workspace {
         self.store.update(cx, |store, cx| {
             store.cycle_pane(&project_id, &pane_id, delta, window, cx)
         });
+        workbench_area::activate_terminal_page(window, cx);
     }
 
     fn on_select_pane(&mut self, action: &SelectPane, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
+        if yields_to_overlay(window, cx) {
             return;
         }
         let Some((project_id, pane_id)) = self.target_pane(cx) else {
             return;
         };
         let index = action.0;
+        if self
+            .store
+            .read(cx)
+            .project_state(&project_id)
+            .and_then(|state| state.terminal_at_index(index))
+            .is_none()
+        {
+            return;
+        }
         self.store.update(cx, |store, cx| {
             store.select_pane_by_index(&project_id, &pane_id, index, window, cx)
         });
-    }
-
-    fn on_split_right(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
-            return;
-        }
-        self.split(SplitDirection::Horizontal, window, cx);
-    }
-
-    fn on_split_down(&mut self, _: &SplitDown, window: &mut Window, cx: &mut Context<Self>) {
-        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
-            return;
-        }
-        self.split(SplitDirection::Vertical, window, cx);
-    }
-
-    fn split(&mut self, direction: SplitDirection, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((project_id, pane_id)) = self.target_pane(cx) else {
-            return;
-        };
-        self.store.update(cx, |store, cx| {
-            store.split_pane(&project_id, &pane_id, direction, window, cx);
-        });
+        workbench_area::activate_terminal_page(window, cx);
     }
 
     fn on_toggle_middle(
@@ -1697,8 +1647,8 @@ impl Workspace {
         let current = self
             .store
             .read(cx)
-            .active_layout()
-            .and_then(|l| l.pane(&pane_id))
+            .project_state(&project_id)
+            .and_then(|state| state.pane(&pane_id))
             .map(|p| p.label().to_string())
             .unwrap_or_default();
         modal::open_rename_pane(self.store.clone(), project_id, pane_id, current, window, cx);
@@ -1826,29 +1776,6 @@ impl Workspace {
             self.store
                 .update(cx, |store, cx| store.clear_unread_done(cx));
         }
-    }
-
-    fn on_focus_left(&mut self, _: &FocusLeft, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus_adjacent(Direction::Left, window, cx);
-    }
-    fn on_focus_right(&mut self, _: &FocusRight, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus_adjacent(Direction::Right, window, cx);
-    }
-    fn on_focus_up(&mut self, _: &FocusUp, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus_adjacent(Direction::Up, window, cx);
-    }
-    fn on_focus_down(&mut self, _: &FocusDown, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus_adjacent(Direction::Down, window, cx);
-    }
-
-    fn focus_adjacent(&mut self, dir: Direction, window: &mut Window, cx: &mut Context<Self>) {
-        // 这四条只从快捷键进来,守卫放这一处就够(Alt+方向键在文本输入框里
-        // 还是「按词移动」,让路给弹窗是必须的)
-        if yields_to_overlay(window, cx) || !self.terminal_page_active(cx) {
-            return;
-        }
-        self.terminal_area
-            .update(cx, |area, cx| area.focus_adjacent(dir, window, cx));
     }
 
     /// Ctrl+F:文件页交给当前文档；终端页在**当前焦点 pane** 上开查找条。
@@ -2194,7 +2121,6 @@ impl Render for Workspace {
             columns,
             middle,
             middle_visible,
-            terminals_visible,
             drawer_width,
             unread,
             global_status,
@@ -2216,14 +2142,12 @@ impl Render for Workspace {
                 columns,
                 middle,
                 config.middle_column_visible,
-                store.terminals_panel_visible(),
                 store.right_drawer_width(),
                 store.unread_done_count(),
                 store.global_ai_status(),
                 store.background_art().cloned(),
             )
         };
-        let terminal_page_active = self.workbench_area.read(cx).is_terminal_active(cx);
 
         // 条件按钮可能在鼠标仍停在原坐标时从元素树消失,这时 GPUI 不保证再补一发
         // on_hover(false)。主动按当前可见性对账,避免它的旧计时把会话偷偷热身。
@@ -2318,10 +2242,6 @@ impl Render for Workspace {
                     .size_range(px(180.0)..px(700.0))
                     .child(middle_group),
             )
-            // 面板切换竖条停靠在终端区**里侧**右缘(固定 44px、不进 resizable
-            // 的分栏账),与 VS Code 终端面板右侧的列表同位。开合会改终端宽度
-            // 并触发一次 PTY resize —— 停靠面板的正常代价,与折叠中间栏同档;
-            // 悬浮的右抽屉(Sessions/Git)另有考量,见下方 drawer_layer 注释。
             .child(
                 resizable_panel().child(
                     div()
@@ -2335,18 +2255,7 @@ impl Render for Workspace {
                                 // 真在变的那块内容,套上等于每帧必然未命中,白付
                                 // 一次 cache_key 比较
                                 .child(self.workbench_area.clone()),
-                        )
-                        .when(terminals_visible && terminal_page_active, |el| {
-                            // 同样套缓存:竖条的数据源只有 store。占位样式照抄它
-                            // render 根节点的 `.w(WIDTH).h_full().flex_none()`
-                            el.child(cached_panel(
-                                &self.terminals_panel,
-                                StyleRefinement::default()
-                                    .w(px(terminals_panel::WIDTH))
-                                    .h_full()
-                                    .flex_none(),
-                            ))
-                        }),
+                        ),
                 ),
             )
             .on_resize(move |state, _window, cx| {
@@ -2458,28 +2367,6 @@ impl Render for Workspace {
                         this.toggle_drawer(DrawerPanel::Git, cx)
                     }),
                 ),
-            )
-            // 终端列表竖条(GPUI 版新增,原版边条没有这颗)。开关的是终端区
-            // 右缘的**停靠竖条**而不是右抽屉,所以激活态跟 store 的持久化显隐走
-            .child(
-                activity_bar::strip_button(
-                    "toggle-terminals",
-                    activity_bar::TERMINALS,
-                    t("app", "activityBar.terminals"),
-                    terminals_visible && terminal_page_active,
-                    self.activity_bar_hover.is_visible("toggle-terminals"),
-                    Self::activity_bar_item_hover_listener("toggle-terminals", cx),
-                )
-                .on_click(cx.listener(|this, _event, window, cx| {
-                    let terminal_was_active = this.terminal_page_active(cx);
-                    this.workbench_area
-                        .update(cx, |area, cx| area.activate_terminal(window, cx));
-                    this.store.update(cx, |store, cx| {
-                        if terminal_was_active || !store.terminals_panel_visible() {
-                            store.toggle_terminals_panel(cx);
-                        }
-                    });
-                })),
             )
             .child(activity_bar::divider())
             .child(
@@ -2795,8 +2682,6 @@ impl Render for Workspace {
         let body = if Self::orca_shell_enabled() {
             self.render_orca_body(
                 orca_context_width,
-                terminals_visible,
-                terminal_page_active,
                 window,
                 cx,
             )
@@ -2855,8 +2740,6 @@ impl Render for Workspace {
             .capture_key_down(cx.listener(Self::on_workspace_key_down))
             .on_action(cx.listener(Self::on_new_terminal))
             .on_action(cx.listener(Self::on_close_pane))
-            .on_action(cx.listener(Self::on_split_right))
-            .on_action(cx.listener(Self::on_split_down))
             .on_action(cx.listener(Self::on_next_pane))
             .on_action(cx.listener(Self::on_prev_pane))
             .on_action(cx.listener(Self::on_select_pane))
@@ -2866,10 +2749,6 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_sessions))
             .on_action(cx.listener(Self::on_toggle_usage))
             .on_action(cx.listener(Self::on_jump_attention))
-            .on_action(cx.listener(Self::on_focus_left))
-            .on_action(cx.listener(Self::on_focus_right))
-            .on_action(cx.listener(Self::on_focus_up))
-            .on_action(cx.listener(Self::on_focus_down))
             .on_action(cx.listener(Self::on_terminal_search))
             .on_action(cx.listener(Self::on_global_search))
             .on_action(cx.listener(Self::on_switch_project))
@@ -2911,7 +2790,7 @@ impl Render for Workspace {
             // 在 paint 期登记拖拽区与三键的 hitbox,而 `window_control_hitboxes`
             // 不在 `PaintIndex` 里、`reuse_paint` 不搬它,每帧还被 `Frame::clear`
             // 清空 —— 命中一次缓存,那一帧的窗口拖拽与最小化/最大化/关闭就全没了。
-            // 它每帧那两遍全 pane 扫改走 `store.title_bar_snapshot()` 合成一次遍历。
+            // The titlebar reads the current worktree's flat terminal inventory.
             .child(self.title_bar.clone())
             .child(body)
             // 弹窗毛玻璃背板:垫在用量面板与 Dialog 层之下、其余一切之上

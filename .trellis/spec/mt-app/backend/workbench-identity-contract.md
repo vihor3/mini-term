@@ -56,12 +56,45 @@ pub struct TerminalJumpTarget {
 }
 
 pub fn terminal_jump_views(&self) -> Vec<TerminalJumpView>;
+pub fn terminal_tab_views(&self, project_id: &str) -> Vec<TerminalJumpView>;
+pub fn terminal_jump_target_for_pane(
+    &self,
+    project_id: &str,
+    pane_id: &str,
+) -> Option<TerminalJumpTarget>;
 pub fn activate_terminal_jump_target(
     store: &Entity<AppStore>,
     target: &TerminalJumpTarget,
     window: &mut Window,
     cx: &mut App,
 ) -> bool;
+pub fn reorder_terminal_tabs(
+    &mut self,
+    source: &TerminalJumpTarget,
+    target: &TerminalJumpTarget,
+    after: bool,
+    cx: &mut Context<Self>,
+) -> bool;
+
+// pane_actions.rs: all X/menu/keyboard close paths use the same confirmation.
+pub fn close_terminal_target(
+    store: Entity<AppStore>,
+    target: TerminalJumpTarget,
+    window: &mut Window,
+    cx: &mut App,
+);
+
+// AppStore owns the retained request/token and returns true only for a removed
+// currently selected terminal that needs a workbench focus handoff.
+pub(crate) fn terminal_close_request(
+    &self,
+    target: &TerminalJumpTarget,
+) -> Option<TerminalCloseRequest>;
+pub(crate) fn close_terminal_target(
+    &mut self,
+    request: TerminalCloseRequest,
+    cx: &mut Context<Self>,
+) -> Task<bool>;
 ```
 
 Deferred workbench handoff boundary:
@@ -102,6 +135,55 @@ pub fn reactivate_active_page(
   length-prefixed domains. Callers never concatenate or parse payloads.
 - `project_id` remains a compatibility/configuration key. `WorktreeId` owns
   workbench layout, document bucket, preview slot, and active-page state.
+- Each worktree has one visible terminal surface. `ProjectState` retains
+  `selected_terminal_pane_key: Option<PaneKey>` and `terminal_order: Vec<PaneKey>`
+  beside its complete legacy route owners. A top-level visual tab represents a
+  terminal `PaneKey`, not a new or replacement routing `TabId`.
+- `terminal_tab_views` is an ordered read-only inventory, including dormant and
+  exited records from every old owner/leaf. Rendering cannot hydrate, reparent,
+  respawn, or drop them. New split/group entrypoints are not compatibility paths.
+- Clicks, cycle/index, Quick Open and Agent navigation use singular selection.
+  `focus_pane` is focus-only and rejects inactive/unselected panes. Reordering
+  captures and validates both complete targets and changes presentation order
+  only; it cannot move a live terminal between routing owners.
+- New desktop terminals select before persistence. Closing the selected terminal
+  selects its flat right neighbor, otherwise left, otherwise empty. Closing a
+  background terminal preserves selection and never hydrates siblings. Mobile
+  background creation appends the order without replacing desktop selection or
+  focus. Deferred close confirmation revalidates the captured full target.
+- Close confirmation also captures the current GUI attachment, binding
+  provenance, configured project source and other worktree-alias snapshots.
+  Installing an attachment during confirmation invalidates that old request.
+  A dormant local/WSL record with a saved incarnation is removed only after
+  asynchronous, session/incarnation-fenced host `Kill` returns `Ok`. No host
+  error, including `SessionMissing` from an older host, proves history cleanup.
+  Disabled/unavailable hosting retains the record with a bounded error because
+  saved panes do not record transport provenance. SSH compatibility and records
+  without a saved incarnation do not issue a host mutation.
+- Before any close mutation, a source alias must agree with other aliases'
+  captured saved layouts, and another alias cannot own a pending worktree save.
+  After flush the pending-owner map is cleared, so absence of that owner alone
+  is not proof that the source snapshot is current. Divergence refuses close
+  with notification rather than writing an older inventory over another alias.
+- A logical-session-keyed pending-close token excludes duplicate close and
+  activation/hydration/reconnect through aliases until its owner completes.
+  Existing other-alias attachments reject dispatch. Same-owner selection/order
+  changes do not invalidate completion: remove the intended background record
+  while retaining the new selection. Conflicting other-alias changes retain the
+  exact record as runtime Error with notification, without saving over newer
+  alias state. Changed original source/route/attachment is inert.
+- Pending-close navigation is rejected before changing project/worktree/page
+  scope, and dormant activation must honor its internal rejection result. A
+  remembered global focus key cannot turn a rejected activation into success.
+- Reconnect resolves its captured route, shell and CWD before disposing the
+  current attachment. Missing prerequisites leave that view and close identity
+  intact. Never weaken exact-route validation to work around a stale handle.
+- Fork opens one new terminal, never a split. Capture source route, provider
+  session, shell, CWD and selected/focused state before asynchronous CWD lookup;
+  changed source/focus makes completion inert. Register lineage before writing
+  the fork command. Never substitute a different source after a stale result.
+- Right-side `ContextPanel` selection remains global, while workbench pages and
+  panel contents stay worktree-owned; see `worktree-context-contract.md`.
 - A global terminal jump captures project, execution host, worktree, tab, pane,
   logical terminal session, and the optional saved/live incarnation before the
   user selects it. No field may be derived from the later active project.
@@ -109,9 +191,12 @@ pub fn reactivate_active_page(
   unrelated panes, then validates the same complete target again before focus.
   A rebind or layout change between those checks is inert.
 - An exact dormant pane may run the ordinary hydration path for that saved
-  pane. A live target uses its existing terminal entity. Neither path creates a
-  replacement pane when the selected identity disappeared.
-- `PaneKey` and `TerminalSessionId` survive save/reload, split, move, reorder,
+  pane. That compatibility path may hydrate other eligible dormant records in
+  its original legacy owner; flattening presentation does not silently change
+  this recovery policy. A live target uses its existing terminal entity without
+  hydrating siblings. Neither path creates a replacement pane when the selected
+  identity disappeared.
+- `PaneKey` and `TerminalSessionId` survive save/reload, legacy split/move, reorder,
   rename, and worktree switches. A successful warm attach keeps both session
   and incarnation. A new PTY spawn or explicit reconnect keeps the session ID
   and mints a new `TerminalIncarnationId`.
@@ -166,6 +251,15 @@ pub fn reactivate_active_page(
 | One project alias is removed while another keeps the worktree | Keep the worktree bucket; remove only stale clean tabs and retain dirty drafts |
 | New PTY is spawned | Preserve pane/session identity and rotate incarnation |
 | Pane is moved or reordered | Preserve pane key, session, incarnation, and current PTY attachment |
+| A visual terminal tab is reordered across old panel boundaries | Change flat order only; keep its original `TabId` and full route |
+| Close confirmation returns after reconnect or project rebind | Reject the captured target without closing a substitute terminal |
+| Background terminal closes or Mobile appends a terminal | Preserve selected desktop terminal and focus |
+| Fork source/focus changes while CWD lookup is pending | Reject completion before creating a terminal or sending input |
+| A saved dormant hosted tab is confirmed closed | Run only the fenced host close asynchronously; remove after confirmed success |
+| Host is unavailable, disabled, mismatched or cannot identify stored history | Keep the dormant record and show a bounded error |
+| Another tab is selected/reordered in the same project during close | Complete the intended close while preserving current selection |
+| Another alias changes its saved layout during a confirmed host close | Retain an explicit Error record without overwriting the newer alias |
+| Reconnect has no usable shell | Preserve the current attachment and saved identity; leave close possible |
 | Remote/WSL identity is provisional | Route consistently but never present it as verified host authority |
 | Persisted authoritative SSH context exactly matches current endpoint and configured path | Reuse the authoritative IDs and authenticated canonical path |
 | Persisted authoritative SSH context is missing, legacy, or mismatched | Do not reuse it; resolve provisionally and require a fresh probe |
@@ -183,6 +277,8 @@ pub fn reactivate_active_page(
   switching restores each worktree's own route.
 - Good: Quick Open selects one dormant pane by its saved complete target and
   hydrates that pane without touching sibling worktrees.
+- Good: Reordering a non-first legacy leaf does not rewrite its route; an Agent
+  event carrying the original owner still reaches that exact terminal.
 - Bad: switch projects first, then look up a pane by display label or whichever
   pane is active in the destination.
 - Good: An Agents overlay opened on a document captures project and worktree;
@@ -218,6 +314,14 @@ pub fn reactivate_active_page(
   the complete stable target and accurate state flags.
 - Exact activation tests vary every identity component, cover the second
   revalidation, and prove stale selection never creates a replacement pane.
+- Flat-navigation regressions cover all legacy owners/leaves, selected non-first
+  restore, full-order cycle/index, selected/background/last close, Mobile append,
+  retained live attachments and stale reorder/fork/confirmation targets.
+- Dormant-close tests cover transport/no-incarnation decisions, retained token
+  ownership, alias activation/reconnect exclusion, every captured identity and
+  source field, failure-to-success rejection, harmless selection/order changes,
+  conflicting aliases and shellless reconnect preflight. Host cleanup fixtures
+  and real GUI timing/focus acceptance remain separate Actions/artifact gates.
 - Remote runtime tests assert authoritative rebind is blocked by either live PTYs
   or open documents and that a safe rebind uses layout reconciliation before
   hydration.

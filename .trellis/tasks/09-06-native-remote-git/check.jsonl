@@ -1,0 +1,5 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"No local or manual SSH reproduction commands; Actions evidence required."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Audit mutation completion after A-to-B-to-A switching and cache invalidation."}
+{"file":".trellis/spec/mt-app/backend/project-onboarding-contract.md","reason":"Check no uncertain mutation replay and execution-host fencing."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Prevent same-path or stale binding from selecting another repository."}
+{"file":".trellis/tasks/09-05-sidebar-agent-status/research/09-06-remote-git-action-surface.md","reason":"Audit every reachable child/dialog action for local fallback and uncertain-mutation safety."}

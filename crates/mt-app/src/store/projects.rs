@@ -1144,6 +1144,7 @@ mod project_onboarding_tests {
             project_states,
             terminals: HashMap::new(),
             terminal_host: None,
+            pending_terminal_closes: Default::default(),
             terminal_routes: HashMap::new(),
             agent_runtime: Default::default(),
             agent_feed_acknowledged: HashMap::new(),

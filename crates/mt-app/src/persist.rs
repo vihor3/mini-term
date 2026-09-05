@@ -31,6 +31,8 @@ pub fn serialize_layout(panels: &[ProjectPanel], active_index: usize) -> SavedPr
             .collect(),
         active_tab_index: active_index,
         active_tab_id: panels.get(active_index).map(|panel| panel.tab_id.clone()),
+        selected_terminal_pane_key: None,
+        terminal_order: None,
     }
 }
 
@@ -76,9 +78,8 @@ fn serialize_node(node: &SplitNode) -> SavedSplitNode {
     }
 }
 
-/// 磁盘格式 → 运行时面板列表 + 活动面板 id。shell 名对不上(用户删了某个 shell)
-/// 时按 `defaultShell` → 列表首项回落;一个都没有则这个 pane 丢弃,pane 全丢的
-/// tab 整个不还原(`activeTabIndex` 随之按「幸存前的原始下标」重新对位)。
+/// Restore all legacy owners. An unavailable shell keeps its saved terminal
+/// record; hydration reports the error instead of deleting recoverable history.
 pub fn restore_layout(
     saved: &SavedProjectLayout,
     config: &AppConfig,
@@ -100,7 +101,18 @@ pub fn restore_layout(
         }
         panels.push(panel);
     }
-    let active_id = active_by_id
+    let selected_owner = saved.selected_terminal_pane_key.as_ref().and_then(|key| {
+        panels.iter_mut().find_map(|panel| {
+            if panel.layout.pane(key.as_str()).is_some() {
+                panel.layout.activate_pane(key.as_str());
+                Some(panel.id.clone())
+            } else {
+                None
+            }
+        })
+    });
+    let active_id = selected_owner
+        .or(active_by_id)
         .or(active_by_index)
         .or_else(|| panels.first().map(|p| p.id.clone()));
     (panels, active_id)
@@ -121,9 +133,8 @@ fn restore_node(saved: &SavedSplitNode, config: &AppConfig) -> Option<SplitNode>
             };
             let mut restored: Vec<PaneState> = Vec::new();
             for sp in saved_panes {
-                let Some(shell_name) = resolve_shell_name(&sp.shell_name, config) else {
-                    continue;
-                };
+                let shell_name = resolve_shell_name(&sp.shell_name, config)
+                    .unwrap_or_else(|| sp.shell_name.clone());
                 let mut p = PaneState::from_identity(
                     shell_name,
                     sp.pane_key.clone().unwrap_or_default(),
@@ -309,6 +320,8 @@ mod tests {
     fn 未知_shell_回落默认() {
         let saved = SavedProjectLayout {
             worktree_id: None,
+            selected_terminal_pane_key: None,
+            terminal_order: None,
             tabs: vec![SavedTab {
                 tab_id: None,
                 custom_title: None,
@@ -354,6 +367,8 @@ mod tests {
         };
         let saved = SavedProjectLayout {
             worktree_id: None,
+            selected_terminal_pane_key: None,
+            terminal_order: None,
             tabs: vec![mk("cmd"), mk("PowerShell"), mk("cmd")],
             active_tab_index: 1,
             active_tab_id: None,
@@ -369,6 +384,8 @@ mod tests {
     fn 旧格式单_pane_字段兼容() {
         let saved = SavedProjectLayout {
             worktree_id: None,
+            selected_terminal_pane_key: None,
+            terminal_order: None,
             tabs: vec![SavedTab {
                 tab_id: None,
                 custom_title: None,

@@ -58,6 +58,11 @@ pub fn retain_project_bindings(&self, live_project_ids: &HashSet<String>) -> Res
 Saved JSON adds optional `worktreeId`, `activeTabId`, `tabId`,
 `activePaneKey`, `paneKey`, `terminalSessionId`, and
 `terminalIncarnationId` fields. Missing fields remain readable.
+Flat terminal navigation adds optional `selectedTerminalPaneKey: PaneKey` and
+`terminalOrder: Vec<PaneKey>` on `SavedProjectLayout`. The Rust order field is
+`Option<Vec<PaneKey>>` to retain compatibility with rows predating this preference.
+`SavedProjectLayout::normalize_terminal_navigation(&mut self)` runs after stable
+IDs and legacy active pointers have been repaired.
 `ProjectWorktreeBinding::identity_context` is an optional opaque provenance
 value. It may contain non-secret identity facts needed to decide whether a
 persisted authoritative binding can be reused.
@@ -100,6 +105,19 @@ persisted authoritative binding can be reused.
   not fall back to legacy data and does not block healthy rows.
 - Normalization writes only when JSON content changed so a second startup does
   not churn stable identities or timestamps.
+- Flat presentation never rewrites the saved panels/split trees into new route
+  owners. All surviving panes, original `TabId`s, provider sessions, CWDs,
+  terminal sessions and incarnations remain readable, including dormant/exited
+  records and records whose saved shell is no longer configured.
+- Navigation normalization keeps valid distinct order entries, removes stale
+  entries, and appends omitted panes in deterministic saved-tree traversal
+  order. Malformed optional preferences cannot reject healthy terminal records.
+  Selection prefers a valid explicit key, then the legacy active owner/leaf,
+  then the first surviving pane. It synchronizes the selected pane's legacy
+  `activeTabId`/index and leaf `activePaneKey` without changing owner identities.
+- The same preferences are saved in the worktree row and compatibility mirror
+  through the existing transaction and latest-dirty-alias policy. They are not
+  reconstructed from a later window-global focus value during a background save.
 
 ### 4. Validation & Error Matrix
 
@@ -119,6 +137,9 @@ persisted authoritative binding can be reused.
 | Empty layout is saved | Delete worktree content and the current alias mirror; keep binding |
 | Shared alias is removed | Flush only when it owns the latest pending snapshot; keep the shared worktree row |
 | Last project binding is removed | Final-save it, then delete binding and alias mirror; keep worktree content |
+| Optional order/selection is absent, malformed, duplicated or stale | Repair preferences only; preserve all healthy terminal records |
+| Selected terminal belongs to a non-first legacy panel/leaf | Retain its key and synchronize its original owner's compatibility pointers |
+| Saved shell was removed from configuration | Retain the terminal record and identity; report unavailable recovery separately |
 
 ### 5. Good / Base / Bad Cases
 
@@ -130,6 +151,9 @@ persisted authoritative binding can be reused.
   and deleting the older alias cannot overwrite the latest pending snapshot.
 - Base: A legacy layout gains stable IDs on first load and performs no second
   write when reopened.
+- Good: A terminal in the last legacy split leaf is selected and reordered to
+  the first visual position; reload retains the same original route owner and
+  terminal identity while showing only that terminal.
 - Bad: Loop over project rows and copy each legacy layout into the same
   worktree destination; ordering would silently destroy one user's state.
 - Bad: Delete all layout tables when schema version differs.
@@ -155,6 +179,12 @@ persisted authoritative binding can be reused.
 - Invalid JSON isolation tests assert healthy bindings still reconcile.
 - Future schema tests assert the database file and unknown payload survive.
 - Delete/retain tests assert orphan worktree rows are preserved.
+- Flat preference tests cover absent/malformed/stale/duplicate keys, non-first
+  owner and leaf selection, deterministic append, empty layouts and idempotence.
+- Flat round-trip tests compare every retained terminal's route owner, session,
+  incarnation, provider metadata and CWD, including unavailable shell records.
+- Alias save tests assert order and selection are dual-written only by the latest
+  dirty owner. Author locally; run all tests and normalization checks in Actions.
 
 ### 7. Wrong vs Correct
 

@@ -1,0 +1,4 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Hard Actions-only constraint and scoped async ownership."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Global right-tool selection with per-worktree data and stale-result rejection."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Retain exact terminal identities during flat-tab navigation."}
+{"file":".trellis/tasks/09-05-sidebar-agent-status/research/09-06-native-feedback.md","reason":"Source-confirmed Agent defects versus unresolved native evidence."}

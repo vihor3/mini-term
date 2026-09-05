@@ -80,6 +80,7 @@
 
 pub mod background;
 pub mod chart;
+pub mod icon_tooltip;
 pub mod icons;
 pub mod motion;
 pub mod terminal;

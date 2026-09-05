@@ -1,0 +1,4 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"No local verification; require exact-commit Actions and artifact evidence."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Audit R17 without merging contextual state or weakening mutation fences."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Cross-child identity and live-terminal preservation review."}
+{"file":".trellis/spec/mt-app/backend/release-staging-contract.md","reason":"Windows package provenance and complete payload verification in Actions."}

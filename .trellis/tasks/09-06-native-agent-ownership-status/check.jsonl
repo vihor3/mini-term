@@ -1,0 +1,5 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Only source review locally; all automated/probe validation in Actions."}
+{"file":".trellis/spec/mt-ai/backend/agent-runtime-contract.md","reason":"Check accepted ordering and preserved independent run identity."}
+{"file":".trellis/spec/mt-app/backend/remote-agent-reconciliation-contract.md","reason":"Check lifecycle hysteresis, stale events, unsupported probes, and truthful projection."}
+{"file":".trellis/spec/mt-app/backend/global-agent-activity-contract.md","reason":"Background owned runs, notifications, and exact activation."}
+{"file":".trellis/tasks/09-05-sidebar-agent-status/research/09-06-native-feedback.md","reason":"Require regressions for demonstrated failures without claiming native reproduction."}

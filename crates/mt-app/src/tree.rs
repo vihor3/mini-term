@@ -261,7 +261,7 @@ impl SplitDirection {
 /// pane 拖拽的落点档位(`layoutOps.ts` 的 `DropZone`)。
 ///
 /// `Center` = 并入目标叶子的 tab 栏;四边 = 在目标叶子的那个方向分出新格。
-/// 几何判档(哪个坐标算哪一档)在 [`crate::dnd::pane_drop_zone`],这里只管语义。
+/// Legacy tree-edit semantics retained for compatibility; no terminal UI drop targets use them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropZone {
     Center,

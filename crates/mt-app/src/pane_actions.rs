@@ -1,25 +1,7 @@
-//! 关终端 / 关整组的**唯一入口**(带 AI 感知确认框),外加「分支会话到新分屏」。
+//! Confirmed single-terminal close and source-fenced fork-to-new-terminal actions.
 //!
-//! 对应 `src/utils/paneActions.ts` 的 `closePane` / `closeLeaf` / `forkPaneSession`。
-//!
-//! # 为什么必须收成一个入口
-//!
-//! 关一个终端有四条路:tab 上的 ×、tab 右键菜单的「关闭此终端」、
-//! 分屏控制条的 ×、Ctrl+Shift+W。原版四条都过同一对函数,所以确认框的口径
-//! 天然一致;GPUI 侧此前是各调各的 `AppStore::close_*`(**完全不确认**),
-//! 正在跑的 AI 会话点一下就没了。
-//!
-//! # 盘点口径
-//!
-//! 「活着的 AI 会话」= pane 状态是 `ai-working` 或 `ai-idle`
-//! (逐字照抄原版 `p.status === 'ai-working' || p.status === 'ai-idle'`)。
-//! 注意**不看** `ai_session` 身份:退出后的 pane 仍留着会话身份备查(供续接),
-//! 那不算「关掉会终止的东西」;反过来输入检测认出、还没拿到 hook 身份的 AI
-//! 照样是 ai-working,必须算进去。
-//!
-//! 单个 tab 的文案里带 pane 名(`closeTabAiMessage`),整组的文案里带**个数**
-//! (`closeGroupAiMessage`)—— 与原版一字不差;个数之外**再列一串名字**放在
-//! 灰色补充行里(原版没有这一段,但「哪几个终端会被杀」是关整组时最想知道的)。
+//! Tab X, menu close and Ctrl+Shift+W share one captured route and confirmation.
+//! Window-close accounting still includes every owned terminal in every project.
 
 use gpui::{App, Entity, Window};
 use mt_config::{AiLauncher, ShellConfig};
@@ -28,8 +10,8 @@ use crate::i18n::{t, tr};
 use crate::menu;
 use crate::prompt::Confirm;
 use crate::session_branch::{BranchMenuSegment, branch_menu_segment};
-use crate::store::{AppStore, resolve_fork_cwd};
-use crate::tree::{PaneState, PaneStatus, SplitDirection, SplitNode};
+use crate::store::{AppStore, TerminalJumpTarget, resolve_fork_cwd};
+use crate::tree::{PaneState, PaneStatus};
 
 /// 这个状态算「AI 会话还活着」吗。
 pub fn is_ai_alive(status: PaneStatus) -> bool {
@@ -190,18 +172,6 @@ pub fn collect_live_ai_panes(store: &AppStore) -> Vec<String> {
     names
 }
 
-/// 取一个叶子里的全部 pane(拷贝一份,免得确认框开着的时候借用还挂在 store 上)。
-fn leaf_panes(store: &AppStore, project_id: &str, leaf_id: &str) -> Vec<PaneState> {
-    store
-        .project_state(project_id)
-        .and_then(|s| s.node(leaf_id))
-        .map(|node| match node {
-            SplitNode::Leaf { panes, .. } => panes.clone(),
-            _ => Vec::new(),
-        })
-        .unwrap_or_default()
-}
-
 /// 关闭一个终端 tab。**总是**先确认(与原版一致:没有 AI 也要问一句)。
 pub fn close_pane(
     store: Entity<AppStore>,
@@ -210,10 +180,25 @@ pub fn close_pane(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let Some(target) = store.read(cx).terminal_jump_target_for_pane(&project_id, &pane_id) else {
+        return;
+    };
+    close_terminal_target(store, target, window, cx);
+}
+
+pub fn close_terminal_target(
+    store: Entity<AppStore>,
+    target: TerminalJumpTarget,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(request) = store.read(cx).terminal_close_request(&target) else {
+        return;
+    };
     let Some(pane) = store
         .read(cx)
-        .project_state(&project_id)
-        .and_then(|s| s.pane(&pane_id))
+        .project_state(&target.project_id)
+        .and_then(|s| s.pane(target.pane_key.as_str()))
         .cloned()
     else {
         return;
@@ -233,114 +218,35 @@ pub fn close_pane(
     };
 
     Confirm::new(title, message).open(
-        move |_window, cx| {
-            // 按 id 从**最新**布局关(不是拿确认前那份快照)—— 确认框开着的这段
-            // 时间里 pane 可能刚拿到 pty_id,用旧快照会漏掉回收(原版同一条注释)
-            store.update(cx, |store, cx| {
-                store.close_pane(&project_id, &pane_id, cx);
-            });
+        move |window, cx| {
+            let close = store.update(cx, |store, cx| store.close_terminal_target(request.clone(), cx));
+            let target = target.clone();
+            window.spawn(cx, async move |cx| {
+                if close.await {
+                    let _ = cx.update(|window, cx| {
+                        crate::workbench_area::reactivate_active_page(
+                            &target.project_id, &target.worktree_id, window, cx,
+                        );
+                    });
+                }
+            }).detach();
         },
         window,
         cx,
     );
 }
 
-/// 关闭某个 pane **所在的整组**(Ctrl+Shift+W / 右键「关闭整个区域」的落点)。
-pub fn close_leaf_of_pane(
-    store: Entity<AppStore>,
-    project_id: String,
-    pane_id: String,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let Some(leaf_id) = store
-        .read(cx)
-        .project_state(&project_id)
-        .and_then(|s| s.leaf_of_pane(&pane_id))
-        .map(|node| node.id().to_string())
-    else {
-        return;
-    };
-    let panes = leaf_panes(store.read(cx), &project_id, &leaf_id);
-    confirm_close_group(
-        panes,
-        move |_window, cx| {
-            // 确认之后**按 pane id 重新定位叶子**:这段时间里可能又分了一次屏,
-            // 叶子 id 会变(insert_split 把原叶子换成 split 的一个子节点)
-            store.update(cx, |store, cx| {
-                store.close_leaf_of_pane(&project_id, &pane_id, cx);
-            });
-        },
-        window,
-        cx,
-    );
+fn fork_source_unchanged(expected: &PaneState, current: &PaneState) -> bool {
+    expected.pane_key == current.pane_key
+        && expected.terminal_session_id == current.terminal_session_id
+        && expected.terminal_incarnation_id == current.terminal_incarnation_id
+        && expected.shell_name == current.shell_name
+        && expected.cwd == current.cwd
+        && expected.ai_session == current.ai_session
 }
 
-/// 关闭一整个分屏格(它的全部 tab)—— 调用方手上已经有 leaf id 的那一路。
-pub fn close_leaf(
-    store: Entity<AppStore>,
-    project_id: String,
-    leaf_id: String,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let panes = leaf_panes(store.read(cx), &project_id, &leaf_id);
-    confirm_close_group(
-        panes,
-        move |_window, cx| {
-            store.update(cx, |store, cx| {
-                store.close_leaf(&project_id, &leaf_id, cx);
-            });
-        },
-        window,
-        cx,
-    );
-}
-
-/// 关闭一整个项目级面板(它的全部 pane,含所有分屏格)。
-/// 确认口径与关整组一致 —— 盘点面板里活着的 AI 会话。
-pub fn close_panel(
-    store: Entity<AppStore>,
-    project_id: String,
-    panel_id: String,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let panes: Vec<PaneState> = store
-        .read(cx)
-        .project_state(&project_id)
-        .and_then(|s| s.panels.iter().find(|p| p.id == panel_id))
-        .map(|p| p.layout.panes().into_iter().cloned().collect())
-        .unwrap_or_default();
-    confirm_close_group(
-        panes,
-        move |_window, cx| {
-            store.update(cx, |store, cx| {
-                store.close_panel(&project_id, &panel_id, cx);
-            });
-        },
-        window,
-        cx,
-    );
-}
-
-/// 把 pane 里跑着的 AI 会话**分支到新分屏**(`paneActions.ts::forkPaneSession`)。
-///
-/// ```text
-/// pane 的 ai_session ──→ 能力位查命令(claude --resume … --fork-session / codex fork …)
-///                        └─ 拼不出(无身份 / grok / 坏 id)→ 什么都不做
-/// 后台线程:resolve_fork_cwd(会话 cwd 预检 → claude 系反查 → None)
-///     ↓ 回主线程
-/// split_pane_with_cwd(横向) → register_pending_fork(新 ptyId) → 写 fork 命令
-/// ```
-///
-/// 原 pane 的原会话继续跑;右侧分出来的新 pane 起一个新进程跑 fork 出来的会话。
-/// PTY 内核缓冲 stdin,shell 就绪前写入不丢(与重启自动续接同一时序)。
-/// **新进程 = 新权限上下文**:原会话里「本会话允许」的授权不迁移(CLI 官方行为)。
-///
-/// 登记必须在写命令**之前** —— hook 可能在命令刚回车就把新会话身份报上来,
-/// 晚一步这条 child→parent 边就永远记不上了(Claude 的 CLI fork 不写磁盘指针,
-/// 自记账是唯一来源)。
+/// Resolve CWD off-thread, then create a new terminal only while the captured
+/// source route and focus still match. Register lineage before writing the command.
 pub fn fork_pane_session(
     store: Entity<AppStore>,
     project_id: String,
@@ -348,12 +254,28 @@ pub fn fork_pane_session(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(session) = store
+    let Some(target) = store.read(cx).terminal_jump_target_for_pane(&project_id, &pane_id) else {
+        return;
+    };
+    if store.read(cx).active_project_id.as_deref() != Some(project_id.as_str())
+        || store.read(cx).resolve_terminal_jump_target(&target).is_none()
+    {
+        return;
+    }
+    let selected_before = store.read(cx).active_pane_id(&project_id);
+    let focus_before = window.focused(cx);
+    let Some(source_snapshot) = store
         .read(cx)
         .project_state(&project_id)
         .and_then(|s| s.pane(&pane_id))
-        .and_then(|p| p.ai_session.clone())
+        .cloned()
     else {
+        return;
+    };
+    let Some(session) = source_snapshot.ai_session.clone() else {
+        return;
+    };
+    let Some(shell) = store.read(cx).resolve_shell(Some(&source_snapshot.shell_name)) else {
         return;
     };
     // 命令与归一化 agent 都由菜单那份判据产出 —— 菜单出得来的项,动作就跑得通
@@ -372,20 +294,37 @@ pub fn fork_pane_session(
                 .spawn(async move { resolve_fork_cwd(&session) })
                 .await;
             let _ = cx.update(|window, cx| {
-                store.update(cx, |store, cx| {
-                    let Some(new_pane) = store.split_pane_with_cwd(
+                let focus_unchanged = focus_before.as_ref().map_or_else(
+                    || window.focused(cx).is_none(),
+                    |focus| focus.is_focused(window),
+                );
+                if !focus_unchanged {
+                    return;
+                }
+                let created = store.update(cx, |store, cx| {
+                    if store.active_project_id.as_deref() != Some(project_id.as_str())
+                        || store.active_worktree_id() != Some(&target.worktree_id)
+                        || store.resolve_terminal_jump_target(&target).is_none()
+                        || store.active_pane_id(&project_id) != selected_before
+                    {
+                        return false;
+                    }
+                    let Some(source) = store.project_state(&project_id).and_then(|state| state.pane(&pane_id)) else {
+                        return false;
+                    };
+                    if !fork_source_unchanged(&source_snapshot, source) {
+                        return false;
+                    }
+                    let cwd = cwd.or_else(|| source_snapshot.cwd.clone());
+                    let Some(new_pane) = store.new_terminal_with_cwd(
                         &project_id,
-                        &pane_id,
-                        SplitDirection::Horizontal,
+                        Some(shell),
+                        Some(pane_id.clone()),
                         cwd,
                         window,
                         cx,
                     ) else {
-                        // 源 pane 在这期间被关掉了 —— 分不出屏,什么都不做
-                        // (原版那条「带 cwd 失败就不带 cwd 重试」在这里是死路:
-                        // GPUI 侧 spawn_pane 从不因目录失败而返回 None,
-                        // 起不来的 PTY 会以错误文本留在 pane 里,见 `start_pty`)
-                        return;
+                        return false;
                     };
                     let pty_id = store
                         .project_state(&project_id)
@@ -395,44 +334,56 @@ pub fn fork_pane_session(
                         store.register_pending_fork(pty_id, &agent, &parent_session_id);
                     }
                     store.write_to_pane(&project_id, &new_pane, &format!("{command}\r"), cx);
+                    true
                 });
+                if created {
+                    crate::workbench_area::activate_terminal_page(window, cx);
+                }
             });
         })
         .detach();
 }
 
-/// 「关整组」的确认框(两条入口共用)。组是空的就什么都不做。
-fn confirm_close_group(
-    panes: Vec<PaneState>,
-    on_ok: impl Fn(&mut Window, &mut App) + 'static,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    if panes.is_empty() {
-        return;
-    }
-    let ai_labels = ai_session_labels(&panes);
-    let (title, message) = if ai_labels.is_empty() {
-        (
-            t("paneGroup", "closeTerminalTitle"),
-            t("paneGroup", "closeGroupMessage").to_string(),
-        )
-    } else {
-        (
-            t("paneGroup", "closeAiTitle"),
-            tr!("paneGroup", "closeGroupAiMessage", count = ai_labels.len()),
-        )
-    };
-    // 名字列在灰色补充行里 —— 正文的口径(个数)与原版一字不差,
-    // 「哪几个会被杀」是关整组时最想知道的,不改文案也能给出来
-    Confirm::new(title, message)
-        .detail(ai_labels)
-        .open(on_ok, window, cx);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_fork_rejects_source_replacement_but_not_activity_updates() {
+        use crate::tree::AiSessionRef;
+        use mt_identity::{PaneKey, TerminalIncarnationId, TerminalSessionId};
+        let mut source = PaneState::new("source-shell");
+        source.terminal_incarnation_id = Some(TerminalIncarnationId::new());
+        source.cwd = Some("/source/cwd".into());
+        source.ai_session = Some(AiSessionRef {
+            agent: Some("codex".into()), session_id: "parent".into(), cwd: Some("/session/cwd".into()),
+        });
+        let mut current = source.clone();
+        current.status = PaneStatus::AiWorking;
+        current.attention = true;
+        assert!(fork_source_unchanged(&source, &current));
+        let mut changed = source.clone();
+        changed.pane_key = PaneKey::new();
+        assert!(!fork_source_unchanged(&source, &changed));
+        let mut changed = source.clone();
+        changed.terminal_session_id = TerminalSessionId::new();
+        assert!(!fork_source_unchanged(&source, &changed));
+        let mut changed = source.clone();
+        changed.terminal_incarnation_id = Some(TerminalIncarnationId::new());
+        assert!(!fork_source_unchanged(&source, &changed));
+        let mut changed = source.clone();
+        changed.cwd = Some("/different".into());
+        assert!(!fork_source_unchanged(&source, &changed));
+        let mut changed = source.clone();
+        changed.shell_name = "different-shell".into();
+        assert!(!fork_source_unchanged(&source, &changed));
+        let mut changed = source.clone();
+        changed.ai_session.as_mut().unwrap().session_id = "other-parent".into();
+        assert!(!fork_source_unchanged(&source, &changed));
+        let mut changed = source.clone();
+        changed.ai_session.as_mut().unwrap().agent = Some("claude-code".into());
+        assert!(!fork_source_unchanged(&source, &changed));
+    }
 
     /// 「只有一个可选项就别弹菜单」那道闸:接入 AI 启动器后必须**连启动器一起算**。
     /// 只按 shell 数判的话,单 shell 用户永远看不到启动器段 —— 而那正是这次要给

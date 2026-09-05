@@ -21,7 +21,7 @@
 //! | 项目列表内排序 / 入组 | [`DragProjectItem`] | `project_list.rs` 的行 | 同左 |
 //! | 资源管理器 → 加项目 | [`gpui::ExternalPaths`] | 系统 | 项目列表容器 |
 //! | 文件树 / 资源管理器 → 终端 | [`DragFilePath`] / `ExternalPaths` | 文件树行 / 系统 | pane 主体 |
-//! | 终端 tab 移动 / 合并 / 重排 | [`DragPane`] | tab | 另一组的 tab 栏 / 终端区 |
+//! | Terminal tab reorder | [`DragTerminalTab`] | Titlebar tab | Titlebar tab |
 //!
 //! # 三条 gpui 硬约束(写代码前必须知道)
 //!
@@ -44,7 +44,7 @@
 //! - **Esc 取消**:gpui 没有内建取消,但 [`gpui::App::stop_active_drag`] 是公开的,
 //!   配上 `capture_key_down`(捕获相沿根→焦点节点下行,先于终端自己的 `on_key_down`)
 //!   就等价于原版 `paneDragState` 里那句 `window.addEventListener('keydown', …, true)`。
-//!   落点在 `terminal_area.rs` 的终端区根容器上,X 批「Esc 取消未做」的记档就此结清。
+//!   Escape cancellation lives at the workspace capture boundary.
 //! - **grabbing 光标**:Windows 上**拿不到**。`CursorStyle::ClosedHand` 在
 //!   gpui 0.2.2 的 `platform/windows/util.rs::load_cursor` 里落进 `_ => IDC_ARROW`,
 //!   强行设过去反而从「手形」退化成「箭头」。而 gpui 拖拽期间本来就会把**拖源元素**
@@ -61,7 +61,7 @@ use gpui::{
 use mt_ui::icons::vector::{Geom, Ink, Shape, VectorIcon};
 use mt_ui::icons::{FileIcon, ProjectKind, TechIcon};
 
-use crate::tree::DropZone;
+use crate::store::TerminalJumpTarget;
 use crate::ui;
 
 // ─── 载荷 ─────────────────────────────────────────────────────
@@ -78,15 +78,10 @@ pub struct DragProjectItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DragFilePath(pub PathBuf);
 
-/// 终端 tab(pane)拖拽的载荷,对应原版 `paneDragState.ts` 的 `PaneDragPayload`。
-///
-/// 带 `project_id` 是**落点的准入闸**:原版 `acceptsPaneDrag` 只接同项目的 pane
-/// (跨项目移动 pane 没有意义 —— PTY 的 cwd、SSH 归属都绑在项目上)。
-/// 项目切换时另一个项目的终端区压根不在元素树里,这道闸实际是防御性的,但照抄。
+/// Presentation-only reorder. Never reconstruct ownership from the active pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DragPane {
-    pub project_id: String,
-    pub pane_id: String,
+pub struct DragTerminalTab {
+    pub target: TerminalJumpTarget,
 }
 
 // ─── 落点判档 ─────────────────────────────────────────────────
@@ -142,59 +137,12 @@ pub fn insert_index(target_idx: usize, dragged_idx: Option<usize>, after: bool) 
     idx
 }
 
-// ─── pane 拖拽的两个几何判档 ──────────────────────────────────
-
-/// 终端区落点判档,逐字对照 `PaneGroup.tsx::zoneFromEvent`:
-/// 中间那块(x、y 都在 0.25..=0.75)是 [`DropZone::Center`],其余取「离哪条边最近」。
-///
-/// 不在矩形里 → `None`(见模块注释第 2 条:`on_drag_move` 打给所有注册者,
-/// 命中闸必须自己做)。宽/高为 0 的退化矩形同样按不命中处理。
-///
-/// 并列时的先后与原版一致:TS 那边是 `[left, right, top, bottom]` 上的
-/// `Array.prototype.sort`(稳定排序),等价于「取第一个最小值」。
-pub fn pane_drop_zone(bounds: Bounds<Pixels>, position: Point<Pixels>) -> Option<DropZone> {
-    let width: f32 = bounds.size.width.into();
-    let height: f32 = bounds.size.height.into();
-    if width <= 0.0 || height <= 0.0 || !bounds.contains(&position) {
+/// A tab drop has only two outcomes: before or after the exact target.
+pub fn terminal_tab_drop_after(bounds: Bounds<Pixels>, position: Point<Pixels>) -> Option<bool> {
+    if bounds.is_empty() || !bounds.contains(&position) {
         return None;
     }
-    // 分母与原版一样兜底到 1(`Math.max(r.width, 1)`)
-    let x: f32 = f32::from(position.x - bounds.origin.x) / width.max(1.0);
-    let y: f32 = f32::from(position.y - bounds.origin.y) / height.max(1.0);
-    if (0.25..=0.75).contains(&x) && (0.25..=0.75).contains(&y) {
-        return Some(DropZone::Center);
-    }
-    let candidates = [
-        (DropZone::Left, x),
-        (DropZone::Right, 1.0 - x),
-        (DropZone::Top, y),
-        (DropZone::Bottom, 1.0 - y),
-    ];
-    let mut best = candidates[0];
-    for cand in &candidates[1..] {
-        if cand.1 < best.1 {
-            best = *cand;
-        }
-    }
-    Some(best.0)
-}
-
-/// tab 栏插入位 + 插入指示线的 x,逐字对照 `PaneGroup.tsx::tabDropFromEvent`:
-/// 指针落在某个 tab 中线**左侧**就插到它前面,否则继续往右;越过最后一个 tab
-/// (落在「+」或右侧控件簇那片空白上)就是末尾。
-///
-/// `tabs` 是各 tab 的 `(左缘, 右缘)`,按 tab 顺序;坐标与 `x` 同一套(屏幕坐标)。
-/// 返回的 x 是**指示线该画在哪**:插到 tab i 前面就贴它左缘,插到末尾就贴最后
-/// 一个 tab 的右缘。一个 tab 都没有时退化成 `(0, 0.0)`(原版同,该分支到不了)。
-pub fn tab_insert_index(tabs: &[(f32, f32)], x: f32) -> (usize, f32) {
-    let mut line_x = 0.0;
-    for (i, (left, right)) in tabs.iter().enumerate() {
-        if x < left + (right - left) / 2.0 {
-            return (i, *left);
-        }
-        line_x = *right;
-    }
-    (tabs.len(), line_x)
+    Some(position.x >= bounds.origin.x + bounds.size.width / 2.0)
 }
 
 // ─── 路径文本化 ───────────────────────────────────────────────
@@ -487,74 +435,13 @@ mod tests {
         }
     }
 
-    fn at(b: Bounds<Pixels>, x: f32, y: f32) -> Option<DropZone> {
-        pane_drop_zone(b, Point { x: px(x), y: px(y) })
-    }
-
-    /// 中间 50%×50% 是 center,四边各 1/4 进深按「离哪条边最近」分。
     #[test]
-    fn 终端区四边一四分之一进深其余归中央() {
-        let b = rect(0.0, 0.0, 400.0, 200.0);
-        assert_eq!(at(b, 200.0, 100.0), Some(DropZone::Center), "正中");
-        assert_eq!(at(b, 100.0, 100.0), Some(DropZone::Center), "x=0.25 边界含在内");
-        assert_eq!(at(b, 300.0, 100.0), Some(DropZone::Center), "x=0.75 边界含在内");
-        // 出了中间那块就按最近边
-        assert_eq!(at(b, 10.0, 100.0), Some(DropZone::Left));
-        assert_eq!(at(b, 390.0, 100.0), Some(DropZone::Right));
-        assert_eq!(at(b, 200.0, 5.0), Some(DropZone::Top));
-        assert_eq!(at(b, 200.0, 195.0), Some(DropZone::Bottom));
-    }
-
-    /// 角上比的是**归一化**进深,不是像素 —— 扁长的 pane 里左上角靠上更近。
-    #[test]
-    fn 角落按归一化进深取最近边() {
-        let b = rect(0.0, 0.0, 400.0, 200.0);
-        // 左上角:x 比例 0.05,y 比例 0.10 → left 更小
-        assert_eq!(at(b, 20.0, 20.0), Some(DropZone::Left));
-        // 同一个像素距离,但 y 比例更小 → top 赢
-        assert_eq!(at(b, 60.0, 20.0), Some(DropZone::Top));
-    }
-
-    /// 并列时取先出现的那一档(TS 侧稳定排序的等价物),顺序 left>right>top>bottom。
-    #[test]
-    fn 进深并列取先出现的档() {
-        let b = rect(0.0, 0.0, 100.0, 100.0);
-        // 正左上角:四档里 left 与 top 同为 0,取 left
-        assert_eq!(at(b, 0.0, 0.0), Some(DropZone::Left));
-        // 正右上角:right 与 top 同为 0,取 right
-        assert_eq!(at(b, 100.0, 0.0), Some(DropZone::Right));
-    }
-
-    #[test]
-    fn 不在_pane_矩形里不判档() {
-        let b = rect(100.0, 50.0, 200.0, 100.0);
-        assert_eq!(at(b, 99.0, 100.0), None);
-        assert_eq!(at(b, 200.0, 200.0), None);
-        // 还没布局出来的那一帧
-        assert_eq!(at(rect(0.0, 0.0, 0.0, 0.0), 0.0, 0.0), None);
-    }
-
-    // ─── tab 栏插入位 ─────────────────────────────────────────
-
-    /// 落在 tab 中线左侧插它前面,右侧继续往右;指示线贴对应的边。
-    #[test]
-    fn tab_插入位按中线左右分() {
-        let tabs = [(0.0, 100.0), (100.0, 200.0), (200.0, 300.0)];
-        assert_eq!(tab_insert_index(&tabs, 10.0), (0, 0.0));
-        assert_eq!(tab_insert_index(&tabs, 49.0), (0, 0.0));
-        // 正中线算「右侧」(原版是 `<` 严格小于)
-        assert_eq!(tab_insert_index(&tabs, 50.0), (1, 100.0));
-        assert_eq!(tab_insert_index(&tabs, 149.0), (1, 100.0));
-        assert_eq!(tab_insert_index(&tabs, 150.0), (2, 200.0));
-        assert_eq!(tab_insert_index(&tabs, 260.0), (3, 300.0), "越过最后一个 → 末尾");
-    }
-
-    /// tab 之间有空隙(gap / 「+」按钮)时指示线贴上一个 tab 的右缘,不会跳回 0。
-    #[test]
-    fn tab_越过末尾指示线贴最后一个右缘() {
-        let tabs = [(0.0, 110.0), (110.0, 230.0)];
-        assert_eq!(tab_insert_index(&tabs, 400.0), (2, 230.0));
-        assert_eq!(tab_insert_index(&[], 400.0), (0, 0.0), "一个 tab 都没有");
+    fn terminal_tab_reorder_uses_only_the_horizontal_midpoint() {
+        let bounds = rect(100.0, 20.0, 176.0, 40.0);
+        assert_eq!(terminal_tab_drop_after(bounds, Point { x: px(120.0), y: px(30.0) }), Some(false));
+        assert_eq!(terminal_tab_drop_after(bounds, Point { x: px(188.0), y: px(30.0) }), Some(true));
+        assert_eq!(terminal_tab_drop_after(bounds, Point { x: px(120.0), y: px(80.0) }), None);
+        assert_eq!(terminal_tab_drop_after(rect(0.0, 0.0, 0.0, 0.0), Point::default()), None);
     }
 
     // ─── 插入下标 ─────────────────────────────────────────────

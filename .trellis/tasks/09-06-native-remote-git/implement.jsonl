@@ -1,0 +1,5 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Actions-only fixtures/builds and exact async operation ownership."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Git draft/history/cache ownership, mutation suspension, and late reconciliation."}
+{"file":".trellis/spec/mt-app/backend/project-onboarding-contract.md","reason":"Existing bounded execution-host Git and uncertain-dispatch patterns."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Exact project/worktree/host routing for Git panel operations."}
+{"file":".trellis/tasks/09-05-sidebar-agent-status/research/09-06-remote-git-action-surface.md","reason":"Complete reachable action/backend matrix, parser reuse, mutation and registration risks."}

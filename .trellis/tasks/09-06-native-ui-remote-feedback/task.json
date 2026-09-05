@@ -1,0 +1,32 @@
+{
+  "id": "native-ui-remote-feedback",
+  "name": "native-ui-remote-feedback",
+  "title": "Address Mini-Term native UI and remote workflow feedback",
+  "description": "Plan the sixteen native feedback items across Agent ownership, terminal navigation, file browsing, remote Git, and independently selected gh accounts in Tasks.",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "leo",
+  "assignee": "leo",
+  "createdAt": "2026-09-06",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "09-06-native-agent-ownership-status",
+    "09-06-native-terminal-navigation",
+    "09-06-native-file-browser",
+    "09-06-native-remote-git",
+    "09-06-native-tasks-gh-accounts"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

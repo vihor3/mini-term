@@ -237,3 +237,6 @@ jobs:
 
       - name: Check sidecars
         run: cargo check --manifest-path sidecars/Cargo.toml --locked --target x86_64-pc-windows-msvc --all-targets
+
+      - name: Run terminal host regressions
+        run: cargo test --locked --target x86_64-pc-windows-msvc -p mt-terminal-host --all-targets --no-fail-fast

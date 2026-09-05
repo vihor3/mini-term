@@ -1,73 +1,32 @@
-//! 自绘标题栏(对应 `src/components/TitleBar.tsx`,审计缺口 #20)。
-//!
-//! ```text
-//! ┌─ 32px ─────────────────────────────────────────────────────────────────┐
-//! │ [mac 交通灯占位] logo Mini-Term v0.13.1 │ ●项目名 ▾  ● │  拖拽  │ ─ □ ✕ │
-//! │ └──────── Drag ────────┘                 胶囊   灯   └Drag┘  └Min/Max/Close┘
-//! └────────────────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! # 拖拽与三键:全部走 gpui 原生的 [`WindowControlArea`]
-//!
-//! 装机版为此写了 283 行 `src-tauri/src/window_snap.rs`(子类化窗口过程、上报最大化
-//! 按钮矩形、DPI 换算、`TrackMouseEvent` 回传悬停态),**整套不搬**:
-//! `.window_control_area(..)` 在 paint 阶段登记一个 hitbox,gpui 的 Windows 平台层
-//! 在 `WM_NCHITTEST` 里把命中结果翻成 `HTCAPTION` / `HTMINBUTTON` / `HTMAXBUTTON` /
-//! `HTCLOSE`(`platform/windows/events.rs:855-880`)。于是:
-//!
-//! | 能力 | 谁给的 |
-//! |---|---|
-//! | 拖拽窗口 | `HTCAPTION` + 系统默认处理 |
-//! | 双击标题栏最大化/还原 | `WM_NCLBUTTONDBLCLK` 落到 `HTCAPTION`,gpui 不吞就交给 `DefWindowProc`(`events.rs:62-65` 的原注释写明了这条) |
-//! | **Win11 贴靠布局菜单** | `HTMAXBUTTON` —— 系统看到这个应答就自己弹,不需要上报矩形 |
-//! | 三键的按下/抬起动作 | `handle_nc_mouse_up_msg`(`events.rs:1032-1058`):按下与抬起在同一区域才动作 |
-//! | 三键的 hover 态 | `WM_NCMOUSEMOVE` 照常翻译成 `MouseMove` 喂进 gpui(`events.rs:921-946`),所以本模块的 `on_hover` 在非客户区照常收得到 |
-//!
-//! ## ⚠️ Drag 区必须「正列」,不能像原版那样「挖洞」
-//!
-//! 原版把整条 bar 设成拖拽区、给胶囊/状态灯/三键挂 `data-no-drag` 挖洞。这里不行:
-//! gpui 的命中回调是**按 paint 顺序**遍历 `window_control_hitboxes`、返回第一个命中的
-//! (`window.rs:1133-1147`),父元素永远排在子元素前面 —— 给根容器挂 `Drag` 的话
-//! 三颗按钮就永远被父级的 `HTCAPTION` 挡住了。所以只给「品牌段」和「中段空白」
-//! 两块**显式**挂 `Drag`,其余区域自然是 `HTCLIENT`,等价于原版的 no-drag 洞。
-//!
-//! 副作用:品牌段内不能再放可点元素(原版品牌段本来就是纯展示)。
-//!
-//! ## ⚠️ Windows 上三键不许挂 `on_click`
-//!
-//! `HTMINBUTTON` 系区域的 `WM_NCLBUTTONDOWN/UP` 会**先**被翻成 gpui 的
-//! MouseDown/MouseUp 派发一遍,没人吞才轮到平台层动作。也就是说 `on_click` 与
-//! 系统动作会**双双触发** —— 关闭键上尤其致命:`remove_window()` 绕过
-//! `on_window_should_close`,会把 Z 批的关窗确认框整个跳过。
-//! 因此 `on_click` 只在 Linux 挂(那边 `on_hit_test_window_control` 是空实现,
-//! 见 `platform/linux/x11/window.rs:1466`),与 gpui-component 的 `TitleBar` 同一取舍。
-//!
-//! # 为什么不用 `gpui_component::TitleBar`
-//!
-//! 与 M 批边条、P 批菜单同源的四条硬伤:图标走 `IconName` → SVG 资产(本仓没注册
-//! `AssetSource`,渲染出来是空白且编译期无感);高度写死 34px / 按钮 34px 宽(原版
-//! 32 / 46);配色取 `cx.theme()` 而不是壳的 [`crate::ui`];布局是两段式,塞不下
-//! 「品牌 / 版本 / 胶囊 / 状态灯 / 中段空白」这套五段结构。
-//! 可抄的两点(`.window_control_area` 只在 Windows 挂、Drag 区用一个元素声明)已照抄。
+//! Flat terminal tabs and native window controls.
+//! Only the logo and trailing blank area are window-drag hit regions.
+//! Windows control buttons deliberately have no click handlers: native hit
+//! testing owns their actions and the guarded window-close request.
+
+use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, App, Context, Div, ElementId, Entity, FocusHandle, Hsla, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, WindowControlArea, anchored, deferred, div, point,
-    prelude::FluentBuilder, px, relative,
+    AnyElement, App, AppContext, Bounds, ClickEvent, Context, Div, Entity, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
+    Render, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled,
+    Window, WindowControlArea, canvas, div, point, prelude::FluentBuilder, px,
 };
-use mt_ui::tooltip::Tooltip;
-use mt_ui::icons::{Geom, Ink, Shape, VectorIcon};
+use mt_identity::{PaneKey, WorktreeId};
+use mt_ui::icon_tooltip::IconTooltips;
+use mt_ui::icons::{AiVendor, BrandIcon, Geom, Ink, Shape, VectorIcon};
 use mt_ui::rgb8;
+use mt_ui::tooltip::Tooltip;
 
+use crate::dnd::{self, DragTerminalTab};
 use crate::i18n::t;
+use crate::menu;
+use crate::pane_actions;
 use crate::prompt::Confirm;
-use crate::store::{AiProjectEntry, AiProjectKind, AppStore, TitleBarLight};
+use crate::store::{AppStore, TerminalJumpTarget, TerminalJumpView};
+use crate::terminal_area::{click_position, open_new_terminal_menu, tab_menu};
 use crate::ui;
 
-/// 标题栏高度。原版 `TITLE_BAR_HEIGHT = 32`(注释:对齐 Windows 原生 32px,
-/// 「窗口按钮的手感才对得上」)。
-pub const HEIGHT: f32 = 32.0;
+pub const HEIGHT: f32 = 44.0;
 
 /// macOS 交通灯占位:三颗灯 + 左右留白,内容从这条线之后开始。
 const MAC_TRAFFIC_LIGHT_WIDTH: f32 = 78.0;
@@ -206,78 +165,15 @@ pub fn max_button_face(maximized: bool) -> (&'static [Shape], &'static str) {
     }
 }
 
-/// 状态灯 / 胶囊状态点的取色。**与边条那颗徽标不是一套**:
-/// 这里 `error` 是最高档而不是被压成 idle,另外多一个 `done` 档。
-pub fn light_color(light: TitleBarLight) -> Hsla {
-    match light {
-        TitleBarLight::Error => ui::color_error(),
-        TitleBarLight::Attention => ui::color_warning(),
-        TitleBarLight::Working => ui::color_ai_working(),
-        TitleBarLight::Done => ui::color_success(),
-        TitleBarLight::Idle => ui::text_muted(),
-    }
-}
 
-/// 下拉行左侧那颗 6px 状态点的取色。档位与状态灯共用一张色表。
-pub fn kind_color(kind: AiProjectKind) -> Hsla {
-    light_color(match kind {
-        AiProjectKind::Attention => TitleBarLight::Attention,
-        AiProjectKind::Working => TitleBarLight::Working,
-        AiProjectKind::Done => TitleBarLight::Done,
-        AiProjectKind::Idle => TitleBarLight::Idle,
-    })
-}
+const TAB_WIDTH: f32 = 176.0;
 
-/// 0.8s 一轮的「呼吸」进度:`0 → 1 → 0` 的三角波再抹平成 ease-in-out。
-///
-/// 对应 `styles.css` 的 `@keyframes alertBlink`
-/// (`0%,100% {opacity:1; scale(1)}` / `50% {opacity:0.2; scale(0.75)}`)——
-/// 输入是 0..1 的线性进度(来自 `mt_ui::motion::pulse_phase`),中点折返得自己算。
 pub fn blink_phase(delta: f32) -> f32 {
     let triangle = 1.0 - (delta * 2.0 - 1.0).abs();
     // smoothstep,等价于 CSS 的 ease-in-out
     triangle * triangle * (3.0 - 2.0 * triangle)
 }
 
-// ─── 窗口动作 ────────────────────────────────────────────────
-
-// ─── 关窗确认(audit #30 / `App.tsx:389-422`)─────────────────
-//
-// # 一条闸,四个入口
-//
-// ```text
-// 系统 WM_CLOSE(标题栏 ✕ / Alt+F4 / 任务栏右键关闭)
-//     └→ gpui handle_close_msg → on_window_should_close(main.rs 注册)
-//                                        ↓
-// Linux 降级路径的 ✕ on_click → request_close_window ─→ allow_close()
-//                                        ↓
-//                 有活着的 AI 或未保存文件? ── 否 ─→ 落盘 → true(放行)
-//                              │
-//                              是 ─→ 弹 Confirm → false(这次不关)
-//                                        └─ 点「确定」→ 置 FORCE_CLOSE
-//                                                     → 落盘 → remove_window()
-// ```
-//
-// 托盘没有「退出」项(菜单里只有项目行,见 `tray.rs`),所以关窗路径就这两条口。
-//
-// # 设计意图(`App.tsx:389-391` 原注释,务必保留)
-//
-// > 只在真的会毁掉什么时才拦一下。之前无条件弹确认,日常开关十几次全是噪音,
-// > 用户学会的是「闭眼点确定」——那正好让确认框在唯一该起作用的时候
-// > (AI 正在跑或文件尚未保存)也失效。
-//
-// # 防重入
-//
-// 两道,各管一头:
-//
-// 1. **确认框开着时再点 ✕**:`Confirm::open` 内部走 `open_guarded`,同种类第二次
-//    直接忽略 —— 于是摞不出第二个框,`allow_close` 照常返回 false,窗口留着。
-//    不需要额外的标志位。
-// 2. **确认之后**:`FORCE_CLOSE` 置位,`allow_close` 从此立刻放行。
-//    `remove_window()` 只是把 `Window::removed` 置 true、由 `App` 下一轮把窗口丢掉
-//    (`gpui-0.2.2/src/window.rs:1375` + `app.rs:1374`),**不会**再投一次
-//    `WM_CLOSE`,所以这一条严格说是冗余的 —— 留着是防线:万一哪个平台的
-//    `remove_window` 走回 should_close,没有它就是「确认框弹到天荒地老」。
 
 thread_local! {
     /// 已经确认过要关了 —— 之后任何一次询问都直接放行。见上面的防重入说明。
@@ -404,558 +300,420 @@ pub fn toggle_maximize(window: &mut Window, _cx: &mut App) {
     window.zoom_window();
 }
 
-/// `focusAttentionTarget()` 等价物(`src/utils/attentionJump.ts`):
-/// 跳到「下一件该我做的事」。挑目标的优先级 待确认/异常 > 最先完成 > 处理中
-/// 由 [`AppStore::next_attention_target`] 给,与托盘菜单同一套落点。
-///
-/// 返回 `false` = 全都闲着 —— 调用方据此决定要不要退而求其次(下拉行会改为
-/// 只把项目切过去,「定位不到目标也不能没反应」)。
-fn focus_attention_target(
-    store: &Entity<AppStore>,
-    only_project: Option<&str>,
-    window: &mut Window,
-    cx: &mut App,
-) -> bool {
-    let Some((project_id, pane_id)) = store.read(cx).next_attention_target(only_project) else {
-        return false;
-    };
-    store.update(cx, |store, cx| {
-        store.set_active_project(&project_id, cx);
-        store.activate_pane(&project_id, &pane_id, window, cx);
-    });
-    crate::workbench_area::activate_terminal_page(window, cx);
-    true
-}
 
-// ─── 视图 ────────────────────────────────────────────────────
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Control { Min, Max, Close }
 
-/// 哪一颗窗口控制键正被悬停。
-///
-/// hover 态不走 `.hover(..)` 样式而走视图状态,是因为图标是 [`VectorIcon`] 自绘 ——
-/// 它的颜色是 paint 期的常量,`text_color` 影响不到它。底色与图标色必须同帧翻转
-/// (关闭键 hover 是**红底白叉**,只翻底色会变成红底深灰叉),所以两者共用这一份。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Control {
-    Min,
-    Max,
-    Close,
+fn revealed_offset(current: f32, viewport: f32, index: usize, tab_width: f32) -> f32 {
+    let left = index as f32 * tab_width;
+    let right = left + tab_width;
+    if left < current || viewport < tab_width {
+        left
+    } else if right > current + viewport {
+        (right - viewport).max(0.0)
+    } else {
+        current
+    }
 }
 
 pub struct TitleBar {
     store: Entity<AppStore>,
-    /// 项目切换胶囊的下拉是否展开。
-    switcher_open: bool,
-    /// 下拉开着时焦点收在这儿(否则打字会落进终端)。
-    focus: FocusHandle,
-    /// 打开下拉前的焦点,关闭时**先还回去再跑动作**。
-    ///
-    /// 顺序是 P 批菜单基建的教训:切项目会重建终端视图并聚焦它,反过来的话
-    /// 还原焦点会把光标从新终端上抢走。
-    prev_focus: Option<FocusHandle>,
-    hovered_control: Option<Control>,
-    /// 全局状态灯被悬停(原版 `group-hover:scale-125`)。
-    light_hovered: bool,
+    workbench: Entity<crate::workbench_area::WorkbenchArea>,
+    navigation_tooltips: Entity<IconTooltips>,
+    window_tooltips: Entity<IconTooltips>,
+    tab_focus: HashMap<PaneKey, FocusHandle>,
+    add_focus: FocusHandle,
+    overflow_focus: FocusHandle,
+    scroll: ScrollHandle,
+    last_scope: Option<(String, WorktreeId)>,
+    last_selected: Option<PaneKey>,
+    last_terminal_page_active: bool,
+    last_order: Vec<PaneKey>,
+    tabs_width: Pixels,
+    tabs_bounds: Option<Bounds<Pixels>>,
+    reveal_selected: bool,
+    tab_drop: Option<(TerminalJumpTarget, bool)>,
 }
 
 impl TitleBar {
-    pub fn new(store: Entity<AppStore>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Entity<AppStore>,
+        workbench: Entity<crate::workbench_area::WorkbenchArea>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        cx.observe(&workbench, |_, _, cx| cx.notify()).detach();
         Self {
             store,
-            switcher_open: false,
-            focus: cx.focus_handle(),
-            prev_focus: None,
-            hovered_control: None,
-            light_hovered: false,
+            workbench,
+            navigation_tooltips: cx.new(|_| IconTooltips::default()),
+            window_tooltips: cx.new(|_| IconTooltips::default()),
+            tab_focus: HashMap::new(),
+            add_focus: cx.focus_handle().tab_stop(true),
+            overflow_focus: cx.focus_handle().tab_stop(true),
+            scroll: ScrollHandle::new(),
+            last_scope: None,
+            last_selected: None,
+            last_terminal_page_active: false,
+            last_order: Vec::new(),
+            tabs_width: px(0.0),
+            tabs_bounds: None,
+            reveal_selected: true,
+            tab_drop: None,
         }
     }
 
-    fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.switcher_open {
-            return;
-        }
-        self.prev_focus = window.focused(cx);
-        window.focus(&self.focus);
-        self.switcher_open = true;
-        cx.notify();
-    }
-
-    /// 收起下拉并把焦点还给打开前那个元素(幂等)。
-    fn dismiss_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.switcher_open {
-            return;
-        }
-        self.switcher_open = false;
-        if let Some(prev) = self.prev_focus.take() {
-            window.focus(&prev);
-        }
-        cx.notify();
-    }
-
-    /// 一颗窗口控制键的外壳。`on_click` 由调用方按平台决定挂不挂。
     fn control_button(
         &self,
         which: Control,
         shapes: &'static [Shape],
         tip: &'static str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let hovered = self.hovered_control == Some(which);
-        let danger = which == Control::Close;
-        let ink = match (hovered, danger) {
-            // 关闭键 hover:红底白叉(白色是字面量 —— 底色是系统红,不跟主题走)
-            (true, true) => gpui::white(),
-            (true, false) => ui::text_primary(),
-            (false, _) => ui::text_secondary(),
+        let id = match which {
+            Control::Min => "titlebar-min",
+            Control::Max => "titlebar-max",
+            Control::Close => "titlebar-close",
         };
-        let id: ElementId = match which {
-            Control::Min => "titlebar-min".into(),
-            Control::Max => "titlebar-max".into(),
-            Control::Close => "titlebar-close".into(),
-        };
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(BUTTON_WIDTH))
-            .h_full()
-            .flex_none()
-            .when(hovered, |el| {
-                el.bg(if danger {
+        let button = div().id(id).w(px(BUTTON_WIDTH)).h_full().flex_none()
+            .flex().items_center().justify_center()
+            .hover(move |el| {
+                el.bg(if which == Control::Close {
                     rgb8(CLOSE_HOVER_BG.0, CLOSE_HOVER_BG.1, CLOSE_HOVER_BG.2)
                 } else {
                     ui::border_default()
                 })
             })
-            .on_hover(cx.listener(move |this: &mut Self, hovered: &bool, _window, cx| {
-                let next = if *hovered {
-                    Some(which)
-                } else if this.hovered_control == Some(which) {
-                    None
-                } else {
-                    // 别人的「离开」不该把当前这颗的高亮抹掉
-                    return;
-                };
-                if this.hovered_control != next {
-                    this.hovered_control = next;
-                    cx.notify();
-                }
-            }))
-            .tooltip(move |window, cx| Tooltip::new(t("app", tip)).build(window, cx))
-            .child(VectorIcon::new(shapes, px(10.0)).ink(ink))
+            .child(VectorIcon::new(shapes, px(10.0)).ink(ui::text_primary()));
+        IconTooltips::button(&self.window_tooltips, SharedString::from(format!("{id}-description")), t("app", tip), button, window, cx)
     }
 
-    /// 项目切换胶囊(触发按钮 + 展开时的下拉)。
-    fn switcher(
-        &self,
-        project_name: String,
-        active_kind: Option<AiProjectKind>,
-        entries: Vec<AiProjectEntry>,
-        active_project_id: Option<String>,
+    fn open_tab_overflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        IconTooltips::reset(&self.navigation_tooltips, window, cx);
+        let titlebar = cx.entity();
+        let entries = self.store.read(cx).active_project_id.as_ref()
+            .map(|project| self.store.read(cx).terminal_tab_views(project)).unwrap_or_default()
+            .into_iter().enumerate().map(|(index, view)| {
+                let store = self.store.clone();
+                let titlebar = titlebar.clone();
+                menu::item(format!("{}. {}", index + 1, view.pane_label), move |window, cx| {
+                    if AppStore::activate_terminal_jump_target(&store, &view.target, window, cx) {
+                        titlebar.update(cx, |bar, cx| {
+                            bar.reveal_selected = true;
+                            cx.notify();
+                        });
+                    }
+                })
+            }).collect();
+        let position = self.tabs_bounds.map(|bounds| point(bounds.right() + px(32.0), bounds.bottom()))
+            .unwrap_or_else(|| window.mouse_position());
+        menu::show(position, entries, window, cx);
+    }
+
+    fn render_tab(
+        &mut self,
+        view: &TerminalJumpView,
+        index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.switcher_open;
-        // 当前项目自己的 AI 状态色点;没有 AI 会话时压暗,和全局灯一个口径
-        let dot_color = active_kind.map(kind_color).unwrap_or_else(ui::text_muted);
-        let dot_alpha = if active_kind.is_some() { 1.0 } else { 0.45 };
-
-        let button = div()
-            .id("titlebar-switcher")
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .max_w(px(220.0))
-            .h(px(22.0))
-            .pl(px(8.0))
-            .pr(px(6.0))
-            .rounded_full()
-            .border_1()
-            .border_color(ui::border_default())
-            .bg(ui::bg_elevated())
-            .text_size(ui::font_px(12.0))
-            .text_color(ui::text_primary())
-            .cursor_pointer()
-            .hover(|el| el.border_color(ui::accent()).bg(ui::border_subtle()))
-            .tooltip(move |window, cx| {
-                Tooltip::new(t("app", "titleBar.projectSwitcher")).build(window, cx)
-            })
-            .on_click(cx.listener(|this, _event, window, cx| {
-                if this.switcher_open {
-                    this.dismiss_switcher(window, cx);
-                } else {
-                    this.open_switcher(window, cx);
-                }
-            }))
-            .child(
-                div()
-                    .w(px(6.0))
-                    .h(px(6.0))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(ui::with_alpha(dot_color, dot_alpha)),
-            )
-            .child(div().flex_1().overflow_hidden().child(div().truncate().child(project_name)))
-            .child(
-                div()
-                    .flex_none()
-                    .child(
-                        VectorIcon::new(ICON_CHEVRON_DOWN, px(9.0))
-                            .ink(ui::text_muted())
-                            // 展开时 `rotate(180deg)` = 半圈(`VectorIcon::rotation` 的单位是圈)
-                            .rotation(if open { 0.5 } else { 0.0 }),
-                    ),
-            );
-
-        let mut container = div().relative().flex_none().child(button);
-        if open {
-            container = container
-                .child(self.switcher_backdrop(window, cx))
-                .child(self.switcher_panel(entries, active_project_id, cx));
-        }
-        container.into_any_element()
-    }
-
-    /// 点外关闭用的全窗遮罩。照抄 [`crate::menu`] 的做法:`occlude` 让它吃掉这一下,
-    /// 否则「关下拉」那一次点击会同时点到底下的终端/项目行。
-    fn switcher_backdrop(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let size = window.viewport_size();
-        deferred(
-            anchored().position(point(px(0.0), px(0.0))).child(
-                div()
-                    .w(size.width)
-                    .h(size.height)
-                    .occlude()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _event: &MouseDownEvent, window, cx| {
-                            this.dismiss_switcher(window, cx);
-                        }),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|this, _event: &MouseDownEvent, window, cx| {
-                            this.dismiss_switcher(window, cx);
-                        }),
-                    ),
-            ),
-        )
-        .into_any_element()
-    }
-
-    /// 下拉面板本体。**不裁剪、不限条数**(与托盘的 `trayMaxProjects` 不同),
-    /// 靠 `max-w` + `truncate` 处理溢出。
-    fn switcher_panel(
-        &self,
-        entries: Vec<AiProjectEntry>,
-        active_project_id: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut panel = div()
-            // 焦点收在面板上,免得下拉开着时打字落进终端。原版没有 Esc 关闭、
-            // 也没有键盘导航(那是全局 Quick Open 的事),所以这里
-            // 只登记焦点、不挂按键。
-            .track_focus(&self.focus)
-            .flex()
-            .flex_col()
-            .min_w(px(220.0))
-            .max_w(px(320.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(ui::border_default())
-            .bg(ui::bg_elevated())
-            .shadow_lg()
-            .overflow_hidden()
-            // 面板内的按下不算「点外」
-            .occlude();
-
-        if entries.is_empty() {
-            panel = panel.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .text_size(ui::font_px(12.0))
-                    .text_color(ui::text_muted())
-                    .child(t("app", "titleBar.noAiProjects")),
-            );
-        }
-        for entry in entries {
-            let is_active = active_project_id.as_deref() == Some(entry.id.as_str());
-            let target = entry.id.clone();
-            panel = panel.child(
-                div()
-                    .id(SharedString::from(format!("titlebar-proj-{}", entry.id)))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .text_size(ui::font_px(12.0))
-                    .cursor_pointer()
-                    .map(|el| {
-                        if is_active {
-                            el.bg(ui::accent_subtle()).text_color(ui::accent())
-                        } else {
-                            el.text_color(ui::text_primary())
-                                .hover(|el| el.bg(ui::border_subtle()))
-                        }
-                    })
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        // 先收下拉(顺带把焦点还回去)再跑动作 —— 切项目会重建
-                        // 终端视图并聚焦它,反过来会被还原焦点抢走光标
-                        this.dismiss_switcher(window, cx);
-                        let store = this.store.clone();
-                        // 定位不到目标(pane 已安静)也要把项目切过去,不能没反应
-                        if !focus_attention_target(&store, Some(&target), window, cx) {
-                            store.update(cx, |store, cx| store.set_active_project(&target, cx));
-                        }
-                    }))
-                    // 左:6px 状态点(**不压暗** —— 这一行必然有 AI 会话)
-                    .child(
-                        div()
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(kind_color(entry.kind)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .child(div().truncate().child(entry.name.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(ui::text_muted())
-                            .child(t("app", entry.kind.tray_status_key())),
-                    ),
-            );
-        }
-
-        // `absolute top:100% left:0` 挂在胶囊下方;外面套 `anchored()`(不给
-        // position = 以自己的布局位置为锚点)白拿贴边收拢,`deferred` 把它抬到
-        // 常规内容之上(否则标题栏是根 flex-col 的**首个** child,会被下面的三栏盖住)
-        deferred(
-            div()
-                .absolute()
-                .left_0()
-                .top(relative(1.0))
-                .mt(px(6.0))
-                .child(anchored().snap_to_window_with_margin(px(4.0)).child(panel)),
-        )
-        .with_priority(1)
-        .into_any_element()
-    }
-
-    /// 全局状态灯。点一下跳到「下一件该我做的事」(不限项目)。
-    fn status_light(
-        &self,
-        light: TitleBarLight,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let color = light_color(light);
-        let alpha = if light == TitleBarLight::Idle { 0.45 } else { 1.0 };
-        // 原版 `group-hover:scale-125`(8px → 10px)
-        let size = if self.light_hovered { 10.0 } else { 8.0 };
-        let tip = light.i18n_key();
-
-        let dot = div()
-            .w(px(size))
-            .h(px(size))
-            .rounded_full()
-            .bg(ui::with_alpha(color, alpha));
-        // `working` 档闪烁(`animate-blink`),相位来自低频泵
-        // (`mt_ui::motion::pulse_phase`)—— 静态档连泵都不挂。
-        // ⚠️ 还要过减弱动效的闸(`mt_ui::motion`):原版的通配规则把
-        // `.animate-blink` 停在第一帧 —— 它**不在** reduce 的豁免名单里,
-        // 装机版在用户机器上就是不闪的。
-        let dot: AnyElement = if light == TitleBarLight::Working && mt_ui::motion::blinks() {
-            let phase = blink_phase(mt_ui::motion::pulse_phase(
-                std::time::Duration::from_millis(800),
-                window,
-                cx,
-            ));
-            let side = px(size - (size * 0.25) * phase);
-            dot.w(side)
-                .h(side)
-                .opacity(1.0 - 0.8 * phase)
-                .into_any_element()
-        } else {
-            dot.into_any_element()
+        let target = view.target.clone();
+        let key = target.pane_key.clone();
+        let focus = self.tab_focus.entry(key.clone()).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone();
+        let vendor = {
+            let store = self.store.read(cx);
+            store.project_state(&target.project_id)
+                .and_then(|state| state.pane(target.pane_key.as_str()))
+                .filter(|pane| pane.shows_ai_session(store.config().ai_auto_resume.unwrap_or(true)))
+                .and_then(|pane| pane.ai_agent())
+                .and_then(|agent| AiVendor::from_session_type(agent).or_else(|| AiVendor::infer(Some(agent), None)))
         };
-
-        div()
-            .id("titlebar-light")
-            .h_full()
-            // 原版是品牌容器 `gap-1.5` + 按钮自己的 `px-1.5`
-            .ml(px(6.0))
-            .px(px(6.0))
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .on_hover(cx.listener(|this: &mut Self, hovered: &bool, _window, cx| {
-                if this.light_hovered != *hovered {
-                    this.light_hovered = *hovered;
+        let unread = self.store.read(cx).is_pane_unread_done(key.as_str());
+        let active = view.active && self.workbench.read(cx).is_terminal_active(cx);
+        let label = view.pane_label.clone();
+        let target_click = target.clone();
+        let target_key = target.clone();
+        let target_menu = target.clone();
+        let target_close = target.clone();
+        let label_menu = label.clone();
+        let drop_side = self.tab_drop.as_ref().filter(|(candidate, _)| candidate == &target).map(|(_, after)| *after);
+        let close = IconTooltips::button(
+            &self.navigation_tooltips,
+            SharedString::from(format!("terminal-close-description-{key}")),
+            t("paneGroup", "closeTab"),
+            div().id(SharedString::from(format!("terminal-close-{key}")))
+                .w(px(24.0)).h(px(24.0)).flex_none().flex().items_center().justify_center()
+                .rounded(px(3.0)).cursor_pointer()
+                .hover(|el| el.bg(ui::border_subtle()))
+                .child(VectorIcon::new(ICON_CLOSE, px(10.0)).ink(ui::text_muted()))
+                .on_mouse_down(MouseButton::Left, |_event, _window, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _event, window, cx| {
+                    cx.stop_propagation();
+                    pane_actions::close_terminal_target(this.store.clone(), target_close.clone(), window, cx);
+                })),
+            window, cx,
+        );
+        div().id(SharedString::from(format!("terminal-tab-{key}")))
+            .relative().w(px(TAB_WIDTH)).h_full().flex_none()
+            .px(px(8.0)).flex().items_center().gap(px(6.0))
+            .track_focus(&focus).tab_index(0)
+            .cursor_pointer().border_t_2()
+            .border_color(if active { ui::accent() } else { ui::with_alpha(ui::accent(), 0.0) })
+            .bg(if active { ui::bg_terminal() } else { ui::bg_surface() })
+            .text_color(if active { ui::text_primary() } else { ui::text_muted() })
+            .text_size(ui::font_px(13.0))
+            .hover(|el| el.bg(ui::bg_overlay()))
+            .on_mouse_down(MouseButton::Left, |_event, window, _cx| {
+                // Reordering preserves focus; a completed click activates its exact target.
+                window.prevent_default();
+            })
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    AppStore::activate_terminal_jump_target(&this.store, &target_key, window, cx);
+                }
+            }))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                if !AppStore::activate_terminal_jump_target(&this.store, &target_click, window, cx) {
+                    return;
+                }
+                if event.click_count() >= 2 {
+                    crate::modal::open_rename_pane(
+                        this.store.clone(), target_click.project_id.clone(),
+                        target_click.pane_key.to_string(), label.clone(), window, cx,
+                    );
+                }
+            }))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                IconTooltips::reset(&this.navigation_tooltips, window, cx);
+                let entries = tab_menu(&this.store, &target_menu, &label_menu, cx);
+                if !entries.is_empty() {
+                    menu::show(event.position, entries, window, cx);
+                }
+            }))
+            .on_drag(DragTerminalTab { target: target.clone() }, {
+                let label = view.pane_label.clone();
+                move |_item, _offset, _window, cx| dnd::preview(label.clone(), dnd::PreviewIcon::Terminal, cx)
+            })
+            .on_drag_move(cx.listener({
+                let target = target.clone();
+                move |this, event: &gpui::DragMoveEvent<DragTerminalTab>, _window, cx| {
+                    let source = &event.drag(cx).target;
+                    let store = this.store.read(cx);
+                    let after = dnd::terminal_tab_drop_after(event.bounds, event.event.position)
+                        .filter(|_| this.tabs_bounds.is_some_and(|bounds| bounds.contains(&event.event.position))
+                            && source.project_id == target.project_id
+                            && source.worktree_id == target.worktree_id
+                            && source.pane_key != target.pane_key
+                            && store.active_project_id.as_deref() == Some(target.project_id.as_str())
+                            && store.resolve_terminal_jump_target(source).is_some()
+                            && store.resolve_terminal_jump_target(&target).is_some());
+                    let next = after.map(|after| (target.clone(), after));
+                    if (next.is_some() || this.tab_drop.as_ref().is_some_and(|(candidate, _)| candidate == &target))
+                        && this.tab_drop != next
+                    {
+                        this.tab_drop = next;
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_drop(cx.listener({
+                let target = target.clone();
+                move |this, item: &DragTerminalTab, _window, cx| {
+                    let Some((destination, after)) = this.tab_drop.take() else { return; };
+                    if destination == target {
+                        this.store.update(cx, |store, cx| {
+                            store.reorder_terminal_tabs(&item.target, &destination, after, cx);
+                        });
+                    }
                     cx.notify();
                 }
             }))
-            .tooltip(move |window, cx| Tooltip::new(t("app", tip)).build(window, cx))
-            .on_click(cx.listener(|this, _event, window, cx| {
-                let store = this.store.clone();
-                focus_attention_target(&store, None, window, cx);
-            }))
-            .child(dot)
-            .into_any_element()
+            .child(div().w(px(24.0)).flex_none().truncate().text_size(ui::font_px(10.0)).child((index + 1).to_string()))
+            .when_some(vendor, |el, vendor| {
+                el.child(BrandIcon::new(Some(vendor)).size(px(14.0)).color(ui::text_muted()))
+            })
+            .child(div().id(SharedString::from(format!("terminal-label-{key}")))
+                .min_w(px(0.0)).flex_1().truncate().child(view.pane_label.clone())
+                .tooltip({
+                    let title = view.pane_label.clone();
+                    move |window, cx| Tooltip::new(title.clone()).build(window, cx)
+                }))
+            .child(div().w(px(5.0)).h(px(5.0)).flex_none().rounded_full()
+                .when(unread, |el| el.bg(ui::color_success()))
+                .when(view.status == crate::tree::PaneStatus::Error, |el| el.bg(ui::color_error())))
+            .child(close)
+            .when_some(drop_side, |el, after| {
+                el.child(div().absolute().top_0().bottom_0().w(px(3.0)).bg(ui::accent())
+                    .when(after, |el| el.right_0()).when(!after, |el| el.left_0()))
+            }).into_any_element()
     }
 }
 
 impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (light, entries, active_project, active_project_id) = {
+        let (scope, views) = {
             let store = self.store.read(cx);
-            // 状态灯与胶囊下拉**合成一次全 pane 遍历**(`title_bar_snapshot`)。
-            // 拆成两个 getter 会各扫一遍 `pane_refs(None)`,而标题栏挂了
-            // `window_control_area`、套不了 view 级缓存,那两遍是每帧都来的。
-            // done 判据仍是 `aiDoneOrder`(不看窗口焦点),与托盘的
-            // `unreadDonePaneIds` 口径**有意不同**。
-            let (light, projects) = store.title_bar_snapshot();
-            (
-                light,
-                projects.entries,
-                store.active_project().map(|p| p.name.clone()),
-                store.active_project_id.clone(),
-            )
+            let scope = store.active_project_id.clone().zip(store.active_worktree_id().cloned());
+            let views = scope.as_ref().map(|(project, _)| store.terminal_tab_views(project)).unwrap_or_default();
+            (scope, views)
         };
-        // 当前项目的 AI 状态档位;`None` = 当前项目没有 AI 会话
-        let active_kind = active_project_id
-            .as_deref()
-            .and_then(|id| entries.iter().find(|e| e.id == id))
-            .map(|e| e.kind);
-
-        let maximized = window.is_maximized();
-        let (max_shapes, max_tip) = max_button_face(maximized);
-        let is_mac = cfg!(target_os = "macos");
-        // Linux 的 `on_hit_test_window_control` 是空实现 → 三键必须靠 `on_click`;
-        // Windows 上挂了会与系统动作**双双触发**(见模块注释)
+        let order: Vec<_> = views.iter().map(|view| view.target.pane_key.clone()).collect();
+        let selected = views.iter().find(|view| view.active).map(|view| view.target.pane_key.clone());
+        let terminal_page_active = self.workbench.read(cx).is_terminal_active(cx);
+        if self.last_terminal_page_active != terminal_page_active {
+            self.last_terminal_page_active = terminal_page_active;
+            self.reveal_selected = true;
+        }
+        if self.last_scope != scope {
+            self.last_scope = scope.clone();
+            self.scroll = ScrollHandle::new();
+            self.tab_drop = None;
+            IconTooltips::reset(&self.navigation_tooltips, window, cx);
+            self.reveal_selected = true;
+        }
+        if self.last_selected != selected || self.last_order != order {
+            self.last_selected = selected;
+            self.last_order = order;
+            self.reveal_selected = true;
+        }
+        self.tab_focus.retain(|key, _| self.last_order.contains(key));
+        if !cx.has_active_drag() {
+            self.tab_drop = None;
+        }
+        let selected_index = views.iter().position(|view| view.active);
+        let this = cx.entity();
+        let mut tabs = div().id("titlebar-terminal-tabs").relative().w_full().min_w(px(0.0))
+            .h_full().flex().items_center().overflow_x_scroll().track_scroll(&self.scroll)
+            .on_drag_move(cx.listener(|this, event: &gpui::DragMoveEvent<DragTerminalTab>, _window, cx| {
+                if !event.bounds.contains(&event.event.position) { return; }
+                let offset = this.scroll.offset();
+                let max_scroll = (this.last_order.len() as f32 * TAB_WIDTH - f32::from(event.bounds.size.width)).max(0.0);
+                let step = if event.event.position.x < event.bounds.origin.x + px(20.0) {
+                    -16.0
+                } else if event.event.position.x > event.bounds.right() - px(20.0) {
+                    16.0
+                } else {
+                    return;
+                };
+                let next = (-f32::from(offset.x) + step).clamp(0.0, max_scroll);
+                if (f32::from(offset.x) + next).abs() > 0.5 {
+                    this.scroll.set_offset(point(px(-next), offset.y));
+                    cx.notify();
+                }
+            }));
+        for (index, view) in views.iter().enumerate() {
+            tabs = tabs.child(self.render_tab(view, index, window, cx));
+        }
+        let tabs = div().id("titlebar-tabs-viewport").relative().flex_1().min_w(px(0.0))
+            .h_full().overflow_hidden().child(tabs)
+            .child(canvas(move |bounds: Bounds<Pixels>, _window, cx| {
+                this.update(cx, |bar, cx| {
+                    bar.tabs_bounds = Some(bounds);
+                    if bar.tabs_width != bounds.size.width || bar.reveal_selected {
+                        bar.tabs_width = bounds.size.width;
+                        bar.reveal_selected = false;
+                        if let Some(index) = selected_index {
+                            let offset = bar.scroll.offset();
+                            let current = (-f32::from(offset.x)).max(0.0);
+                            let next = revealed_offset(current, f32::from(bounds.size.width), index, TAB_WIDTH);
+                            if (next - current).abs() > 0.5 {
+                                bar.scroll.set_offset(point(px(-next), offset.y));
+                                cx.notify();
+                            }
+                        }
+                    }
+                });
+            }, |_, _, _, _| {}).absolute().size_full());
+        let mut navigation = div().id("titlebar-terminal-navigation").flex_1().min_w(px(0.0))
+            .h_full().flex().items_center().child(tabs);
+        if scope.is_some() {
+            let add = div().id("titlebar-new-terminal").w(px(32.0)).h(px(32.0))
+                .track_focus(&self.add_focus).tab_index(0)
+                .flex_none().flex().items_center().justify_center().cursor_pointer()
+                .rounded(px(3.0)).text_color(ui::text_muted()).text_size(px(20.0))
+                .hover(|el| el.bg(ui::border_subtle())).child("+")
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        IconTooltips::reset(&this.navigation_tooltips, window, cx);
+                        let position = this.tabs_bounds.map(|bounds| point(bounds.right(), bounds.bottom()))
+                            .unwrap_or_else(|| window.mouse_position());
+                        open_new_terminal_menu(this.store.clone(), position, window, cx);
+                    }
+                }))
+                .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                    IconTooltips::reset(&this.navigation_tooltips, window, cx);
+                    open_new_terminal_menu(this.store.clone(), click_position(event, window), window, cx);
+                }));
+            navigation = navigation.child(IconTooltips::button(
+                &self.navigation_tooltips, "titlebar-new-description",
+                t("terminalArea", "newTerminal"), add, window, cx,
+            ));
+        }
+        if !views.is_empty() {
+            let overflow = div().id("titlebar-terminal-overflow").w(px(32.0)).h(px(32.0))
+                .track_focus(&self.overflow_focus).tab_index(0)
+                .flex_none().flex().items_center().justify_center().cursor_pointer()
+                .rounded(px(3.0)).hover(|el| el.bg(ui::border_subtle()))
+                .child(VectorIcon::new(ICON_CHEVRON_DOWN, px(12.0)).ink(ui::text_muted()))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        this.open_tab_overflow(window, cx);
+                    }
+                }))
+                .on_click(cx.listener(|this, _event, window, cx| this.open_tab_overflow(window, cx)));
+            navigation = navigation.child(IconTooltips::button(
+                &self.navigation_tooltips, "titlebar-overflow-description",
+                t("paneGroup", "tablistLabel"), overflow, window, cx,
+            ));
+        }
+        let navigation = IconTooltips::group(&self.navigation_tooltips, navigation, window, cx);
+        let (max_shapes, max_tip) = max_button_face(window.is_maximized());
         let click_fallback = cfg!(target_os = "linux");
-
-        div()
-            .w_full()
-            .h(px(HEIGHT))
-            .flex_none()
-            .flex()
-            .bg(ui::bg_surface())
-            .border_b_1()
-            .border_color(ui::border_subtle())
-            // macOS 把左上角让给系统交通灯
-            .when(is_mac, |el| el.child(div().w(px(MAC_TRAFFIC_LIGHT_WIDTH)).flex_none()))
-            // 品牌段 —— 拖拽区之一。⚠️ 挂了 Drag 之后里面不能再放可点元素
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .pl(px(12.0))
-                    .pr(px(6.0))
-                    .flex_none()
-                    .window_control_area(WindowControlArea::Drag)
-                    .child(VectorIcon::new(ICON_LOGO, px(14.0)).ink(ui::text_muted()))
-                    .child(
-                        div()
-                            .text_size(ui::font_px(12.0))
-                            .text_color(ui::text_secondary())
-                            .child("Mini-Term"),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui::font_px(11.0))
-                            .text_color(ui::text_muted())
-                            .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
-                    ),
-            )
-            // 项目切换胶囊。**没有项目时整块(含竖分隔线)都不渲染**
-            .children(active_project.map(|name| {
-                div()
-                    .flex()
-                    .items_center()
-                    .flex_none()
-                    // 原版这几件同在品牌容器的 `gap-1.5` 里,分隔线自己再带 `mx-1`
-                    // —— 两侧各 10px。拆成两段之后靠 `gap` + `mx` 还原同一间距。
-                    .gap(px(6.0))
-                    // 竖分隔线:纯文字紧挨版本号会被误读成标题的一部分
-                    .child(
-                        div()
-                            .mx(px(4.0))
-                            .w(px(1.0))
-                            .h(px(14.0))
-                            .flex_none()
-                            .bg(ui::border_default()),
-                    )
-                    .child(self.switcher(
-                        name,
-                        active_kind,
-                        entries,
-                        active_project_id.clone(),
-                        window,
-                        cx,
-                    ))
-            }))
-            .child(self.status_light(light, window, cx))
-            // 中段留白 —— 主要的拖拽区
-            .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .window_control_area(WindowControlArea::Drag),
-            )
-            // 窗口控制 —— macOS 用系统交通灯,这里不画(两套并存会撞在一起)
-            .when(!is_mac, |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .child(
-                            self.control_button(
-                                Control::Min,
-                                ICON_MINIMIZE,
-                                "titleBar.minimize",
-                                cx,
-                            )
-                            .window_control_area(WindowControlArea::Min)
-                            .when(click_fallback, |el| {
-                                el.on_click(|_event, window, cx| minimize(window, cx))
-                            }),
-                        )
-                        .child(
-                            self.control_button(Control::Max, max_shapes, max_tip, cx)
-                                .window_control_area(WindowControlArea::Max)
-                                .when(click_fallback, |el| {
-                                    el.on_click(|_event, window, cx| toggle_maximize(window, cx))
-                                }),
-                        )
-                        .child(
-                            self.control_button(Control::Close, ICON_CLOSE, "titleBar.close", cx)
-                                .window_control_area(WindowControlArea::Close)
-                                .when(click_fallback, |el| {
-                                    el.on_click(|_event, window, cx| {
-                                        request_close_window(window, cx)
-                                    })
-                                }),
-                        ),
-                )
-            })
+        let is_mac = cfg!(target_os = "macos");
+        let controls = div().id("titlebar-window-controls").flex().h_full().flex_none()
+            .child(self.control_button(Control::Min, ICON_MINIMIZE, "titleBar.minimize", window, cx)
+                .window_control_area(WindowControlArea::Min)
+                .when(click_fallback, |el| el.on_click(|_, window, cx| minimize(window, cx))))
+            .child(self.control_button(Control::Max, max_shapes, max_tip, window, cx)
+                .window_control_area(WindowControlArea::Max)
+                .when(click_fallback, |el| el.on_click(|_, window, cx| toggle_maximize(window, cx))))
+            .child(self.control_button(Control::Close, ICON_CLOSE, "titleBar.close", window, cx)
+                .window_control_area(WindowControlArea::Close)
+                .when(click_fallback, |el| el.on_click(|_, window, cx| request_close_window(window, cx))));
+        let controls = IconTooltips::group(&self.window_tooltips, controls, window, cx);
+        div().w_full().h(px(HEIGHT)).flex_none().flex().items_center()
+            .bg(ui::bg_surface()).border_b_1().border_color(ui::border_subtle())
+            .when(is_mac, |el| el.child(div().w(px(MAC_TRAFFIC_LIGHT_WIDTH)).h_full().flex_none()))
+            .child(div().h_full().px(px(12.0)).flex_none().flex().items_center().gap(px(6.0))
+                .window_control_area(WindowControlArea::Drag)
+                .child(VectorIcon::new(ICON_LOGO, px(14.0)).ink(ui::text_muted()))
+                .when(window.viewport_size().width > px(760.0), |el| {
+                    el.child(div().text_size(ui::font_px(12.0)).text_color(ui::text_secondary()).child("Mini-Term"))
+                }))
+            .child(navigation)
+            .child(div().w(px(28.0)).h_full().flex_none().window_control_area(WindowControlArea::Drag))
+            .when(!is_mac, |el| el.child(controls))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_tabs_are_revealed_without_scrolling_visible_tabs() {
+        assert_eq!(revealed_offset(0.0, 352.0, 0, 176.0), 0.0);
+        assert_eq!(revealed_offset(0.0, 352.0, 3, 176.0), 352.0);
+        assert_eq!(revealed_offset(352.0, 352.0, 0, 176.0), 0.0);
+        assert_eq!(revealed_offset(100.0, 352.0, 1, 176.0), 100.0);
+        assert_eq!(revealed_offset(0.0, 90.0, 2, 176.0), 352.0);
+    }
 
     /// 形状表的点必须全落在单位方框内 —— 越界会画到相邻按钮上。
     /// (mt-ui 与 M 批边条各有一份同款体检,这里是标题栏这五张表的。)
@@ -1029,7 +787,7 @@ mod tests {
     /// 三键的 tooltip key 都在字典里(拼错的后果是空 tooltip,真机上很难发现)。
     #[test]
     fn 窗口控制键文案_key_齐全() {
-        let mut keys = vec!["titleBar.minimize", "titleBar.close", "titleBar.projectSwitcher", "titleBar.noAiProjects"];
+        let mut keys = vec!["titleBar.minimize", "titleBar.close"];
         keys.push(max_button_face(false).1);
         keys.push(max_button_face(true).1);
         for key in keys {
@@ -1057,26 +815,4 @@ mod tests {
         }
     }
 
-    /// 五档灯色互不相同(除了 idle 用 `--text-muted`,其余四档各是一种语义色)——
-    /// 撞色等于状态编码失效。
-    #[test]
-    fn 状态灯五档取色互不相同() {
-        let colors = [
-            light_color(TitleBarLight::Error),
-            light_color(TitleBarLight::Attention),
-            light_color(TitleBarLight::Working),
-            light_color(TitleBarLight::Done),
-            light_color(TitleBarLight::Idle),
-        ];
-        for (i, a) in colors.iter().enumerate() {
-            for (j, b) in colors.iter().enumerate() {
-                assert!(i == j || a != b, "第 {i} 档与第 {j} 档撞色");
-            }
-        }
-        // 胶囊/下拉的四档色与状态灯同一张表
-        assert_eq!(kind_color(AiProjectKind::Attention), colors[1]);
-        assert_eq!(kind_color(AiProjectKind::Working), colors[2]);
-        assert_eq!(kind_color(AiProjectKind::Done), colors[3]);
-        assert_eq!(kind_color(AiProjectKind::Idle), colors[4]);
-    }
 }

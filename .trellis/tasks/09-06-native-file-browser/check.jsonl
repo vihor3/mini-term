@@ -1,0 +1,5 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Check row/blank targeting and all execution gates remain Actions-only."}
+{"file":".trellis/spec/mt-app/backend/project-onboarding-contract.md","reason":"No stale picker registration, implicit init, or local fallback."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Scroll/cache separation and old-source event rejection."}
+{"file":".trellis/spec/mt-app/backend/file-workbench-contract.md","reason":"No document/transfer ownership regression from global tool selection."}
+{"file":".trellis/spec/mt-ssh/backend/remote-document-io-contract.md","reason":"Preserve remote mutation safety through new context targets."}

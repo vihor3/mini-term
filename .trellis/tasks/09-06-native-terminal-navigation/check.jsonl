@@ -1,0 +1,8 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"No local builds/UI harnesses/format checks; audit exact Actions results."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Check no live terminal reparenting, route retagging, respawn, or stale focus."}
+{"file":".trellis/spec/mt-layout/backend/worktree-layout-contract.md","reason":"Audit legacy terminal completeness, alias saves, and migration compatibility."}
+{"file":".trellis/spec/mt-terminal-host/backend/terminal-host-contract.md","reason":"Dormant close needs confirmed session/incarnation-fenced host cleanup without hydration; preserve cold history and close/restore/create reservations on uncertainty."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"R17 holds across Files/Git/Tasks/Sessions without scope leakage."}
+{"file":".trellis/spec/mt-app/backend/file-workbench-contract.md","reason":"Check hidden terminals survive document navigation and exact focus restoration."}
+{"file":".trellis/spec/mt-ui/backend/icon-tooltip-contract.md","reason":"Shared delayed-first tooltip timing, explicit focus handles, mount/window lifecycle and nonintercepting placement."}
+{"file":".trellis/tasks/09-05-sidebar-agent-status/research/09-06-flat-terminal-compatibility.md","reason":"Check complete legacy inventory, one-terminal rendering/transitions, exact activation, close/fork/mobile/persistence regressions."}

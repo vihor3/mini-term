@@ -1,0 +1,4 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Hard Actions-only constraint and async source safety."}
+{"file":".trellis/spec/mt-app/backend/github-project-tasks-contract.md","reason":"Retain host/cache/error contracts while replacing active-account authority."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Global Tasks tool selection does not share account or presentation state."}
+{"file":".trellis/tasks/09-06-native-tasks-gh-accounts/research/gh-account-isolation.md","reason":"Official named-account lookup, process-scoped auth, and secret boundary constraints."}

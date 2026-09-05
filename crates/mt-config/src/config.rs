@@ -404,6 +404,122 @@ pub struct SavedProjectLayout {
     pub active_tab_index: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_tab_id: Option<TabId>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_selected_terminal"
+    )]
+    pub selected_terminal_pane_key: Option<PaneKey>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_terminal_order"
+    )]
+    pub terminal_order: Option<Vec<PaneKey>>,
+}
+
+// Presentation preferences must not make otherwise healthy terminal records unreadable.
+fn deserialize_selected_terminal<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<PaneKey>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+fn deserialize_terminal_order<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<PaneKey>>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_array().map(|values| {
+        values
+            .iter()
+            .filter_map(|value| serde_json::from_value(value.clone()).ok())
+            .collect()
+    }))
+}
+
+impl SavedProjectLayout {
+    /// Repair only flat navigation preferences, retaining every legacy route owner and tree.
+    /// Call after stable pane identities and legacy active pointers have been normalized.
+    pub fn normalize_terminal_navigation(&mut self) {
+        fn collect(node: &SavedSplitNode, keys: &mut Vec<PaneKey>) {
+            match node {
+                SavedSplitNode::Leaf { panes, pane, .. } => {
+                    let panes = if panes.is_empty() { pane.as_slice() } else { panes };
+                    keys.extend(panes.iter().filter_map(|pane| pane.pane_key.clone()));
+                }
+                SavedSplitNode::Split { children, .. } => {
+                    for child in children {
+                        collect(child, keys);
+                    }
+                }
+            }
+        }
+        fn active(node: &SavedSplitNode) -> Option<PaneKey> {
+            match node {
+                SavedSplitNode::Leaf { active_pane_key, panes, pane } => {
+                    let panes = if panes.is_empty() { pane.as_slice() } else { panes };
+                    active_pane_key
+                        .as_ref()
+                        .filter(|key| panes.iter().any(|pane| pane.pane_key.as_ref() == Some(*key)))
+                        .cloned()
+                        .or_else(|| panes.first().and_then(|pane| pane.pane_key.clone()))
+                }
+                SavedSplitNode::Split { children, .. } => children.iter().find_map(active),
+            }
+        }
+        fn select(node: &mut SavedSplitNode, key: &PaneKey) -> bool {
+            match node {
+                SavedSplitNode::Leaf { active_pane_key, panes, pane } => {
+                    let panes = if panes.is_empty() { pane.as_slice() } else { panes };
+                    if panes.iter().any(|pane| pane.pane_key.as_ref() == Some(key)) {
+                        *active_pane_key = Some(key.clone());
+                        true
+                    } else {
+                        false
+                    }
+                }
+                SavedSplitNode::Split { children, .. } => {
+                    children.iter_mut().any(|child| select(child, key))
+                }
+            }
+        }
+        let mut inventory = Vec::new();
+        for tab in &self.tabs {
+            collect(&tab.split_layout, &mut inventory);
+        }
+        let valid = inventory.iter().cloned().collect::<std::collections::HashSet<_>>();
+        let mut order = self.terminal_order.take().unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        order.retain(|key| valid.contains(key) && seen.insert(key.clone()));
+        order.extend(inventory.iter().filter(|key| seen.insert((*key).clone())).cloned());
+        self.terminal_order = Some(order);
+        let legacy = self
+            .active_tab_id
+            .as_ref()
+            .and_then(|id| self.tabs.iter().find(|tab| tab.tab_id.as_ref() == Some(id)))
+            .or_else(|| self.tabs.get(self.active_tab_index))
+            .or_else(|| self.tabs.first());
+        self.selected_terminal_pane_key = self
+            .selected_terminal_pane_key
+            .take()
+            .filter(|key| valid.contains(key))
+            .or_else(|| {
+                legacy
+                    .and_then(|tab| active(&tab.split_layout))
+                    .filter(|key| valid.contains(key))
+            })
+            .or_else(|| inventory.first().cloned());
+        if let Some(key) = &self.selected_terminal_pane_key {
+            for (index, tab) in self.tabs.iter_mut().enumerate() {
+                if select(&mut tab.split_layout, key) {
+                    self.active_tab_index = index;
+                    self.active_tab_id = tab.tab_id.clone();
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// 项目级环境变量。注入到该项目新建终端 PTY 的子进程,与 portable-pty 默认继承的
@@ -1568,6 +1684,8 @@ mod tests {
                 path: "/tmp".into(),
                 description: None,
                 saved_layout: Some(SavedProjectLayout {
+                    selected_terminal_pane_key: None,
+                    terminal_order: None,
                     worktree_id: None,
                     tabs: vec![SavedTab {
                         tab_id: None,
@@ -1675,6 +1793,8 @@ mod tests {
                 .parse()
                 .unwrap();
         let layout = SavedProjectLayout {
+            selected_terminal_pane_key: None,
+            terminal_order: None,
             worktree_id: Some(worktree_id.clone()),
             tabs: vec![SavedTab {
                 tab_id: Some(tab_id.clone()),
@@ -2397,6 +2517,31 @@ mod tests {
             parent_project_id: None,
             kind_override: None,
         }
+    }
+
+    #[test]
+    fn malformed_terminal_preferences_do_not_reject_legacy_pane_json() {
+        let key = PaneKey::new();
+        let mut value = serde_json::json!({
+            "activeTabIndex": 0,
+            "tabs": [{"splitLayout": {"type": "leaf", "pane": {
+                "paneKey": key, "shellName": "saved-shell", "cwd": "/saved/cwd"
+            }}}],
+            "selectedTerminalPaneKey": {"bad": true},
+            "terminalOrder": [false, "invalid", key, null]
+        });
+        let mut layout: SavedProjectLayout = serde_json::from_value(value.clone()).unwrap();
+        assert!(layout.selected_terminal_pane_key.is_none());
+        assert_eq!(layout.terminal_order, Some(vec![key.clone()]));
+        normalize_saved_layout(&mut layout);
+        layout.normalize_terminal_navigation();
+        assert_eq!(layout.selected_terminal_pane_key.as_ref(), Some(&key));
+        let SavedSplitNode::Leaf { panes, .. } = &layout.tabs[0].split_layout else { panic!("leaf"); };
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].cwd.as_deref(), Some("/saved/cwd"));
+        value["terminalOrder"] = serde_json::json!("wrong-type");
+        let layout: SavedProjectLayout = serde_json::from_value(value).unwrap();
+        assert!(layout.terminal_order.is_none());
     }
 
     #[test]

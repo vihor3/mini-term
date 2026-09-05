@@ -1,26 +1,184 @@
-//! 终端与分屏相关的 `AppStore` 方法:新建/分屏/关闭/激活/焦点、pane 拖拽移动、
-//! 双击最大化,以及 PTY 的起停与回收。
-//!
-//! 从 `store.rs` 原样搬来的几段(`// === 终端 ===` / `// === pane 拖拽移动 ===` /
-//! `// === 双击最大化 ===`),段注释随代码走,逻辑一行未改。
+//! Flat terminal selection, single-pane lifecycle, and PTY attach/recovery.
+//! Legacy panel and tree identities remain route owners, not UI groups.
 
-use gpui::{AppContext, Context, Window};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use gpui::{AppContext, Context, Task, Window};
 use mt_config::{AiLauncher, ProjectConfig, ShellConfig};
 use mt_identity::{PaneKey, TabId, TerminalIncarnationId, TerminalSessionId};
+use mt_layout::ProjectWorktreeBinding;
 use mt_pty::PtySpawn;
+use mt_terminal_host::ErrorCode as HostErrorCode;
 use mt_ui::{DwellConfig, TerminalStyle};
 
 use crate::pane::{HostedLaunch, PaneEvent, TerminalPane, TerminalRecovery};
-use crate::tree::{
-    AiSessionRef, DropZone, PaneState, PaneStatus, ProjectPanel, SplitDirection, SplitNode,
-};
+use crate::tree::{AiSessionRef, PaneState, PaneStatus, ProjectPanel, SplitNode};
 
-use super::AppStore;
+use super::{AppStore, ProjectState, TerminalJumpTarget};
 use super::identity::TerminalRoute;
 use super::pure::{
-    next_maximized, resolve_auto_resume_command, resolve_resume_cwd, resolve_scrollback,
+    resolve_auto_resume_command, resolve_resume_cwd, resolve_scrollback,
     terminal_style_from,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalCloseRequest {
+    target: TerminalJumpTarget,
+    pty_id: Option<u32>,
+    binding: ProjectWorktreeBinding,
+    project_path: String,
+    ssh_connection_id: Option<String>,
+    connection_fingerprint: Option<u64>,
+    // Capture deletion authority separately from same-owner navigation changes.
+    source_layout: serde_json::Value,
+    // Alias snapshots also fence changes already flushed by the layout debounce.
+    aliases: Vec<(ProjectWorktreeBinding, serde_json::Value)>,
+}
+
+impl TerminalCloseRequest {
+    fn same_owner(&self, other: &Self) -> bool {
+        self.target == other.target
+            && self.pty_id == other.pty_id
+            && self.binding == other.binding
+            && self.project_path == other.project_path
+            && self.ssh_connection_id == other.ssh_connection_id
+            && self.connection_fingerprint == other.connection_fingerprint
+    }
+
+    fn matches_before_dispatch(&self, current: &Self) -> bool {
+        self.same_owner(current) && self.aliases == current.aliases
+    }
+
+    fn may_replace_alias_layout(&self, dirty_owner: Option<&str>) -> bool {
+        // A completed flush forgets its owner. Divergent captured aliases are
+        // therefore not proof that this source owns the latest saved layout.
+        dirty_owner.is_none_or(|owner| owner == self.target.project_id.as_str())
+            && self.aliases.iter().all(|(_, saved)| saved == &self.source_layout)
+    }
+}
+
+fn terminal_close_aliases(
+    target: &TerminalJumpTarget,
+    bindings: &HashMap<String, ProjectWorktreeBinding>,
+    states: &HashMap<String, ProjectState>,
+) -> Option<Vec<(ProjectWorktreeBinding, serde_json::Value)>> {
+    let mut aliases = Vec::new();
+    for alias in bindings.values().filter(|alias| {
+        alias.worktree_id == target.worktree_id && alias.project_id != target.project_id
+    }) {
+        let saved = states.get(&alias.project_id)?.saved_layout();
+        aliases.push((alias.clone(), serde_json::to_value(saved).ok()?));
+    }
+    aliases.sort_by(|a, b| a.0.project_id.cmp(&b.0.project_id));
+    Some(aliases)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalCloseCompletion {
+    Stale,
+    Failed(Option<HostErrorCode>),
+    Conflict,
+    Remove,
+}
+
+fn terminal_close_completion(
+    expected: &TerminalCloseRequest,
+    current: Option<&TerminalCloseRequest>,
+    alias_conflict: bool,
+    result: Result<(), Option<HostErrorCode>>,
+) -> TerminalCloseCompletion {
+    let Some(current) = current.filter(|current| expected.same_owner(current)) else {
+        return TerminalCloseCompletion::Stale;
+    };
+    if let Err(code) = result {
+        return TerminalCloseCompletion::Failed(code);
+    }
+    if alias_conflict || expected.aliases != current.aliases {
+        return TerminalCloseCompletion::Conflict;
+    }
+    TerminalCloseCompletion::Remove
+}
+
+fn close_has_other_attachment(
+    request: &TerminalCloseRequest,
+    routes: &HashMap<u32, TerminalRoute>,
+    states: &HashMap<String, ProjectState>,
+) -> bool {
+    let session_id = &request.target.terminal_session_id;
+    routes.iter().any(|(pty_id, route)| {
+        &route.terminal_session_id == session_id && Some(*pty_id) != request.pty_id
+    }) || states.iter().any(|(project_id, state)| {
+        state.all_panes().iter().any(|pane| {
+            &pane.terminal_session_id == session_id && pane.pty_id.is_some()
+                && (project_id != &request.target.project_id || pane.pane_key != request.target.pane_key)
+        })
+    })
+}
+
+#[derive(Default)]
+pub(super) struct PendingTerminalCloses {
+    requests: HashMap<TerminalSessionId, Arc<TerminalCloseRequest>>,
+}
+
+impl PendingTerminalCloses {
+    pub(super) fn contains(&self, session_id: &TerminalSessionId) -> bool {
+        self.requests.contains_key(session_id)
+    }
+
+    fn begin(&mut self, request: TerminalCloseRequest) -> Option<Arc<TerminalCloseRequest>> {
+        let session_id = request.target.terminal_session_id.clone();
+        if self.contains(&session_id) {
+            return None;
+        }
+        let request = Arc::new(request);
+        self.requests.insert(session_id, request.clone());
+        Some(request)
+    }
+
+    fn finish(&mut self, request: &Arc<TerminalCloseRequest>) -> bool {
+        let session_id = &request.target.terminal_session_id;
+        if !self.requests.get(session_id).is_some_and(|owner| Arc::ptr_eq(owner, request)) {
+            return false;
+        }
+        self.requests.remove(session_id);
+        true
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalClosePlan {
+    Attached(u32),
+    RecordOnly,
+    Hosted(TerminalIncarnationId),
+    HostUnavailable,
+}
+
+fn terminal_close_plan(request: &TerminalCloseRequest, host_available: bool) -> TerminalClosePlan {
+    if let Some(pty_id) = request.pty_id {
+        return TerminalClosePlan::Attached(pty_id);
+    }
+    if request.ssh_connection_id.is_some() {
+        return TerminalClosePlan::RecordOnly;
+    }
+    match request.target.terminal_incarnation_id.as_ref() {
+        None => TerminalClosePlan::RecordOnly,
+        Some(incarnation) if host_available => TerminalClosePlan::Hosted(incarnation.clone()),
+        Some(_) => TerminalClosePlan::HostUnavailable,
+    }
+}
+
+fn dormant_close_error(code: Option<HostErrorCode>) -> &'static str {
+    match code {
+        Some(HostErrorCode::IncarnationMismatch) =>
+            "Terminal identity changed. The saved terminal was kept.",
+        Some(HostErrorCode::SessionMissing | HostErrorCode::RecoveryUnavailable) =>
+            "Terminal history could not be safely closed. The saved terminal was kept.",
+        Some(HostErrorCode::ProtocolMismatch) =>
+            "Terminal host version mismatch. The saved terminal was kept.",
+        _ => "Terminal close was not confirmed. The saved terminal was kept; retry when the host is available.",
+    }
+}
 
 impl AppStore {
     // === 终端 ===
@@ -68,24 +226,6 @@ impl AppStore {
         Some(pane_id)
     }
 
-    /// 新建一个终端**面板**并按 AI 启动器把 agent 拉起来。
-    /// 与 [`new_terminal_from_launcher`] 同,只是落点是新面板而非当前面板的 tab 栏。
-    ///
-    /// [`new_terminal_from_launcher`]: Self::new_terminal_from_launcher
-    pub fn new_panel_from_launcher(
-        &mut self,
-        project_id: &str,
-        launcher: &AiLauncher,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let shell = self.resolve_shell(launcher.shell.as_deref())?;
-        let pane_id = self.new_panel(project_id, Some(shell), window, cx)?;
-        self.rename_pane(project_id, &pane_id, &launcher.name, cx);
-        self.write_launcher_command(project_id, &pane_id, &launcher.command, cx);
-        Some(pane_id)
-    }
-
     /// 把启动器命令连同回车写进 pane。
     ///
     /// ⚠️ 必须走 [`write_to_pane`] 而不是裸 PTY 写:AI 会话身份靠**输入检测**建立,
@@ -125,7 +265,7 @@ impl AppStore {
     ) -> Option<String> {
         let project = self.project(project_id)?.clone();
         let shell = shell.or_else(|| self.resolve_shell(None))?;
-        let anchor = anchor_pane_id.or_else(|| self.focused_pane_id.clone());
+        let anchor = anchor_pane_id.or_else(|| self.active_pane_id(project_id));
         let (target_panel_id, tab_id) = {
             let state = self.project_states.get(project_id)?;
             if state.panels.is_empty() {
@@ -158,296 +298,172 @@ impl AppStore {
             let layout = &mut state.panel_mut(&target)?.layout;
             layout.append_pane(anchor.as_deref(), pane);
         }
+        state.select_terminal(&pane_id);
+        self.clear_preedit_of_focused(cx);
         self.after_layout_change(project_id, cx);
         self.focus_pane(project_id, &pane_id, window, cx);
         Some(pane_id)
     }
 
-    /// 在指定 pane 处分屏。分屏继承源 pane 的 cwd 覆盖。
-    pub fn split_pane(
-        &mut self,
-        project_id: &str,
-        pane_id: &str,
-        direction: SplitDirection,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<String> {
-        self.split_pane_with_cwd(project_id, pane_id, direction, None, window, cx)
+    pub(crate) fn terminal_close_request(&self, target: &TerminalJumpTarget) -> Option<TerminalCloseRequest> {
+        if self.pending_terminal_closes.contains(&target.terminal_session_id) {
+            return None;
+        }
+        self.terminal_close_snapshot(target)
     }
 
-    /// 分屏并**显式指定**新 PTY 的启动目录。
-    ///
-    /// 单独一个入口是给「分支会话到新分屏」用的:fork 出的会话必须落在源会话
-    /// 记录的目录(`splitPane(…, { cwd })` 的等价物),见 [`resolve_fork_cwd`]。
-    /// `cwd = None` 时与 [`split_pane`] 完全相同 —— 继承源 pane 的 cwd 覆盖
-    /// (worktree 终端分出来的屏理应还在 worktree 里)。
-    ///
-    /// [`split_pane`]: Self::split_pane
-    pub fn split_pane_with_cwd(
-        &mut self,
-        project_id: &str,
-        pane_id: &str,
-        direction: SplitDirection,
-        cwd: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let project = self.project(project_id)?.clone();
-        let source_cwd = cwd.or_else(|| {
-            self.project_states
-                .get(project_id)
-                .and_then(|s| s.pane(pane_id))
-                .and_then(|p| p.cwd.clone())
-        });
-        let shell_name = self
-            .project_states
-            .get(project_id)
-            .and_then(|s| s.pane(pane_id))
-            .map(|p| p.shell_name.clone());
-        let shell = self.resolve_shell(shell_name.as_deref())?;
-        let tab_id = self
-            .project_states
-            .get(project_id)
-            .and_then(|state| {
-                state
-                    .panels
-                    .iter()
-                    .find(|panel| panel.layout.pane(pane_id).is_some())
-            })
-            .map(|panel| panel.tab_id.clone())?;
+    fn terminal_close_snapshot(&self, target: &TerminalJumpTarget) -> Option<TerminalCloseRequest> {
+        self.resolve_terminal_jump_target(target)?;
+        let project = self.project(&target.project_id)?;
+        let state = self.project_states.get(&target.project_id)?;
+        let pane = state.pane(target.pane_key.as_str())?;
+        let binding = self.project_worktree_bindings.get(&target.project_id)?.clone();
+        let aliases = terminal_close_aliases(target, &self.project_worktree_bindings, &self.project_states)?;
+        Some(TerminalCloseRequest {
+            target: target.clone(),
+            pty_id: pane.pty_id,
+            binding,
+            project_path: project.path.clone(),
+            ssh_connection_id: project.ssh_connection_id.clone(),
+            connection_fingerprint: self.remote_connection_of(&target.project_id)
+                .as_ref().map(crate::remote_ssh::connection_fingerprint),
+            source_layout: serde_json::to_value(state.saved_layout()).ok()?,
+            aliases,
+        })
+    }
 
-        let pane = self.spawn_pane(&project, &shell, source_cwd, &tab_id, window, cx)?;
-        let new_pane_id = pane.id.clone();
-        let new_leaf = SplitNode::leaf(pane);
+    fn close_has_other_attachment(&self, request: &TerminalCloseRequest) -> bool {
+        close_has_other_attachment(request, &self.terminal_routes, &self.project_states)
+    }
 
-        let state = self.project_states.get_mut(project_id)?;
-        // 在目标 pane 所在的面板里分屏;pane 没了(含整个面板没了)与树变换
-        // 未命中同一档处置 —— 回收无处安放的新 PTY
-        let inserted = state
-            .layout_of_pane_mut(pane_id)
-            .map(|layout| layout.insert_split(pane_id, direction, new_leaf))
-            .unwrap_or(false);
-        if !inserted {
-            // 目标 pane 在起 PTY 期间被关掉了 —— 新 PTY 无处安放,显式回收,
-            // 否则后端留一个谁也看不见、谁也杀不掉的孤儿子进程。
-            let orphan: Vec<u32> = self
-                .terminals
-                .keys()
-                .copied()
-                .filter(|id| !self.pty_in_any_layout(*id))
-                .collect();
-            for id in orphan {
-                self.dispose_terminal(id, cx);
+    fn report_terminal_close_error(&self, target: &TerminalJumpTarget, message: &str, cx: &mut Context<Self>) {
+        let Some(project) = self.project(&target.project_id) else {
+            return;
+        };
+        crate::toast::push_message_deduped(
+            crate::notify::ToastKind::PasteError,
+            target.project_id.clone(), project.name.clone(), message.to_string(), cx,
+        );
+    }
+
+    fn report_terminal_close_conflict(&mut self, target: &TerminalJumpTarget, message: &str, cx: &mut Context<Self>) {
+        if let Some(state) = self.project_states.get_mut(&target.project_id) {
+            if let Some(pane) = state.pane_mut(target.pane_key.as_str()) {
+                pane.status = PaneStatus::Error;
             }
-            return None;
+            state.status = state.highest_status();
         }
-        // 最大化状态下分出来的新格落在**被隐藏的整树**里,看不见会让人以为分屏坏了
-        // —— 先自动还原(原版 `paneActions.ts::splitPane` 尾部同一句)
-        self.clear_maximized(project_id);
-        self.after_layout_change(project_id, cx);
-        self.focus_pane(project_id, &new_pane_id, window, cx);
-        Some(new_pane_id)
-    }
-
-    // === pane 拖拽移动 / 合并 / 重排(v0.14.0)===
-
-    /// 拖拽移动 pane:`Center` 并入目标组的 tab 栏,四边在目标组对应方向分屏。
-    /// 对应 `paneActions.ts::movePane`。
-    ///
-    /// 树变换是纯函数([`SplitNode::move_pane_in_layout`]),返回 `None` = 拖回
-    /// 原位,这里直接不写 —— 不写就不落盘、不 notify,一次无效拖拽零副作用。
-    pub fn move_pane(
-        &mut self,
-        project_id: &str,
-        pane_id: &str,
-        target_pane_id: &str,
-        zone: DropZone,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // 拖拽只发生在看得见的那棵树上 —— 源与目标都在活动面板里
-        let Some(next) = self
-            .project_states
-            .get(project_id)
-            .and_then(|s| s.active_layout())
-            .and_then(|l| l.move_pane_in_layout(pane_id, target_pane_id, zone))
-        else {
-            return;
-        };
-        if let Some(state) = self.project_states.get_mut(project_id)
-            && let Some(layout) = state.active_layout_mut()
-        {
-            *layout = next;
-        }
-        // 与 split_pane 同一处置:最大化状态下四边分屏会落进隐藏的整树,先还原。
-        // `move_pane_to_tab` **不需要** —— 最大化时 tab 栏只能同组重排,结果就在眼前。
-        self.clear_maximized(project_id);
-        self.after_layout_change(project_id, cx);
-        self.focus_pane(project_id, pane_id, window, cx);
-    }
-
-    /// 拖到 tab 栏的精确落位:同组前后换位,跨组按插入位并入并激活。
-    /// 对应 `paneActions.ts::movePaneToTab`。
-    pub fn move_pane_to_tab(
-        &mut self,
-        project_id: &str,
-        pane_id: &str,
-        anchor_pane_id: &str,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(next) = self
-            .project_states
-            .get(project_id)
-            .and_then(|s| s.active_layout())
-            .and_then(|l| l.move_pane_to_tab_index(pane_id, anchor_pane_id, index))
-        else {
-            return;
-        };
-        if let Some(state) = self.project_states.get_mut(project_id)
-            && let Some(layout) = state.active_layout_mut()
-        {
-            *layout = next;
-        }
-        self.after_layout_change(project_id, cx);
-        self.focus_pane(project_id, pane_id, window, cx);
-    }
-
-    // === 双击最大化(v0.14.0,纯运行时状态)===
-
-    /// 当前被最大化的 pane。**只在布局真的分了屏时才作数** —— 单格布局下
-    /// 「最大化」没有意义,原版 `TerminalArea.tsx` 也是拿 `layout.type === 'split'`
-    /// 与门之后才去找那个叶子的。
-    pub fn maximized_pane_id(&self, project_id: &str) -> Option<&str> {
-        let state = self.project_states.get(project_id)?;
-        let layout = state.active_layout()?;
-        if !matches!(layout, SplitNode::Split { .. }) {
-            return None;
-        }
-        state.maximized_pane_id.as_deref()
-    }
-
-    /// 双击 tab 栏空白处 / 点最大化钮的落点,对应 `PaneGroup.tsx::toggleMaximize`:
-    /// **本组**已经是最大化的那一组就还原,否则把本组铺满(仅当真的分了屏)。
-    ///
-    /// 判据落在**叶子**上而不是 pane 上 —— 最大化之后在组内切了 tab,
-    /// `maximized_pane_id` 还指着切换前那个 pane,但用户看到的仍是这一组铺满,
-    /// 这时再双击一次理应还原(拿 pane id 直接比会变成「换成另一个 pane」)。
-    pub fn toggle_maximized_leaf(
-        &mut self,
-        project_id: &str,
-        anchor_pane_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(state) = self.project_states.get(project_id) else {
-            return;
-        };
-        let Some(layout) = state.active_layout() else {
-            return;
-        };
-        let anchor_leaf = layout
-            .leaf_of_pane(anchor_pane_id)
-            .map(|l| l.id().to_string());
-        let current_leaf = state
-            .maximized_pane_id
-            .as_deref()
-            .and_then(|id| layout.leaf_of_pane(id))
-            .map(|l| l.id().to_string());
-        let is_split = matches!(layout, SplitNode::Split { .. });
-
-        if anchor_leaf.is_some() && anchor_leaf == current_leaf {
-            self.set_maximized(project_id, None, cx);
-        } else if is_split {
-            self.set_maximized(project_id, Some(anchor_pane_id), cx);
-        }
-    }
-
-    /// 切换最大化的底层写入。逐字照抄 `store.ts::toggleMaximizedPane` 的三态口径
-    /// ([`next_maximized`])。
-    ///
-    /// ⚠️ 原版在这里还挂了一段 `suppress-pane-enter`(最大化/还原会让 React 重挂
-    /// `PaneGroup`,整树的淡入动画会重播成满屏闪动)。GPUI 侧**结构性不需要**:
-    /// 进场动画的进度表按 `项目\u{1}叶子` 索引且不按帧回收,同一个叶子换个容器
-    /// 渲染时拿到的还是那条早就跑完的进度(见 `terminal_area::wrap_pane_enter`)。
-    fn set_maximized(&mut self, project_id: &str, pane_id: Option<&str>, cx: &mut Context<Self>) {
-        let Some(state) = self.project_states.get_mut(project_id) else {
-            return;
-        };
-        let next = next_maximized(state.maximized_pane_id.as_deref(), pane_id);
-        if state.maximized_pane_id == next {
-            return;
-        }
-        state.maximized_pane_id = next;
+        self.report_terminal_close_error(target, message, cx);
         cx.notify();
     }
 
-    /// 无条件还原(分屏 / 拖拽移动落地前调),不 notify —— 调用方随后都会走
-    /// `after_layout_change`,那里统一 notify。
-    fn clear_maximized(&mut self, project_id: &str) {
-        if let Some(state) = self.project_states.get_mut(project_id) {
-            state.maximized_pane_id = None;
+    /// Returns whether an active selected terminal was removed and needs focus handoff.
+    /// Dormant host IPC runs off the GUI thread; uncertainty never removes the record.
+    pub(crate) fn close_terminal_target(
+        &mut self,
+        request: TerminalCloseRequest,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        if self.pending_terminal_closes.contains(&request.target.terminal_session_id)
+            || self.terminal_close_snapshot(&request.target)
+                .is_none_or(|current| !request.matches_before_dispatch(&current))
+        {
+            return Task::ready(false);
         }
+        if !request.may_replace_alias_layout(
+            self.layout_dirty_worktree_owners.get(&request.target.worktree_id).map(String::as_str),
+        ) {
+            self.report_terminal_close_conflict(&request.target,
+                "Another project may own a newer layout. The terminal was kept; review the project aliases before closing it.", cx);
+            return Task::ready(false);
+        }
+        if self.close_has_other_attachment(&request) {
+            self.report_terminal_close_error(&request.target,
+                "This terminal is attached through another project. The saved terminal was kept.", cx);
+            return Task::ready(false);
+        }
+        let incarnation = match terminal_close_plan(&request, self.terminal_host.is_some()) {
+            TerminalClosePlan::Attached(pty_id) => {
+                self.dispose_terminal(pty_id, cx);
+                return Task::ready(self.remove_closed_pane(&request.target, cx));
+            }
+            TerminalClosePlan::RecordOnly => {
+                return Task::ready(self.remove_closed_pane(&request.target, cx));
+            }
+            TerminalClosePlan::HostUnavailable => {
+                self.report_terminal_close_error(&request.target,
+                    "Terminal host is disabled or unavailable. Re-enable it before closing this saved terminal.", cx);
+                return Task::ready(false);
+            }
+            TerminalClosePlan::Hosted(incarnation) => incarnation,
+        };
+        let Some(client) = self.terminal_host.clone() else {
+            return Task::ready(false);
+        };
+        let Some(request) = self.pending_terminal_closes.begin(request) else {
+            return Task::ready(false);
+        };
+        cx.spawn(async move |this, cx| {
+            let session_id = request.target.terminal_session_id.clone();
+            let result = cx.background_executor().spawn(async move {
+                client.kill(session_id, incarnation)
+            }).await;
+            this.update(cx, |store, cx| {
+                if !store.pending_terminal_closes.finish(&request) {
+                    return false;
+                }
+                match terminal_close_completion(
+                    &request,
+                    store.terminal_close_snapshot(&request.target).as_ref(),
+                    store.close_has_other_attachment(&request) || !request.may_replace_alias_layout(
+                        store.layout_dirty_worktree_owners.get(&request.target.worktree_id).map(String::as_str),
+                    ),
+                    result.map_err(|error| error.code()),
+                ) {
+                    TerminalCloseCompletion::Stale => false,
+                    TerminalCloseCompletion::Failed(code) => {
+                        store.report_terminal_close_error(&request.target, dormant_close_error(code), cx);
+                        false
+                    }
+                    TerminalCloseCompletion::Conflict => {
+                        store.report_terminal_close_conflict(&request.target,
+                            "Terminal closed, but another project layout changed. The saved record was kept; review it before retrying.", cx);
+                        false
+                    }
+                    TerminalCloseCompletion::Remove => store.remove_closed_pane(&request.target, cx),
+                }
+            }).unwrap_or(false)
+        })
     }
 
-    /// 关闭一个 pane:回收 PTY,再把它从所在面板的树里摘掉
-    /// (面板随最后一个 pane 一起消失;面板全没了 = 项目回到空态)。
-    pub fn close_pane(&mut self, project_id: &str, pane_id: &str, cx: &mut Context<Self>) {
-        let pty_id = self
-            .project_states
-            .get(project_id)
-            .and_then(|s| s.pane(pane_id))
-            .and_then(|p| p.pty_id);
-        if let Some(pty_id) = pty_id {
-            self.dispose_terminal(pty_id, cx);
-        }
+    fn remove_closed_pane(&mut self, target: &TerminalJumpTarget, cx: &mut Context<Self>) -> bool {
+        let project_id = target.project_id.as_str();
+        let pane_id = target.pane_key.as_str();
+        let was_selected = self.active_pane_id(project_id).as_deref() == Some(pane_id);
         let Some(state) = self.project_states.get_mut(project_id) else {
-            return;
+            return false;
         };
         state.remove_pane(pane_id);
         if self.focused_pane_id.as_deref() == Some(pane_id) {
-            self.focused_pane_id = self
-                .project_states
-                .get(project_id)
-                .and_then(|s| s.active_layout())
-                .and_then(|l| l.first_active_pane())
-                .map(|p| p.id.clone());
+            self.focused_pane_id = (self.active_project_id.as_deref() == Some(project_id))
+                .then(|| self.active_pane_id(project_id))
+                .flatten();
         }
-        // 关掉的可能是活动面板的最后一个 pane → 活动指针挪到了邻位面板,
-        // 而那个面板可能是恢复出来、从没显示过的(pane 还没有 PTY)—— 补起来
-        self.hydrate_project(project_id, cx);
+        // Closing a background terminal must not start unrelated dormant records.
+        let hydrate_neighbor = was_selected
+            && self.active_project_id.as_deref() == Some(project_id)
+            && self.project_states.get(project_id)
+                .and_then(|state| state.selected_terminal())
+                .is_some_and(|pane| pane.pty_id.is_none());
+        if hydrate_neighbor {
+            self.hydrate_project(project_id, cx);
+        }
         self.after_layout_change(project_id, cx);
+        was_selected && self.active_project_id.as_deref() == Some(project_id)
+            && self.active_worktree_id() == Some(&target.worktree_id)
     }
 
-    /// 关掉某个 pane **所在的整组**(Ctrl+Shift+W 的落点)。
-    pub fn close_leaf_of_pane(&mut self, project_id: &str, pane_id: &str, cx: &mut Context<Self>) {
-        let leaf_id = self
-            .project_states
-            .get(project_id)
-            .and_then(|s| s.leaf_of_pane(pane_id))
-            .map(|node| node.id().to_string());
-        if let Some(leaf_id) = leaf_id {
-            self.close_leaf(project_id, &leaf_id, cx);
-        }
-    }
-
-    /// 关闭一整个叶子(它的全部 tab)。
-    pub fn close_leaf(&mut self, project_id: &str, leaf_id: &str, cx: &mut Context<Self>) {
-        let pane_ids: Vec<String> = self
-            .project_states
-            .get(project_id)
-            .and_then(|s| s.node(leaf_id))
-            .map(|node| match node {
-                SplitNode::Leaf { panes, .. } => panes.iter().map(|p| p.id.clone()).collect(),
-                _ => Vec::new(),
-            })
-            .unwrap_or_default();
-        for pane_id in pane_ids {
-            self.close_pane(project_id, &pane_id, cx);
-        }
-    }
-
-    /// 激活叶子里的某个 tab 并把焦点交给它。
+    /// Select one terminal under its existing owner and focus its current entity.
     pub fn activate_pane(
         &mut self,
         project_id: &str,
@@ -478,45 +494,36 @@ impl AppStore {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        // 切走之前把上一个 pane 的 IME 预编辑串收掉,否则组合中失焦会在画面上
-        // 留一串下划线残影(而且那次组合的候选框还挂在旧位置)。
-        self.clear_preedit_of_focused(cx);
-        // 目标 pane 可能在别的面板上(跳待办/会话跳转/未读完成都按 pane 定位)——
-        // 先把那个面板切成活动的,否则「跳过去了但画面没变」
-        let Some(owner_panel) = self
+        let Some(pane) = self
             .project_states
             .get(project_id)
-            .and_then(|state| state.panel_id_of_pane(pane_id))
-            .map(str::to_string)
+            .and_then(|state| state.pane(pane_id))
         else {
             return false;
         };
-        let panel_ready = if hydrate {
-            self.set_active_panel(project_id, &owner_panel, cx);
-            true
-        } else {
-            self.set_active_panel_without_hydration(project_id, &owner_panel, cx)
-        };
-        if !panel_ready {
+        if self.pending_terminal_closes.contains(&pane.terminal_session_id) {
             return false;
         }
-        let Some(layout) = self
-            .project_states
-            .get_mut(project_id)
-            .and_then(|state| state.layout_of_pane_mut(pane_id))
-        else {
-            return false;
-        };
-        if layout.pane(pane_id).is_none() {
+        let live = pane.pty_id.is_some_and(|id| self.terminals.contains_key(&id));
+        if !hydrate && !live {
             return false;
         }
-        layout.activate_pane(pane_id);
+        self.clear_preedit_of_focused(cx);
+        let Some(state) = self.project_states.get_mut(project_id) else {
+            return false;
+        };
+        if !state.select_terminal(pane_id) {
+            return false;
+        }
+        if hydrate && !live {
+            self.hydrate_project(project_id, cx);
+        }
         self.focus_pane(project_id, pane_id, window, cx);
         self.save_project_layout_soon(project_id, cx);
         true
     }
 
-    /// 叶内环形切 tab(Ctrl+Tab / Ctrl+Shift+Tab)。只有一个 tab 时什么也不做。
+    /// Cycle the complete flat worktree inventory (Ctrl+Tab / Ctrl+Shift+Tab).
     pub fn cycle_pane(
         &mut self,
         project_id: &str,
@@ -528,18 +535,18 @@ impl AppStore {
         let target = self
             .project_states
             .get(project_id)
-            .and_then(|s| s.layout_of_pane(from_pane_id))
-            .and_then(|l| l.cycle_target(from_pane_id, delta));
+            .and_then(|state| state.cycle_terminal_target(from_pane_id, delta))
+            .and_then(|id| self.terminal_jump_target_for_pane(project_id, &id));
         if let Some(target) = target {
-            self.activate_pane(project_id, &target, window, cx);
+            self.focus_terminal_jump_target(&target, window, cx);
         }
     }
 
-    /// 选中叶内第 `index` 个 tab(Ctrl+1..9,**1-based**)。越界不动。
+    /// Select the 1-based flat terminal index; out-of-range requests are inert.
     pub fn select_pane_by_index(
         &mut self,
         project_id: &str,
-        from_pane_id: &str,
+        _from_pane_id: &str,
         index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -547,10 +554,10 @@ impl AppStore {
         let target = self
             .project_states
             .get(project_id)
-            .and_then(|s| s.layout_of_pane(from_pane_id))
-            .and_then(|l| l.pane_at_index(from_pane_id, index));
+            .and_then(|state| state.terminal_at_index(index))
+            .and_then(|pane| self.terminal_jump_target_for_pane(project_id, &pane.id));
         if let Some(target) = target {
-            self.activate_pane(project_id, &target, window, cx);
+            self.focus_terminal_jump_target(&target, window, cx);
         }
     }
 
@@ -576,6 +583,11 @@ impl AppStore {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_project_id.as_deref() != Some(project_id)
+            || self.active_pane_id(project_id).as_deref() != Some(pane_id)
+        {
+            return;
+        }
         self.focused_pane_id = Some(pane_id.to_string());
         let pty_id = self
             .project_states
@@ -588,14 +600,13 @@ impl AppStore {
         cx.notify();
     }
 
-    /// 当前项目里该操作哪个 pane:焦点 pane → 布局里第一个激活 pane
-    /// (旧版 `resolveActivePane`,它以 DOM 焦点为准)。
+    /// Remembered worktree terminal, with a focused-pane fallback for old live state.
     pub fn active_pane_id(&self, project_id: &str) -> Option<String> {
-        let layout = self.project_states.get(project_id)?.active_layout()?;
-        self.focused_pane_id
-            .clone()
-            .filter(|id| layout.pane(id).is_some())
-            .or_else(|| layout.first_active_pane().map(|p| p.id.clone()))
+        let state = self.project_states.get(project_id)?;
+        state.selected_terminal_pane_key.as_ref().and_then(|key| state.pane(key.as_str()))
+            .or_else(|| self.focused_pane_id.as_deref().and_then(|id| state.pane(id)))
+            .or_else(|| state.selected_terminal())
+            .map(|pane| pane.id.clone())
     }
 
     /// 把一段文本当作用户键入写进某个 pane。
@@ -659,8 +670,8 @@ impl AppStore {
         }
     }
 
-    /// 恢复出来的布局里,pane 还没有 PTY(重启后 PTY 当然不在了)。
-    /// 项目第一次被显示时把它们补起来 —— 与旧版「PaneGroup 懒创建」同一时机。
+    /// Ordinary dormant activation recovers eligible records in the selected
+    /// terminal's original legacy panel. Exact-live activation skips this path.
     ///
     /// # AI 自动续接
     ///
@@ -701,8 +712,8 @@ impl AppStore {
             ai_session: Option<AiSessionRef>,
             resume_pending: bool,
         }
-        // 只补**活动面板**:后台面板与后台项目同一档懒创建时机,
-        // 切过去(`set_active_panel`)才起 PTY
+        // Selection sets the original owner before this ordinary recovery path.
+        // Retain panel-wide dormant recovery; flat rendering does not change PTY lifetime.
         let pending: Vec<Pending> = self
             .project_states
             .get(project_id)
@@ -713,9 +724,9 @@ impl AppStore {
                     .layout
                     .panes()
                     .into_iter()
-                    // status == error 的 pane 不重开(旧版 effect 的同一条守卫):
-                    // 它上次就是起不来 / 已退出,自动重来只会刷屏
+                    // Failed or exited records are not automatically restarted.
                     .filter(|p| p.pty_id.is_none() && p.status != PaneStatus::Error)
+                    .filter(|p| !self.pending_terminal_closes.contains(&p.terminal_session_id))
                     .map(|p| Pending {
                         pane_id: p.id.clone(),
                         tab_id: tab_id.clone(),
@@ -1112,5 +1123,240 @@ impl AppStore {
             .or_else(|| shells.iter().find(|s| s.name == self.config.default_shell))
             .or_else(|| shells.first())
             .cloned()
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use mt_identity::{ExecutionHostId, HostInstallId, RepoId, WorktreeId};
+
+    use super::*;
+
+    fn close_request() -> TerminalCloseRequest {
+        let host = ExecutionHostId::derive("local", &HostInstallId::new());
+        let repo = RepoId::derive(&host, "/repo/.git");
+        let worktree = WorktreeId::derive(&repo, "/repo", None);
+        let mut request = TerminalCloseRequest {
+            target: TerminalJumpTarget {
+                project_id: "owner".into(),
+                execution_host_id: host.clone(),
+                worktree_id: worktree.clone(),
+                tab_id: TabId::new(),
+                pane_key: PaneKey::new(),
+                terminal_session_id: TerminalSessionId::new(),
+                terminal_incarnation_id: Some(TerminalIncarnationId::new()),
+            },
+            pty_id: None,
+            binding: ProjectWorktreeBinding {
+                project_id: "owner".into(),
+                execution_host_id: host,
+                repo_id: repo,
+                worktree_id: worktree,
+                identity_source: "test".into(),
+                canonical_worktree_path: Some("/repo".into()),
+                identity_context: None,
+            },
+            project_path: "/repo".into(),
+            ssh_connection_id: None,
+            connection_fingerprint: None,
+            source_layout: serde_json::Value::Null,
+            aliases: Vec::new(),
+        };
+        request.source_layout = serde_json::to_value(state_for(&request).saved_layout()).unwrap();
+        request
+    }
+
+    fn state_for(request: &TerminalCloseRequest) -> ProjectState {
+        let mut pane = PaneState::new("saved-shell");
+        pane.pane_key = request.target.pane_key.clone();
+        pane.id = pane.pane_key.to_string();
+        pane.terminal_session_id = request.target.terminal_session_id.clone();
+        pane.terminal_incarnation_id = request.target.terminal_incarnation_id.clone();
+        pane.pty_id = request.pty_id;
+        let mut state = ProjectState::new();
+        state.panels.push(ProjectPanel::with_tab_id(request.target.tab_id.clone(), SplitNode::leaf(pane)));
+        state.select_terminal(request.target.pane_key.as_str());
+        state
+    }
+
+    #[test]
+    fn dormant_close_requires_host_confirmation_only_for_local_saved_incarnations() {
+        let mut request = close_request();
+        assert_eq!(terminal_close_plan(&request, true), TerminalClosePlan::Hosted(request.target.terminal_incarnation_id.clone().unwrap()));
+        assert_eq!(terminal_close_plan(&request, false), TerminalClosePlan::HostUnavailable);
+        request.project_path = r"\\wsl.localhost\Ubuntu\repo".into();
+        assert!(matches!(terminal_close_plan(&request, true), TerminalClosePlan::Hosted(_)));
+        assert_eq!(terminal_close_plan(&request, false), TerminalClosePlan::HostUnavailable);
+        request.ssh_connection_id = Some("ssh".into());
+        assert_eq!(terminal_close_plan(&request, true), TerminalClosePlan::RecordOnly);
+        assert_eq!(terminal_close_plan(&request, false), TerminalClosePlan::RecordOnly);
+        request.ssh_connection_id = None;
+        request.target.terminal_incarnation_id = None;
+        assert_eq!(terminal_close_plan(&request, false), TerminalClosePlan::RecordOnly);
+        request.pty_id = Some(17);
+        assert_eq!(terminal_close_plan(&request, false), TerminalClosePlan::Attached(17));
+    }
+
+    #[test]
+    fn pending_close_excludes_alias_activation_reconnect_and_duplicate_close_until_its_owner_finishes() {
+        let request = close_request();
+        let mut pending = PendingTerminalCloses::default();
+        let first = pending.begin(request.clone()).unwrap();
+        assert!(pending.contains(&request.target.terminal_session_id));
+        assert!(pending.begin(request.clone()).is_none());
+        let mut alias = request.clone();
+        alias.target.project_id = "alias".into();
+        alias.target.terminal_incarnation_id = Some(TerminalIncarnationId::new());
+        assert!(pending.begin(alias).is_none());
+        let other = pending.begin(close_request()).unwrap();
+        assert!(pending.finish(&first));
+        assert!(!pending.contains(&request.target.terminal_session_id));
+        let retry = pending.begin(request).unwrap();
+        assert!(!pending.finish(&first), "a late completion must not release the retry");
+        assert!(pending.contains(&retry.target.terminal_session_id));
+        assert!(pending.finish(&other));
+        assert!(pending.finish(&retry));
+    }
+
+    #[test]
+    fn close_never_deletes_on_missing_exited_transport_or_protocol_failure() {
+        let request = close_request();
+        for code in [None, Some(HostErrorCode::SessionMissing), Some(HostErrorCode::SessionExited),
+            Some(HostErrorCode::ProtocolMismatch), Some(HostErrorCode::IncarnationMismatch),
+            Some(HostErrorCode::IoFailed), Some(HostErrorCode::HostBusy), Some(HostErrorCode::RecoveryUnavailable)] {
+            assert_eq!(terminal_close_completion(&request, Some(&request), false, Err(code)), TerminalCloseCompletion::Failed(code));
+            assert!(dormant_close_error(code).len() < 180);
+        }
+        assert_eq!(terminal_close_completion(&request, Some(&request), false, Ok(())), TerminalCloseCompletion::Remove);
+    }
+
+    #[test]
+    fn close_completion_rejects_every_changed_route_source_and_attachment() {
+        let request = close_request();
+        let mutations: &[fn(&mut TerminalCloseRequest)] = &[
+            |r| r.target.project_id = "different".into(),
+            |r| r.target.execution_host_id = ExecutionHostId::derive("other", &HostInstallId::new()),
+            |r| r.target.worktree_id = WorktreeId::derive(&r.binding.repo_id, "/different", None),
+            |r| r.target.tab_id = TabId::new(),
+            |r| r.target.pane_key = PaneKey::new(),
+            |r| r.target.terminal_session_id = TerminalSessionId::new(),
+            |r| r.target.terminal_incarnation_id = Some(TerminalIncarnationId::new()),
+            |r| r.pty_id = Some(9),
+            |r| r.project_path = "/different".into(),
+            |r| r.binding.identity_context = Some("rebound".into()),
+            |r| r.ssh_connection_id = Some("other-transport".into()),
+            |r| r.connection_fingerprint = Some(5),
+        ];
+        for mutate in mutations {
+            let mut current = request.clone();
+            mutate(&mut current);
+            assert_eq!(terminal_close_completion(&request, Some(&current), false, Ok(())), TerminalCloseCompletion::Stale);
+        }
+        assert_eq!(terminal_close_completion(&request, None, false, Ok(())), TerminalCloseCompletion::Stale);
+        assert_eq!(terminal_close_completion(&request, Some(&request), true, Ok(())), TerminalCloseCompletion::Conflict);
+    }
+
+    #[test]
+    fn selection_and_order_changes_during_close_preserve_the_new_selected_terminal() {
+        let mut request = close_request();
+        let mut state = state_for(&request);
+        let neighbor = PaneState::new("neighbor");
+        let neighbor_id = neighbor.id.clone();
+        let neighbor_key = neighbor.pane_key.clone();
+        state.panels.push(ProjectPanel::new(SplitNode::leaf(neighbor)));
+        state.normalize_terminal_navigation(None);
+        let mut alias_state = state_for(&request);
+        alias_state.panels = state.panels.clone();
+        alias_state.normalize_terminal_navigation(None);
+        request.source_layout = serde_json::to_value(state.saved_layout()).unwrap();
+        let mut alias_binding = request.binding.clone();
+        alias_binding.project_id = "alias".into();
+        let bindings = HashMap::from([
+            ("owner".into(), request.binding.clone()), ("alias".into(), alias_binding),
+        ]);
+        let mut states = HashMap::from([
+            ("owner".into(), state), ("alias".into(), alias_state),
+        ]);
+        request.aliases = terminal_close_aliases(&request.target, &bindings, &states).unwrap();
+        assert!(request.may_replace_alias_layout(None));
+        assert!(request.may_replace_alias_layout(Some("owner")));
+        assert!(!request.may_replace_alias_layout(Some("alias")));
+        let state = states.get_mut("owner").unwrap();
+        assert!(state.select_terminal(&neighbor_id));
+        assert!(state.reorder_terminal(&neighbor_key, &request.target.pane_key, false));
+        let mut current = request.clone();
+        current.source_layout = serde_json::to_value(state.saved_layout()).unwrap();
+        current.aliases = terminal_close_aliases(&request.target, &bindings, &states).unwrap();
+        assert_ne!(request.source_layout, current.source_layout);
+        assert!(request.matches_before_dispatch(&current));
+        assert!(request.may_replace_alias_layout(None));
+        assert_eq!(terminal_close_completion(&request, Some(&current), false, Ok(())), TerminalCloseCompletion::Remove);
+        assert_eq!(
+            terminal_close_completion(&request, Some(&current), !request.may_replace_alias_layout(Some("alias")), Ok(())),
+            TerminalCloseCompletion::Conflict
+        );
+        let state = states.get_mut("owner").unwrap();
+        state.remove_pane(request.target.pane_key.as_str());
+        assert_eq!(state.selected_terminal().unwrap().id, neighbor_id);
+        assert!(state.selected_terminal().unwrap().pty_id.is_none(), "background close does not hydrate");
+
+        states.get_mut("alias").unwrap().panels[0].custom_title = Some("changed alias".into());
+        current.aliases = terminal_close_aliases(&request.target, &bindings, &states).unwrap();
+        assert_eq!(terminal_close_completion(&request, Some(&current), false, Ok(())), TerminalCloseCompletion::Conflict);
+    }
+
+    #[test]
+    fn preexisting_alias_append_blocks_close_before_and_after_layout_flush() {
+        let mut request = close_request();
+        let source = state_for(&request);
+        let source_before = serde_json::to_value(source.saved_layout()).unwrap();
+        let mut alias = state_for(&request);
+        let mut mobile_pane = PaneState::new("mobile-shell");
+        mobile_pane.pty_id = Some(83);
+        mobile_pane.terminal_incarnation_id = Some(TerminalIncarnationId::new());
+        let mobile_key = mobile_pane.pane_key.clone();
+        assert!(alias.append_background_terminal(request.target.tab_id.clone(), mobile_pane));
+        let alias_before = serde_json::to_value(alias.saved_layout()).unwrap();
+        let mut alias_binding = request.binding.clone();
+        alias_binding.project_id = "alias".into();
+        let bindings = HashMap::from([
+            ("owner".into(), request.binding.clone()), ("alias".into(), alias_binding),
+        ]);
+        let states = HashMap::from([("owner".into(), source), ("alias".into(), alias)]);
+        request.aliases = terminal_close_aliases(&request.target, &bindings, &states).unwrap();
+
+        // The shared source stayed dormant; its attachment fence cannot see the
+        // different terminal added before close captured the other alias.
+        assert!(!close_has_other_attachment(&request, &HashMap::new(), &states));
+        assert!(request.matches_before_dispatch(&request));
+        assert!(!request.may_replace_alias_layout(Some("alias")));
+        assert!(!request.may_replace_alias_layout(None), "flush has forgotten its owner");
+        assert!(!request.may_replace_alias_layout(Some("owner")), "selection cannot authorize an older inventory");
+        assert_eq!(serde_json::to_value(states["owner"].saved_layout()).unwrap(), source_before);
+        assert_eq!(serde_json::to_value(states["alias"].saved_layout()).unwrap(), alias_before);
+        assert_eq!(states["alias"].pane(mobile_key.as_str()).unwrap().pty_id, Some(83));
+        assert!(states["alias"].pane(request.target.pane_key.as_str()).unwrap().pty_id.is_none());
+    }
+
+    #[test]
+    fn another_alias_attachment_blocks_dormant_close_even_with_the_same_pty_handle() {
+        let mut request = close_request();
+        let mut attached = request.clone();
+        attached.pty_id = Some(7);
+        let states = HashMap::from([("alias".into(), state_for(&attached))]);
+        assert!(close_has_other_attachment(&request, &HashMap::new(), &states));
+        request.pty_id = Some(7);
+        assert!(close_has_other_attachment(&request, &HashMap::new(), &states));
+        let states = HashMap::from([("owner".into(), state_for(&request))]);
+        assert!(!close_has_other_attachment(&request, &HashMap::new(), &states));
+        let route = TerminalRoute {
+            execution_host_id: request.target.execution_host_id.clone(),
+            worktree_id: request.target.worktree_id.clone(),
+            tab_id: request.target.tab_id.clone(),
+            pane_key: request.target.pane_key.clone(),
+            terminal_session_id: request.target.terminal_session_id.clone(),
+            terminal_incarnation_id: request.target.terminal_incarnation_id.clone().unwrap(),
+        };
+        assert!(close_has_other_attachment(&request, &HashMap::from([(8, route)]), &HashMap::new()));
     }
 }

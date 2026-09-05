@@ -1,0 +1,7 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Actions-only tests and native acceptance provenance."}
+{"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Flat visual tabs must retain internal route and PTY identity."}
+{"file":".trellis/spec/mt-layout/backend/worktree-layout-contract.md","reason":"Preserve saved terminals, shared-alias ownership, and recoverable legacy layouts."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Global context tool choice, worktree data, and exact terminal activation."}
+{"file":".trellis/spec/mt-app/backend/file-workbench-contract.md","reason":"Retain document tabs, dirty state, and active-page ownership while moving terminal tabs."}
+{"file":".trellis/spec/mt-app/backend/navigation-catalog-contract.md","reason":"Preserve project settings visibility and canonical worktree navigation."}
+{"file":".trellis/tasks/09-05-sidebar-agent-status/research/09-06-flat-terminal-compatibility.md","reason":"Lossless flat projection, original route ownership, selected/order metadata, and hidden split/close paths."}

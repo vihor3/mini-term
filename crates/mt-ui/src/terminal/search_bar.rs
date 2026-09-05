@@ -131,8 +131,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
+    App, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled, Subscription, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -140,7 +140,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex};
 use mt_terminal::TerminalEmulator;
 
-use crate::tooltip::Tooltip;
+use crate::icon_tooltip::IconTooltips;
 
 use super::search::{SearchDirection, SearchOptions, TerminalSearch};
 
@@ -204,6 +204,7 @@ pub struct TerminalSearchBar {
     search: Rc<RefCell<TerminalSearch>>,
     emulator: Arc<TerminalEmulator>,
     input: Entity<InputState>,
+    icon_tooltips: Entity<IconTooltips>,
     /// `None` = 跟随 [`mt_i18n`] 的当前语言。
     labels: Option<SearchBarLabels>,
     on_close: Option<OnSearchClose>,
@@ -241,6 +242,7 @@ impl TerminalSearchBar {
             search,
             emulator,
             input,
+            icon_tooltips: cx.new(|_| IconTooltips::default()),
             labels: None,
             on_close: None,
             _subscriptions: vec![subscription],
@@ -302,6 +304,7 @@ impl TerminalSearchBar {
     /// `pub(super)` 的。action 要等输入框进了 dispatch 树才有人接,
     /// 所以推迟到下一帧发。
     pub fn focus_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        IconTooltips::reset(&self.icon_tooltips, window, cx);
         self.input.focus_handle(cx).focus(window);
         window.defer(cx, |window, cx| {
             window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx);
@@ -310,6 +313,7 @@ impl TerminalSearchBar {
 
     /// 收起。关键词与三个开关都留着,下次 [`Self::open`] 接着用。
     pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        IconTooltips::reset(&self.icon_tooltips, window, cx);
         self.search.borrow_mut().set_enabled(false);
         cx.emit(SearchBarEvent::Closed);
         if let Some(cb) = self.on_close.clone() {
@@ -412,21 +416,39 @@ pub fn counter_text(active: bool, index: usize, count: usize, no_results: &str) 
     format!("{index}/{count}")
 }
 
-/// 给查找条上的按钮套一层带 tooltip 的壳。
-///
-/// 为什么不用 `Button::tooltip(..)`:那条在 gpui-component 内部直接建它自带的气泡,
-/// 字号和停留时长都绕不过去(理由见 [`crate::tooltip`])。壳是个 `flex_none` 的裸
-/// div,在 `h_flex` 里既不撑也不缩,排布与之前一致。
-fn with_tip(id: &'static str, tip: SharedString, button: Button) -> impl IntoElement {
+/// Keep the Button's geometry and focus behavior while sharing the group's delay.
+fn tip_anchor(id: &'static str, button: Button) -> Stateful<Div> {
+    // Block layout puts the appended absolute tooltip canvas below the Button.
+    // Flex alignment keeps the full-size anchor over the same button bounds.
     div()
         .id(id)
         .flex_none()
-        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        .flex()
+        .items_center()
+        .justify_center()
         .child(button)
 }
 
+fn with_tip(
+    owner: &Entity<IconTooltips>,
+    id: &'static str,
+    tip: SharedString,
+    button: Button,
+    window: &mut Window,
+    cx: &mut App,
+) -> Stateful<Div> {
+    IconTooltips::button(
+        owner,
+        id,
+        tip,
+        tip_anchor(id, button),
+        window,
+        cx,
+    )
+}
+
 impl Render for TerminalSearchBar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let labels = self.resolved_labels();
         let (active, options, index, count, has_query, has_error) = {
             let engine = self.search.borrow();
@@ -442,6 +464,102 @@ impl Render for TerminalSearchBar {
         let counter = counter_text(active, index, count, &labels.no_results);
         let muted = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
+
+        let tools = h_flex()
+            .id("terminal-search-tools")
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .child(with_tip(
+                &self.icon_tooltips,
+                "case-sensitive-tip",
+                labels.case_sensitive.clone(),
+                Button::new("case-sensitive")
+                    .label("Aa")
+                    .xsmall()
+                    .compact()
+                    .ghost()
+                    .selected(options.case_sensitive)
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.toggle_option(|o| o.case_sensitive = !o.case_sensitive, cx);
+                    })),
+                window,
+                cx,
+            ))
+            .child(with_tip(
+                &self.icon_tooltips,
+                "whole-word-tip",
+                labels.whole_word.clone(),
+                Button::new("whole-word")
+                    .label("ab")
+                    .xsmall()
+                    .compact()
+                    .ghost()
+                    .selected(options.whole_word)
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.toggle_option(|o| o.whole_word = !o.whole_word, cx);
+                    })),
+                window,
+                cx,
+            ))
+            .child(with_tip(
+                &self.icon_tooltips,
+                "regex-tip",
+                labels.regex.clone(),
+                Button::new("regex")
+                    .label(".*")
+                    .xsmall()
+                    .compact()
+                    .ghost()
+                    .selected(options.regex)
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.toggle_option(|o| o.regex = !o.regex, cx);
+                    })),
+                window,
+                cx,
+            ))
+            .child(with_tip(
+                &self.icon_tooltips,
+                "previous-tip",
+                labels.previous.clone(),
+                Button::new("previous")
+                    .label("↑")
+                    .xsmall()
+                    .compact()
+                    .ghost()
+                    .disabled(!has_query)
+                    .on_click(cx.listener(|this, _, _window, cx| this.find_previous(cx))),
+                window,
+                cx,
+            ))
+            .child(with_tip(
+                &self.icon_tooltips,
+                "next-tip",
+                labels.next.clone(),
+                Button::new("next")
+                    .label("↓")
+                    .xsmall()
+                    .compact()
+                    .ghost()
+                    .disabled(!has_query)
+                    .on_click(cx.listener(|this, _, _window, cx| this.find_next(cx))),
+                window,
+                cx,
+            ))
+            .child(with_tip(
+                &self.icon_tooltips,
+                "close-tip",
+                labels.close.clone(),
+                Button::new("close")
+                    .label("✕")
+                    .xsmall()
+                    .compact()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, window, cx| this.close(window, cx))),
+                window,
+                cx,
+            ));
+        let tools = IconTooltips::group(&self.icon_tooltips, tools, window, cx);
 
         h_flex()
             .id("terminal-search-bar")
@@ -474,83 +592,24 @@ impl Render for TerminalSearchBar {
                     .text_color(if has_error { danger } else { muted })
                     .child(counter),
             )
-            .child(with_tip(
-                "case-sensitive-tip",
-                labels.case_sensitive.clone(),
-                Button::new("case-sensitive")
-                    .label("Aa")
-                    .xsmall()
-                    .compact()
-                    .ghost()
-                    .selected(options.case_sensitive)
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.toggle_option(|o| o.case_sensitive = !o.case_sensitive, cx);
-                    })),
-            ))
-            .child(with_tip(
-                "whole-word-tip",
-                labels.whole_word.clone(),
-                Button::new("whole-word")
-                    .label("ab")
-                    .xsmall()
-                    .compact()
-                    .ghost()
-                    .selected(options.whole_word)
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.toggle_option(|o| o.whole_word = !o.whole_word, cx);
-                    })),
-            ))
-            .child(with_tip(
-                "regex-tip",
-                labels.regex.clone(),
-                Button::new("regex")
-                    .label(".*")
-                    .xsmall()
-                    .compact()
-                    .ghost()
-                    .selected(options.regex)
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.toggle_option(|o| o.regex = !o.regex, cx);
-                    })),
-            ))
-            .child(with_tip(
-                "previous-tip",
-                labels.previous.clone(),
-                Button::new("previous")
-                    .label("↑")
-                    .xsmall()
-                    .compact()
-                    .ghost()
-                    .disabled(!has_query)
-                    .on_click(cx.listener(|this, _, _window, cx| this.find_previous(cx))),
-            ))
-            .child(with_tip(
-                "next-tip",
-                labels.next.clone(),
-                Button::new("next")
-                    .label("↓")
-                    .xsmall()
-                    .compact()
-                    .ghost()
-                    .disabled(!has_query)
-                    .on_click(cx.listener(|this, _, _window, cx| this.find_next(cx))),
-            ))
-            .child(with_tip(
-                "close-tip",
-                labels.close.clone(),
-                Button::new("close")
-                    .label("✕")
-                    .xsmall()
-                    .compact()
-                    .ghost()
-                    .on_click(cx.listener(|this, _, window, cx| this.close(window, cx))),
-            ))
+            .child(tools)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tooltip_anchor_uses_flex_alignment_for_the_absolute_overlay() {
+        let mut anchor = tip_anchor("search-tip", Button::new("search-option").label("Aa"));
+        let style = anchor.style();
+        assert_eq!(style.display, Some(gpui::Display::Flex));
+        assert_eq!(style.align_items, Some(gpui::AlignItems::Center));
+        assert_eq!(style.justify_content, Some(gpui::JustifyContent::Center));
+        assert_eq!(style.flex_grow, Some(0.0));
+        assert_eq!(style.flex_shrink, Some(0.0));
+    }
 
     #[test]
     fn 计数文案的三种状态() {
@@ -588,6 +647,10 @@ mod tests {
         assert_eq!(en("placeholder"), "Find…");
         assert_eq!(en("noResults"), "No results");
         assert_eq!(en("caseSensitive"), "Match case");
+        assert_eq!(en("wholeWord"), "Match whole word");
+        assert_eq!(en("regex"), "Use regular expression");
+        assert_eq!(en("previous"), "Previous (Shift+Enter)");
+        assert_eq!(en("next"), "Next (Enter)");
         assert_eq!(en("close"), "Close (Esc)");
 
         // 打错 key 在 debug 下会直接 panic(mt-i18n 的静态断言),

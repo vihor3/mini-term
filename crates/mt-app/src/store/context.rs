@@ -14,11 +14,12 @@ use mt_identity::{
     AgentEventId, AgentRunId, ExecutionHostId, PaneKey, TabId, TerminalIncarnationId,
     TerminalSessionId, WorktreeId,
 };
+use mt_layout::ProjectWorktreeBinding;
 
 use crate::pane::TerminalRecovery;
-use crate::tree::PaneStatus;
+use crate::tree::{PaneState, PaneStatus};
 
-use super::{AppStore, RemoteAgentProbeCapability};
+use super::{AppStore, ProjectState, RemoteAgentProbeCapability};
 
 const DIAGNOSTIC_TEXT_LIMIT: usize = 512;
 
@@ -256,6 +257,32 @@ fn terminal_jump_identity_matches(
         && target.terminal_incarnation_id.as_ref() == terminal_incarnation_id
 }
 
+fn resolve_terminal_pane<'a>(
+    binding: &ProjectWorktreeBinding,
+    state: &'a ProjectState,
+    target: &TerminalJumpTarget,
+) -> Option<&'a PaneState> {
+    if binding.project_id != target.project_id {
+        return None;
+    }
+    let panel = state.panels.iter().find(|panel| panel.tab_id == target.tab_id)?;
+    let pane = panel.layout.pane(target.pane_key.as_str())?;
+    terminal_jump_identity_matches(
+        target,
+        &binding.execution_host_id,
+        &binding.worktree_id,
+        &panel.tab_id,
+        &pane.pane_key,
+        &pane.terminal_session_id,
+        pane.terminal_incarnation_id.as_ref(),
+    ).then_some(pane)
+}
+
+fn selected_terminal_matches_route(state: &ProjectState, route: &AgentRoute) -> bool {
+    state.active_panel().is_some_and(|panel| panel.tab_id == route.tab_id)
+        && state.selected_terminal().is_some_and(|pane| pane.pane_key == route.pane_key)
+}
+
 fn preferred_agent_route_project_id<'a>(
     candidate_project_ids: impl IntoIterator<Item = &'a str>,
     active_project_id: Option<&str>,
@@ -425,8 +452,17 @@ impl AppStore {
     /// visible before hydration, while live panes carry their expected
     /// incarnation so activation can reject a reused runtime route.
     pub fn terminal_jump_views(&self) -> Vec<TerminalJumpView> {
+        self.config
+            .projects
+            .iter()
+            .flat_map(|project| self.terminal_tab_views(&project.id))
+            .collect()
+    }
+
+    /// Flat presentation for one exact project's bound worktree. This read never hydrates.
+    pub fn terminal_tab_views(&self, project_id: &str) -> Vec<TerminalJumpView> {
         let mut rows = Vec::new();
-        for project in &self.config.projects {
+        for project in self.config.projects.iter().filter(|project| project.id == project_id) {
             let Some(binding) = self.project_worktree_bindings.get(&project.id) else {
                 continue;
             };
@@ -491,34 +527,40 @@ impl AppStore {
                     });
                 }
             }
+            let order = state.ordered_terminal_panes().iter().enumerate()
+                .map(|(index, pane)| (pane.pane_key.clone(), index)).collect::<HashMap<_, _>>();
+            rows.sort_by_key(|row| order.get(&row.target.pane_key).copied().unwrap_or(usize::MAX));
         }
         rows
     }
 
-    fn resolve_terminal_jump_target(&self, target: &TerminalJumpTarget) -> Option<(String, bool)> {
+    pub fn terminal_jump_target_for_pane(
+        &self,
+        project_id: &str,
+        pane_id: &str,
+    ) -> Option<TerminalJumpTarget> {
+        let binding = self.project_worktree_bindings.get(project_id)?;
+        let state = self.project_states.get(project_id)?;
+        let panel = state.panels.iter().find(|panel| panel.layout.pane(pane_id).is_some())?;
+        let pane = panel.layout.pane(pane_id)?;
+        Some(TerminalJumpTarget {
+            project_id: project_id.to_string(),
+            execution_host_id: binding.execution_host_id.clone(),
+            worktree_id: binding.worktree_id.clone(),
+            tab_id: panel.tab_id.clone(),
+            pane_key: pane.pane_key.clone(),
+            terminal_session_id: pane.terminal_session_id.clone(),
+            terminal_incarnation_id: pane.terminal_incarnation_id.clone(),
+        })
+    }
+
+    pub(crate) fn resolve_terminal_jump_target(
+        &self,
+        target: &TerminalJumpTarget,
+    ) -> Option<(String, bool)> {
         let binding = self.project_worktree_bindings.get(&target.project_id)?;
-        if binding.execution_host_id != target.execution_host_id
-            || binding.worktree_id != target.worktree_id
-        {
-            return None;
-        }
         let state = self.project_states.get(&target.project_id)?;
-        let panel = state
-            .panels
-            .iter()
-            .find(|panel| panel.tab_id == target.tab_id)?;
-        let pane = panel.layout.pane(target.pane_key.as_str())?;
-        if !terminal_jump_identity_matches(
-            target,
-            &binding.execution_host_id,
-            &binding.worktree_id,
-            &panel.tab_id,
-            &pane.pane_key,
-            &pane.terminal_session_id,
-            pane.terminal_incarnation_id.as_ref(),
-        ) {
-            return None;
-        }
+        let pane = resolve_terminal_pane(binding, state, target)?;
         let live = match pane.pty_id {
             Some(pty_id) => {
                 self.terminals.contains_key(&pty_id)
@@ -541,12 +583,45 @@ impl AppStore {
             .then(|| (pane.id.clone(), live))
     }
 
-    fn focus_terminal_jump_target(
+    /// Reorder presentation only; both endpoints retain their exact original owner.
+    pub fn reorder_terminal_tabs(
+        &mut self,
+        source: &TerminalJumpTarget,
+        target: &TerminalJumpTarget,
+        after: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if source.project_id != target.project_id
+            || source.worktree_id != target.worktree_id
+            || self.active_project_id.as_deref() != Some(source.project_id.as_str())
+            || self.active_worktree_id() != Some(&source.worktree_id)
+            || self.resolve_terminal_jump_target(source).is_none()
+            || self.resolve_terminal_jump_target(target).is_none()
+            || source.pane_key == target.pane_key
+        {
+            return false;
+        }
+        let Some(state) = self.project_states.get_mut(&source.project_id) else {
+            return false;
+        };
+        if !state.reorder_terminal(&source.pane_key, &target.pane_key, after) {
+            return false;
+        }
+        self.save_project_layout_soon(&source.project_id, cx);
+        cx.notify();
+        true
+    }
+
+    pub(super) fn focus_terminal_jump_target(
         &mut self,
         target: &TerminalJumpTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // Block navigation, not the identity resolution needed by close completion.
+        if self.pending_terminal_closes.contains(&target.terminal_session_id) {
+            return false;
+        }
         let Some((pane_id, live)) = self.resolve_terminal_jump_target(target) else {
             return false;
         };
@@ -564,11 +639,6 @@ impl AppStore {
             }
         } else {
             self.activate_pane(&target.project_id, &pane_id, window, cx);
-            // `activate_pane` hydrates when it changes panels, but an exact
-            // dormant pane may already belong to the active panel. Make that
-            // path perform the same ordinary project hydration as any other
-            // dormant terminal activation.
-            self.hydrate_project(&target.project_id, cx);
         }
         self.active_project_id.as_deref() == Some(target.project_id.as_str())
             && self.active_worktree_id() == Some(&target.worktree_id)
@@ -605,13 +675,7 @@ impl AppStore {
         let Some(panel) = state.active_panel() else {
             return false;
         };
-        if panel.tab_id != target.route.tab_id
-            || panel
-                .layout
-                .first_active_pane()
-                .map(|pane| pane.id.as_str())
-                != Some(target.pane_id.as_str())
-        {
+        if !selected_terminal_matches_route(state, &target.route) {
             return false;
         }
         let Some(pane) = panel.layout.pane(&target.pane_id) else {
@@ -943,6 +1007,55 @@ mod tests {
         let mut changed = target;
         changed.terminal_incarnation_id = Some(TerminalIncarnationId::new());
         assert!(!matches(&changed));
+    }
+
+    #[test]
+    fn exact_terminal_lookup_and_agent_selection_retain_hidden_legacy_owner() {
+        use crate::tree::{ProjectPanel, SplitDirection, SplitNode, gen_id};
+        let route = route();
+        let target = terminal_target(&route);
+        let binding = ProjectWorktreeBinding {
+            project_id: target.project_id.clone(),
+            execution_host_id: route.execution_host_id.clone(),
+            repo_id: RepoId::derive(&route.execution_host_id, "/repo/.git"),
+            worktree_id: route.worktree_id.clone(),
+            identity_source: "test".into(), canonical_worktree_path: Some("/repo".into()), identity_context: None,
+        };
+        let mut source = PaneState::from_identity("source", route.pane_key.clone(), route.terminal_session_id.clone(), Some(route.terminal_incarnation_id.clone()));
+        source.pty_id = Some(44);
+        let other = PaneState::new("other");
+        let first = ProjectPanel::new(SplitNode::leaf(PaneState::new("first-owner")));
+        let owner = ProjectPanel::with_tab_id(route.tab_id.clone(), SplitNode::Split {
+            id: gen_id("split"), direction: SplitDirection::Vertical, sizes: vec![40.0, 60.0],
+            children: vec![SplitNode::leaf(other), SplitNode::leaf(source.clone())],
+        });
+        let mut state = ProjectState::new();
+        state.active_panel_id = Some(first.id.clone());
+        state.panels = vec![first, owner];
+        state.normalize_terminal_navigation(None);
+        assert_eq!(resolve_terminal_pane(&binding, &state, &target), Some(&source));
+        assert!(!selected_terminal_matches_route(&state, &route));
+        state.select_terminal(&source.id);
+        assert!(selected_terminal_matches_route(&state, &route));
+        assert_ne!(state.active_layout().unwrap().first_active_pane().unwrap().pane_key, source.pane_key);
+        let anchor = state.all_panes()[0].pane_key.clone();
+        state.reorder_terminal(&source.pane_key, &anchor, false);
+        assert_eq!(resolve_terminal_pane(&binding, &state, &target), Some(&source));
+        assert!(selected_terminal_matches_route(&state, &route));
+        let mut changed = target.clone();
+        changed.project_id = "different-project".into();
+        assert!(resolve_terminal_pane(&binding, &state, &changed).is_none());
+        let mut changed = target.clone();
+        changed.tab_id = state.panels[0].tab_id.clone();
+        assert!(resolve_terminal_pane(&binding, &state, &changed).is_none());
+        let mut rebound = binding.clone();
+        rebound.worktree_id = WorktreeId::derive(&binding.repo_id, "/other-worktree", None);
+        assert!(resolve_terminal_pane(&rebound, &state, &target).is_none());
+        state.pane_mut(&source.id).unwrap().terminal_incarnation_id = Some(TerminalIncarnationId::new());
+        assert!(resolve_terminal_pane(&binding, &state, &target).is_none());
+        state.remove_pane(&source.id);
+        assert!(resolve_terminal_pane(&binding, &state, &target).is_none());
+        assert_eq!(state.all_panes().len(), 2);
     }
 
     #[test]

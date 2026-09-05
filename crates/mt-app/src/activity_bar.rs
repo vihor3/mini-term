@@ -20,14 +20,13 @@
 //! 「跳到已完成」。(Git 那颗由 V 批补上,与右抽屉的 sessions⇄git 段控件同一个开关;
 //! 移动端那颗由 U 批补上,位置照原版排在「设置」之前。)
 
-use std::time::Duration;
-
 use gpui::{
     AnyElement, App, Div, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
     SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div,
     prelude::FluentBuilder as _, px, rems,
 };
 use gpui_component::ActiveTheme as _;
+pub use mt_ui::icon_tooltip::{HOVER_SHOW_DELAY, HoverEnter, HoverSession};
 use mt_ui::icons::{Geom, Ink, Shape, StatusDot, StatusKind, VectorIcon};
 
 use crate::tree::PaneStatus;
@@ -39,94 +38,11 @@ pub const WIDTH: f32 = 44.0;
 const BUTTON: f32 = 32.0;
 /// 图标尺寸。原版每个 svg 都是 `width="18" height="18"`。
 const ICON: f32 = 18.0;
-/// 一次新的边条悬停会话里,第一条文字提示要停多久才出现。
-///
-/// 这是**完整延迟**,不再叠加全局 [`mt_ui::tooltip::Tooltip`] 的额外 700ms。
-pub const HOVER_SHOW_DELAY: Duration = Duration::from_millis(500);
 /// 按钮在 44px 边条里左右各留 6px;提示从按钮右缘再跨过这 6px,
 /// 正好从边条右缘开始画。
 const LABEL_GAP: f32 = (WIDTH - BUTTON) / 2.0;
 /// 与全局 tooltip 同一档字号(0.75rem),只把定位与计时收归 Activity Bar。
 const LABEL_FONT_SIZE: f32 = 0.75;
-
-/// 进入一颗 Activity Bar 按钮之后,宿主该做什么。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HoverEnter {
-    /// 重复收到同一颗按钮的 enter,状态没有变化。
-    Unchanged,
-    /// 新会话的第一条提示要起表;值是本次计时的代号。
-    Delay(u64),
-    /// 本次会话已经热身,提示已在状态机里切到新按钮,直接重画即可。
-    ShowNow,
-}
-
-/// Activity Bar 整组按钮共用的悬停会话。
-///
-/// 这台状态机不碰时钟:宿主按 [`HoverEnter::Delay`] 起计时,到点后带
-/// `generation` 回来对账。Task drop 是第一道取消,代号是竞态下的第二道闸。
-#[derive(Debug, Default)]
-pub struct HoverSession {
-    hovered: Option<&'static str>,
-    visible: Option<&'static str>,
-    warmed: bool,
-    generation: u64,
-}
-
-impl HoverSession {
-    /// 进入一颗按钮。热身前返回计时代号,热身后当场切换可见标签。
-    pub fn enter(&mut self, key: &'static str) -> HoverEnter {
-        if self.hovered == Some(key) {
-            return HoverEnter::Unchanged;
-        }
-
-        self.generation = self.generation.wrapping_add(1);
-        self.hovered = Some(key);
-        if self.warmed {
-            self.visible = Some(key);
-            HoverEnter::ShowNow
-        } else {
-            self.visible = None;
-            HoverEnter::Delay(self.generation)
-        }
-    }
-
-    /// 离开一颗按钮。只有离开的仍是当前目标才清理 —— 相邻按钮的 enter/leave
-    /// 到达顺序不保证,旧按钮的迟到 leave 不能抹掉新按钮。
-    pub fn leave(&mut self, key: &'static str) -> bool {
-        if self.hovered != Some(key) {
-            return false;
-        }
-        self.generation = self.generation.wrapping_add(1);
-        self.hovered = None;
-        self.visible = None;
-        true
-    }
-
-    /// 第一段停留到点。仍悬着同一颗且代号没过期才真正显示并热身。
-    pub fn on_delay_elapsed(&mut self, generation: u64, key: &'static str) -> bool {
-        if self.warmed || self.generation != generation || self.hovered != Some(key) {
-            return false;
-        }
-        self.warmed = true;
-        self.visible = Some(key);
-        true
-    }
-
-    /// 离开整条边条:隐藏、降温并让所有在飞的旧计时失效。
-    pub fn reset(&mut self) -> bool {
-        let changed = self.hovered.is_some() || self.visible.is_some() || self.warmed;
-        self.generation = self.generation.wrapping_add(1);
-        self.hovered = None;
-        self.visible = None;
-        self.warmed = false;
-        changed
-    }
-
-    /// 当前是否该在这颗按钮右侧画文字。
-    pub fn is_visible(&self, key: &'static str) -> bool {
-        self.visible == Some(key)
-    }
-}
 
 /// Activity Bar 专用的文字表面。定位壳高 32px 并 `items_center`,所以文字高度
 /// 无论随主题字号怎么变,都始终相对按钮垂直居中。
@@ -706,6 +622,8 @@ pub fn divider() -> Div {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -717,7 +635,7 @@ mod tests {
         assert!(!session.is_visible("one"), "停够 500ms 前不能先画出来");
         assert!(session.on_delay_elapsed(generation, "one"));
         assert!(session.is_visible("one"));
-        assert!(session.warmed);
+        assert_eq!(session.enter("two"), HoverEnter::ShowNow);
     }
 
     #[test]
@@ -730,7 +648,6 @@ mod tests {
 
         assert!(session.leave("one"), "进空隙时隐藏当前标签");
         assert!(!session.is_visible("one"));
-        assert!(session.warmed, "空隙不等于离开整条边条");
 
         assert_eq!(session.enter("two"), HoverEnter::ShowNow);
         assert!(session.is_visible("two"));
@@ -744,7 +661,6 @@ mod tests {
         };
         assert!(session.on_delay_elapsed(generation, "one"));
         assert!(session.reset());
-        assert!(!session.warmed);
         assert!(!session.is_visible("one"));
         assert!(matches!(session.enter("two"), HoverEnter::Delay(_)));
     }

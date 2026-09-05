@@ -32,7 +32,7 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, AnyView, App, AppContext, Context, IntoElement, ParentElement, Render, Styled,
+    AnyElement, AnyView, App, AppContext, Context, Div, IntoElement, ParentElement, Render, Styled,
     Task, Window, div, px, rems,
 };
 use gpui_component::{ActiveTheme, h_flex, text::Text};
@@ -48,6 +48,21 @@ pub const EXTRA_SHOW_DELAY: Duration = Duration::from_millis(700);
 /// 用 rem 而非 px:随 `gpui_component` 主题的 `font_size`(= 窗口 rem 基准)
 /// 缩放,与上游同一套相对关系。
 const TOOLTIP_FONT_SIZE: f32 = 0.75;
+
+/// Shared visual surface; timing and placement remain owned by each caller.
+pub(crate) fn surface(cx: &App) -> Div {
+    h_flex()
+        .font_family(cx.theme().font_family.clone())
+        .bg(cx.theme().popover)
+        .text_color(cx.theme().popover_foreground)
+        .border_1()
+        .border_color(cx.theme().border)
+        .shadow_md()
+        .rounded(px(6.0))
+        .py_0p5()
+        .px_2()
+        .text_size(rems(TOOLTIP_FONT_SIZE))
+}
 
 enum TooltipContent {
     Text(Text),
@@ -154,19 +169,9 @@ impl Render for Tooltip {
         // 外面那层 div 是上游留的:m_3 是相对鼠标的偏移,写在子级才生效。
         div()
             .child(
-                h_flex()
-                    .font_family(cx.theme().font_family.clone())
+                surface(cx)
                     .m_3()
-                    .bg(cx.theme().popover)
-                    .text_color(cx.theme().popover_foreground)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .shadow_md()
-                    .rounded(px(6.))
                     .justify_between()
-                    .py_0p5()
-                    .px_2()
-                    .text_size(rems(TOOLTIP_FONT_SIZE))
                     .gap_3()
                     .child(content),
             )

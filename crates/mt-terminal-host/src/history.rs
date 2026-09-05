@@ -522,6 +522,30 @@ pub(crate) fn invalidate(root: &Path, session_id: &TerminalSessionId) -> anyhow:
     write_invalidation_marker(&HistoryPaths::new(root, session_id)?)
 }
 
+/// The caller must exclude create/restore until its subsequent purge finishes.
+/// A missing directory is absence; missing or unreadable metadata is not.
+pub(crate) fn stored_incarnation(
+    root: &Path,
+    session_id: &TerminalSessionId,
+) -> anyhow::Result<Option<TerminalIncarnationId>> {
+    let paths = HistoryPaths::new(root, session_id)?;
+    let directory = match fs::symlink_metadata(&paths.directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect terminal history directory"),
+    };
+    if !directory.is_dir() || directory.file_type().is_symlink() {
+        bail!("terminal history is not a regular directory");
+    }
+    let metadata = fs::symlink_metadata(&paths.meta).context("inspect terminal history metadata")?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        bail!("terminal history metadata is not a regular file");
+    }
+    let meta: HistoryMeta = read_json(&paths.meta, 64 * 1024)?;
+    validate_meta(&meta, session_id, &meta.worktree_id, &meta.incarnation_id)?;
+    Ok(Some(meta.incarnation_id))
+}
+
 pub(crate) fn purge(root: &Path, session_id: &TerminalSessionId) -> anyhow::Result<()> {
     let paths = HistoryPaths::new(root, session_id)?;
     match fs::remove_dir_all(&paths.directory) {
@@ -912,6 +936,51 @@ mod tests {
 
     fn worktree_id() -> WorktreeId {
         format!("worktree-v1:{}", "0".repeat(64)).parse().unwrap()
+    }
+
+    #[test]
+    fn cold_close_metadata_distinguishes_absence_from_unidentified_history() {
+        let root = root("close-metadata");
+        let session_id = TerminalSessionId::new();
+        let generation = TerminalIncarnationId::new();
+        let paths = HistoryPaths::new(&root, &session_id).unwrap();
+        assert_eq!(stored_incarnation(&root, &session_id).unwrap(), None);
+
+        prepare_directory(&paths.directory).unwrap();
+        fs::write(&paths.log, b"unidentified history").unwrap();
+        assert!(stored_incarnation(&root, &session_id).is_err());
+        assert_eq!(fs::read(&paths.log).unwrap(), b"unidentified history");
+        fs::write(&paths.meta, b"invalid metadata").unwrap();
+        assert!(stored_incarnation(&root, &session_id).is_err());
+        fs::write(&paths.meta, vec![b' '; 64 * 1024 + 1]).unwrap();
+        assert!(stored_incarnation(&root, &session_id).is_err());
+
+        write_meta(&paths, &TerminalSessionId::new(), &worktree_id(), &generation).unwrap();
+        assert!(stored_incarnation(&root, &session_id).is_err());
+        write_meta(&paths, &session_id, &worktree_id(), &generation).unwrap();
+        assert_eq!(stored_incarnation(&root, &session_id).unwrap(), Some(generation));
+        assert_eq!(fs::read(&paths.log).unwrap(), b"unidentified history");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cold_close_metadata_rejects_symlinked_history() {
+        let root = root("close-symlink");
+        let session_id = TerminalSessionId::new();
+        let paths = HistoryPaths::new(&root, &session_id).unwrap();
+        let other = root.join("other-history");
+        fs::create_dir_all(&other).unwrap();
+        std::os::unix::fs::symlink(&other, &paths.directory).unwrap();
+        assert!(stored_incarnation(&root, &session_id).is_err());
+        fs::remove_file(&paths.directory).unwrap();
+        prepare_directory(&paths.directory).unwrap();
+        let other_meta = other.join("meta.json");
+        fs::write(&other_meta, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&other_meta, &paths.meta).unwrap();
+        assert!(stored_incarnation(&root, &session_id).is_err());
+        assert_eq!(fs::read(other_meta).unwrap(), b"untouched");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

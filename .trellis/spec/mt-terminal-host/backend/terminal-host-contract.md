@@ -35,6 +35,19 @@ create, attach, restore, write, resize, arm_autofill, kill, detach,
 list, status, shutdown_if_idle
 ```
 
+The existing explicit-close client boundary remains:
+
+```rust
+pub fn kill(
+    &self,
+    session_id: TerminalSessionId,
+    expected_incarnation_id: TerminalIncarnationId,
+) -> Result<(), ClientError>;
+```
+
+No new close wire operation or protocol version is introduced for dormant GUI
+records. Application calls to this blocking client API run off the GUI thread.
+
 ### 3. Identity and Mutation Contracts
 
 - `TerminalSessionId` identifies the logical terminal and survives GUI restart.
@@ -51,6 +64,25 @@ list, status, shutdown_if_idle
 - An old incarnation cannot attach or restore over the new incarnation.
 - A stale incarnation must fail before write, resize, autofill, or kill reaches
   the current PTY.
+- `Kill` reserves the logical session through registered or cold-history cleanup.
+  Competing attach/create/restore/kill is rejected until writers are quiesced and
+  purge is complete. Do not forget a registered session before confirmed cleanup
+  and then let another close treat its in-flight writer as a cold absent session.
+- With no registered session, `Kill` reads bounded stored metadata and verifies
+  session and expected incarnation before invalidation/purge. Absence of the
+  entire history directory is idempotent success; missing/malformed/oversized
+  identity metadata in an existing directory, or a symlink, is not absence.
+  This operation never creates, attaches or restores a terminal process.
+- Close racing a matching restore requests cancellation and returns `HostBusy`
+  while cleanup runs. Keep its reservation through retirement of old and
+  uncommitted sessions and purge; a later explicit retry may confirm absence.
+  A cold restore cancelled before its identity check cannot authorize deletion
+  of another incarnation's history. Uncertain cancelled-restore cleanup stays
+  fenced until host restart rather than becoming false close success.
+- Registered cleanup errors and cold mutation `IoFailed` also retain the closing
+  fence until restart. A terminated flag or missing registry entry does not
+  prove a failed kill/purge succeeded. Non-mutating identity/metadata refusals
+  release their reservation and remain repairable/retryable.
 - Host-returned identity is persisted and installed into `TerminalRoute` only
   after create or attach succeeds. Restore fencing compares only stable process
   fields: session, incarnation, worktree, and process ID. Dynamic sequence
@@ -145,6 +177,10 @@ connections.
 | Replay gap with valid history | Seal and end the unusable incarnation, then explicitly restore |
 | PTY output drain fails or times out | Emit recovery-unavailable after accepted output; invalidate history and never replay it |
 | Explicit close races restore | Cancel restore, retire any uncommitted replacement, quiesce history, and purge |
+| Close finds only matching cold history | Validate bounded identity, reserve against create/restore, invalidate and purge without spawning a terminal |
+| Close finds no registered session or history directory | Return idempotent success without creating a terminal |
+| Close finds unidentified or mismatched cold history | Fail closed and retain history; application keeps its saved record |
+| Close arrives during cleanup or matching restore cancellation | Return busy; retry only explicitly after cleanup, never report early success |
 | History missing or corrupt | Start clean with a visible recovery-unavailable notice |
 | Incarnation mismatch | Fail closed; do not take over the host session |
 | Protocol mismatch or existing-session conflict | Fail closed; do not mutate either session |
@@ -190,6 +226,17 @@ matches the staged source.
   generations fail closed.
 - Restore/close races retire uncommitted replacements and prevent late history
   recreation. Stable descriptor comparison ignores dynamic output/size fields.
+- Cold close tests assert exact-incarnation deletion, mismatch preservation,
+  true absence/idempotence, no terminal spawn and rejection of unidentified,
+  oversized or symlinked metadata. Both live and cold close reservations exclude
+  concurrent kill/create/restore/attach until cleanup actually completes.
+- Cancellation-before-validation tests preserve another incarnation's history;
+  cancel-before/after-spawn tests require busy before completed cleanup and an
+  explicit successful retry afterward. Execute all fixtures only in Actions.
+- Cleanup-failure tests retain the reservation across retry/create/restore/attach
+  and distinguish pre-mutation metadata refusal. CI runs the terminal-host
+  all-target test package on Windows as well as Linux; Unix-only IPC integration
+  fixtures still require separate Windows native artifact acceptance.
 - JSONL, write, command-queue, RPC/read/write, history-file, and PTY drain bounds
   have oversized/stalled-peer regressions.
 - Log rotation stays within the bound, explicit kill removes history, and

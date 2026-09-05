@@ -1328,6 +1328,9 @@ impl Render for WorkbenchArea {
             self.last_rendered_project = Some(project_id.clone());
             self.last_rendered_worktree = Some(worktree_id.clone());
             self.last_rendered_page = Some(active.clone());
+            if active != WorkbenchPage::Terminal {
+                self.terminal_area.update(cx, |area, cx| area.suspend(window, cx));
+            }
             match &active {
                 WorkbenchPage::Terminal => {
                     let area = cx.entity();
@@ -1376,7 +1379,6 @@ impl Render for WorkbenchArea {
             return div().size_full().child(self.terminal_area.clone());
         }
 
-        let terminal_active = active == WorkbenchPage::Terminal;
         let mut tab_bar = div()
             .id("workbench-tabs")
             .h(px(34.0))
@@ -1386,37 +1388,7 @@ impl Render for WorkbenchArea {
             .overflow_x_scroll()
             .bg(ui::bg_elevated())
             .border_b_1()
-            .border_color(ui::border_subtle())
-            .child(
-                div()
-                    .id("workbench-tab-terminal")
-                    .h_full()
-                    .min_w(px(110.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .text_size(ui::font_px(12.0))
-                    .when(terminal_active, |el| {
-                        el.bg(ui::bg_terminal())
-                            .text_color(ui::text_primary())
-                            .border_t_2()
-                            .border_color(ui::accent())
-                    })
-                    .when(!terminal_active, |el| {
-                        el.text_color(ui::text_muted())
-                            .border_t_2()
-                            .border_color(gpui::Hsla {
-                                a: 0.0,
-                                ..ui::accent()
-                            })
-                    })
-                    .child(t("terminalArea", "terminal"))
-                    .on_click(
-                        cx.listener(|this, _event, window, cx| this.activate_terminal(window, cx)),
-                    ),
-            );
+            .border_color(ui::border_subtle());
 
         for (key, title, document, state) in &tabs {
             let selected = active == WorkbenchPage::Document(key.clone());

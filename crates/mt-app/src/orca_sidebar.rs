@@ -3,15 +3,19 @@
 //! The entity owns only presentation state. Project, terminal, and file state
 //! remain in [`AppStore`], while the shared [`WorktreeCatalog`] owns Git facts.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div,
+    AnyElement, AppContext, Bounds, Context, Entity, EventEmitter, FocusHandle, FontWeight,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement, Styled, Window, canvas, div,
     prelude::FluentBuilder as _, px,
 };
 use mt_ai::{AgentActivity, AgentConnectivity, AgentEvidence};
 use mt_project::worktree::WorktreePathState;
+use mt_ui::icon_tooltip::IconTooltips;
 use mt_ui::icons::vector::{Geom, Ink, Shape, VectorIcon};
 use mt_ui::icons::{AiVendor, BrandIcon, FileIcon, StatusDot, StatusKind};
 use mt_ui::tooltip::Tooltip;
@@ -40,6 +44,7 @@ pub enum OrcaSidebarEvent {
     ToggleAgents,
     OpenUsage,
     OpenSettings,
+    OpenMobile,
 }
 
 /// Magnifier geometry shared with the existing file-tree search action.
@@ -283,7 +288,6 @@ fn nav_row(
 
 fn small_icon_button(
     id: impl Into<gpui::ElementId>,
-    tooltip: SharedString,
     icon: AnyElement,
 ) -> gpui::Stateful<gpui::Div> {
     div()
@@ -296,20 +300,61 @@ fn small_icon_button(
         .justify_center()
         .rounded(px(3.0))
         .cursor_pointer()
+        .tab_index(0)
+        .focus(|button| button.bg(ui::accent_subtle()).text_color(ui::accent()))
         .text_color(ui::text_muted())
         .hover(|button| {
             button
                 .bg(ui::border_subtle())
                 .text_color(ui::text_primary())
         })
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .child(icon)
 }
+
+fn project_menu_anchor(project_id: &str) -> SharedString {
+    format!("orca-project-settings-{project_id}").into()
+}
+
+fn show_project_menu_trigger(hovered: bool, focused: bool, menu_open: bool) -> bool {
+    hovered || focused || menu_open
+}
+
+struct ProjectRowControls {
+    focus: FocusHandle,
+    menu_focus: FocusHandle,
+    menu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    tooltips: Entity<IconTooltips>,
+}
+
+const FOOTER_ACTIONS: [(&str, &str, &[Shape], OrcaSidebarEvent); 3] = [
+    (
+        "orca-usage",
+        "activityBar.stats",
+        crate::activity_bar::STATS,
+        OrcaSidebarEvent::OpenUsage,
+    ),
+    (
+        "orca-settings",
+        "activityBar.settings",
+        crate::activity_bar::SETTINGS,
+        OrcaSidebarEvent::OpenSettings,
+    ),
+    (
+        "orca-mobile",
+        "activityBar.mobile",
+        crate::activity_bar::MOBILE,
+        OrcaSidebarEvent::OpenMobile,
+    ),
+];
 
 pub struct OrcaProjectSidebar {
     store: Entity<AppStore>,
     catalog: Entity<WorktreeCatalog>,
     collapsed_projects: HashSet<String>,
+    hovered_project: Option<String>,
+    project_controls: HashMap<String, ProjectRowControls>,
+    header_tooltips: Entity<IconTooltips>,
+    footer_tooltips: Entity<IconTooltips>,
 }
 
 impl EventEmitter<OrcaSidebarEvent> for OrcaProjectSidebar {}
@@ -328,10 +373,18 @@ impl OrcaProjectSidebar {
             cx.notify();
         })
         .detach();
+        cx.observe(&menu::layer(cx), |_this: &mut Self, _, cx| {
+            cx.notify();
+        })
+        .detach();
         Self {
             store,
             catalog,
             collapsed_projects: HashSet::new(),
+            hovered_project: None,
+            project_controls: HashMap::new(),
+            header_tooltips: cx.new(|_| IconTooltips::default()),
+            footer_tooltips: cx.new(|_| IconTooltips::default()),
         }
     }
 
@@ -413,8 +466,60 @@ impl OrcaProjectSidebar {
             })
     }
 
-    fn render_projects_header(&self, _cx: &mut Context<Self>) -> gpui::Div {
+    fn render_projects_header(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let store_for_add = self.store.clone();
+        let options = IconTooltips::button(
+            &self.header_tooltips,
+            "orca-project-options-description",
+            "Project options",
+            small_icon_button(
+                "orca-project-options",
+                VectorIcon::new(MORE_ICON, px(13.0))
+                    .ink(ui::text_muted())
+                    .into_any_element(),
+            )
+            .on_click(move |event: &gpui::ClickEvent, window, cx| {
+                cx.stop_propagation();
+                menu::show(
+                    event.position(),
+                    vec![menu::item(t("app", "activityBar.ssh"), |window, cx| {
+                        crate::ssh_panel::open(window, cx);
+                    })],
+                    window,
+                    cx,
+                );
+            }),
+            window,
+            cx,
+        );
+        let add = IconTooltips::button(
+            &self.header_tooltips,
+            "orca-add-project-description",
+            t("projectList", "menu.addProject"),
+            small_icon_button(
+                "orca-add-project",
+                VectorIcon::new(PLUS_ICON, px(13.0))
+                    .ink(ui::text_muted())
+                    .into_any_element(),
+            )
+            .on_click(move |_event, window, cx| {
+                crate::project_onboarding::open(store_for_add.clone(), None, window, cx);
+            }),
+            window,
+            cx,
+        );
+        let tools = IconTooltips::group(
+            &self.header_tooltips,
+            div()
+                .id("orca-project-header-tools")
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .child(options)
+                .child(add),
+            window,
+            cx,
+        );
         div()
             .h(px(36.0))
             .flex_none()
@@ -432,62 +537,44 @@ impl OrcaProjectSidebar {
                     .text_color(ui::text_muted())
                     .child(t("panels", "projects")),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .child(
-                        small_icon_button(
-                            "orca-project-options",
-                            "Project options".into(),
-                            VectorIcon::new(MORE_ICON, px(13.0))
-                                .ink(ui::text_muted())
-                                .into_any_element(),
-                        )
-                        .on_click(
-                            move |event: &gpui::ClickEvent, window, cx| {
-                                cx.stop_propagation();
-                                menu::show(
-                                    event.position(),
-                                    vec![
-                                        menu::item(t("app", "activityBar.ssh"), |window, cx| {
-                                            crate::ssh_panel::open(window, cx);
-                                        }),
-                                        menu::item(t("app", "activityBar.mobile"), |window, cx| {
-                                            crate::mobile_panel::open(window, cx);
-                                        }),
-                                    ],
-                                    window,
-                                    cx,
-                                );
-                            },
-                        ),
-                    )
-                    .child(
-                        small_icon_button(
-                            "orca-add-project",
-                            t("projectList", "menu.addProject").into(),
-                            VectorIcon::new(PLUS_ICON, px(13.0))
-                                .ink(ui::text_muted())
-                                .into_any_element(),
-                        )
-                        .on_click(move |_event, window, cx| {
-                            crate::project_onboarding::open(
-                                store_for_add.clone(),
-                                None,
-                                window,
-                                cx,
-                            );
-                        }),
-                    ),
-            )
+            .child(tools)
+    }
+
+    fn open_project_menu(&self, project_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(controls) = self.project_controls.get(project_id) else {
+            return;
+        };
+        let Some(bounds) = controls.menu_bounds.get() else {
+            return;
+        };
+        let Some(target) = ProjectSettingsTarget::capture(self.store.read(cx), project_id) else {
+            return;
+        };
+        IconTooltips::reset(&controls.tooltips, window, cx);
+        let store = self.store.clone();
+        let catalog = self.catalog.clone();
+        menu::show_anchored(
+            project_menu_anchor(project_id),
+            bounds,
+            vec![menu::item(t("worktree", "settings.title"), move |window, cx| {
+                crate::project_settings::open(
+                    store.clone(),
+                    catalog.clone(),
+                    target.clone(),
+                    window,
+                    cx,
+                );
+            })],
+            window,
+            cx,
+        );
     }
 
     fn render_project_row(
         &self,
         project: &ProjectWorktreeGroup,
         expanded: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let project_id = project.root_project_id.clone();
@@ -497,8 +584,89 @@ impl OrcaProjectSidebar {
         let is_ssh = matches!(project.backend, CatalogBackend::Ssh { .. });
         let can_create_worktree = matches!(project.backend, CatalogBackend::Local);
         let settings_project_id = project.root_project_id.clone();
-        let settings_store = self.store.clone();
-        let settings_catalog = self.catalog.clone();
+        let hover_project_id = project.root_project_id.clone();
+        let controls = &self.project_controls[&project.root_project_id];
+        let menu_anchor = project_menu_anchor(&project.root_project_id);
+        let menu_open = menu::layer(cx).read(cx).is_anchored_to(&menu_anchor);
+        let show_menu = show_project_menu_trigger(
+            window.is_window_hovered()
+                && self.hovered_project.as_deref() == Some(project.root_project_id.as_str()),
+            window.is_window_active() && controls.focus.contains_focused(window, cx),
+            menu_open,
+        );
+        let mut tools = div()
+            .id(SharedString::from(format!(
+                "orca-project-tools-{}",
+                project.root_project_id
+            )))
+            .flex_none()
+            .flex()
+            .items_center();
+        if can_create_worktree {
+            tools = tools.child(IconTooltips::button(
+                &controls.tooltips,
+                SharedString::from(format!(
+                    "orca-add-worktree-description-{}",
+                    project.root_project_id
+                )),
+                t("worktree", "createTitle"),
+                small_icon_button(
+                    SharedString::from(format!(
+                        "orca-add-worktree-{}",
+                        project.root_project_id
+                    )),
+                    VectorIcon::new(PLUS_ICON, px(12.0))
+                        .ink(ui::text_muted())
+                        .into_any_element(),
+                )
+                .on_click(move |_event, window, cx| {
+                    cx.stop_propagation();
+                    crate::git_worktree::open(
+                        project_path.clone(),
+                        true,
+                        Some(project_id.clone()),
+                        move |cx| crate::worktree_catalog::force_refresh_global(cx),
+                        window,
+                        cx,
+                    );
+                }),
+                window,
+                cx,
+            ));
+        }
+        let mut menu_slot = div().w(px(24.0)).h(px(24.0)).flex_none();
+        if show_menu {
+            let bounds = controls.menu_bounds.clone();
+            menu_slot = menu_slot.child(IconTooltips::button(
+                &controls.tooltips,
+                SharedString::from(format!(
+                    "orca-project-menu-description-{}",
+                    project.root_project_id
+                )),
+                t("worktree", "settings.title"),
+                small_icon_button(
+                    menu_anchor,
+                    VectorIcon::new(MORE_ICON, px(13.0))
+                        .ink(ui::text_muted())
+                        .into_any_element(),
+                )
+                .track_focus(&controls.menu_focus)
+                .when(menu_open, |button| button.bg(ui::border_subtle()))
+                .child(
+                    canvas(move |rect, _, _| bounds.set(Some(rect)), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
+                )
+                .on_click(cx.listener(move |this, _event, window, cx| {
+                    cx.stop_propagation();
+                    this.open_project_menu(&settings_project_id, window, cx);
+                })),
+                window,
+                cx,
+            ));
+        }
+        tools = tools.child(menu_slot);
+        let tools = IconTooltips::group(&controls.tooltips, tools, window, cx);
 
         let leading_icon: AnyElement = if is_ssh {
             VectorIcon::new(crate::activity_bar::SSH, px(ROW_ICON_SIZE))
@@ -526,11 +694,20 @@ impl OrcaProjectSidebar {
             .text_size(ui::font_px(12.5))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(ui::text_primary())
+            .track_focus(&controls.focus)
+            .tab_index(0)
+            .focus(|row| row.bg(ui::accent_subtle()))
             .hover(|row| row.bg(ui::border_subtle()))
-            .tooltip({
-                let path = project.root_project_path.clone();
-                move |window, cx| Tooltip::new(path.clone()).build(window, cx)
-            })
+            .on_hover(cx.listener(move |this, hovered, _window, cx| {
+                if *hovered {
+                    this.hovered_project = Some(hover_project_id.clone());
+                } else if this.hovered_project.as_deref() == Some(hover_project_id.as_str()) {
+                    this.hovered_project = None;
+                } else {
+                    return;
+                }
+                cx.notify();
+            }))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 if !this.collapsed_projects.remove(&toggle_project_id) {
                     this.collapsed_projects.insert(toggle_project_id.clone());
@@ -551,9 +728,17 @@ impl OrcaProjectSidebar {
             .child(div().w(px(16.0)).flex_none().child(leading_icon))
             .child(
                 div()
+                    .id(SharedString::from(format!(
+                        "orca-project-name-{}",
+                        project.root_project_id
+                    )))
                     .flex_1()
                     .min_w_0()
                     .truncate()
+                    .tooltip({
+                        let path = project.root_project_path.clone();
+                        move |window, cx| Tooltip::new(path.clone()).build(window, cx)
+                    })
                     .child(project.root_project_name.clone()),
             )
             .child(
@@ -582,33 +767,6 @@ impl OrcaProjectSidebar {
                         )
                     }),
             )
-            .when(can_create_worktree, |row| {
-                row.child(
-                    small_icon_button(
-                        SharedString::from(format!(
-                            "orca-add-worktree-{}",
-                            project.root_project_id
-                        )),
-                        t("worktree", "createTitle").into(),
-                        VectorIcon::new(PLUS_ICON, px(12.0))
-                            .ink(ui::text_muted())
-                            .into_any_element(),
-                    )
-                    .on_click(move |_event, window, cx| {
-                        cx.stop_propagation();
-                        crate::git_worktree::open(
-                            project_path.clone(),
-                            true,
-                            Some(project_id.clone()),
-                            move |cx| {
-                                crate::worktree_catalog::force_refresh_global(cx);
-                            },
-                            window,
-                            cx,
-                        );
-                    }),
-                )
-            })
             .child(
                 div()
                     .max_w(px(62.0))
@@ -622,46 +780,7 @@ impl OrcaProjectSidebar {
                     })
                     .child(host_label),
             )
-            .child(
-                small_icon_button(
-                    SharedString::from(format!(
-                        "orca-project-settings-{}",
-                        project.root_project_id
-                    )),
-                    t("worktree", "settings.title").into(),
-                    VectorIcon::new(MORE_ICON, px(13.0))
-                        .ink(ui::text_muted())
-                        .into_any_element(),
-                )
-                .on_click(move |event: &gpui::ClickEvent, window, cx| {
-                    cx.stop_propagation();
-                    let Some(target) = ProjectSettingsTarget::capture(
-                        settings_store.read(cx),
-                        &settings_project_id,
-                    ) else {
-                        return;
-                    };
-                    let store = settings_store.clone();
-                    let catalog = settings_catalog.clone();
-                    menu::show(
-                        event.position(),
-                        vec![menu::item(
-                            t("worktree", "settings.title"),
-                            move |window, cx| {
-                                crate::project_settings::open(
-                                    store.clone(),
-                                    catalog.clone(),
-                                    target.clone(),
-                                    window,
-                                    cx,
-                                );
-                            },
-                        )],
-                        window,
-                        cx,
-                    );
-                }),
-            )
+            .child(tools)
     }
 
     fn render_worktree_row(
@@ -974,44 +1093,47 @@ impl OrcaProjectSidebar {
             )
     }
 
-    fn render_footer(&self, cx: &mut Context<Self>) -> gpui::Div {
-        div()
+    fn render_footer(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let mut footer = div()
+            .id("orca-footer")
+            .h(px(48.0))
             .flex_none()
             .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .p(px(8.0))
+            .items_center()
+            .gap(px(4.0))
+            .px(px(8.0))
             .border_t_1()
-            .border_color(ui::border_subtle())
-            .child(
-                nav_row(
-                    "orca-usage",
-                    "Usage",
-                    VectorIcon::new(crate::activity_bar::STATS, px(NAV_ICON_SIZE))
+            .border_color(ui::border_subtle());
+        for (id, label, icon, action) in FOOTER_ACTIONS {
+            footer = footer.child(IconTooltips::button(
+                &self.footer_tooltips,
+                SharedString::from(format!("{id}-description")),
+                t("app", label),
+                small_icon_button(
+                    id,
+                    VectorIcon::new(icon, px(18.0))
                         .ink(ui::text_muted())
                         .into_any_element(),
                 )
-                .on_click(cx.listener(|_this, _event, _window, cx| {
-                    cx.emit(OrcaSidebarEvent::OpenUsage);
+                .w(px(32.0))
+                .h(px(32.0))
+                .on_click(cx.listener(move |_this, _event, _window, cx| {
+                    cx.emit(action);
                 })),
-            )
-            .child(
-                nav_row(
-                    "orca-settings",
-                    t("app", "activityBar.settings"),
-                    VectorIcon::new(crate::activity_bar::SETTINGS, px(NAV_ICON_SIZE))
-                        .ink(ui::text_muted())
-                        .into_any_element(),
-                )
-                .on_click(cx.listener(|_this, _event, _window, cx| {
-                    cx.emit(OrcaSidebarEvent::OpenSettings);
-                })),
-            )
+                window,
+                cx,
+            ));
+        }
+        IconTooltips::group(&self.footer_tooltips, footer, window, cx)
     }
 }
 
 impl Render for OrcaProjectSidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (projects, active_project_id, mut agents_by_project) = {
             let store = self.store.read(cx);
             let agents_by_project = if orca_worktree_context_enabled() {
@@ -1026,6 +1148,39 @@ impl Render for OrcaProjectSidebar {
             )
         };
 
+        let live_projects: HashSet<String> = projects
+            .iter()
+            .map(|project| project.root_project_id.clone())
+            .collect();
+        let menu = menu::layer(cx);
+        let removed_open_anchor = self.project_controls.keys().any(|id| {
+            !live_projects.contains(id)
+                && menu.read(cx).is_anchored_to(&project_menu_anchor(id))
+        });
+        if removed_open_anchor {
+            menu::close(window, cx);
+        }
+        self.project_controls
+            .retain(|id, _| live_projects.contains(id));
+        if self
+            .hovered_project
+            .as_ref()
+            .is_some_and(|id| !live_projects.contains(id))
+        {
+            self.hovered_project = None;
+        }
+        for id in live_projects {
+            self.project_controls
+                .entry(id)
+                .or_insert_with(|| ProjectRowControls {
+                    // GPUI takes tab-stop state from explicit tracked handles.
+                    focus: cx.focus_handle().tab_stop(true),
+                    menu_focus: cx.focus_handle().tab_stop(true),
+                    menu_bounds: Rc::new(Cell::new(None)),
+                    tooltips: cx.new(|_| IconTooltips::default()),
+                });
+        }
+
         let mut rows = div()
             .id("orca-project-rows")
             .flex_1()
@@ -1033,7 +1188,7 @@ impl Render for OrcaProjectSidebar {
             .py(px(3.0));
         for project in projects {
             let expanded = !self.collapsed_projects.contains(&project.root_project_id);
-            rows = rows.child(self.render_project_row(&project, expanded, cx));
+            rows = rows.child(self.render_project_row(&project, expanded, window, cx));
             if expanded {
                 let hidden = self
                     .store
@@ -1073,6 +1228,7 @@ impl Render for OrcaProjectSidebar {
 
         div()
             .id("orca-project-sidebar")
+            .tab_group()
             .w(px(WIDTH))
             .h_full()
             .flex_none()
@@ -1082,10 +1238,75 @@ impl Render for OrcaProjectSidebar {
             .border_r_1()
             .border_color(ui::border_default())
             .bg(ui::bg_surface())
+            .on_key_down(|event: &KeyDownEvent, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key == "tab"
+                    && !modifiers.control
+                    && !modifiers.platform
+                    && !modifiers.alt
+                {
+                    cx.stop_propagation();
+                    if modifiers.shift {
+                        window.focus_prev();
+                    } else {
+                        window.focus_next();
+                    }
+                }
+            })
             .child(self.render_top_actions(cx))
-            .child(self.render_projects_header(cx))
+            .child(self.render_projects_header(window, cx))
             .child(rows)
-            .child(self.render_footer(cx))
+            .child(self.render_footer(window, cx))
+    }
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+
+    #[test]
+    fn project_menu_trigger_follows_hover_focus_or_its_open_menu() {
+        assert!(!show_project_menu_trigger(false, false, false));
+        assert!(show_project_menu_trigger(true, false, false));
+        assert!(show_project_menu_trigger(false, true, false));
+        assert!(show_project_menu_trigger(false, false, true));
+        assert!(show_project_menu_trigger(true, true, true));
+    }
+
+    #[test]
+    fn project_menu_anchor_is_project_specific() {
+        assert_eq!(
+            project_menu_anchor("project-a"),
+            project_menu_anchor("project-a"),
+        );
+        assert_ne!(
+            project_menu_anchor("project-a"),
+            project_menu_anchor("project-b"),
+        );
+    }
+
+    #[test]
+    fn footer_icons_keep_distinct_commands_and_existing_descriptions() {
+        let actions: Vec<_> = FOOTER_ACTIONS
+            .iter()
+            .map(|(id, label, icon, action)| {
+                assert!(!icon.is_empty());
+                for locale in mt_i18n::Locale::ALL {
+                    assert!(
+                        mt_i18n::lookup(locale, "app", label).is_some_and(|text| !text.is_empty())
+                    );
+                }
+                (*id, *action)
+            })
+            .collect();
+        assert_eq!(
+            actions,
+            vec![
+                ("orca-usage", OrcaSidebarEvent::OpenUsage),
+                ("orca-settings", OrcaSidebarEvent::OpenSettings),
+                ("orca-mobile", OrcaSidebarEvent::OpenMobile),
+            ],
+        );
     }
 }
 

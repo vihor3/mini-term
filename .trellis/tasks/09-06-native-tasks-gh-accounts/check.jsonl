@@ -1,0 +1,4 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Only Actions may run account shims, fixture processes, builds, or checks."}
+{"file":".trellis/spec/mt-app/backend/github-project-tasks-contract.md","reason":"Audit exact repository/account/source/epoch fences and inert untrusted content."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Check per-worktree UI isolation under a shared Tasks tab selection."}
+{"file":".trellis/tasks/09-06-native-tasks-gh-accounts/research/gh-account-isolation.md","reason":"Check no global switch/config mutation, token logging, argv leak, or remote credential return."}

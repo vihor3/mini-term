@@ -1628,8 +1628,8 @@ fn paste_image(
 /// 按 pty 编号取「分支那一段」的菜单项(含前导分隔线)。
 ///
 /// 显隐口径与 tab 右键**逐字相同**(`branch_menu_segment` 一处判据),
-/// 项的实现也是同一份(`branch_family` 的三个构造器)——
-/// 「用户在哪儿右键都找得到同一个入口」是这条功能的设计前提。
+/// Fork captures the complete route before the menu opens; branch browsing
+/// and the missing-identity hint keep the shared branch-family constructors.
 ///
 /// # 为什么是自由函数
 ///
@@ -1638,6 +1638,9 @@ fn paste_image(
 fn branch_entries_for_pty(pty_id: u32, cx: &mut gpui::App) -> Vec<menu::MenuEntry> {
     let store = AppStore::global(cx);
     let Some((project_id, pane_id)) = store.read(cx).pane_of_pty(pty_id) else {
+        return Vec::new();
+    };
+    let Some(target) = store.read(cx).terminal_jump_target_for_pane(&project_id, &pane_id) else {
         return Vec::new();
     };
     let (segment, project_path) = {
@@ -1658,6 +1661,23 @@ fn branch_entries_for_pty(pty_id: u32, cx: &mut gpui::App) -> Vec<menu::MenuEntr
             .unwrap_or_default();
         (segment, path)
     };
+    if let crate::session_branch::BranchMenuSegment::Fork { session_id, .. } = &segment {
+        let fork_store = store.clone();
+        return vec![
+            menu::separator(),
+            menu::item(t("paneGroup", "forkSession"), move |window, cx| {
+                // The menu may outlive a reconnect or project rebind.
+                if fork_store.read(cx).resolve_terminal_jump_target(&target).is_none() {
+                    return;
+                }
+                crate::pane_actions::fork_pane_session(
+                    fork_store.clone(), target.project_id.clone(),
+                    target.pane_key.to_string(), window, cx,
+                );
+            }),
+            crate::branch_family::view_branches_menu_item(&store, project_path, session_id.clone()),
+        ];
+    }
     crate::branch_family::branch_menu_entries(&store, &project_id, &pane_id, project_path, &segment)
 }
 
@@ -1889,7 +1909,17 @@ impl Render for TerminalPane {
             // `rect.top + 6` / `rect.right - w - 14` 同款(那边是 rAF 每帧算出来的
             // fixed 坐标,这里由布局白拿)
             .when_some(self.search_bar.clone(), |el, bar| {
-                el.child(div().absolute().top(px(6.0)).right(px(14.0)).child(bar))
+                el.child(
+                    div()
+                        .absolute()
+                        .top(px(6.0))
+                        .right(px(14.0))
+                        // Do not arm the terminal body's click-to-focus handler.
+                        .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(bar),
+                )
             })
             .when_some(self.backend_notice.clone(), |el, notice| {
                 el.child(

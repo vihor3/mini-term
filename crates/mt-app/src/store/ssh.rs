@@ -2,11 +2,38 @@
 //! 整块搬来(含块前的段注释),逻辑一行未改。
 
 use gpui::{Context, Task};
-use mt_config::SshConnection;
+use mt_config::{ShellConfig, SshConnection};
+use mt_identity::{PaneKey, TabId, TerminalSessionId};
 
 use crate::tree::{PaneState, PaneStatus};
 
-use super::{AppStore, SshAssocOutcome};
+use super::{AppStore, ProjectState, SshAssocOutcome};
+
+struct ReconnectPlan {
+    shell: ShellConfig,
+    old_pty: Option<u32>,
+    cwd: Option<String>,
+    tab_id: TabId,
+    pane_key: PaneKey,
+    terminal_session_id: TerminalSessionId,
+}
+
+fn reconnect_plan(
+    state: &ProjectState,
+    pane_id: &str,
+    resolve_shell: impl FnOnce(&str) -> Option<ShellConfig>,
+) -> Option<ReconnectPlan> {
+    let panel = state.panels.iter().find(|panel| panel.layout.pane(pane_id).is_some())?;
+    let pane = panel.layout.pane(pane_id)?;
+    Some(ReconnectPlan {
+        shell: resolve_shell(&pane.shell_name)?,
+        old_pty: pane.pty_id,
+        cwd: pane.cwd.clone(),
+        tab_id: panel.tab_id.clone(),
+        pane_key: pane.pane_key.clone(),
+        terminal_session_id: pane.terminal_session_id.clone(),
+    })
+}
 
 // ===========================================================================
 // SSH(audit #28,BB-a 批)
@@ -328,41 +355,25 @@ impl AppStore {
         cx: &mut Context<Self>,
     ) -> Option<u32> {
         let project = self.project(project_id)?.clone();
-        let old_pty = self
-            .project_states
-            .get(project_id)
-            .and_then(|s| s.pane(pane_id))
-            .and_then(|p| p.pty_id);
-        // dispose 里已经做了:kill 子进程 + 清标记与游标 + 摘退出登记
-        // (`clearMarkersForPty` / `clearPtyExited` 在原版是分开两调,这里同源)
-        if let Some(old) = old_pty {
+        let target = self.terminal_jump_target_for_pane(project_id, pane_id)?;
+        self.resolve_terminal_jump_target(&target)?;
+        if self.pending_terminal_closes.contains(&target.terminal_session_id) {
+            return None;
+        }
+        // Capture every fallible prerequisite before disposing the current view.
+        let plan = reconnect_plan(self.project_states.get(project_id)?, pane_id, |name| {
+            self.resolve_shell(Some(name))
+        })?;
+        if let Some(old) = plan.old_pty {
             self.dispose_terminal(old, cx);
         }
-
-        let (shell_name, cwd, tab_id, pane_key, terminal_session_id) = {
-            let state = self.project_states.get(project_id)?;
-            let pane = state.pane(pane_id)?;
-            let tab_id = state
-                .panels
-                .iter()
-                .find(|panel| panel.layout.pane(pane_id).is_some())
-                .map(|panel| panel.tab_id.clone())?;
-            (
-                pane.shell_name.clone(),
-                pane.cwd.clone(),
-                tab_id,
-                pane.pane_key.clone(),
-                pane.terminal_session_id.clone(),
-            )
-        };
-        let shell = self.resolve_shell(Some(&shell_name))?;
         let (new_pty, incarnation_id, _) = self.start_pty(
             &project,
-            &shell,
-            cwd.as_deref(),
-            &tab_id,
-            &pane_key,
-            &terminal_session_id,
+            &plan.shell,
+            plan.cwd.as_deref(),
+            &plan.tab_id,
+            &plan.pane_key,
+            &plan.terminal_session_id,
             None,
             cx,
         );
@@ -375,5 +386,57 @@ impl AppStore {
         state.status = state.highest_status();
         self.after_layout_change(project_id, cx);
         Some(new_pty)
+    }
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use mt_identity::TerminalIncarnationId;
+
+    use crate::tree::{ProjectPanel, SplitNode};
+
+    use super::*;
+
+    #[test]
+    fn shellless_reconnect_preflight_preserves_the_old_pane_and_close_identity() {
+        let mut pane = PaneState::new("removed-shell");
+        pane.pty_id = Some(42);
+        pane.terminal_incarnation_id = Some(TerminalIncarnationId::new());
+        pane.status = PaneStatus::Error;
+        pane.cwd = Some("/remote/worktree".into());
+        let mut state = ProjectState::new();
+        let panel = ProjectPanel::new(SplitNode::leaf(pane.clone()));
+        let owner = panel.tab_id.clone();
+        state.panels.push(panel);
+        state.select_terminal(&pane.id);
+        let before = serde_json::to_value(state.saved_layout()).unwrap();
+
+        assert!(reconnect_plan(&state, &pane.id, |_| None).is_none());
+        assert_eq!(serde_json::to_value(state.saved_layout()).unwrap(), before);
+        let unchanged = state.pane(&pane.id).unwrap();
+        assert_eq!(unchanged.pty_id, Some(42));
+        assert_eq!(unchanged.terminal_session_id, pane.terminal_session_id);
+        assert_eq!(unchanged.terminal_incarnation_id, pane.terminal_incarnation_id);
+        assert_eq!(unchanged.status, PaneStatus::Error);
+        assert_eq!(state.panels[0].tab_id, owner);
+
+        let shell = ShellConfig {
+            name: "replacement".into(), command: "shell".into(), args: None,
+        };
+        let plan = reconnect_plan(&state, &pane.id, |_| Some(shell.clone())).unwrap();
+        assert_eq!(plan.old_pty, Some(42));
+        assert_eq!(plan.tab_id, owner);
+        assert_eq!(plan.pane_key, pane.pane_key);
+        assert_eq!(plan.terminal_session_id, pane.terminal_session_id);
+        assert_eq!(plan.cwd, pane.cwd);
+        assert_eq!(plan.shell.name, shell.name);
+        assert_eq!(state.pane(&pane.id).unwrap().pty_id, Some(42));
+    }
+
+    #[test]
+    fn reconnect_preflight_never_resolves_a_shell_for_a_missing_original_pane() {
+        assert!(reconnect_plan(&ProjectState::new(), "missing", |_| {
+            panic!("missing route must be rejected before shell resolution")
+        }).is_none());
     }
 }

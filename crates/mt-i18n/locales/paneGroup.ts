@@ -10,7 +10,7 @@ export const paneGroup = {
     rename: "重命名",
     splitRight: "向右分屏",
     splitDown: "向下分屏",
-    forkSession: "分支会话到新分屏",
+    forkSession: "分支会话到新终端",
     viewSessionBranches: "查看会话分支",
     forkNeedsIdentity: "分支会话（未获会话身份，需注册 Hook 事件）",
     branchPopover: {
@@ -43,7 +43,7 @@ export const paneGroup = {
     rename: "Rename",
     splitRight: "Split right",
     splitDown: "Split down",
-    forkSession: "Fork session to new split",
+    forkSession: "Fork session to new terminal",
     viewSessionBranches: "View session branches",
     forkNeedsIdentity: "Fork session (no session identity — register hook events)",
     branchPopover: {

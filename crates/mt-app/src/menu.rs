@@ -104,10 +104,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Global, Hsla, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Window, anchored, deferred,
-    div, point, prelude::FluentBuilder, px, relative,
+    AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, Global, Hsla,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement,
+    Pixels, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    Window, anchored, deferred, div, point, prelude::FluentBuilder, px, relative,
 };
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 
@@ -279,6 +279,7 @@ impl MenuOptions {
 struct OpenMenu {
     /// 菜单左上角要贴的窗口坐标。右键菜单是鼠标点,下拉菜单是触发框的左下角。
     position: Point<Pixels>,
+    anchor: Option<SharedString>,
     options: MenuOptions,
     entries: Vec<MenuEntry>,
     /// 展开中的子菜单路径(逐层下标)。`[]` = 没展开任何子菜单。
@@ -344,6 +345,36 @@ pub fn show_with(
     window: &mut Window,
     cx: &mut App,
 ) {
+    show_at(position, None, entries, options, window, cx);
+}
+
+/// Open below a measured trigger, retaining its identity until this menu closes
+/// or is replaced. Pointer and keyboard activation use the same anchor.
+pub fn show_anchored(
+    anchor: impl Into<SharedString>,
+    bounds: Bounds<Pixels>,
+    entries: Vec<MenuEntry>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    show_at(
+        anchored_menu_position(bounds),
+        Some(anchor.into()),
+        entries,
+        MenuOptions::default(),
+        window,
+        cx,
+    );
+}
+
+fn show_at(
+    position: Point<Pixels>,
+    anchor: Option<SharedString>,
+    entries: Vec<MenuEntry>,
+    options: MenuOptions,
+    window: &mut Window,
+    cx: &mut App,
+) {
     if entries.is_empty() {
         return;
     }
@@ -363,6 +394,7 @@ pub fn show_with(
         window.focus(&focus);
         menu.open = Some(OpenMenu {
             position,
+            anchor,
             options,
             entries,
             open_path: Vec::new(),
@@ -391,6 +423,10 @@ pub fn close(window: &mut Window, cx: &mut App) {
 }
 
 // ─── 纯逻辑(可测) ────────────────────────────────────────────
+
+fn anchored_menu_position(bounds: Bounds<Pixels>) -> Point<Pixels> {
+    point(bounds.left(), bounds.bottom())
+}
 
 /// 悬停 `ancestors` 这一层的第 `index` 项之后,展开路径该变成什么。
 ///
@@ -611,6 +647,10 @@ fn with_alpha(color: Hsla, a: f32) -> Hsla {
 // ─── 渲染 ─────────────────────────────────────────────────────
 
 impl ContextMenu {
+    pub fn is_anchored_to(&self, anchor: &str) -> bool {
+        self.open.as_ref().and_then(|open| open.anchor.as_deref()) == Some(anchor)
+    }
+
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(open) = self.open.take() else {
             return;
@@ -1138,6 +1178,13 @@ impl Render for ContextMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anchored_menu_uses_the_trigger_bottom_edge() {
+        let bounds = Bounds::new(point(px(250.0), px(40.0)), gpui::size(px(24.0), px(24.0)));
+        assert_eq!(anchored_menu_position(bounds), point(px(250.0), px(64.0)));
+        assert!(!ContextMenu::default().is_anchored_to("project-a"));
+    }
 
     /// 悬停子菜单父项 = 展开它;悬停普通项 = 收掉本层的子菜单。
     #[test]

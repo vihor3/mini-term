@@ -1,0 +1,6 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Actions-only compilation, fixture execution, and checks."}
+{"file":".trellis/spec/mt-ai/backend/agent-runtime-contract.md","reason":"Accepted evidence/order contracts; generic recency exception needs approved semantic refinement."}
+{"file":".trellis/spec/mt-app/backend/remote-agent-reconciliation-contract.md","reason":"Poll ownership, retirement, natural exit, and accepted projection."}
+{"file":".trellis/spec/mt-ssh/backend/remote-agent-inventory-contract.md","reason":"Bounded authenticated process identity without leaking environment/argv."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Exact run/title ownership across background worktrees."}
+{"file":".trellis/tasks/09-05-sidebar-agent-status/research/09-06-native-feedback.md","reason":"Reported symptoms, current inference failures, and Orca reference anchors."}

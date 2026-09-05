@@ -1,0 +1,5 @@
+{"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Explicit context targets, async source ownership, Actions-only verification."}
+{"file":".trellis/spec/mt-app/backend/project-onboarding-contract.md","reason":"Directory-only selection, existing registration, and exact picker/modal ownership."}
+{"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Independent FileTree state and stale watcher/listing rejection."}
+{"file":".trellis/spec/mt-app/backend/file-workbench-contract.md","reason":"Document and transfer context compatibility."}
+{"file":".trellis/spec/mt-ssh/backend/remote-document-io-contract.md","reason":"Remote paths, file types, and source-qualified I/O safeguards."}

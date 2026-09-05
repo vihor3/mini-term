@@ -548,10 +548,18 @@ fn restore_cancelled(session_id: &TerminalSessionId) -> HostFailure {
     )
 }
 
+fn close_in_progress(session_id: &TerminalSessionId) -> HostFailure {
+    HostFailure::new(
+        ErrorCode::HostBusy,
+        format!("terminal close for session {session_id} is not yet confirmed; retry after cleanup"),
+    )
+}
+
 #[derive(Default)]
 struct Registry {
     sessions: HashMap<TerminalSessionId, Arc<HostedSession>>,
     creating: HashSet<TerminalSessionId>,
+    closing: HashSet<TerminalSessionId>,
     restoring: HashMap<TerminalSessionId, TerminalIncarnationId>,
     cancelled_restores: HashSet<TerminalSessionId>,
 }
@@ -596,11 +604,15 @@ impl DaemonState {
 
     fn is_busy(&self) -> bool {
         let registry = self.registry.lock();
-        !registry.creating.is_empty() || registry.sessions.values().any(|session| session.is_live())
+        !registry.creating.is_empty() || !registry.closing.is_empty()
+            || registry.sessions.values().any(|session| session.is_live())
     }
 
     fn session(&self, id: &TerminalSessionId) -> Result<Arc<HostedSession>, HostFailure> {
         let registry = self.registry.lock();
+        if registry.closing.contains(id) {
+            return Err(close_in_progress(id));
+        }
         if registry.creating.contains(id) {
             return Err(HostFailure::new(
                 ErrorCode::SessionCreating,
@@ -630,6 +642,9 @@ impl DaemonState {
         }
         {
             let mut registry = self.registry.lock();
+            if registry.closing.contains(&session_id) {
+                return Err(close_in_progress(&session_id));
+            }
             if registry.creating.contains(&session_id) {
                 return Err(HostFailure::new(
                     ErrorCode::SessionCreating,
@@ -762,6 +777,9 @@ impl DaemonState {
         let (after_reserve, after_spawn) = hooks;
         let existing = {
             let mut registry = self.registry.lock();
+            if registry.closing.contains(&session_id) {
+                return Err(close_in_progress(&session_id));
+            }
             if registry.creating.contains(&session_id) {
                 return Err(HostFailure::new(
                     ErrorCode::SessionCreating,
@@ -853,9 +871,7 @@ impl DaemonState {
         })();
 
         let mut registry = self.registry.lock();
-        registry.creating.remove(&session_id);
-        registry.restoring.remove(&session_id);
-        let cancelled = registry.cancelled_restores.remove(&session_id);
+        let cancelled = registry.cancelled_restores.contains(&session_id);
         let still_owned = existing.as_ref().map_or_else(
             || !registry.sessions.contains_key(&session_id),
             |existing| {
@@ -866,22 +882,56 @@ impl DaemonState {
             },
         );
         if cancelled || !still_owned {
+            // Keep the creating reservation until old and uncommitted writers
+            // have quiesced and cleanup has finished. Kill reports busy meanwhile.
             drop(registry);
             let mut failure = restore_cancelled(&session_id);
+            let mut cleanup_failed = false;
+            if let Some(existing) = existing.as_ref()
+                && let Err(error) = existing.retire_uncommitted()
+            {
+                cleanup_failed = true;
+                failure.message.push_str(&format!("; previous cleanup failed: {}", error.message));
+            }
+            let owns_history = existing.is_some() || result.is_ok();
             if let Ok((session, _)) = result
                 && let Err(error) = session.retire_uncommitted()
             {
+                cleanup_failed = true;
                 failure
                     .message
                     .push_str(&format!("; replacement cleanup failed: {}", error.message));
             }
-            if let Err(error) = history::purge(&self.history_root, &session_id) {
+            let purge = if owns_history {
+                history::purge(&self.history_root, &session_id).map_err(|error| {
+                    HostFailure::new(ErrorCode::IoFailed, format!("purge terminal history: {error:#}"))
+                })
+            } else {
+                // A cold restore may have been cancelled before validating its
+                // history. Its supplied old incarnation is not deletion authority.
+                self.close_stored_history(&session_id, &expected_previous_incarnation_id)
+            };
+            if let Err(error) = purge {
+                cleanup_failed |= owns_history || error.code == ErrorCode::IoFailed;
                 failure
                     .message
-                    .push_str(&format!("; history purge failed: {error:#}"));
+                    .push_str(&format!("; history purge failed: {}", error.message));
+            }
+            let mut registry = self.registry.lock();
+            registry.creating.remove(&session_id);
+            registry.restoring.remove(&session_id);
+            registry.cancelled_restores.remove(&session_id);
+            if cleanup_failed {
+                // No later request may turn uncertain replacement cleanup into
+                // success merely because the registry has no committed session.
+                registry.closing.insert(session_id);
+            } else if still_owned {
+                registry.sessions.remove(&session_id);
             }
             return Err(failure);
         }
+        registry.creating.remove(&session_id);
+        registry.restoring.remove(&session_id);
         let (session, snapshot) = result?;
         let descriptor = session.descriptor();
         registry.sessions.insert(session_id, session);
@@ -898,12 +948,24 @@ impl DaemonState {
         id: &TerminalSessionId,
         expected: &TerminalIncarnationId,
     ) -> Result<(), HostFailure> {
+        self.remove_and_kill_after_reserve(id, expected, || {})
+    }
+
+    fn remove_and_kill_after_reserve(
+        &self,
+        id: &TerminalSessionId,
+        expected: &TerminalIncarnationId,
+        after_reserve: impl FnOnce(),
+    ) -> Result<(), HostFailure> {
         let session = {
             let mut registry = self.registry.lock();
-            let cancelling_restore = match registry.restoring.get(id) {
+            if registry.closing.contains(id) {
+                return Err(close_in_progress(id));
+            }
+            match registry.restoring.get(id) {
                 Some(restore_incarnation) if restore_incarnation == expected => {
                     registry.cancelled_restores.insert(id.clone());
-                    true
+                    return Err(close_in_progress(id));
                 }
                 Some(_) => {
                     return Err(HostFailure::new(
@@ -911,33 +973,81 @@ impl DaemonState {
                         format!("terminal incarnation mismatch for session {id}"),
                     ));
                 }
-                None => false,
-            };
+                None => {}
+            }
+            if registry.creating.contains(id) {
+                return Err(HostFailure::new(
+                    ErrorCode::SessionCreating,
+                    format!("terminal session {id} is being created"),
+                ));
+            }
             let session = registry.sessions.get(id).cloned();
             if let Some(session) = session.as_ref() {
                 session.validate_identity(expected)?;
-                registry.sessions.remove(id);
-            } else if !cancelling_restore {
-                return Err(HostFailure::new(
-                    ErrorCode::SessionMissing,
-                    format!("terminal session {id} does not exist"),
-                ));
             }
+            registry.closing.insert(id.clone());
             session
         };
+        after_reserve();
 
-        let invalidation = match session.as_ref() {
-            Some(session) => session.history.invalidate(),
-            None => history::invalidate(&self.history_root, id),
+        let result = match session.as_ref() {
+            Some(session) => self.close_registered_session(id, expected, session),
+            None => self.close_stored_history(id, expected),
         };
-        let close = session
-            .as_ref()
-            .map_or(Ok(()), |session| session.close_explicitly(expected));
-        let history_fence = session
-            .as_ref()
-            .map_or(Ok(()), |session| session.history.invalidate_and_wait());
-        let purge = history::purge(&self.history_root, id);
+        let mut registry = self.registry.lock();
+        // Once cleanup has mutated a session or its history, uncertainty keeps
+        // the closing fence until restart; a retry must not infer success.
+        let cleanup_uncertain = result.as_ref().is_err_and(|error| {
+            session.is_some() || error.code == ErrorCode::IoFailed
+        });
+        if !cleanup_uncertain {
+            registry.closing.remove(id);
+        }
+        if result.is_ok() {
+            registry.sessions.remove(id);
+        }
         self.touch();
+        result
+    }
+
+    fn close_stored_history(
+        &self,
+        id: &TerminalSessionId,
+        expected: &TerminalIncarnationId,
+    ) -> Result<(), HostFailure> {
+        let stored = history::stored_incarnation(&self.history_root, id).map_err(|error| {
+            HostFailure::new(
+                ErrorCode::RecoveryUnavailable,
+                format!("cannot identify stored terminal history: {error:#}"),
+            )
+        })?;
+        if let Some(stored) = stored {
+            if &stored != expected {
+                return Err(HostFailure::new(
+                    ErrorCode::IncarnationMismatch,
+                    format!("terminal incarnation mismatch for session {id}"),
+                ));
+            }
+            history::invalidate(&self.history_root, id).map_err(|error| {
+                HostFailure::new(ErrorCode::IoFailed, format!("invalidate terminal history: {error:#}"))
+            })?;
+            history::purge(&self.history_root, id).map_err(|error| {
+                HostFailure::new(ErrorCode::IoFailed, format!("purge terminal history: {error:#}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn close_registered_session(
+        &self,
+        id: &TerminalSessionId,
+        expected: &TerminalIncarnationId,
+        session: &HostedSession,
+    ) -> Result<(), HostFailure> {
+        let invalidation = session.history.invalidate();
+        let close = session.close_explicitly(expected);
+        let history_fence = session.history.invalidate_and_wait();
+        let purge = history::purge(&self.history_root, id);
         match (close, purge) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) => Err(error),
@@ -1590,6 +1700,221 @@ mod tests {
         assert_eq!(stream.bounds(), (1, 2));
     }
 
+    fn seed_cold_history(root: &Path, session_id: &TerminalSessionId, incarnation: &TerminalIncarnationId) {
+        let history = SessionHistory::pending(HistorySeed {
+            root,
+            session_id: session_id.clone(),
+            worktree_id: test_worktree_id(),
+            generation: incarnation.clone(),
+            rows: 24,
+            cols: 80,
+            scrollback: 100,
+            initial_snapshot: None,
+        }).unwrap();
+        assert!(history.activate());
+        history.record_output(b"saved terminal output");
+        assert!(history.seal());
+    }
+
+    #[test]
+    fn cold_close_is_fenced_idempotent_and_never_spawns() {
+        let root = test_root("cold-close");
+        let state = DaemonState::new(root.clone());
+        let session_id = TerminalSessionId::new();
+        let incarnation = TerminalIncarnationId::new();
+        seed_cold_history(&root, &session_id, &incarnation);
+
+        let error = state.remove_and_kill(&session_id, &TerminalIncarnationId::new()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::IncarnationMismatch);
+        assert!(history::recover(&root, &session_id, &test_worktree_id(), &incarnation).is_ok());
+        assert!(state.descriptors().is_empty());
+
+        // Corrupt/unavailable replay is still explicitly closable when identity is valid.
+        history::invalidate(&root, &session_id).unwrap();
+        state.remove_and_kill(&session_id, &incarnation).unwrap();
+        assert!(history::stored_incarnation(&root, &session_id).unwrap().is_none());
+        state.remove_and_kill(&session_id, &incarnation).unwrap();
+        assert!(state.descriptors().is_empty());
+        assert!(!state.is_busy());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_cold_cleanup_keeps_the_close_fence_until_restart() {
+        for cancel_restore in [false, true] {
+            let root = test_root("failed-cold-cleanup");
+            let state = DaemonState::new(root.clone());
+            let session_id = TerminalSessionId::new();
+            let incarnation = TerminalIncarnationId::new();
+            seed_cold_history(&root, &session_id, &incarnation);
+            let directory = std::fs::read_dir(&root)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let blocker = directory.join("invalidated");
+            std::fs::create_dir(&blocker).unwrap();
+
+            if cancel_restore {
+                let error = state.restore_with_timeout_after_reserve(
+                    session_id.clone(), test_worktree_id(), incarnation.clone(),
+                    test_spawn(), Duration::from_secs(1), || {
+                        assert_eq!(
+                            state.remove_and_kill(&session_id, &incarnation).unwrap_err().code,
+                            ErrorCode::HostBusy
+                        );
+                    },
+                ).unwrap_err();
+                assert_eq!(error.code, ErrorCode::RecoveryUnavailable);
+                assert!(error.message.contains("history purge failed"));
+            } else {
+                assert_eq!(
+                    state.remove_and_kill(&session_id, &incarnation).unwrap_err().code,
+                    ErrorCode::IoFailed
+                );
+            }
+            std::fs::remove_dir(&blocker).unwrap();
+            assert!(state.is_busy());
+            assert_eq!(
+                state.remove_and_kill(&session_id, &incarnation).unwrap_err().code,
+                ErrorCode::HostBusy
+            );
+            assert_eq!(
+                state.create(session_id.clone(), test_worktree_id(), true, test_spawn())
+                    .unwrap_err().code,
+                ErrorCode::HostBusy
+            );
+            assert_eq!(
+                state.restore(session_id.clone(), test_worktree_id(), incarnation.clone(), test_spawn())
+                    .unwrap_err().code,
+                ErrorCode::HostBusy
+            );
+            assert_eq!(state.session(&session_id).err().unwrap().code, ErrorCode::HostBusy);
+            assert_eq!(
+                history::stored_incarnation(&root, &session_id).unwrap(),
+                Some(incarnation.clone())
+            );
+
+            let restarted = DaemonState::new(root.clone());
+            restarted.remove_and_kill(&session_id, &incarnation).unwrap();
+            assert!(history::stored_incarnation(&root, &session_id).unwrap().is_none());
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn unidentified_cold_history_refusal_does_not_reserve_a_mutation() {
+        let root = test_root("unidentified-cold-close");
+        let state = DaemonState::new(root.clone());
+        let session_id = TerminalSessionId::new();
+        let incarnation = TerminalIncarnationId::new();
+        seed_cold_history(&root, &session_id, &incarnation);
+        let directory = std::fs::read_dir(&root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let meta_path = directory.join("meta.json");
+        let metadata = std::fs::read(&meta_path).unwrap();
+        std::fs::remove_file(&meta_path).unwrap();
+        assert_eq!(
+            state.remove_and_kill(&session_id, &incarnation).unwrap_err().code,
+            ErrorCode::RecoveryUnavailable
+        );
+        assert!(!state.is_busy());
+        std::fs::write(&meta_path, metadata).unwrap();
+        state.remove_and_kill(&session_id, &incarnation).unwrap();
+        assert!(history::stored_incarnation(&root, &session_id).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_and_cold_close_reservations_exclude_kill_create_restore_and_attach() {
+        mt_pty::conpty::initialize_default();
+        for live in [false, true] {
+            let root = test_root("close-reservation");
+            let state = Arc::new(DaemonState::new(root.clone()));
+            let session_id = TerminalSessionId::new();
+            let incarnation = if live {
+                state.create(session_id.clone(), test_worktree_id(), true, test_spawn()).unwrap().incarnation_id
+            } else {
+                let incarnation = TerminalIncarnationId::new();
+                seed_cold_history(&root, &session_id, &incarnation);
+                incarnation
+            };
+            let (reserved_tx, reserved_rx) = std::sync::mpsc::channel();
+            let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+            let close_state = state.clone();
+            let close_id = session_id.clone();
+            let close_incarnation = incarnation.clone();
+            let close = std::thread::spawn(move || {
+                close_state.remove_and_kill_after_reserve(&close_id, &close_incarnation, || {
+                    reserved_tx.send(()).unwrap();
+                    continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                })
+            });
+            reserved_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(state.is_busy());
+            assert_eq!(state.remove_and_kill(&session_id, &incarnation).unwrap_err().code, ErrorCode::HostBusy);
+            assert_eq!(state.create(session_id.clone(), test_worktree_id(), true, test_spawn()).unwrap_err().code, ErrorCode::HostBusy);
+            assert_eq!(state.restore(session_id.clone(), test_worktree_id(), incarnation.clone(), test_spawn()).unwrap_err().code, ErrorCode::HostBusy);
+            assert_eq!(state.session(&session_id).err().unwrap().code, ErrorCode::HostBusy);
+            assert_eq!(history::stored_incarnation(&root, &session_id).unwrap(), Some(incarnation.clone()));
+            continue_tx.send(()).unwrap();
+            close.join().unwrap().unwrap();
+            assert!(history::stored_incarnation(&root, &session_id).unwrap().is_none());
+            assert!(state.descriptors().is_empty());
+            assert!(!state.is_busy());
+
+            let replacement = state.create(session_id.clone(), test_worktree_id(), true, test_spawn()).unwrap();
+            assert_ne!(replacement.incarnation_id, incarnation);
+            assert_eq!(state.remove_and_kill(&session_id, &incarnation).unwrap_err().code, ErrorCode::IncarnationMismatch);
+            let remaining = state.descriptors();
+            assert_eq!(remaining.len(), 1);
+            assert!(remaining[0].same_process_as(&replacement));
+            state.remove_and_kill(&session_id, &replacement.incarnation_id).unwrap();
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn close_rejects_an_uncommitted_create_without_touching_history() {
+        let root = test_root("close-create");
+        let state = DaemonState::new(root.clone());
+        let session_id = TerminalSessionId::new();
+        let incarnation = TerminalIncarnationId::new();
+        seed_cold_history(&root, &session_id, &incarnation);
+        state.registry.lock().creating.insert(session_id.clone());
+        assert_eq!(state.remove_and_kill(&session_id, &incarnation).unwrap_err().code, ErrorCode::SessionCreating);
+        assert!(history::recover(&root, &session_id, &test_worktree_id(), &incarnation).is_ok());
+        state.registry.lock().creating.remove(&session_id);
+        state.remove_and_kill(&session_id, &incarnation).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cancelling_a_stale_cold_restore_cannot_purge_another_incarnation() {
+        let root = test_root("stale-cancel");
+        let state = DaemonState::new(root.clone());
+        let session_id = TerminalSessionId::new();
+        let incarnation = TerminalIncarnationId::new();
+        let stale = TerminalIncarnationId::new();
+        seed_cold_history(&root, &session_id, &incarnation);
+        let error = state.restore_with_timeout_after_reserve(
+            session_id.clone(), test_worktree_id(), stale.clone(), test_spawn(),
+            Duration::from_secs(1), || {
+                assert_eq!(state.remove_and_kill(&session_id, &stale).unwrap_err().code, ErrorCode::HostBusy);
+            },
+        ).unwrap_err();
+        assert_eq!(error.code, ErrorCode::RecoveryUnavailable);
+        assert!(history::recover(&root, &session_id, &test_worktree_id(), &incarnation).is_ok());
+        assert!(!state.is_busy());
+        state.remove_and_kill(&session_id, &incarnation).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn restore_timeout_reinserts_a_failed_incarnation_and_invalidates_history() {
         mt_pty::conpty::initialize_default();
@@ -1687,7 +2012,8 @@ mod tests {
         });
 
         reserved_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        state.remove_and_kill(&session_id, &generation).unwrap();
+        assert_eq!(state.remove_and_kill(&session_id, &generation).unwrap_err().code, ErrorCode::HostBusy);
+        assert_eq!(state.remove_and_kill(&session_id, &generation).unwrap_err().code, ErrorCode::HostBusy);
         continue_tx.send(()).unwrap();
         let restore_error = restore.join().unwrap().unwrap_err();
         assert_eq!(restore_error.code, ErrorCode::RecoveryUnavailable);
@@ -1697,6 +2023,7 @@ mod tests {
                 .contains("cancelled by explicit close")
         );
         assert!(!state.registry.lock().sessions.contains_key(&session_id));
+        state.remove_and_kill(&session_id, &generation).unwrap();
 
         let restarted = DaemonState::new(root.clone());
         let restart_error = restarted
@@ -1754,7 +2081,8 @@ mod tests {
         });
 
         let replacement_process_id = spawned_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        state.remove_and_kill(&session_id, &generation).unwrap();
+        assert_eq!(state.remove_and_kill(&session_id, &generation).unwrap_err().code, ErrorCode::HostBusy);
+        assert_eq!(state.create(session_id.clone(), worktree_id.clone(), true, test_spawn()).unwrap_err().code, ErrorCode::SessionCreating);
         continue_tx.send(()).unwrap();
         let restore_error = restore.join().unwrap().unwrap_err();
         assert_eq!(restore_error.code, ErrorCode::RecoveryUnavailable);
@@ -1765,6 +2093,7 @@ mod tests {
         );
         wait_for_process_exit(replacement_process_id);
         assert!(!state.registry.lock().sessions.contains_key(&session_id));
+        state.remove_and_kill(&session_id, &generation).unwrap();
         assert!(
             std::fs::read_dir(&root)
                 .map(|mut entries| entries.next().is_none())

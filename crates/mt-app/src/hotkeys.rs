@@ -29,9 +29,9 @@
 use gpui::{App, KeyBinding, NoAction};
 
 use crate::{
-    ClosePane, FocusDown, FocusLeft, FocusRight, FocusUp, GlobalSearch, JumpAttention, MarkerNext,
+    ClosePane, GlobalSearch, JumpAttention, MarkerNext,
     MarkerPrev, NewTerminal, NextPane, OpenTerminalSettings, PrevPane, RenamePane, SelectPane,
-    SplitDown, SplitRight, SwitchProject, TerminalSearch, ToggleMiddleColumn, ToggleSessions,
+    SwitchProject, TerminalSearch, ToggleMiddleColumn, ToggleSessions,
     ToggleUsage, git_changes, jump_palette,
 };
 
@@ -138,22 +138,6 @@ pub const HOTKEYS: &[HotkeyDef] = &[
         G_TERMINAL,
         "shortcuts.renamePane",
     ),
-    def(
-        "splitRight",
-        Some("ctrl-shift-d"),
-        combo(true, true, false, "D"),
-        Scope::Global,
-        G_TERMINAL,
-        "shortcuts.splitRight",
-    ),
-    def(
-        "splitDown",
-        Some("ctrl-shift-e"),
-        combo(true, true, false, "E"),
-        Scope::Global,
-        G_TERMINAL,
-        "shortcuts.splitDown",
-    ),
     // ── 导航 ──
     def(
         "nextPane",
@@ -180,38 +164,6 @@ pub const HOTKEYS: &[HotkeyDef] = &[
         Scope::Global,
         G_NAV,
         "shortcuts.selectPaneN",
-    ),
-    def(
-        "focusLeft",
-        Some("alt-left"),
-        combo(false, false, true, "←"),
-        Scope::Global,
-        G_NAV,
-        "shortcuts.focusLeft",
-    ),
-    def(
-        "focusRight",
-        Some("alt-right"),
-        combo(false, false, true, "→"),
-        Scope::Global,
-        G_NAV,
-        "shortcuts.focusRight",
-    ),
-    def(
-        "focusUp",
-        Some("alt-up"),
-        combo(false, false, true, "↑"),
-        Scope::Global,
-        G_NAV,
-        "shortcuts.focusUp",
-    ),
-    def(
-        "focusDown",
-        Some("alt-down"),
-        combo(false, false, true, "↓"),
-        Scope::Global,
-        G_NAV,
-        "shortcuts.focusDown",
     ),
     // ── 全局 ──
     def(
@@ -394,7 +346,7 @@ pub fn bind_keys(cx: &mut App) {
         }
     }
 
-    // Ctrl+1..9:选中叶内第 N 个 tab(表里是一条占位项 `1…9`,这里展开成九条)
+    // Ctrl+1..9 selects the 1-based flat terminal index; the table has one placeholder row.
     for n in 1..=9usize {
         bindings.push(KeyBinding::new(
             &format!("ctrl-{n}"),
@@ -474,14 +426,8 @@ fn binding_for(id: &str, keystroke: &str) -> Option<KeyBinding> {
         "newTerminal" => KeyBinding::new(keystroke, NewTerminal, Some(WORKSPACE)),
         "closePane" => KeyBinding::new(keystroke, ClosePane, Some(WORKSPACE)),
         "renamePane" => KeyBinding::new(keystroke, RenamePane, Some(WORKSPACE)),
-        "splitRight" => KeyBinding::new(keystroke, SplitRight, Some(WORKSPACE)),
-        "splitDown" => KeyBinding::new(keystroke, SplitDown, Some(WORKSPACE)),
         "nextPane" => KeyBinding::new(keystroke, NextPane, Some(WORKSPACE)),
         "prevPane" => KeyBinding::new(keystroke, PrevPane, Some(WORKSPACE)),
-        "focusLeft" => KeyBinding::new(keystroke, FocusLeft, Some(WORKSPACE)),
-        "focusRight" => KeyBinding::new(keystroke, FocusRight, Some(WORKSPACE)),
-        "focusUp" => KeyBinding::new(keystroke, FocusUp, Some(WORKSPACE)),
-        "focusDown" => KeyBinding::new(keystroke, FocusDown, Some(WORKSPACE)),
         "switchProject" => KeyBinding::new(keystroke, SwitchProject, Some(WORKSPACE)),
         "globalSearch" => KeyBinding::new(keystroke, GlobalSearch, Some(WORKSPACE)),
         "terminalSearch" => KeyBinding::new(keystroke, TerminalSearch, Some(WORKSPACE)),
@@ -618,6 +564,14 @@ mod tests {
         let (bindings, _) =
             keymap.bindings_for_input(&[Keystroke::parse("tab").unwrap()], &outside);
         assert_eq!(bindings.len(), 1, "终端之外 Tab 仍该是焦点导航");
+    }
+
+    #[test]
+    fn split_and_directional_shortcuts_are_not_registered() {
+        for id in ["splitRight", "splitDown", "focusLeft", "focusRight", "focusUp", "focusDown"] {
+            assert!(HOTKEYS.iter().all(|entry| entry.id != id));
+            assert!(binding_for(id, "alt-left").is_none());
+        }
     }
 
     /// id 不重复 —— 设置页拿 id 当行 key。

@@ -52,6 +52,13 @@ pub fn open_rename_pane(
     if is_open(kind::RENAME_PANE) {
         return;
     }
+    let Some(target) = store
+        .read(cx)
+        .terminal_jump_target_for_pane(&project_id, &pane_id)
+        .filter(|target| store.read(cx).resolve_terminal_jump_target(target).is_some())
+    else {
+        return;
+    };
     // 原版这条走的是同一个 `showPrompt`(`paneActions.ts:310`,标题当默认值),
     // 于是也吃到那句 `if (defaultValue) input.select()`
     let select_all = Cell::new(!current.is_empty());
@@ -73,8 +80,7 @@ pub fn open_rename_pane(
             });
         }
         let store = store.clone();
-        let project_id = project_id.clone();
-        let pane_id = pane_id.clone();
+        let target = target.clone();
         let input_for_ok = input.clone();
         dialog
             .title(t("paneGroup", "renameTerminal"))
@@ -90,7 +96,14 @@ pub fn open_rename_pane(
             .on_ok(move |_: &ClickEvent, _window, cx| {
                 let title = input_for_ok.read(cx).value().to_string();
                 store.update(cx, |store, cx| {
-                    store.rename_pane(&project_id, &pane_id, &title, cx)
+                    if store.resolve_terminal_jump_target(&target).is_some() {
+                        store.rename_pane(
+                            &target.project_id,
+                            target.pane_key.as_str(),
+                            &title,
+                            cx,
+                        );
+                    }
                 });
                 true
             })

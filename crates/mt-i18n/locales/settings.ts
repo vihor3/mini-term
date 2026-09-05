@@ -183,7 +183,7 @@ export const settings = {
       clipboard: "复制粘贴",
       // 动作描述
       newTerminal: "新建终端标签",
-      closePane: "关闭当前分屏区域",
+      closePane: "关闭当前终端",
       renamePane: "重命名当前终端",
       splitRight: "向右分屏",
       splitDown: "向下分屏",
@@ -413,7 +413,7 @@ export const settings = {
       clipboard: "Copy & paste",
       // Action descriptions
       newTerminal: "New terminal tab",
-      closePane: "Close current pane",
+      closePane: "Close current terminal",
       renamePane: "Rename current terminal",
       splitRight: "Split right",
       splitDown: "Split down",

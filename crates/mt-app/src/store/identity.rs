@@ -128,6 +128,7 @@ fn apply_reconciled_project_layout(
     if let Some(state) = project_states.get_mut(project_id) {
         state.panels = panels;
         state.active_panel_id = active_panel_id;
+        state.restore_terminal_navigation(&layout);
         state.maximized_pane_id = None;
         state.status = state.highest_status();
     }
@@ -720,6 +721,8 @@ mod tests {
 
     fn saved_layout(shell_name: &str, cwd: &str, worktree_id: WorktreeId) -> SavedProjectLayout {
         SavedProjectLayout {
+            selected_terminal_pane_key: None,
+            terminal_order: None,
             worktree_id: Some(worktree_id),
             tabs: vec![SavedTab {
                 tab_id: Some(TabId::new()),
@@ -1118,15 +1121,33 @@ mod tests {
         let old_route = route(TerminalIncarnationId::new());
         let new_route = route(TerminalIncarnationId::new());
         let old_layout = saved_layout(&shell_name, "/srv/repo/provisional", old_route.worktree_id);
-        let destination_layout = saved_layout(
+        let mut destination_layout = saved_layout(
             &shell_name,
             "/srv/repo/authoritative",
             new_route.worktree_id.clone(),
         );
+        destination_layout.tabs.extend(
+            saved_layout(
+                &shell_name,
+                "/srv/repo/authoritative/selected",
+                new_route.worktree_id.clone(),
+            )
+            .tabs,
+        );
+        let key_for_tab = |tab: &SavedTab| match &tab.split_layout {
+            SavedSplitNode::Leaf { panes, .. } => panes[0].pane_key.clone().unwrap(),
+            SavedSplitNode::Split { .. } => panic!("fixture must be a leaf"),
+        };
+        let selected = key_for_tab(&destination_layout.tabs[1]);
+        let order = vec![selected.clone(), key_for_tab(&destination_layout.tabs[0])];
+        destination_layout.selected_terminal_pane_key = Some(selected.clone());
+        destination_layout.terminal_order = Some(order.clone());
+        let selected_owner = destination_layout.tabs[1].tab_id.clone();
         let (panels, active_panel_id) = persist::restore_layout(&old_layout, &config);
         let mut state = ProjectState::new();
         state.panels = panels;
         state.active_panel_id = active_panel_id;
+        state.restore_terminal_navigation(&old_layout);
         let old_pane_id = state.all_panes()[0].id.clone();
         state.maximized_pane_id = Some(old_pane_id);
         assert!(!state.panels.is_empty());
@@ -1150,6 +1171,16 @@ mod tests {
             Some("/srv/repo/authoritative")
         );
         assert!(state.maximized_pane_id.is_none());
+        assert_eq!(state.selected_terminal_pane_key.as_ref(), Some(&selected));
+        assert_eq!(state.terminal_order, order);
+        assert_eq!(
+            state.active_panel().map(|panel| &panel.tab_id),
+            selected_owner.as_ref()
+        );
+        let snapshot = state.saved_layout();
+        assert_eq!(snapshot.selected_terminal_pane_key.as_ref(), Some(&selected));
+        assert_eq!(snapshot.terminal_order.as_ref(), Some(&order));
+        assert_eq!(snapshot.active_tab_index, 1);
         assert_eq!(
             config.projects[0]
                 .saved_layout
