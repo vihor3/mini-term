@@ -130,7 +130,11 @@ pub const ICON_LOGO: &[Shape] = &[
     Shape::line(
         Ink::Current,
         1.3 / 16.0,
-        Geom::Polyline(&[(4.5 / 16.0, 6.5 / 16.0), (6.5 / 16.0, 8.0 / 16.0), (4.5 / 16.0, 9.5 / 16.0)]),
+        Geom::Polyline(&[
+            (4.5 / 16.0, 6.5 / 16.0),
+            (6.5 / 16.0, 8.0 / 16.0),
+            (4.5 / 16.0, 9.5 / 16.0),
+        ]),
     ),
     Shape::line(
         Ink::Current,
@@ -165,7 +169,6 @@ pub fn max_button_face(maximized: bool) -> (&'static [Shape], &'static str) {
     }
 }
 
-
 const TAB_WIDTH: f32 = 176.0;
 
 pub fn blink_phase(delta: f32) -> f32 {
@@ -173,7 +176,6 @@ pub fn blink_phase(delta: f32) -> f32 {
     // smoothstep,等价于 CSS 的 ease-in-out
     triangle * triangle * (3.0 - 2.0 * triangle)
 }
-
 
 thread_local! {
     /// 已经确认过要关了 —— 之后任何一次询问都直接放行。见上面的防重入说明。

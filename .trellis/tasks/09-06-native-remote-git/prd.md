@@ -53,8 +53,11 @@ Remote effects can be uncertain after dispatch; cancellation is not rollback.
 Worktree cleanup needs authoritative remote evidence and exact terminal/document
 ownership. New machine-format parsers need fixture coverage, not text guesses.
 
-## Planning Status
+## Execution Status
 
-PRD, source action inventory, design, execution plan, and curated context are
-prepared for parent final review. No product edits, real remote Git commands, or
-implementation approval; all automated checks and fixtures are Actions-only.
+The user approved the final parent scope on 2026-09-06. Transport-free Git
+planning/parsing is activated in its own mt-project write scope while the
+preceding Agent and Files slices continue. Shared app/host integration remains
+coordinated and must consume the host-aware browser before enabling remote
+Worktree Management. No real user repository commands or local automated checks
+are authorized; all fixtures, verification and packaging remain Actions-only.

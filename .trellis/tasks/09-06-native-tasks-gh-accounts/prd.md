@@ -53,9 +53,11 @@ Installed `gh` capabilities and noninteractive credential-store access need
 Actions fixtures plus target-artifact acceptance. Official-source feasibility
 does not establish that either real device account is currently accessible.
 
-## Planning Status
+## Execution Status
 
-The user confirmed the independent account behavior on 2026-09-06. PRD, design,
-execution plan, and curated context are prepared for final review, not approved
-implementation. No credential commands or authentication probes were executed.
-All compatibility, isolation, security, build, and test checks run in Actions.
+The user approved the independent account behavior and complete final parent
+scope on 2026-09-06. The disjoint transport-free mt-github domain slice is
+activated; app/host execution and configuration integration remain coordinated
+with the preceding children. No real credential command or authentication
+probe is authorized here. All compatibility, isolation, security, build and
+test execution remains GitHub Actions-only.
