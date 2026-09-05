@@ -266,7 +266,7 @@ impl OrcaProjectSidebar {
                 )
                 .on_click(cx.listener(|_this, _event, _window, cx| {
                     cx.emit(OrcaSidebarEvent::OpenJumpPalette);
-                }),
+                })),
             )
             .when(activity_enabled, |actions| {
                 actions.child(
