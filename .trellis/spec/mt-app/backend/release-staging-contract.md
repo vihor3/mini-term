@@ -468,7 +468,10 @@ typed membership/liveness, never the underlying process references.
   as valid UTF-8/UTF-16. Compare the COMPLETE message, allowing only BOM/newline
   framing, against fixed system-message IDs: base Win32 0..=1999, WinSock
   10000..=11004 and ten named standard HRESULTs, at most 4096 candidates.
-  FormatMessageW uses FROM_SYSTEM | IGNORE_INSERTS and a fixed 512-unit buffer.
+  FormatMessageW uses FROM_SYSTEM | IGNORE_INSERTS | MAX_WIDTH_MASK and a fixed
+  512-unit buffer. Match WSL's trusted resource rendering flags; outer CR/LF
+  trimming does not replace its treatment of embedded regular line breaks.
+  Do not adopt ALLOCATE_BUFFER or normalize the private input to force a match.
   Retain Unknown or SystemMessageId with the matched numeric identifier only;
   no substrings, output-derived labels, guessed codes from length or raw text.
   A matching message identifier is not an independently observed OS return code.
@@ -535,6 +538,9 @@ prove bounded ownership, missing/busy/query-failed states and TLS isolation.
 Catalogue coverage proves fixed order and cap, representative messages inside
 and outside the former 26-ID list, and complete framing. Do not round-trip
 every catalogue ID through a whole-catalogue scan or cache private payloads.
+Pin the exact trusted rendering flags and independently compare representative
+system messages using those flags, without assuming every locale has soft
+line breaks. This renderer parity does not establish an actual transport cause.
 
 ### 7. Wrong vs Correct
 

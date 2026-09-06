@@ -2,12 +2,77 @@
 
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
 pointer still identifies the Git child. Source review and explicitly authorized
-Actions log inspection only. The current root-only observer, bounded system
-message catalogue and focused tests are UNRUN. No local build, test, lint,
-formatting, syntax, whitespace, transport or native acceptance is claimed.
-The c92e54a Actions run predates this follow-up and cannot validate it.
+Actions log inspection only. The current trusted-renderer flag correction and
+one new test are UNRUN. No local build, test, lint, formatting, syntax,
+whitespace, transport or native acceptance is claimed. The a98473e Actions
+run predates this correction and cannot validate it.
 
-## Root-Only WSL Diagnostics: Source Released To Main
+## WSL System Rendering Flags: Source Released To Main
+
+The narrow test-renderer correction is authored and source-reviewed, with no
+unresolved implementation blocker. Ownership is released to Main and source
+writes are frozen. Only `crates/mt-app/src/tasks_account_executor/process.rs`
+and this report changed. Main owns specs, Git, formatter artifacts and Actions;
+the ongoing ordinary/package gates are not cancelled by this work.
+
+### Confirmed Difference And Bounded Correction
+
+Microsoft's
+[GetSystemErrorString](https://github.com/microsoft/WSL/blob/master/src/windows/common/wslutil.cpp#L1047)
+uses FORMAT_MESSAGE_MAX_WIDTH_MASK together with FROM_SYSTEM and IGNORE_INSERTS.
+Our trusted renderer omitted the width flag. Microsoft documents that this flag
+[ignores regular resource line breaks while preserving hard-coded breaks](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-formatmessagew).
+Outer BOM/CR/LF trimming alone does not make the two renderings equivalent.
+
+The renderer now uses exactly those three flags, pinned by a private test-only
+constant. It does NOT adopt WSL's ALLOCATE_BUFFER flag: the original 512-u16
+buffer and length checks remain. The 4096-byte input bound, 4096-candidate cap,
+3015-ID catalogue, strict UTF decoding and complete-message matching are
+unchanged. No private input stripping or normalization was added. Matching still
+runs only under trace for a nonzero exit with false cleanup acknowledgement,
+and emits only the existing numeric SystemMessageId or Unknown.
+
+There is no substring, resource or contextual-wrapper parser, new catalogue,
+Job/launcher change, production result remapping or acknowledgement relaxation.
+The confirmed difference is in trusted message rendering, NOT a confirmed cause
+of the observed early WSL exit or Unknown classification. Current upstream source
+also does not prove the implementation of this runner's installed WSL binary.
+
+### One New Test: Authored UNRUN
+
+- `tasks_account_executor::process::tests::native_windows_message_renderer_uses_exact_wsl_system_flags`
+
+The test pins the exact flag set and independently calls FormatMessageW with
+those flags for ERROR_BAD_EXE_FORMAT, ERROR_BROKEN_PIPE and
+ERROR_EXE_MACHINE_TYPE_MISMATCH. Full results must equal the renderer's output;
+failure diagnostics contain only static text and the fixed numeric ID. This
+covers the intended rendering where a localized resource has regular breaks,
+without assuming that every runner language uses multiline resource text.
+All existing framing, contamination, Unknown, catalogue-bound and gating tests
+remain unchanged. No all-catalogue API roundtrip or new diagnostic framework.
+
+### Exact Evidence And Remaining Gates
+
+The authorized
+[a98473e log, run 34021441260 / job 101454796139](https://github.com/vihor3/mini-term/actions/runs/34021441260/job/101454796139)
+ran exactly one actual WSL test and failed in 28.96 seconds at LookupCancel.
+The private root was NotInJob and Alive at the first readiness termination;
+its exit at 144475 us preceded cancellation at 298343 us. The native message
+classification remained Unknown, cleanup acknowledgement was false, and owned
+distro cleanup succeeded. Earlier DataCancel and LookupTimeout cases, including
+their descendant assertions, completed by source ordering. This is not a passing
+full WSL gate or proof of the failed case's descendant cleanup.
+
+The new flag correction and regression are UNRUN pending Main's next exact-SHA
+Actions gate. Current ordinary/package outcomes remain Main's responsibility.
+No local execution, automated checks, Git writes, child agents or other source
+edits occurred. WSL early-exit causality and native hardware acceptance remain
+unresolved; no production correction is claimed.
+
+## Earlier Root-Only WSL Diagnostics Handoff
+
+Historical release status follows. The rendering-flag correction and current
+evidence above supersede its pending-gate summary without reopening its scope.
 
 The approved test-only slice is authored and source-reviewed. No unresolved
 source/API blocker is identified. Ownership is released to Main and source

@@ -1353,3 +1353,77 @@ format-only source successor; no local formatter/check ran. Rootfs101454289183
 passed; Windows101454289075 and actualWSL101454407533 remain in progress.
 The successor push must wait until actual WSL import has completed rather than
 superseding a runner during import. No new test pass is claimed at this point.
+
+Main observed45c813f's WSL import step SUCCESS and the exact-test step actively
+building before pushing formatting successor
+a98473ee81e78d5a5b0c448f7e905e3aeb108038. Superseded Windows101454289075,
+WSL101454407533 and package34021304195 were cancelled, not passes. The WSL
+log confirms exact owned cleanup at08:17:37Z:
+`Cleaned only Actions-owned distro mt-tasks-34021304351-1`.
+Successor CI34021441260 and Package34021441294 are running. Their Linux/
+rootfs/Windows jobs are101454684308/101454684420/101454684440. No new actual
+test result is yet available; no retry or cleanup policy changed.
+
+At a98473e, actualWSL101454796139 discovered/executed exactly one test and
+FAILED in28.96s at LookupCancel (tests.rs2627). This run passed DataCancel and
+LookupTimeout, including their final descendant assertions, by source order;
+the LookupCancel descendant assertion was not reached. Its first readiness
+probe1883-135491us retired at135426-135451us with Count(5), success. At that
+instant exact Private root was NotInJob/Alive and Readiness InJob/Exited.
+Private attached2451us, exited144475us at-1 without stop/control, tree retired
+144530us, drained154002us ackfalse/stdout118/stderr0 and both native classes
+Unknown. API returned154039us with cancelled=false. The final second probe
+185824-298343us became ready, retired298291-298308us Count(1)/success with
+Private NotInJob/Exited and Readiness InJob/Exited; cancel298343us. No actual
+cleanup acknowledgement existed. Exact owned distro cleanupSUCCESS08:29:28Z.
+
+This excludes direct membership of the private Windows root in the first
+readiness Job at observation time; it does not identify its other members,
+rule out indirect transport effects or establish a native cause. The bounded
+3015-ID catalogue still returned Unknown and private output stays undisclosed.
+Linux compile/sidecar-check/Clippy and Windows compile have passed; remaining
+ordinary tests/package are still running. No full current CI pass is claimed.
+Main resumed Noether READ-ONLY for one constrained source-backed assessment of
+WSL native-message framing/resource handling and relevant transport semantics;
+no next diagnostic or production-policy edit is yet authorized. No raw output,
+member enumeration, Job retention, cancellation remapping or weaker guards.
+
+Noether's bounded read-only review found a concrete renderer difference:
+Microsoft WSL GetSystemErrorString uses FORMAT_MESSAGE_MAX_WIDTH_MASK together
+with FROM_SYSTEM/IGNORE_INSERTS; our test renderer omitted it. Regular embedded
+resource line breaks can therefore differ despite outer CR/LF trimming. Main
+confirmed the primary source and authorized only that test-renderer flag fix,
+one focused regression and the report. WSL resource/contextual wrappers may
+still remain Unknown; this is not a proven cause of the observed early exit.
+
+Noether released/froze only process.rs and the Tasks report, then closed. The
+three rendering flags are pinned by a test-only constant and independently
+checked against three representative system messages. Fixed512buffer,
+4096input/candidatecaps,3015catalogue and full private-message equality remain;
+no input normalization, new wrapper parser, Job/production or control change.
+Main updated the release contract. The correction/test are UNRUN and not yet
+pushed; the current ordinary/package runs must complete before their successor.
+
+At a98473e, Linux101454684308 is fully SUCCESS: mt-ai244, mt-app1219 plus
+five ordinary ignored host fixtures, both new object-only parser tests and the
+updated malformed-array cancellation fixture passed. Each of all five actual
+authenticated SSH fixtures then executed once and passed, with zero ignored,
+followed by sidecars and whitespace. Windows101454684440 has passed all primary
+filters/sidecar check and is finishing terminal-host regressions.
+Package34021441294/job101454669916 is fully SUCCESS. Artifact9985930270 is
+Mini-Term_1.2.2-ci.59_windows-x64, downloaded only to
+`/home/leo/.cache/mini-term/artifacts/a98473e-integration`.
+The Actions manifest reports passed, installer18,851,649 bytes and SHA256
+`7c81edca24c5b437baeec11f2f2e95ff0c4a19f1093bf13cf54dfeeccffd9232`.
+No local verification, hash command or installer/app launch occurred.
+
+Windows101454684440 has now completed entirely SUCCESS: onboarding82/3,
+Files49/14/5/1, execution-host19, Tasks executor31 plus1ignored actualWSL,
+Tasks app/config/domain24/2/31, Git24/6/124 and terminal-host31. The two new
+root observer tests, catalogue bound test, two object-parser tests and updated
+malformed-array capture assertions explicitly passed where enabled. Main
+updated validation.md to this exact completed a98473e/ci.59 candidate, excluding
+the later unrun renderer correction. CI34021441260 failed only actualWSL.
+The read-only gh-watch session ended on a transient API EOF; subsequent API/job
+logs independently confirmed all final outcomes. No local command remains from
+that watcher and no workflow was cancelled for this follow-up.

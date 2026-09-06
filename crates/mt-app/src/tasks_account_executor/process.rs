@@ -133,15 +133,27 @@ const WINDOWS_TRANSPORT_ERROR_CODES: &[u32] = {
 };
 
 #[cfg(all(test, windows))]
-fn windows_system_message(code: u32) -> Option<String> {
+const WINDOWS_SYSTEM_MESSAGE_FLAGS: windows::Win32::System::Diagnostics::Debug::FORMAT_MESSAGE_OPTIONS = {
     use windows::Win32::System::Diagnostics::Debug::{
-        FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FormatMessageW,
+        FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FORMAT_MESSAGE_MAX_WIDTH_MASK,
+        FORMAT_MESSAGE_OPTIONS,
     };
+
+    FORMAT_MESSAGE_OPTIONS(
+        FORMAT_MESSAGE_FROM_SYSTEM.0
+            | FORMAT_MESSAGE_IGNORE_INSERTS.0
+            | FORMAT_MESSAGE_MAX_WIDTH_MASK.0,
+    )
+};
+
+#[cfg(all(test, windows))]
+fn windows_system_message(code: u32) -> Option<String> {
+    use windows::Win32::System::Diagnostics::Debug::FormatMessageW;
 
     let mut buffer = [0_u16; 512];
     let length = unsafe {
         FormatMessageW(
-            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            WINDOWS_SYSTEM_MESSAGE_FLAGS,
             None,
             code,
             0,
@@ -979,6 +991,48 @@ pub(super) fn envelope_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_message_renderer_uses_exact_wsl_system_flags() {
+        use windows::Win32::Foundation::{
+            ERROR_BAD_EXE_FORMAT, ERROR_BROKEN_PIPE, ERROR_EXE_MACHINE_TYPE_MISMATCH,
+        };
+        use windows::Win32::System::Diagnostics::Debug::{
+            FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FORMAT_MESSAGE_MAX_WIDTH_MASK,
+            FormatMessageW,
+        };
+
+        let expected_flags = FORMAT_MESSAGE_FROM_SYSTEM
+            | FORMAT_MESSAGE_IGNORE_INSERTS
+            | FORMAT_MESSAGE_MAX_WIDTH_MASK;
+        assert_eq!(WINDOWS_SYSTEM_MESSAGE_FLAGS.0, expected_flags.0);
+        for code in [
+            ERROR_BAD_EXE_FORMAT.0,
+            ERROR_BROKEN_PIPE.0,
+            ERROR_EXE_MACHINE_TYPE_MISMATCH.0,
+        ] {
+            // Render independently; localized resources need not contain soft breaks.
+            let mut buffer = [0_u16; 512];
+            let length = unsafe {
+                FormatMessageW(
+                    expected_flags,
+                    None,
+                    code,
+                    0,
+                    windows::core::PWSTR(buffer.as_mut_ptr()),
+                    buffer.len() as u32,
+                    None,
+                )
+            } as usize;
+            assert!(length > 0 && length < buffer.len(), "trusted system message unavailable: code={code}");
+            let expected = String::from_utf16(&buffer[..length]).expect("invalid system message UTF-16");
+            assert!(
+                windows_system_message(code).as_deref() == Some(expected.as_str()),
+                "WSL system rendering flags mismatch: code={code}"
+            );
+        }
+    }
 
     #[cfg(windows)]
     #[test]
