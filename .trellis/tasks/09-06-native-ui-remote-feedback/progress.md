@@ -784,3 +784,13 @@ passing Linux/actual WSL or native UI gate. Main reviewed the marker helper,
 private Null-only production factor, diagnostic matrix and regression source,
 and recorded the boundary in the release-staging contract; Noether's final
 source release still precedes staging/push of that diagnostic delta.
+
+Noether released the complete marker matrix, immutable Null production factor
+and six new Windows regressions. Main reviewed the final guard/secret-safe
+assertion changes, then committed/pushed the seven-file diagnostic integration
+as `5a03fa60249b6162319b006b77b958911fde6198` with the Agent Clippy fix.
+CI `34009289031` / package `34009289005` started. Linux `101422143667`
+stopped at formatting in only the two new diagnostic source files. Main read
+and applied its complete exact-run `full-rustfmt.patch` to index and source,
+without local tools/checks. The immediate format follow-up restarts the gate
+before waiting for more expensive test builds; this run is not transport proof.

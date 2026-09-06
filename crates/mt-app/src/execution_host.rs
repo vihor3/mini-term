@@ -457,7 +457,10 @@ fn plan_tasks_wsl_marker_probe(
     user: TasksWslProbeUser,
     stdin: TasksWslProbeStdin,
 ) -> Result<(PlannedHostCommand, ProcessStdin), CommandExecutionError> {
-    let owned_distro = format!("mt-tasks-{}-{}", environment.run_id, environment.run_attempt);
+    let owned_distro = format!(
+        "mt-tasks-{}-{}",
+        environment.run_id, environment.run_attempt
+    );
     if environment.actions != "true"
         || [&environment.run_id, &environment.run_attempt]
             .iter()
@@ -1343,7 +1346,8 @@ mod tests {
             for user in [TasksWslProbeUser::Default, TasksWslProbeUser::Root] {
                 for stdin in [TasksWslProbeStdin::Null, TasksWslProbeStdin::ClosedPipe] {
                     let (plan, process_stdin) =
-                        plan_tasks_wsl_marker_probe(&source, &environment, cwd, user, stdin).unwrap();
+                        plan_tasks_wsl_marker_probe(&source, &environment, cwd, user, stdin)
+                            .unwrap();
                     let mut args = vec!["--distribution", "mt-tasks-12345-2"];
                     if user == TasksWslProbeUser::Root {
                         args.extend(["--user", "root"]);
@@ -1391,7 +1395,9 @@ mod tests {
                     for stdin in [TasksWslProbeStdin::Null, TasksWslProbeStdin::ClosedPipe] {
                         let error =
                             plan_tasks_wsl_marker_probe(source, environment, cwd, user, stdin)
-                                .expect_err("unowned marker probe must be rejected before dispatch");
+                                .expect_err(
+                                    "unowned marker probe must be rejected before dispatch",
+                                );
                         assert_eq!(error.kind, CommandExecutionErrorKind::Rejected);
                         assert_eq!(
                             error.message,
@@ -1428,7 +1434,11 @@ mod tests {
             distro: "Ubuntu".into(),
         };
         reject(&invalid, &environment);
-        for path in ["/", "/mini-term-fixture/cases/1", "/mini-term-fixture/../home"] {
+        for path in [
+            "/",
+            "/mini-term-fixture/cases/1",
+            "/mini-term-fixture/../home",
+        ] {
             let mut invalid = source.clone();
             invalid.canonical_path = path.into();
             reject(&invalid, &environment);

@@ -9,7 +9,8 @@ use mt_identity::{ExecutionHostId, HostInstallId, RepoId, WorktreeId};
 use super::*;
 #[cfg(windows)]
 use crate::execution_host::{
-    HostCommandResult, TasksWslProbeCwd, TasksWslProbeStdin, TasksWslProbeUser, tasks_wsl_marker_probe,
+    HostCommandResult, TasksWslProbeCwd, TasksWslProbeStdin, TasksWslProbeUser,
+    tasks_wsl_marker_probe,
 };
 #[cfg(windows)]
 use mt_github::{CommandExecutionError, CommandExecutionErrorKind};
@@ -1317,7 +1318,10 @@ fn wsl_prelude_system_messages_require_exact_text_not_length() {
             assert!(!diagnostic.contains(message));
         }
         let decorated = format!("{message} fixture_credential_suffix");
-        assert_eq!(wsl_prelude_output_class(decorated.as_bytes()), "unclassified");
+        assert_eq!(
+            wsl_prelude_output_class(decorated.as_bytes()),
+            "unclassified"
+        );
     }
     let unrelated = [b'x', 0].repeat(45);
     assert_eq!(unrelated.len(), 90);
@@ -1363,16 +1367,21 @@ fn wsl_marker_matrix_reuses_failed_baseline_without_success_fallback() {
                     && user == TasksWslProbeUser::Default
                     && stdin == TasksWslProbeStdin::Null;
                 assert_eq!(
-                    probed.iter().filter(|row| **row == (cwd, user, stdin)).count(),
+                    probed
+                        .iter()
+                        .filter(|row| **row == (cwd, user, stdin))
+                        .count(),
                     if baseline { 0 } else { 1 }
                 );
             }
         }
     }
     assert_eq!(diagnostic.lines().count(), 9);
-    assert!(diagnostic.contains(
-        "row=Captured/Default/Null stage=ReadOwner exit=Some(-1) exit_hex=0xffffffff"
-    ));
+    assert!(
+        diagnostic.contains(
+            "row=Captured/Default/Null stage=ReadOwner exit=Some(-1) exit_hex=0xffffffff"
+        )
+    );
     assert_eq!(diagnostic.matches("marker_matches=true").count(), 7);
     assert_eq!(diagnostic.matches("marker_matches=false").count(), 1);
     assert!(!diagnostic.contains("fixture_credential_"));
@@ -1401,7 +1410,10 @@ fn wsl_marker_matrix_rejects_unowned_incomplete_and_dispatch_failures() {
         ("kind", serde_json::json!("fixture_credential_wrong_kind")),
         ("run_id", serde_json::json!("12346")),
         ("run_attempt", serde_json::json!("3")),
-        ("repository", serde_json::json!("fixture_credential_repository")),
+        (
+            "repository",
+            serde_json::json!("fixture_credential_repository"),
+        ),
         ("sha", serde_json::json!("fixture_credential_sha")),
         ("unknown", serde_json::json!("fixture_credential_unknown")),
     ] {
