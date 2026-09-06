@@ -5,77 +5,138 @@ pointer still identifies the Git child. Source review and explicitly authorized
 Actions log inspection. No passing build, lint, type-check, formatting, test,
 transport, or native acceptance is claimed for the current diagnostic patch.
 
-## WSL Failure Resume: Diagnostic Handoff
+## WSL Launch Matrix: Source Released To Main
 
-Scope for this resume is only `tasks_account_executor/tests.rs` and this review.
-The launcher/ELF shim needed no change. No Agent source, Tasks service/view,
-production executor/API, ProcessTree, CI script/workflow, staging or commit was
-changed. Pauli's style-fix ownership was left untouched. This narrow source
-follow-up is ready for Main; its new code and test are UNRUN.
+The approved diagnostic slice and regressions are authored and source-reviewed;
+ownership is released to Main. No implementation blocker remains. Scope is only
+`execution_host.rs` private runner factoring and Windows-test-only marker helper,
+`tasks_account_executor/tests.rs`, and this review. No launcher/ELF shim, Agent,
+Tasks service/view, account executor, ProcessTree policy, CI script/workflow or
+spec changed. No local verification, staging, commit, push or child agent.
+All current code/tests are UNRUN, pending Main's exact-SHA Actions gates.
 
 ### Actual Actions Evidence
 
-Read the authorized log for
-[run 34005933974, job 101413098858](https://github.com/vihor3/mini-term/actions/runs/34005933974/job/101413098858).
-Main identifies the tested non-Agent base as `37b4ef9` and reports Linux/Windows
-compilation. The inspected Windows job log independently shows the test binary
-finished building, the exact ignored test was discovered once, and execution
-reported `0 passed; 1 failed; 0 ignored` in 0.06 seconds. The panic was the shared
-`require_success` assertion at the then-current `tests.rs:899`. Import and
-owned-distro cleanup succeeded. This supersedes the earlier UNRUN snapshot below
-for that old WSL test execution only, not for this new patch or native acceptance.
+Latest authorized log inspected:
+[run 34007314719, job 101416918481](https://github.com/vihor3/mini-term/actions/runs/34007314719/job/101416918481),
+which Main identifies as `0b28475`. Exactly one actual WSL test ran and failed
+in 0.10 seconds: `ReadOwner`, exit `Some(-1)` / `0xffffffff`, no timeout or
+truncation, stdout 90 bytes / `unclassified`, stderr 0 bytes / `empty`.
+Owned-distro cleanup succeeded. This identifies the first marker read, before
+Python/gh/account APIs, but not a Windows message or root cause. No inference
+is made from the 90-byte length.
 
-### Finding Fixed: Prelude Failure Was Not Attributed
+The earlier inspected
+[run 34005933974, job 101413098858](https://github.com/vihor3/mini-term/actions/runs/34005933974/job/101413098858)
+ran exactly one test and failed in 0.06 seconds without stage/status attribution.
+Main now reports the complete `aec1c72` Windows CI and package jobs succeeded.
+Those results do not validate this diagnostic slice or establish passing WSL
+execution/native credential acceptance for the current source.
 
-- The old assertion reported neither the failed operation nor numeric exit
-  status. It was shared by marker reading, executable resolution, hash/directory
-  checks and case/marker creation, so the log cannot prove the first marker
-  command was the failing operation.
-- Source tracing rules out a missing `--cd` argument: `snapshot` preserves
-  `/mini-term-fixture`; `plan_host_command` supplies explicit distro, that cwd
-  and structured argv. The fixture has no Windows-path conversion here.
-- Node's owner guard directly spawns WSL with explicit `--user root --cd /`.
-  The test uses `execute_host_command` and `run_process`, including suspended
-  Windows spawn, Job attachment/resume, null stdin and bounded pipe readers.
-  The observed assertion means dispatch returned an output with nonzero/missing
-  exit status, without reported timeout/truncation; it was not the spawn/attach
-  error path. `run_process` saves exit status before successful Job termination,
-  so there is no source evidence that cleanup replaced a successful exit code.
-- Added fixed pre-auth stage labels: `ReadOwner`, `ResolveGh`, `ResolvePython`,
-  `VerifyGhHash`, `CheckCasesDirectory`. Failures report only stage, signed/hex
-  numeric exit, timeout/truncation flags, byte counts and fixed output classes.
-  UTF-8/UTF-16LE diagnostics are classified within the existing 4096-byte bound.
-  Unrecognized output is `unclassified`; malformed/oversized input has a fixed
-  category. No raw output, marker contents, argv, environment, account payload
-  or exception message is formatted.
-- Classification is called only by the five pre-auth probes in `WslFixture::open`,
-  before any account API. Later fixture mkdir/touch failures gain only static
-  operation labels and numeric status, not output classification or dumping.
-- The same `execute_host_command` path, five-second limit, 4096-byte capture,
-  epoch/completeness/exit checks, exact marker/shim/hash checks and account tests
-  remain. No redundant cwd change, direct-spawn retry, guard bypass, skip or
-  weakened assertion was added.
+### Authored Helper And Invariants
 
-New Windows-only ordinary unit test, authored UNRUN:
+Approved API, only under `cfg(all(test, windows))`:
 
-`tasks_account_executor::tests::wsl_prelude_diagnostics_are_bounded_stage_specific_and_secret_safe`
+```rust
+pub(crate) fn tasks_wsl_marker_probe(
+    snapshot: &ProjectExecutionSnapshot,
+    cwd: TasksWslProbeCwd,     // Captured | Root
+    user: TasksWslProbeUser,   // Default | Root
+    stdin: TasksWslProbeStdin, // Null | ClosedPipe
+) -> Result<HostCommandResult, CommandExecutionError>;
+```
 
-It exercises the diagnostic functions used by the actual fixture, including all
-stage labels, numeric exit formatting, UTF-16 invalid-handle classification,
-UTF-8 path/permission classes, synthetic secret suppression, malformed/oversized
-input and timeout/truncation flags. It is not a transport pass claim or a
-source-substring test. The existing actual WSL ignored test/filter and all rootfs
-environment/marker/path/hash requirements below are unchanged.
+- The private planner requires `GITHUB_ACTIONS=true`, numeric nonempty run ID
+  and attempt, exact `mt-tasks-<run>-<attempt>` in both env and WSL backend,
+  fixed marker env path, and both snapshot paths exactly `/mini-term-fixture`.
+  Invalid/missing inputs reject before spawn with a static error. No arbitrary
+  executable, argv, env map, working path, timeout or output-cap input.
+- The production WSL planner builds only `/bin/cat` with the fixed
+  `/mini-term-fixture/owner.json` argument. Root cwd changes a clone to `/`;
+  explicit root adds structured `--user root`. No Windows current-dir change,
+  executable override, Job bypass, breakaway or special launcher.
+- `run_process` keeps its signature and unconditionally delegates with
+  `ProcessStdin::Null`. Its privately factored body still selects exactly
+  `Stdio::null()` in production. The only alternative is Windows-test
+  `ClosedPipe`, whose writer drops immediately after successful attach.
+- Source diff preserves all original configure/spawn/attach/resume/error,
+  suspended/no-window flags, kill-on-close Job policy, reader, deadline,
+  termination and cleanup paths. Each probe uses the same guarded body,
+  five-second command limit and 4096-byte per-stream cap. Seven alternatives
+  add at most 35 seconds of command waits plus existing bounded cleanup waits.
 
-### Finding Not Fixed: Actual Nonzero Exit Cause Is Unconfirmed
+### Failure-Only Matrix
 
-The existing log cannot distinguish a WSL guest/prelude failure from a Windows
-launch/handle/Job interaction. Successful Node import/provenance does not prove
-the production runner path. No production or CI correction is justified by
-the current evidence, and none was made. Main should rerun the unchanged exact
-WSL gate with this patch; its failure will identify the stage/status and a
-secret-safe class. Any resulting production executor or CI setup change still
-requires Main's coordination. No additional setup command is required yet.
+`WslFixture::open` still obtains the first marker read through ordinary
+`execute_host_command`. Only its failed/incomplete/mismatched `ReadOwner` result
+runs the seven alternatives, before helper/shim checks or account APIs.
+
+| Cwd / User | Null Stdin | Closed-Pipe Stdin |
+| --- | --- | --- |
+| Captured / Default | Reuse original baseline; never rerun | Probe |
+| Root / Default | Probe | Probe |
+| Captured / Root | Probe | Probe |
+| Root / Root | Probe | Probe |
+
+The original failure always rejects the fixture, even if every alternative
+succeeds. A valid baseline starts no diagnostic probes; later stages cannot
+trigger this matrix. Each row reports only static enum/error/output classes,
+numeric exit/length metadata, timeout/truncation/epoch flags and boolean
+`marker_matches`. That boolean requires complete successful bounded output,
+no connection epoch, and exact typed owner JSON with unknown fields rejected.
+No raw output, marker, argv, env, exception message, account or credential is
+formatted. The pre-auth env guard also no longer prints rejected values.
+
+The retained classifier delta recognizes exact canonical Windows file/path
+not-found and invalid-parameter messages in UTF-8/UTF-16LE with optional BOM
+and CRLF. Decorated messages and unrelated 90-byte payloads remain unclassified.
+The existing five pre-auth stage labels and fixed bounded output classes remain.
+
+### Exact Tests: Current Patch UNRUN
+
+New ordinary Windows tests under Main's `execution_host::` filter:
+
+- `execution_host::tests::tasks_wsl_marker_probe_plans_are_fixed_and_match_production_baseline`
+- `execution_host::tests::tasks_wsl_marker_probe_rejects_unowned_launch_inputs`
+
+They exercise the actual helper planner/guard, all eight combinations, exact
+argv and stdin policy, unchanged source identity, and rejection of foreign or
+missing env/run/attempt/backend/marker/snapshot paths, without WSL or global env
+mutation. No source-string tests.
+
+New ordinary Windows tests under `tasks_account_executor::tests::`:
+
+- `wsl_prelude_system_messages_require_exact_text_not_length` (retained delta)
+- `wsl_marker_matrix_reuses_failed_baseline_without_success_fallback`
+- `wsl_marker_matrix_does_not_probe_after_valid_owner`
+- `wsl_marker_matrix_rejects_unowned_incomplete_and_dispatch_failures`
+
+The matrix regressions exercise the same decision/diagnostic functions as the
+actual fixture: exactly seven distinct probes and eight rows, no alternate
+success fallback, no success-path probes, wrong/missing/extra/ill-typed owner
+fields, incomplete/oversized output, unexpected epoch, every typed dispatch
+error and synthetic-secret suppression. The earlier ordinary test
+`wsl_prelude_diagnostics_are_bounded_stage_specific_and_secret_safe` remains.
+
+The actual ignored test/filter and rootfs/env/marker/hash requirements below
+are unchanged and still must discover/run once. No setup change is needed.
+Main has added/released the Windows `execution_host::` filter, retaining native
+lifecycle tests; the Linux workspace gate retains generic cleanup regressions.
+All current tests, build/type-check, lint, formatting and probes remain UNRUN.
+
+### Not Fixed: Startup Cause Still Unconfirmed
+
+The source already supplies `--cd /mini-term-fixture`; no redundant cwd fix is
+justified. Node's successful marker guard uses explicit root and `/`, with a
+different stdin/spawn path. Node/libuv can itself use no-window and Job guards;
+it is not an unguarded control. Previously inspected primary sources:
+[Node 22 Windows process spawning](https://github.com/nodejs/node/blob/v22.x/deps/uv/src/win/process.c)
+and [synchronous stdin shutdown](https://github.com/nodejs/node/blob/v22.x/src/spawn_sync.cc).
+The matrix varies only the approved parameters while keeping production guards.
+If all rows fail it cannot rule out every executable-resolution, WSL-version or
+Job/handle difference. No production behavior fix is claimed or attempted.
+Main needs Actions matrix/classifier evidence before any production/setup fix.
+Native hardware/secure-store acceptance remains separate from these fixtures.
 
 Verification for this patch: lint, type-check/build, unit/WSL tests, formatter
 and probes are all UNRUN, Actions-only. Only source/config/docs, read-only Git

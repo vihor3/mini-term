@@ -752,3 +752,35 @@ Hook test type annotation. Resumed Leibniz owns only those two mt-ai source
 locations and its lower-layer-review addendum; runtime/lifecycle semantics and
 mutex ordering remain fixed. Root tests and authenticated SSH are still blocked
 by this lint gate. Windows full compilation also passed at this exact SHA.
+
+Leibniz released the two-file style correction with preserved tracker mutex and
+episode semantics; main reviewed and committed it as `fdceead`, not yet pushed.
+Windows job `101418401984` at `aec1c72` is now entirely SUCCESS. Onboarding
+filters passed 82/3, Files 49/14/5/1, Tasks executor eight (including the first
+secret-safe diagnostic unit) with the separate WSL test ignored as intended,
+Tasks app 24, config two, domain 31, Git domain 24/6, Git app 124, and terminal
+host 31. The previously failing fake-discard regression explicitly passed.
+Root/sidecar checks also passed. The two terminal-host binary targets contained
+zero tests; the 31 library passes are the regression evidence.
+
+Actual WSL `101418545901` again FAILED at ReadOwner with the same -1/90-byte
+unclassified-output result (0.05 seconds, exactly one executed test). Owned
+cleanup succeeded. Main authorized Noether's Windows-test-only fixed-marker
+matrix: captured/root cwd, default/root user, null/closed-pipe stdin, retaining
+strict Job/suspended/no-window guards and original-baseline failure regardless
+of alternative successes. Only private runner factoring is allowed; production
+still selects Null stdin. Main added the Windows execution_host module filter;
+Pauli reviewed it and added nonempty discovery without changing existing Tasks
+or actual WSL gates. No production cause or passing transport is claimed.
+
+Package `34007899592` / job `101418384070` at `aec1c72` is SUCCESS,
+including staged-payload and extracted-installer checks. Artifact `9981841547`
+is `Mini-Term_1.2.2-ci.45_windows-x64`; it was downloaded to the local cache
+without launching or validating the binary locally. The Actions manifest records
+installer size 18,851,835 bytes and SHA-256
+`e3e27a52205d37935e539a2cb592958b5833ed5be020069cc5d019faca32cf80`.
+This is complete Windows build/fixture/package evidence for that source, not a
+passing Linux/actual WSL or native UI gate. Main reviewed the marker helper,
+private Null-only production factor, diagnostic matrix and regression source,
+and recorded the boundary in the release-staging contract; Noether's final
+source release still precedes staging/push of that diagnostic delta.

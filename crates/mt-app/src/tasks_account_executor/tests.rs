@@ -7,6 +7,12 @@ use mt_github::{GitHubRepoIdentity, WorkItemKind};
 use mt_identity::{ExecutionHostId, HostInstallId, RepoId, WorktreeId};
 
 use super::*;
+#[cfg(windows)]
+use crate::execution_host::{
+    HostCommandResult, TasksWslProbeCwd, TasksWslProbeStdin, TasksWslProbeUser, tasks_wsl_marker_probe,
+};
+#[cfg(windows)]
+use mt_github::{CommandExecutionError, CommandExecutionErrorKind};
 
 struct Fixture {
     root: PathBuf,
@@ -825,6 +831,12 @@ fn wsl_prelude_output_class(bytes: &[u8]) -> &'static str {
         text.to_string()
     };
     let text = text.to_ascii_lowercase();
+    match text.trim_start_matches('\u{feff}').trim() {
+        "the system cannot find the file specified." => return "windows-file-not-found",
+        "the system cannot find the path specified." => return "windows-path-not-found",
+        "the parameter is incorrect." => return "windows-invalid-parameter",
+        _ => {}
+    }
     // Return fixed categories only, never any part of a command's output.
     for (needle, class) in [
         ("error_invalid_handle", "invalid-handle"),
@@ -870,6 +882,123 @@ fn wsl_prelude_diagnostic(stage: WslPreludeStage, output: &CommandOutput) -> Str
 }
 
 #[cfg(windows)]
+type WslMarkerProbeRow = (TasksWslProbeCwd, TasksWslProbeUser, TasksWslProbeStdin);
+
+#[cfg(windows)]
+const WSL_MARKER_PROBE_ROWS: [WslMarkerProbeRow; 8] = [
+    (
+        TasksWslProbeCwd::Captured,
+        TasksWslProbeUser::Default,
+        TasksWslProbeStdin::Null,
+    ),
+    (
+        TasksWslProbeCwd::Captured,
+        TasksWslProbeUser::Default,
+        TasksWslProbeStdin::ClosedPipe,
+    ),
+    (
+        TasksWslProbeCwd::Root,
+        TasksWslProbeUser::Default,
+        TasksWslProbeStdin::Null,
+    ),
+    (
+        TasksWslProbeCwd::Root,
+        TasksWslProbeUser::Default,
+        TasksWslProbeStdin::ClosedPipe,
+    ),
+    (
+        TasksWslProbeCwd::Captured,
+        TasksWslProbeUser::Root,
+        TasksWslProbeStdin::Null,
+    ),
+    (
+        TasksWslProbeCwd::Captured,
+        TasksWslProbeUser::Root,
+        TasksWslProbeStdin::ClosedPipe,
+    ),
+    (
+        TasksWslProbeCwd::Root,
+        TasksWslProbeUser::Root,
+        TasksWslProbeStdin::Null,
+    ),
+    (
+        TasksWslProbeCwd::Root,
+        TasksWslProbeUser::Root,
+        TasksWslProbeStdin::ClosedPipe,
+    ),
+];
+
+#[cfg(windows)]
+fn wsl_marker_matches(result: &HostCommandResult, expected: &WslFixtureOwner) -> bool {
+    let output = &result.output;
+    result.observed_connection_epoch.is_none()
+        && output.exit_code == Some(0)
+        && !output.timed_out
+        && !output.stdout_truncated
+        && !output.stderr_truncated
+        && output.stdout.len() <= WSL_FIXTURE_OUTPUT_CAP
+        && output.stderr.len() <= WSL_FIXTURE_OUTPUT_CAP
+        && serde_json::from_slice::<WslFixtureOwner>(&output.stdout)
+            .is_ok_and(|owner| owner == *expected)
+}
+
+#[cfg(windows)]
+fn wsl_marker_probe_diagnostic(
+    (cwd, user, stdin): WslMarkerProbeRow,
+    result: &Result<HostCommandResult, CommandExecutionError>,
+    expected: &WslFixtureOwner,
+) -> String {
+    let row = format!("row={cwd:?}/{user:?}/{stdin:?}");
+    match result {
+        Ok(result) => format!(
+            "{row} {} epoch_present={} marker_matches={}",
+            wsl_prelude_diagnostic(WslPreludeStage::ReadOwner, &result.output),
+            result.observed_connection_epoch.is_some(),
+            wsl_marker_matches(result, expected),
+        ),
+        Err(error) => format!(
+            "{row} stage=ReadOwner dispatch_kind={:?} marker_matches=false",
+            error.kind,
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn wsl_require_owner_marker(
+    baseline: Result<HostCommandResult, CommandExecutionError>,
+    expected: &WslFixtureOwner,
+    mut probe: impl FnMut(
+        TasksWslProbeCwd,
+        TasksWslProbeUser,
+        TasksWslProbeStdin,
+    ) -> Result<HostCommandResult, CommandExecutionError>,
+) -> Result<(), String> {
+    if baseline
+        .as_ref()
+        .is_ok_and(|result| wsl_marker_matches(result, expected))
+    {
+        return Ok(());
+    }
+    // The first row is the original production launch, never a diagnostic retry.
+    let mut rows = vec![wsl_marker_probe_diagnostic(
+        WSL_MARKER_PROBE_ROWS[0],
+        &baseline,
+        expected,
+    )];
+    for &(cwd, user, stdin) in &WSL_MARKER_PROBE_ROWS[1..] {
+        rows.push(wsl_marker_probe_diagnostic(
+            (cwd, user, stdin),
+            &probe(cwd, user, stdin),
+            expected,
+        ));
+    }
+    Err(format!(
+        "Actions WSL pre-auth original ReadOwner baseline rejected\n{}",
+        rows.join("\n")
+    ))
+}
+
+#[cfg(windows)]
 #[derive(Clone)]
 struct WslFixture {
     source: ProjectExecutionSnapshot,
@@ -878,9 +1007,8 @@ struct WslFixture {
 #[cfg(windows)]
 impl WslFixture {
     fn open() -> Self {
-        assert_eq!(
-            std::env::var("GITHUB_ACTIONS").as_deref(),
-            Ok("true"),
+        assert!(
+            std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"),
             "Actions-only fixture"
         );
         let required =
@@ -904,13 +1032,15 @@ impl WslFixture {
             "invalid Actions commit identity"
         );
         let distro = required("MT_TEST_WSL_DISTRO");
-        assert_eq!(
-            distro,
-            format!("mt-tasks-{run_id}-{run_attempt}"),
+        assert!(
+            distro == format!("mt-tasks-{run_id}-{run_attempt}"),
             "refusing a non-owned distro"
         );
         let marker = required("MT_TEST_WSL_MARKER");
-        assert_eq!(marker, "/mini-term-fixture/owner.json");
+        assert!(
+            marker == "/mini-term-fixture/owner.json",
+            "refusing a non-fixture owner marker path"
+        );
         let gh_hash = required("MT_TEST_WSL_GH_SHA256");
         assert!(
             gh_hash.len() == 64
@@ -924,21 +1054,20 @@ impl WslFixture {
         let fixture = Self { source };
         // These bounded fixture commands read only the explicitly named distro.
         // No account API is called until both provenance and the executable match.
-        let output = fixture.pre_auth_command(WslPreludeStage::ReadOwner, "/bin/cat", &[&marker]);
-        let owner: WslFixtureOwner = serde_json::from_slice(&output.stdout)
-            .unwrap_or_else(|_| panic!("invalid WSL fixture owner marker"));
-        assert!(
-            owner
-                == WslFixtureOwner {
-                    schema: 1,
-                    kind: "mini-term-tasks-wsl".into(),
-                    run_id,
-                    run_attempt,
-                    repository,
-                    sha,
-                },
-            "WSL fixture owner marker mismatch"
-        );
+        let expected_owner = WslFixtureOwner {
+            schema: 1,
+            kind: "mini-term-tasks-wsl".into(),
+            run_id,
+            run_attempt,
+            repository,
+            sha,
+        };
+        wsl_require_owner_marker(
+            fixture.run_command("/bin/cat", &[&marker]),
+            &expected_owner,
+            |cwd, user, stdin| tasks_wsl_marker_probe(&fixture.source, cwd, user, stdin),
+        )
+        .unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
         for (stage, command, expected) in [
             (
                 WslPreludeStage::ResolveGh,
@@ -1154,6 +1283,181 @@ fn wsl_prelude_diagnostics_are_bounded_stage_specific_and_secret_safe() {
     let diagnostic = wsl_prelude_diagnostic(WslPreludeStage::ReadOwner, &output);
     assert!(diagnostic.contains("timed_out=true stdout_truncated=true stderr_truncated=true"));
     assert!(!diagnostic.contains("fixture_credential_"));
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_prelude_system_messages_require_exact_text_not_length() {
+    for (message, class) in [
+        (
+            "The system cannot find the file specified.",
+            "windows-file-not-found",
+        ),
+        (
+            "The system cannot find the path specified.",
+            "windows-path-not-found",
+        ),
+        ("The parameter is incorrect.", "windows-invalid-parameter"),
+    ] {
+        for prefix in ["", "\u{feff}"] {
+            let text = format!("{prefix}{message}\r\n");
+            assert_eq!(wsl_prelude_output_class(text.as_bytes()), class);
+            let bytes = text
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>();
+            assert_eq!(wsl_prelude_output_class(&bytes), class);
+            let output = CommandOutput {
+                stdout: bytes,
+                exit_code: Some(-1),
+                ..Default::default()
+            };
+            let diagnostic = wsl_prelude_diagnostic(WslPreludeStage::ReadOwner, &output);
+            assert!(diagnostic.contains(&format!("stdout_class={class}")));
+            assert!(!diagnostic.contains(message));
+        }
+        let decorated = format!("{message} fixture_credential_suffix");
+        assert_eq!(wsl_prelude_output_class(decorated.as_bytes()), "unclassified");
+    }
+    let unrelated = [b'x', 0].repeat(45);
+    assert_eq!(unrelated.len(), 90);
+    assert_eq!(wsl_prelude_output_class(&unrelated), "unclassified");
+}
+
+#[cfg(windows)]
+fn wsl_marker_test_inputs() -> (WslFixtureOwner, HostCommandResult) {
+    let stdout = br#"{"schema":1,"kind":"mini-term-tasks-wsl","run_id":"12345","run_attempt":"2","repository":"fixture/repository","sha":"1111111111111111111111111111111111111111"}"#.to_vec();
+    let expected = serde_json::from_slice(&stdout).unwrap();
+    (
+        expected,
+        HostCommandResult {
+            output: CommandOutput {
+                stdout,
+                exit_code: Some(0),
+                ..Default::default()
+            },
+            observed_connection_epoch: None,
+        },
+    )
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_marker_matrix_reuses_failed_baseline_without_success_fallback() {
+    let (expected, success) = wsl_marker_test_inputs();
+    let mut baseline = success.clone();
+    baseline.output.exit_code = Some(-1);
+    baseline.output.stdout = b"fixture_credential_stdout".to_vec();
+    baseline.output.stderr = b"fixture_credential_stderr".to_vec();
+    let mut probed = Vec::new();
+    let diagnostic = wsl_require_owner_marker(Ok(baseline), &expected, |cwd, user, stdin| {
+        probed.push((cwd, user, stdin));
+        Ok(success.clone())
+    })
+    .expect_err("alternate launch success must never replace a failed production baseline");
+    assert_eq!(probed.len(), 7);
+    for cwd in [TasksWslProbeCwd::Captured, TasksWslProbeCwd::Root] {
+        for user in [TasksWslProbeUser::Default, TasksWslProbeUser::Root] {
+            for stdin in [TasksWslProbeStdin::Null, TasksWslProbeStdin::ClosedPipe] {
+                let baseline = cwd == TasksWslProbeCwd::Captured
+                    && user == TasksWslProbeUser::Default
+                    && stdin == TasksWslProbeStdin::Null;
+                assert_eq!(
+                    probed.iter().filter(|row| **row == (cwd, user, stdin)).count(),
+                    if baseline { 0 } else { 1 }
+                );
+            }
+        }
+    }
+    assert_eq!(diagnostic.lines().count(), 9);
+    assert!(diagnostic.contains(
+        "row=Captured/Default/Null stage=ReadOwner exit=Some(-1) exit_hex=0xffffffff"
+    ));
+    assert_eq!(diagnostic.matches("marker_matches=true").count(), 7);
+    assert_eq!(diagnostic.matches("marker_matches=false").count(), 1);
+    assert!(!diagnostic.contains("fixture_credential_"));
+    assert!(!diagnostic.contains("fixture/repository"));
+    assert!(diagnostic.len() < 4096);
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_marker_matrix_does_not_probe_after_valid_owner() {
+    let (expected, success) = wsl_marker_test_inputs();
+    wsl_require_owner_marker(Ok(success), &expected, |_, _, _| {
+        panic!("a valid baseline must not start diagnostic launches")
+    })
+    .unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_marker_matrix_rejects_unowned_incomplete_and_dispatch_failures() {
+    let (expected, success) = wsl_marker_test_inputs();
+    let mut failures = Vec::new();
+    for (field, value) in [
+        ("schema", serde_json::json!(2)),
+        ("schema", serde_json::json!("1")),
+        ("kind", serde_json::json!("fixture_credential_wrong_kind")),
+        ("run_id", serde_json::json!("12346")),
+        ("run_attempt", serde_json::json!("3")),
+        ("repository", serde_json::json!("fixture_credential_repository")),
+        ("sha", serde_json::json!("fixture_credential_sha")),
+        ("unknown", serde_json::json!("fixture_credential_unknown")),
+    ] {
+        let mut marker: serde_json::Value = serde_json::from_slice(&success.output.stdout).unwrap();
+        marker[field] = value;
+        let mut invalid = success.clone();
+        invalid.output.stdout = serde_json::to_vec(&marker).unwrap();
+        failures.push(Ok(invalid));
+    }
+    let mut marker: serde_json::Value = serde_json::from_slice(&success.output.stdout).unwrap();
+    marker.as_object_mut().unwrap().remove("sha");
+    let mut invalid = success.clone();
+    invalid.output.stdout = serde_json::to_vec(&marker).unwrap();
+    failures.push(Ok(invalid));
+    for case in 0..9 {
+        let mut invalid = success.clone();
+        match case {
+            0 => invalid.output.exit_code = Some(-1),
+            1 => invalid.output.exit_code = None,
+            2 => invalid.output.timed_out = true,
+            3 => invalid.output.stdout_truncated = true,
+            4 => invalid.output.stderr_truncated = true,
+            5 => invalid.observed_connection_epoch = Some(1),
+            6 => invalid.output.stdout = vec![b'x'; WSL_FIXTURE_OUTPUT_CAP + 1],
+            7 => invalid.output.stderr = vec![b'x'; WSL_FIXTURE_OUTPUT_CAP + 1],
+            _ => invalid.output.stdout = b"fixture_credential_invalid_json".to_vec(),
+        }
+        failures.push(Ok(invalid));
+    }
+    for kind in [
+        CommandExecutionErrorKind::ProgramNotFound,
+        CommandExecutionErrorKind::Disconnected,
+        CommandExecutionErrorKind::Rejected,
+        CommandExecutionErrorKind::Io,
+    ] {
+        failures.push(Err(CommandExecutionError::new(
+            kind,
+            "fixture_credential_dispatch_error",
+        )));
+    }
+    for baseline in failures {
+        let mut probes = 0;
+        let diagnostic = wsl_require_owner_marker(baseline, &expected, |_, _, _| {
+            probes += 1;
+            Err(CommandExecutionError::new(
+                CommandExecutionErrorKind::Io,
+                "fixture_credential_probe_error",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(probes, 7);
+        assert_eq!(diagnostic.lines().count(), 9);
+        assert_eq!(diagnostic.matches("marker_matches=false").count(), 8);
+        assert!(!diagnostic.contains("fixture_credential_"));
+        assert!(diagnostic.len() < 4096);
+    }
 }
 
 #[cfg(windows)]

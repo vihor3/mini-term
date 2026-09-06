@@ -155,3 +155,44 @@ Both CI files and this source-review handoff are RELEASED to main for integratio
 and staging. Main owns the remaining tests/specs/run evidence. All unrelated
 dirty paths were preserved; no tests/executor/backend/domain/CLI/local source
 or other workflow was edited by this reviewer.
+
+## Windows Execution Host Module Addendum
+
+Status: bounded CI SOURCE REVIEW COMPLETE and RELEASED to main. This followup
+changes only `.github/workflows/ci.yml` and
+`.trellis/tasks/09-06-native-tasks-gh-accounts/ci-review.md`.
+
+- Loaded the assigned Tasks check.jsonl entries, PRD, design, implement plan,
+  release-staging contract, quality/package index and shared reuse guide.
+- Fixed the added Windows module command's zero-discovery gap: first list
+  `execution_host::` with the same locked package/bin/MSVC target, print the
+  listing, and fail unless it contains module test entries. The anchored match
+  accepts Windows line endings but not a Cargo summary or another module.
+  Discovery/build failure also fails the existing Bash step; no success override.
+- Retained main's execution command unchanged:
+  `cargo test --locked --target x86_64-pc-windows-msvc -p mt-app --bin mini-term --no-fail-fast execution_host::`.
+  No `--exact` is applied to this module prefix, and no `--ignored` is added.
+  All ordinary module tests, including Noether's new helper plan/guard tests
+  when integrated, remain selected rather than one hard-coded test inventory.
+- Source confirms `main.rs` declares `execution_host`, its ordinary tests live
+  in the inline `execution_host::tests` module, and the `mini-term` binary is
+  the relevant target. This review does not claim runner discovery/execution.
+- Existing Windows `tasks_account_executor`, `github_tasks`, account-config and
+  domain commands remain intact, including native process cleanup coverage.
+  Linux root `--workspace --all-targets` remains unchanged for native factoring
+  and Linux process cleanup. No other step, job, cache, setup or workflow changed.
+- The actual WSL gate still validates the same-run owned fixture and discovers
+  exactly one named ignored test before running it with
+  `--ignored --exact --test-threads=1`; its import, timeout and `always()` cleanup
+  remain separate. This module addition neither replaces that gate nor accepts
+  a passing diagnostic matrix as recovery of the originally failed baseline.
+- Noether retains execution_host/Tasks test/review ownership. Production Null
+  stdin, Job/no-window/suspend guards, exact-owned marker matrix and baseline
+  assertions were not edited here; their source handoff and actual WSL outcome
+  remain Noether/main's responsibility. No Agent or original dirty path touched.
+
+Verification: source/Git reads only. Tests/discovery, builds, metadata, lint,
+format, syntax, whitespace, fixtures, probes and app checks are UNRUN locally
+and remain GitHub Actions-only. Require the integrated exact-SHA Windows module
+listing/results plus the unchanged Tasks and actual WSL gates; no passing
+execution or native acceptance is claimed. No children, staging, commit or push.

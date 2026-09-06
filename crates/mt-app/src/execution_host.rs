@@ -418,6 +418,108 @@ pub fn execute_host_command(
     }
 }
 
+#[cfg(all(test, windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TasksWslProbeCwd {
+    Captured,
+    Root,
+}
+
+#[cfg(all(test, windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TasksWslProbeUser {
+    Default,
+    Root,
+}
+
+#[cfg(all(test, windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TasksWslProbeStdin {
+    Null,
+    ClosedPipe,
+}
+
+#[cfg(all(test, windows))]
+#[derive(Clone)]
+struct TasksWslProbeEnvironment {
+    actions: String,
+    run_id: String,
+    run_attempt: String,
+    distro: String,
+    marker: String,
+}
+
+#[cfg(all(test, windows))]
+fn plan_tasks_wsl_marker_probe(
+    snapshot: &ProjectExecutionSnapshot,
+    environment: &TasksWslProbeEnvironment,
+    cwd: TasksWslProbeCwd,
+    user: TasksWslProbeUser,
+    stdin: TasksWslProbeStdin,
+) -> Result<(PlannedHostCommand, ProcessStdin), CommandExecutionError> {
+    let owned_distro = format!("mt-tasks-{}-{}", environment.run_id, environment.run_attempt);
+    if environment.actions != "true"
+        || [&environment.run_id, &environment.run_attempt]
+            .iter()
+            .any(|value| value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()))
+        || environment.distro != owned_distro
+        || !matches!(&snapshot.backend, ExecutionBackend::Wsl { distro } if *distro == owned_distro)
+        || environment.marker != "/mini-term-fixture/owner.json"
+        || snapshot.canonical_path != "/mini-term-fixture"
+        || snapshot.root_source_path != "/mini-term-fixture"
+    {
+        return Err(command_error(
+            CommandExecutionErrorKind::Rejected,
+            "Tasks WSL marker probe requires the owned Actions fixture",
+        ));
+    }
+
+    let mut source = snapshot.clone();
+    if cwd == TasksWslProbeCwd::Root {
+        source.canonical_path = "/".into();
+    }
+    let mut plan = plan_host_command(
+        &source,
+        &CommandPlan::new("/bin/cat", ["/mini-term-fixture/owner.json"]),
+    )?;
+    if user == TasksWslProbeUser::Root {
+        let PlannedHostCommand::Process { args, .. } = &mut plan else {
+            unreachable!("owned WSL marker planning must produce a process")
+        };
+        drop(args.splice(2..2, ["--user".into(), "root".into()]));
+    }
+    let stdin = match stdin {
+        TasksWslProbeStdin::Null => ProcessStdin::Null,
+        TasksWslProbeStdin::ClosedPipe => ProcessStdin::ClosedPipe,
+    };
+    Ok((plan, stdin))
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn tasks_wsl_marker_probe(
+    snapshot: &ProjectExecutionSnapshot,
+    cwd: TasksWslProbeCwd,
+    user: TasksWslProbeUser,
+    stdin: TasksWslProbeStdin,
+) -> Result<HostCommandResult, CommandExecutionError> {
+    let environment = TasksWslProbeEnvironment {
+        actions: std::env::var("GITHUB_ACTIONS").unwrap_or_default(),
+        run_id: std::env::var("GITHUB_RUN_ID").unwrap_or_default(),
+        run_attempt: std::env::var("GITHUB_RUN_ATTEMPT").unwrap_or_default(),
+        distro: std::env::var("MT_TEST_WSL_DISTRO").unwrap_or_default(),
+        marker: std::env::var("MT_TEST_WSL_MARKER").unwrap_or_default(),
+    };
+    let (plan, stdin) = plan_tasks_wsl_marker_probe(snapshot, &environment, cwd, user, stdin)?;
+    let PlannedHostCommand::Process { program, args, cwd } = plan else {
+        unreachable!("owned WSL marker planning must produce a process")
+    };
+    let output = run_process_with_stdin(&program, &args, cwd, Duration::from_secs(5), 4096, stdin)?;
+    Ok(HostCommandResult {
+        output,
+        observed_connection_epoch: None,
+    })
+}
+
 pub fn serialize_posix_argv<'a>(
     argv: impl IntoIterator<Item = &'a str>,
 ) -> Result<String, CommandExecutionError> {
@@ -830,6 +932,13 @@ fn take_child_pipes(
     Ok(ChildPipes { stdout, stderr })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessStdin {
+    Null,
+    #[cfg(all(test, windows))]
+    ClosedPipe,
+}
+
 fn run_process(
     program: &str,
     args: &[String],
@@ -837,10 +946,25 @@ fn run_process(
     timeout: Duration,
     output_cap: usize,
 ) -> Result<CommandOutput, CommandExecutionError> {
+    run_process_with_stdin(program, args, cwd, timeout, output_cap, ProcessStdin::Null)
+}
+
+fn run_process_with_stdin(
+    program: &str,
+    args: &[String],
+    cwd: Option<PathBuf>,
+    timeout: Duration,
+    output_cap: usize,
+    stdin: ProcessStdin,
+) -> Result<CommandOutput, CommandExecutionError> {
     let mut command = Command::new(program);
     command
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(match stdin {
+            ProcessStdin::Null => Stdio::null(),
+            #[cfg(all(test, windows))]
+            ProcessStdin::ClosedPipe => Stdio::piped(),
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(cwd) = cwd {
@@ -861,6 +985,10 @@ fn run_process(
             &mut process_tree,
             &mut child,
         ));
+    }
+    #[cfg(all(test, windows))]
+    if stdin == ProcessStdin::ClosedPipe {
+        drop(child.stdin.take());
     }
 
     let ChildPipes { stdout, stderr } = take_child_pipes(&mut child, &mut process_tree)?;
@@ -1167,6 +1295,147 @@ mod tests {
                 cwd: None,
             }
         );
+    }
+
+    #[cfg(windows)]
+    fn tasks_wsl_probe_inputs() -> (ProjectExecutionSnapshot, TasksWslProbeEnvironment) {
+        let environment = TasksWslProbeEnvironment {
+            actions: "true".into(),
+            run_id: "12345".into(),
+            run_attempt: "2".into(),
+            distro: "mt-tasks-12345-2".into(),
+            marker: "/mini-term-fixture/owner.json".into(),
+        };
+        let mut source = snapshot(
+            ExecutionBackend::Wsl {
+                distro: environment.distro.clone(),
+            },
+            "/mini-term-fixture",
+        );
+        source.root_source_path = source.canonical_path.clone();
+        (source, environment)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tasks_wsl_marker_probe_plans_are_fixed_and_match_production_baseline() {
+        let (source, environment) = tasks_wsl_probe_inputs();
+        let original = source.source_signature();
+        let (baseline, stdin) = plan_tasks_wsl_marker_probe(
+            &source,
+            &environment,
+            TasksWslProbeCwd::Captured,
+            TasksWslProbeUser::Default,
+            TasksWslProbeStdin::Null,
+        )
+        .unwrap();
+        assert_eq!(stdin, ProcessStdin::Null);
+        assert_eq!(
+            baseline,
+            plan_host_command(
+                &source,
+                &CommandPlan::new("/bin/cat", ["/mini-term-fixture/owner.json"]),
+            )
+            .unwrap()
+        );
+
+        for cwd in [TasksWslProbeCwd::Captured, TasksWslProbeCwd::Root] {
+            for user in [TasksWslProbeUser::Default, TasksWslProbeUser::Root] {
+                for stdin in [TasksWslProbeStdin::Null, TasksWslProbeStdin::ClosedPipe] {
+                    let (plan, process_stdin) =
+                        plan_tasks_wsl_marker_probe(&source, &environment, cwd, user, stdin).unwrap();
+                    let mut args = vec!["--distribution", "mt-tasks-12345-2"];
+                    if user == TasksWslProbeUser::Root {
+                        args.extend(["--user", "root"]);
+                    }
+                    args.extend([
+                        "--cd",
+                        if cwd == TasksWslProbeCwd::Captured {
+                            "/mini-term-fixture"
+                        } else {
+                            "/"
+                        },
+                        "--exec",
+                        "/bin/cat",
+                        "/mini-term-fixture/owner.json",
+                    ]);
+                    assert_eq!(
+                        plan,
+                        PlannedHostCommand::Process {
+                            program: "wsl.exe".into(),
+                            args: args.into_iter().map(str::to_string).collect(),
+                            cwd: None,
+                        }
+                    );
+                    assert_eq!(
+                        process_stdin,
+                        if stdin == TasksWslProbeStdin::Null {
+                            ProcessStdin::Null
+                        } else {
+                            ProcessStdin::ClosedPipe
+                        }
+                    );
+                    assert_eq!(source.source_signature(), original);
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tasks_wsl_marker_probe_rejects_unowned_launch_inputs() {
+        let (source, environment) = tasks_wsl_probe_inputs();
+        let reject = |source: &ProjectExecutionSnapshot, environment: &TasksWslProbeEnvironment| {
+            for cwd in [TasksWslProbeCwd::Captured, TasksWslProbeCwd::Root] {
+                for user in [TasksWslProbeUser::Default, TasksWslProbeUser::Root] {
+                    for stdin in [TasksWslProbeStdin::Null, TasksWslProbeStdin::ClosedPipe] {
+                        let error =
+                            plan_tasks_wsl_marker_probe(source, environment, cwd, user, stdin)
+                                .expect_err("unowned marker probe must be rejected before dispatch");
+                        assert_eq!(error.kind, CommandExecutionErrorKind::Rejected);
+                        assert_eq!(
+                            error.message,
+                            "Tasks WSL marker probe requires the owned Actions fixture"
+                        );
+                    }
+                }
+            }
+        };
+        for field in 0..5 {
+            for value in ["", "unowned-synthetic-secret", "123/2", "\0"] {
+                let mut invalid = environment.clone();
+                *match field {
+                    0 => &mut invalid.actions,
+                    1 => &mut invalid.run_id,
+                    2 => &mut invalid.run_attempt,
+                    3 => &mut invalid.distro,
+                    _ => &mut invalid.marker,
+                } = value.into();
+                reject(&source, &invalid);
+            }
+        }
+        for (run_id, run_attempt) in [("12346", "2"), ("12345", "3")] {
+            let mut invalid = environment.clone();
+            invalid.run_id = run_id.into();
+            invalid.run_attempt = run_attempt.into();
+            invalid.distro = format!("mt-tasks-{run_id}-{run_attempt}");
+            reject(&source, &invalid);
+        }
+        let mut invalid = source.clone();
+        invalid.backend = ExecutionBackend::Local;
+        reject(&invalid, &environment);
+        invalid.backend = ExecutionBackend::Wsl {
+            distro: "Ubuntu".into(),
+        };
+        reject(&invalid, &environment);
+        for path in ["/", "/mini-term-fixture/cases/1", "/mini-term-fixture/../home"] {
+            let mut invalid = source.clone();
+            invalid.canonical_path = path.into();
+            reject(&invalid, &environment);
+            let mut invalid = source.clone();
+            invalid.root_source_path = path.into();
+            reject(&invalid, &environment);
+        }
     }
 
     #[test]

@@ -326,3 +326,67 @@ Wrong: accept any available WSL distro and infer a test ran from Cargo exit zero
 
 Correct: validate same-run ownership and fixture bytes, import a unique guest,
 require exact test discovery and execution, then clean only that recorded guest.
+
+## Scenario: WSL Marker Launch Diagnostics
+
+### 1. Scope / Trigger
+
+An Actions-owned WSL fixture may import successfully but fail the production
+ReadOwner launch before any account request. Diagnose that boundary without
+changing production credentials, stdin behavior or process cleanup guarantees.
+
+### 2. Signatures
+
+Windows test builds alone expose `tasks_wsl_marker_probe(snapshot, cwd, user,
+stdin) -> Result<HostCommandResult, CommandExecutionError>`. The selectors are
+`TasksWslProbeCwd::{Captured, Root}`, `TasksWslProbeUser::{Default, Root}` and
+`TasksWslProbeStdin::{Null, ClosedPipe}`. Private `run_process` retains its
+existing signature and production Null selection; the factored runner has no
+production ClosedPipe variant.
+
+### 3. Contracts
+
+- Require Actions, numeric run/attempt, the matching `mt-tasks-<run>-<attempt>`
+  distro, exact marker path and captured `/mini-term-fixture` source. The helper
+  runs only `/bin/cat /mini-term-fixture/owner.json`; it accepts no arbitrary
+  command, environment map, credential or alternate marker.
+- Keep suspended creation, strict Job attachment, no-window, bounded output,
+  timeouts and cleanup paths. A diagnostic pipe writer closes after attachment;
+  no Job bypass or breakaway flag is permitted.
+- Reuse the original failed baseline and collect seven alternative rows for
+  the three binary selectors. Each launch is bounded to five seconds and 4096
+  bytes per stream. Baseline success starts no diagnostic launch.
+- Log only static row/stage/error classes, numeric status, capture flags and
+  typed `marker_matches`. Never print raw output, marker JSON, argv, environment
+  or exception text. Compare system-message classes by text, not output length.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Foreign source, marker or run ownership | Reject before dispatch |
+| Original complete marker matches exact owner | Continue ordinary pre-auth checks |
+| Original fails, every alternative succeeds | Still fail original baseline |
+| Wrong/partial/malformed marker or capture | Report false match, never account consent |
+| Any diagnostic launch fails | Record its static failure and retain baseline rejection |
+
+### 5. Good / Base / Bad
+
+Good: identify a launch-condition difference through the same guarded runner.
+Base: report unclassified output without copying it to logs. Bad: adopt a
+successful alternate row as production recovery or infer the cause from bytes.
+
+### 6. Tests Required
+
+Windows `execution_host::` discovery must be nonempty and its ordinary tests
+must execute. Cover fixed argv, original-snapshot preservation, all selector
+combinations and rejection before launch. Tasks matrix tests assert baseline
+reuse, seven unique alternatives, no fallback, zero probes after success, exact
+owner/completeness checks and secret-safe diagnostics. Preserve native process
+cleanup and actual WSL gates; all execution remains Actions-only.
+
+### 7. Wrong vs Correct
+
+Wrong: return success when the explicit-root or closed-pipe diagnostic works.
+Correct: fail the original path, record the bounded difference, and require a
+separately reviewed production or fixture fix with fresh Actions evidence.

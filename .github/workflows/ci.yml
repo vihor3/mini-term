@@ -326,6 +326,17 @@ jobs:
       - name: Run Tasks account isolation regressions
         shell: bash
         run: |
+          execution_host_tests=$(cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-app --bin mini-term --no-fail-fast \
+            execution_host:: -- --list)
+          printf '%s\n' "$execution_host_tests"
+          if [ -z "$(printf '%s\n' "$execution_host_tests" | sed -n '/^execution_host::.*: test[[:space:]]*$/p')" ]; then
+            printf 'Expected execution_host module tests to be discovered\n' >&2
+            exit 1
+          fi
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-app --bin mini-term --no-fail-fast \
+            execution_host::
           cargo test --locked --target x86_64-pc-windows-msvc \
             -p mt-app --bin mini-term --no-fail-fast \
             tasks_account_executor
