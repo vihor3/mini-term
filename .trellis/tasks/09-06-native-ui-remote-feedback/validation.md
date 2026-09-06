@@ -2,48 +2,45 @@
 
 ## Latest Completed Candidate
 
-- Product commit: `35fe65367c122e011f12154a5da2e36530dda575`.
-- CI: https://github.com/vihor3/mini-term/actions/runs/34026742549
-- Windows Package: https://github.com/vihor3/mini-term/actions/runs/34026742604
-- State: Linux/Windows/package SUCCESS; actual WSL FAILED at LookupCancel
-  after early transport exit. No full WSL correction is validated.
+- Product commit: `f4ee0f9aa954142a7552e458760d9254e17701b7`.
+- CI: https://github.com/vihor3/mini-term/actions/runs/34032734882
+- Windows Package: https://github.com/vihor3/mini-term/actions/runs/34032734897
+- State: Linux/Windows/actual WSL1/package SUCCESS on this exact product commit.
 - All five implementation slices are independently source-reviewed. All
   execution, including diagnostics, formatting and fixtures, remains Actions-only.
 
-Subsequent causal-diagnostic follow-ups are tracked in `progress.md`; their
-unrun/running/failed gates do not inherit a pass from this completed candidate.
+Actual WSL job101485351593 executed the exact ignored gate once:1 passed,
+0 failed,0 ignored,149.54s. All original owner/marker/hash/cwd/literal-argv,
+account isolation, privacy, lifecycle and descendant assertions passed. The
+eight appended client-first rows also completed: registered/pre-project normal
+completion and timeout, plus private data/lookup cancellation and timeout, each
+with a proven overlapping peer that survived retirement and finished normally.
+No failure-only timing contrast ran. Owned mt-tasks-34032734882-1 cleanup passed
+at12:33:19Z. This verifies the production correction on the isolated WSL1 fixture.
 
-Current WSL job101469109594 discovered and executed exactly one test in 25.72 s.
-It passed marker/shim/hash, hostile captured cwd, literal/empty argument counts
-on project/pre-project routes, account enumeration/selected identity/secret
-rejection and error cases by source order. DataTimeout, DataCancel and LookupTimeout
-passed their result and descendant assertions. LookupCancel then returned
-HostHelperUnavailable at119686us before cancellation. First readiness retirement
-103113-103145us had Count(8),
-Private NotInJob/Alive and Readiness InJob/Exited. Private exit-1 was observed
-113517us with no latched stop or cleanup acknowledgement. Classification remained
-Unknown. The second probe became ready and cancelled at236160us. The failed
-case's descendant assertion did not run; exact owned distro cleanup succeeded.
-The separate fixed public producer also exited-1 with start but no end marker;
-its complete bounded public preview reported that the WSL instance terminated.
-The own-marker probe exited0 at103400us. This confirms reproduction without gh
-in the post-failure fixture, not yet Job-retirement causality or WSL2 impact.
-Linux job101468976555 is entirely SUCCESS, including mt-ai244, mt-app1219,
-both new object-only protocol tests, malformed-array acknowledgement, all five
-individually executed actual SSH fixtures, sidecars and whitespace.
-Windows job101468976679 is entirely SUCCESS: onboarding 82/3, Files 49/14/5/1,
-execution-host 19, Tasks executor 40 (one separate WSL test ignored), Tasks
-app/config/domain 24/2/31, Git domain/app 24/6/124, terminal-host library 31.
-Object-only/root-observer/catalogue tests and the new exact rendering-flag
-regression explicitly passed where enabled. All eight public-comparison trigger,
-ownership, join and privacy/bounds tests explicitly passed. The later causal
-retirement-timing contrast is being authored and is not validated by this run. Native acceptance
-remains open; previous runs passing a later lifecycle do not make this run pass.
+Linux job101485217634 is entirely SUCCESS: format, dictionaries/staging, locked
+graphs, compilation, Clippy, full tests (including mt-ai244 and mt-app1223), all
+five individually discovered/run actual SSH fixtures, sidecars and whitespace.
+Those five fixtures were ignored only in the ordinary root suite; each then
+ran separately with1 pass and0 ignored, covering Git, Tasks, Files and browsing.
 
-Package job101468961657 is SUCCESS. Artifact9987655617 is
-`Mini-Term_1.2.2-ci.64_windows-x64`; no local launch or verification occurred.
-Artifact: https://github.com/vihor3/mini-term/actions/runs/34026742604/artifacts/9987655617
-This artifact does not establish successful actual WSL or native UI acceptance.
+Windows job101485217555 is entirely SUCCESS: onboarding82/3, Files49/14/5/1,
+execution-host28, Tasks executor49 plus1 separately executed WSL gate, Tasks
+app/config/domain24/2/31, Git24/6/126 and terminal-host31. All eight new policy,
+root-ownership and fixture tests explicitly passed, as did the eighteen existing
+timing/public regressions and both Git launcher-loss/retained-lease regressions.
+
+Package job101485197913 is SUCCESS. Artifact9989567203 is
+`Mini-Term_1.2.2-ci.67_windows-x64`:
+https://github.com/vihor3/mini-term/actions/runs/34032734897/artifacts/9989567203
+Downloaded only to `/home/leo/.cache/mini-term/artifacts/f4ee0f9-integration`.
+The passed Actions manifest records installer18,851,455 bytes and SHA256
+`77c5fcb8c8ba194760ca31a5181fef753fcd07504f5a54bb666d53d4f6fd25a3`.
+No local installer/app launch, hash check or other automated verification ran.
+
+WSL2, enabled interop, nested Jobs, real shared-distro behavior and the native
+acceptance checklist below remain unverified. Chronological failure evidence,
+the public timing contrast and all source/review handoffs remain in progress.md.
 
 ## Proven Predecessor
 
@@ -67,8 +64,9 @@ At `0e141f01596787b66e3a9c90f5c94ff3e1708236`, CI34009374061:
   payload verification. Downloaded only, with no local launch or verification,
   to `/home/leo/.cache/mini-term/artifacts/0e141f0-integration`.
 
-This predecessor is Windows/SSH pre-acceptance evidence, not a passing current
-WSL correction. Chronological runs, fixes and artifact hashes are in `progress.md`.
+This predecessor was Windows/SSH pre-acceptance evidence only; the current WSL
+correction is validated by the exact latest candidate above. Chronological runs,
+fixes and artifact hashes are in `progress.md`.
 
 ## Native Acceptance: Open
 

@@ -1746,3 +1746,42 @@ owned import and entered test compilation. Main will now push the formatter
 successor so its exact source receives the full Linux/Windows/WSL gates,
 then confirm the superseded job's owned cleanup. No df2bae6 actual-test result
 or production success is claimed at this point.
+
+Formatter successor f4ee0f9aa954142a7552e458760d9254e17701b7 was pushed only
+after df2bae6's owned import explicitly succeeded. Superseded WSL101484913601
+was cancelled during compilation, before any actual test result; its cleanup
+removed only mt-tasks-34032592031-1 successfully12:19:06Z. Windows101484792500
+and Package34032592140 cancelled without a pass claim. New CI34032734882 and
+Package34032734897 are running. Rootfs101485217378 succeeded; Linux101485217634
+passed formatting and is checking, Windows101485217555 is checking, and actual
+WSL101485351593 has imported and entered the test step. No local automated
+verification occurred. Current product/source evidence must come from this run.
+
+Actual WSL101485351593 on f4ee0f9 completed SUCCESS. The unchanged exact ignored
+gate executed once:1 passed,0 failed,0 ignored,149.54s. Its full original
+owner/cwd/argv/account/privacy/lifecycle/descendant assertions and all eight
+appended client-first peer rows therefore completed. No failure-only A/B ran.
+Cleanup removed only mt-tasks-34032734882-1 successfully12:33:19Z. Main read the
+exact completed job log; this is the first actual WSL1 production pass for the
+retirement correction, not WSL2 or native UI acceptance. Linux/Windows ordinary
+checks and package are still running; full final validation remains pending.
+
+All f4ee0f9 workflows/jobs completed SUCCESS. Linux101485217634 passed full
+format/dictionary/staging/locked-graph/compile/Clippy/tests and whitespace gates,
+including mt-ai244, mt-app1223 and all five separately executed real SSH fixtures
+(each1 pass/0ignored), plus sidecars. Windows101485217555 passed onboarding82/3,
+Files49/14/5/1, execution-host28, Tasks executor49 plus1separate actualWSL,
+Tasksapp/config/domain24/2/31, Git24/6/126 and terminal-host31. The eight new
+policy/root/fixture units, eighteen prior timing/public regressions and two Git
+receipt/lease regressions passed. No empty binary target is counted as coverage.
+
+Package101485197913/run34032734897 artifact9989567203 is
+Mini-Term_1.2.2-ci.67_windows-x64. Downloaded only to
+`/home/leo/.cache/mini-term/artifacts/f4ee0f9-integration`; its passed Actions
+manifest matches f4ee0f9 and records installer18,851,455 bytes / SHA256
+`77c5fcb8c8ba194760ca31a5181fef753fcd07504f5a54bb666d53d4f6fd25a3`.
+No local hash/installer/app/fixture/compile/check occurred. Main updated the
+latest completed validation candidate and recorded the post-fix analysis in
+the Git-child research note. The WSL1 background-command issue is validated;
+WSL2/interop/nested Jobs/shared clients and all user-observed native UI acceptance
+remain open. Parent/children are not archived or broadly marked complete.

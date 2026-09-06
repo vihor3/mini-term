@@ -239,3 +239,62 @@ safety for user interop. No such production flag or guarantee is approved here.
   No flag experiment or production correction is included. Selected diagnostic
   is unimplemented/unrun here. Report is released and frozen; no further research
   or CI wait is required for Main's narrow dispatch.
+
+## Main Post-Fix Analysis: WSL Client Ownership
+
+This addendum follows the historical research release above. Main read the
+completed Actions logs: the f1fde4d timing contrast supported retirement
+interference, and the production correction on f4ee0f9 passed the exact actual
+WSL1 gate, including every original assertion and eight appended peer rows.
+It ran once in149.54s and cleaned its owned distro. Final Linux/Windows CI,
+all five actual SSH fixtures and packaging also passed on that product commit.
+
+### 1. Root Cause Category
+
+- E, Implicit Assumption: a command's Windows descendants were treated as
+  exclusively command-owned, although WSL can involve shared instance lifetime.
+- B, Cross-Layer Contract: owning/retiring the Windows client is not equivalent
+  to owning or proving termination of Linux guest work.
+- D, Test Coverage Gap: isolated command/root checks do not establish that
+  another concurrent WSL client survives retirement. Root nonmembership also
+  cannot rule out indirect interference through shared infrastructure.
+
+### 2. Why Earlier Changes Were Insufficient
+
+Captured-directory and empty-launcher-argument corrections addressed separate
+observed entry failures, not concurrent retirement. Native error rendering and
+root-membership observations were useful bounded evidence but did not isolate
+cleanup timing. A fixed non-credential producer and a single-probe timing
+contrast separated normal client exit from final Job retirement without logging
+private bytes, serializing production or substituting successful diagnostics.
+
+### 3. Prevention Mechanisms
+
+| Priority | Mechanism | Action / Status |
+| --- | --- | --- |
+| P0 | Typed ownership | Strict native default; explicit WSL policy in both ordinary entries and private capture, committed |
+| P0 | Concurrent integration coverage | Original actual WSL assertions plus eight client-first/overlap/peer-survival rows, passed on f4ee0f9 |
+| P0 | Honest uncertain writes | Known WSL launcher loss retains exact Git lease after reconciliation; exact-candidate Linux/Windows regressions passed |
+| P0 | Private cleanup authority | Preserve Linux group cleanup and strict acknowledgement; original and appended actual WSL checks passed |
+| P1 | Compatibility limits | WSL2, interop, nested Jobs and real native acceptance remain separately open |
+
+### 4. Systematic Expansion
+
+The registered, pre-project and private background paths were audited together.
+Interactive PTY and SSH behavior was deliberately not expanded. Silent breakaway
+does not selectively exempt infrastructure; escaped relay/interop descendants
+remain an explicit limitation. No new ordinary guest-stop acknowledgement,
+global distro lifetime manager, retry or universal compatibility claim follows.
+
+### 5. Knowledge Capture
+
+- Updated and committed git-host-contract.md for typed client ownership and
+  launcher-loss uncertainty, plus github-project-tasks-contract.md for private
+  cleanup boundaries. The release contract retains the narrow diagnostic rules.
+- Captured exact fixture budgets and cold-start/OS-scheduling limits in the
+  production contract and wsl-containment-fixtures.md.
+- Kept unrelated dirty shared guides untouched. This native application has no
+  matching Trellis template-source tree to synchronize; no template was invented.
+
+Evidence: [timing contrast](https://github.com/vihor3/mini-term/actions/runs/34030386551/job/101478843292)
+and [actual production WSL1 gate](https://github.com/vihor3/mini-term/actions/runs/34032734882/job/101485351593).
