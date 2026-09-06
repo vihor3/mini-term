@@ -10,7 +10,8 @@ use super::*;
 #[cfg(windows)]
 use crate::execution_host::{
     HostCommandResult, TasksWslProbeCwd, TasksWslProbeStdin, TasksWslProbeUser,
-    TasksWslRetirementTrace, tasks_wsl_marker_probe, tasks_wsl_retirement_trace,
+    TasksWslRetirementTrace, TasksWslRootRole, TasksWslRoots, tasks_wsl_marker_probe,
+    tasks_wsl_retirement_trace, tasks_wsl_root_scope,
 };
 #[cfg(windows)]
 use mt_github::{CommandExecutionError, CommandExecutionErrorKind};
@@ -1901,6 +1902,7 @@ impl WslFixture {
         &self,
         cancellation: AccountCancellation,
         started: Instant,
+        roots: TasksWslRoots,
     ) -> std::thread::JoinHandle<WslReadinessObservation> {
         let fixture = self.clone();
         std::thread::spawn(move || {
@@ -1908,8 +1910,11 @@ impl WslFixture {
             let mut observation = WslReadinessObservation::default();
             loop {
                 let probe_started_us = started.elapsed().as_micros();
-                let (ready, retirement) =
-                    tasks_wsl_retirement_trace(started, || fixture.exists("ready"));
+                let (ready, retirement) = tasks_wsl_root_scope(
+                    &roots,
+                    TasksWslRootRole::Readiness,
+                    || tasks_wsl_retirement_trace(started, || fixture.exists("ready")),
+                );
                 let probe_returned_us = started.elapsed().as_micros();
                 observation.record_probe(ready, probe_started_us, probe_returned_us, retirement);
                 if ready || Instant::now() >= deadline {
@@ -1939,12 +1944,25 @@ impl WslFixture {
 #[cfg(windows)]
 #[test]
 fn wsl_readiness_diagnostics_retain_earlier_false_probes_in_fixed_storage() {
-    use crate::execution_host::{TasksWslActiveProcesses, TasksWslRetirement};
+    use crate::execution_host::{
+        TasksWslActiveProcesses, TasksWslRetirement, TasksWslRootLiveness,
+        TasksWslRootMembership, TasksWslRootState, TasksWslRootsObservation,
+    };
 
     let first = TasksWslRetirement {
         before_us: 2,
         after_us: 3,
         active_processes: TasksWslActiveProcesses::Count(1),
+        roots: Some(TasksWslRootsObservation::Roots {
+            private: TasksWslRootState {
+                membership: TasksWslRootMembership::NotInJob,
+                liveness: TasksWslRootLiveness::Alive,
+            },
+            readiness: TasksWslRootState {
+                membership: TasksWslRootMembership::InJob,
+                liveness: TasksWslRootLiveness::Exited,
+            },
+        }),
         succeeded: true,
     };
     let retirement = TasksWslRetirementTrace {
@@ -1975,6 +1993,8 @@ fn wsl_readiness_diagnostics_retain_earlier_false_probes_in_fixed_storage() {
             .contains("probe_started_us=20 probe_returned_us=25")
     );
     assert!(observation.describe().contains("cancel_us=30"));
+    assert!(observation.describe().contains("private: TasksWslRootState { membership: NotInJob, liveness: Alive }"));
+    assert!(observation.describe().contains("readiness: TasksWslRootState { membership: InJob, liveness: Exited }"));
 
     observation.probe_count = u32::MAX;
     observation.record_probe(
@@ -2561,10 +2581,13 @@ fn tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host() {
         )
         .unwrap();
         // Capture and the concurrent guarded readiness command share one clock.
+        let roots = TasksWslRoots::default();
         let started = Instant::now();
-        let canceller = cancel.then(|| case.cancel_after_start(cancellation, started));
-        let (result, diagnostics) = process::trace_capture(started, || {
-            execute_selected_account(&case.source, &selected("github.com", login), &bounded)
+        let canceller = cancel.then(|| case.cancel_after_start(cancellation, started, roots.clone()));
+        let (result, diagnostics) = tasks_wsl_root_scope(&roots, TasksWslRootRole::Private, || {
+            process::trace_capture(started, || {
+                execute_selected_account(&case.source, &selected("github.com", login), &bounded)
+            })
         });
         let returned_us = started.elapsed().as_micros();
         let cancelled_at_return = bounded.cancellation().is_cancelled();

@@ -59,7 +59,36 @@ struct PrivateCapture {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativeWindowsMessage {
     Unknown,
-    Win32(u32),
+    SystemMessageId(u32),
+}
+
+#[cfg(all(test, windows))]
+const WINDOWS_MESSAGE_CANDIDATE_LIMIT: usize = 4096;
+
+#[cfg(all(test, windows))]
+const WINDOWS_SYSTEM_HRESULTS: &[u32] = {
+    use windows::Win32::Foundation as win;
+
+    &[
+        win::E_NOTIMPL.0 as u32,
+        win::E_NOINTERFACE.0 as u32,
+        win::E_POINTER.0 as u32,
+        win::E_ABORT.0 as u32,
+        win::E_FAIL.0 as u32,
+        win::E_UNEXPECTED.0 as u32,
+        win::E_ACCESSDENIED.0 as u32,
+        win::E_HANDLE.0 as u32,
+        win::E_OUTOFMEMORY.0 as u32,
+        win::E_INVALIDARG.0 as u32,
+    ]
+};
+
+#[cfg(all(test, windows))]
+fn windows_system_message_ids() -> impl Iterator<Item = u32> {
+    (0..=1999)
+        .chain(10000..=11004)
+        .chain(WINDOWS_SYSTEM_HRESULTS.iter().copied())
+        .take(WINDOWS_MESSAGE_CANDIDATE_LIMIT)
 }
 
 #[cfg(all(test, windows))]
@@ -166,11 +195,11 @@ fn native_windows_message(bytes: &[u8]) -> NativeWindowsMessage {
         .strip_prefix('\u{feff}')
         .unwrap_or(&text)
         .trim_matches(['\r', '\n']);
-    for &code in WINDOWS_TRANSPORT_ERROR_CODES {
+    for code in windows_system_message_ids() {
         if windows_system_message(code)
             .is_some_and(|message| message.trim_matches(['\r', '\n']) == text)
         {
-            return NativeWindowsMessage::Win32(code);
+            return NativeWindowsMessage::SystemMessageId(code);
         }
     }
     NativeWindowsMessage::Unknown
@@ -694,6 +723,8 @@ fn capture(
         let _ = owned.cleanup();
         return Err(AccountExecutionError::CleanupFailed);
     }
+    #[cfg(all(test, windows))]
+    crate::execution_host::register_tasks_wsl_root(&owned.child);
     #[cfg(test)]
     observe_capture(
         CaptureStage::Attached,
@@ -951,8 +982,25 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn native_windows_message_catalogue_is_fixed_bounded_and_ordered() {
+        let ids = windows_system_message_ids().collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2000 + 1005 + WINDOWS_SYSTEM_HRESULTS.len());
+        assert!(ids.len() <= WINDOWS_MESSAGE_CANDIDATE_LIMIT);
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(&ids[..2000], &(0..=1999).collect::<Vec<_>>());
+        assert_eq!(&ids[2000..3005], &(10000..=11004).collect::<Vec<_>>());
+        assert_eq!(&ids[3005..], WINDOWS_SYSTEM_HRESULTS);
+        assert!(WINDOWS_TRANSPORT_ERROR_CODES.iter().all(|code| ids.contains(code)));
+        assert!(ids.contains(&windows::Win32::Foundation::ERROR_NO_SYSTEM_RESOURCES.0));
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn native_windows_message_matches_complete_system_messages_in_utf8_and_utf16() {
-        for &code in WINDOWS_TRANSPORT_ERROR_CODES {
+        use windows::Win32::Foundation::ERROR_NO_SYSTEM_RESOURCES;
+
+        // Representative original messages and one outside the old 26-ID list.
+        for code in [2, 109, 1726, 10054, ERROR_NO_SYSTEM_RESOURCES.0] {
             let message = windows_system_message(code)
                 .unwrap_or_else(|| panic!("allowlisted system message unavailable: code={code}"));
             let utf16 = std::iter::once(0xfeff)
@@ -967,7 +1015,7 @@ mod tests {
             ] {
                 assert_eq!(
                     native_windows_message(&bytes),
-                    NativeWindowsMessage::Win32(code)
+                    NativeWindowsMessage::SystemMessageId(code)
                 );
             }
         }
@@ -990,6 +1038,8 @@ mod tests {
             vec![0xff],
             vec![0xff, 0xfe, 0x20],
             vec![0xff, 0xfe, 0x00, 0xd8],
+            format!(" {message}").into_bytes(),
+            format!("{message} ").into_bytes(),
         ] {
             let class = native_windows_message(&bytes);
             assert_eq!(class, NativeWindowsMessage::Unknown);
@@ -1025,7 +1075,7 @@ mod tests {
                     Some(false)
                 ),
                 Some((
-                    NativeWindowsMessage::Win32(109),
+                    NativeWindowsMessage::SystemMessageId(109),
                     NativeWindowsMessage::Unknown
                 ))
             );

@@ -2,12 +2,112 @@
 
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
 pointer still identifies the Git child. Source review and explicitly authorized
-Actions log inspection only. The current object-only parser correction, two new
-tests and updated fixture are UNRUN. No local build, test, lint, formatting,
-syntax, whitespace, transport or native acceptance is claimed. The c92e54a
-Actions run predates this follow-up and cannot validate it.
+Actions log inspection only. The current root-only observer, bounded system
+message catalogue and focused tests are UNRUN. No local build, test, lint,
+formatting, syntax, whitespace, transport or native acceptance is claimed.
+The c92e54a Actions run predates this follow-up and cannot validate it.
 
-## Object-Only Host Reply: Source Released To Main
+## Root-Only WSL Diagnostics: Source Released To Main
+
+The approved test-only slice is authored and source-reviewed. No unresolved
+source/API blocker is identified. Ownership is released to Main and source
+writes are frozen. Exact release paths: `crates/mt-app/src/execution_host.rs`,
+`crates/mt-app/src/tasks_account_executor/process.rs`,
+`crates/mt-app/src/tasks_account_executor/tests.rs`, and this report. Main owns
+specs, CI, complete Actions formatter artifacts, Git and exact-SHA validation.
+
+### Root Observer Boundary
+
+One per-case Arc/Mutex registry holds at most two non-inheritable process
+OwnedHandles, indexed only by the fixed Private and Readiness roles. Scoped
+test/Windows TLS selects the registry and role; neither the registry nor its
+handle owner implements Debug. Both existing runners register their exact Child
+only after successful Job attachment. No PID lookup, member enumeration, Job
+handle retention or cross-test identity registry was introduced.
+
+[DuplicateHandle](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)
+requests only PROCESS_QUERY_LIMITED_INFORMATION plus PROCESS_SYNCHRONIZE, with
+zero duplicate options and inheritance disabled. Replacement closes the old
+role reference before duplicating a new one. Registration and observation use
+try_lock: a missed registration invalidates the old role instead of presenting
+it as current. Missing, busy and failed-query observations are explicit, not
+false membership or fabricated zero counts.
+
+Immediately before the EXISTING readiness TerminateJobObject call, the observer
+queries the two exact roots against THAT Job with
+[IsProcessInJob](https://learn.microsoft.com/en-us/windows/win32/api/jobapi/nf-jobapi-isprocessinjob).
+Membership and independent zero-wait liveness have separate typed states.
+The private root is therefore reported as InJob, NotInJob, QueryFailed or
+Unavailable, independently of Alive, Exited, QueryFailed or Unavailable.
+Readiness-root metadata supplies the corresponding known-root observation.
+Only these states enter the existing fixed first/final retirement record;
+counts, timestamps, success results and termination arguments remain unchanged.
+
+TLS resets on return and unwind. The existing concurrent readiness thread shares
+only its case's registry and clock; it is joined before the original assertions.
+No peer wait, start barrier, cadence/deadline change, additional WSL command,
+termination, cancellation decision or result remapping was added. The observer
+does not preserve roots beyond the case or retain Job handles. Process reference
+lifetime and Job counts are not Linux descendant-cleanup evidence.
+
+### Bounded Complete-Message Catalogue
+
+The existing windows_system_message/FormatMessageW path now considers base
+Win32 IDs 0..=1999, WinSock IDs 10000..=11004 and ten named standard HRESULT IDs.
+The fixed ordered catalogue has 3015 candidates and a hard iterator cap of
+4096. Input remains capped at 4096 bytes and the system-message buffer at 512
+u16 units. FROM_SYSTEM and IGNORE_INSERTS, strict UTF decoding and complete
+BOM/newline-framed matching are unchanged. No private-byte cache was added.
+
+Only a numeric SystemMessageId or Unknown is emitted, solely for an already
+traced nonzero transport exit with false cleanup acknowledgement. The renamed
+variant does not mislabel HRESULTs as Win32 errors. A matching ID identifies a
+trusted catalogue message, not necessarily a unique underlying OS error when
+messages alias; deterministic catalogue order selects the first match. Unknown
+remains Unknown. No raw output, paths, handles, argv, environment or credentials
+are logged, and byte length is not used to infer an error.
+
+### Three New Tests: Authored UNRUN
+
+- `execution_host::tests::tasks_wsl_root_observer_distinguishes_known_jobs_and_root_liveness`
+- `execution_host::tests::tasks_wsl_root_observer_preserves_results_and_isolates_scopes_and_contention`
+- `tasks_account_executor::process::tests::native_windows_message_catalogue_is_fixed_bounded_and_ordered`
+
+The root tests use fixed guarded native cmd roots to distinguish known own/peer
+Job membership and Alive/Exited states, with normal bounded guard cleanup.
+They cover missing/busy/query-failed states, invalidated stale registration,
+per-thread/per-case isolation, unwind/TLS release and preserved results. The
+existing guarded exit-23 runner test also verifies its registered root metadata
+and unchanged exactly-once retirement. No raw handle is formatted by assertions.
+
+The existing readiness fixed-storage test retains typed root metadata through
+first/final recording and saturation. Catalogue tests cover exact bounds/order,
+retention of all original 26 IDs and a newly covered system ID. Five representative
+messages exercise UTF-8/UTF-16 complete matches; no all-ID roundtrip API loop is
+used. Existing private-payload, malformed UTF, Unknown and failure-only guards
+remain, with whitespace-contamination rejection added.
+
+### Evidence And Remaining Gates
+
+Main reports remote c92e54a run 34017910209 Linux, Windows and packaging passed,
+except actual WSL job 101445078760. That failure remained DataCancel, with
+owned-distro cleanup passing but no final descendant check. Count(4), timing
+correlation and the earlier Unknown message do not establish cross-Job cause.
+This slice is diagnostic only, NOT a WSL root-cause correction.
+
+All three new tests and updated observer/catalogue/fixture assertions are UNRUN.
+The object-only parser in Main's local unpushed 7b9eb0f also remains UNRUN pending
+the next Actions gate. Existing execution_host and Tasks filters cover this
+release; no workflow, dependency, mod.rs, gh_fixture, Python/SSH, production
+policy or public API change was made. Actual cwd/literal/account/readiness,
+strict acknowledgement and final descendant assertions are retained. No local
+execution, automated checks, Git writes or child agents occurred. Native hardware
+acceptance and a passing full actual WSL gate remain separate requirements.
+
+## Earlier Object-Only Host Reply Handoff
+
+The parser slice below is already committed locally by Main as 7b9eb0f. It is
+unchanged by this diagnostic follow-up and remains pending exact-SHA Actions.
 
 The bounded correction is authored and source-reviewed with no implementation
 blocker. Ownership is released to Main and source writes are frozen. Exact

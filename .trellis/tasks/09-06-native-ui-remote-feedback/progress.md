@@ -1267,3 +1267,73 @@ Windows101444951923 has passed execution-host/Tasks/Git filters and entered
 sidecar checks; it and package101444939167 are not yet fully complete. These
 results validate the preceding empty-struct correction, not the new map-only
 parser. McClintock's read-only Job-scope proposal remains outstanding.
+
+The object-only follow-up is locally committed as7b9eb0f (not pushed yet).
+McClintock confirmed no production guard correction is justified by current
+timing/count evidence. Main approved a bounded TEST-ONLY paired observer next:
+per-case Private/Readiness exact root objects, pre-existing-termination peer
+membership/liveness checks, own-Job snapshots capped32 with query-only process
+handles, rechecked membership and in-memory object identity comparison. Only
+fixed role/count/typed completeness/membership/liveness may be emitted; no raw
+IDs/handles/names/paths/output, no Job-handle retention, no peer waits, extra
+commands/termination/retries, altered cadence or production policy. Negative/
+incomplete records remain inconclusive. McClintock owns only that observer's
+execution_host/process/test wiring and a bounded Git-child review addendum;
+Noether's mod.rs/gh_fixture/report remain frozen. Main will integrate the two
+distinct deltas before the next push and preserve all original failure guards.
+
+At c92e54a, Windows101444951923 and package101444939167 are now entirely
+SUCCESS. Windows passed onboarding82/3, Files49/14/5/1, execution-host17, Tasks
+executor28 plus1ignoredWSL, Tasksapp/config/domain24/2/31, Git24/6/124 and
+terminal-host31. All eight newly enabled strict-field/classifier/retirement
+tests passed, including the formerly failed ack assertion. CI34017910209 is
+FAILED only on actualWSL. Package34017910189 artifact9984848856 is
+Mini-Term_1.2.2-ci.57_windows-x64. Main updated validation.md to this exact
+completed candidate, excluding the later object-only parser and membership
+observer from its passing evidence.
+
+The ci.57 package was downloaded only to
+`/home/leo/.cache/mini-term/artifacts/c92e54a-integration`. Its Actions manifest
+reports status passed, installer18,863,080 bytes and SHA256
+`833d2fb05b16f96bf89f96e898c921c1cb24d6a860e020b1df47b0bd4dec42e2`.
+No local hash/app/installer verification or launch occurred.
+
+McClintock was paused for a concrete status after the implementation stayed at
+design. He confirmed NO files/commands outstanding and no demonstrated API or
+lifetime incompatibility; 32-member overlap bookkeeping remained unimplemented.
+Main closed that owner and WITHDREW full member snapshots/identity overlap from
+the next diagnostic scope. No new member-snapshot implementation or pass exists.
+
+Main resumed Noether for a smaller TEST-ONLY follow-up in execution_host.rs,
+process.rs, tests.rs and the Tasks report. At most two per-case query-only exact
+root process references, scoped Private/Readiness roles, and pre-existing-
+termination private-root membership/liveness checks are allowed. No process-ID
+enumeration, member snapshots, Job-handle retention, peer waits, barriers, extra
+commands/termination/retries or production-policy changes. Missing/query-failed/
+busy data stays explicit, not false; process identity never enters logs.
+Main also authorized broadening the formerly unknown native error match to a
+FIXED BOUNDED trusted system-message catalogue: baseWin32 IDs0..=1999, WinSock
+10000..=11004 and a small fixed standard-HRESULT set, at most4096 candidates.
+Keep complete-message matching, existing input/buffer caps and failure-only
+activation; output only numeric system-message IDs/Unknown. No raw strings,
+substrings, private-data cache, length guesses, result remapping or quadratic
+all-catalogue roundtrip test. Preserve existing actual assertions. All new
+source/validation remains pending, and local7b9eb0f is still not pushed.
+
+Noether released/froze the narrowed root-only observer, catalogue and focused
+tests in execution_host.rs, process.rs, tests.rs and the Tasks report. Main
+source-reviewed the final bounded registry, exact query-only duplicates,
+try_lock/current-reference invalidation, independent membership/liveness and
+unchanged existing termination. At most two per-case process references are
+retained, with no Job/PID/member inventory. Three new functions cover guarded
+known roots, scope/result/error isolation and the fixed3015-ID catalogue;
+existing native exit/readiness/capture guards remain. No concrete source/API
+blocker remains; actual WSL cause is still unconfirmed. Noether is closed.
+
+Main updated the release contract for the root observer, fixed4096-candidate
+ceiling, complete-message matching and matching-ID versus actual-error-code
+distinction. The earlier object-only parser7b9eb0f and this diagnostic successor
+are being integrated for their first Actions push. All new/updated test execution
+and formatting remain UNRUN locally and pending exact-SHA Actions evidence.
+The c92e54a/ci.57 link was offered only for native UI pre-acceptance; no user
+observations or full WSL pass have been received, and tasks remain open.

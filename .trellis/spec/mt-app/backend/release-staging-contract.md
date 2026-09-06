@@ -440,6 +440,9 @@ Windows test builds also expose `tasks_wsl_retirement_trace(started, action)
 -> (T, TasksWslRetirementTrace)`, retaining first/last numeric retirement records
 and a saturating call count. `TasksWslActiveProcesses` distinguishes Count from
 QueryFailed; an absent retirement record is not either of those observations.
+`tasks_wsl_root_scope(&TasksWslRoots, TasksWslRootRole, action)` supplies per-case
+Private/Readiness root identity to the same observer. Its record contains only
+typed membership/liveness, never the underlying process references.
 
 ### 3. Contracts
 
@@ -463,14 +466,29 @@ QueryFailed; an absent retirement record is not either of those observations.
 - Only an active private test trace with a nonzero transport exit and false
   cleanup acknowledgement may classify native output. Decode at most 4096 bytes
   as valid UTF-8/UTF-16. Compare the COMPLETE message, allowing only BOM/newline
-  framing, against a fixed small Win32 allowlist obtained with FormatMessageW
-  into a fixed 512-unit buffer. Retain Unknown or the matched numeric code only;
+  framing, against fixed system-message IDs: base Win32 0..=1999, WinSock
+  10000..=11004 and ten named standard HRESULTs, at most 4096 candidates.
+  FormatMessageW uses FROM_SYSTEM | IGNORE_INSERTS and a fixed 512-unit buffer.
+  Retain Unknown or SystemMessageId with the matched numeric identifier only;
   no substrings, output-derived labels, guessed codes from length or raw text.
+  A matching message identifier is not an independently observed OS return code.
 - The shared Windows test observer queries JobObjectBasicAccountingInformation
   only in an active trace, records active-process Count or QueryFailed and
   same-clock times around the EXISTING TerminateJobObject call. Preserve its
   exactly-once invocation, arguments, result/error mapping and ownership state.
-  No Job handles, process IDs/names, extra termination or breakaway policy.
+  No retained Job handles, process IDs/names, extra termination or breakaway policy.
+- Root registration occurs only in an active Windows test scope, after the
+  exact Child attaches to its guard. Duplicate its handle with only query-limited
+  and synchronization rights; retain at most two non-inheritable OwnedHandles
+  per case, replacing the previous same-role reference. Never reopen by PID,
+  enumerate members or retain Job objects. Clear TLS on return/unwind.
+- Immediately before the existing readiness retirement, query these exact roots
+  against that exact Job with IsProcessInJob and zero-time WaitForSingleObject.
+  Keep membership InJob/NotInJob/QueryFailed/Unavailable separate from liveness
+  Alive/Exited/QueryFailed/Unavailable. A busy registry is Busy, a poisoned one
+  QueryFailed; a missed registration invalidates the preceding reference.
+  No peer waits, barriers or cadence/deadline changes. Per-case Arc ownership
+  must end with the case; query references must never affect Job lifetime.
 - First/final readiness records retain probe start AND return, plus their
   corresponding fixed retirement traces. Intermediate calls are counted, not
   accumulated in an unbounded list. A count of zero, failed query and missing
@@ -488,6 +506,8 @@ QueryFailed; an absent retirement record is not either of those observations.
 | Payload contains a system message plus private text | Unknown; no substring classification |
 | No active trace, successful exit or valid cleanup reply | Do not classify private output |
 | Job count query fails or no retirement call occurred | Explicit QueryFailed or absent record, never invented zero |
+| Root missing, registration missed or registry busy | Explicit Unavailable/Busy, never invented non-membership |
+| Exact root belongs to another Job | NotInJob and an independent liveness observation; no Linux cleanup inference |
 
 ### 5. Good / Base / Bad
 
@@ -509,6 +529,12 @@ guards, and covers retirement result preservation, unwind/thread isolation and
 one real guarded nonzero child exit. First-probe retirement evidence must survive
 later probes in fixed storage. The actual WSL scenario stays concurrent and
 retains the original expected error and descendant-retirement assertions.
+Root coverage uses Actions-only guarded native children to distinguish known
+same/different Jobs and live/exited roots, preserve termination results and
+prove bounded ownership, missing/busy/query-failed states and TLS isolation.
+Catalogue coverage proves fixed order and cap, representative messages inside
+and outside the former 26-ID list, and complete framing. Do not round-trip
+every catalogue ID through a whole-catalogue scan or cache private payloads.
 
 ### 7. Wrong vs Correct
 
