@@ -1554,3 +1554,12 @@ LxssConsoleManager.cpp uses ConsoleId zero for clients without a console handle
 and keys session leaders by ConsoleId/elevation. This is only a hypothesis lead:
 it does not establish the Actions inbox WSL1 implementation or shared-Job cause.
 No creation flags, Job ownership, process inventory or cleanup policy changed.
+
+Public-comparison commit fe25593c4e5149116f5d6e61079dead842a62e96 started
+CI34026585804 and Package34026585781. Linux101468522710 failed formatting;
+same-run full artifact9987251928 was downloaded/read and applied in entirety
+from `/home/leo/.cache/mini-term/artifacts/fe25593-integration/rustfmt/full-rustfmt.patch`.
+Only tests.rs changed in that generated patch. Rootfs101468522782 succeeded;
+Windows101468522620 is compiling and actualWSL101468664122 is importing.
+No local formatter, syntax/test/whitespace check or native launch occurred.
+Main will push the formatting successor only after owned import completes.

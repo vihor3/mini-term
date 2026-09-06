@@ -1580,8 +1580,13 @@ impl WslFixture {
             "invalid fixture ELF checksum"
         );
         let mut source = snapshot(Path::new("/mini-term-fixture"));
-        source.backend = ExecutionBackend::Wsl { distro: distro.clone() };
-        let mut fixture = Self { source, attested_distro: None };
+        source.backend = ExecutionBackend::Wsl {
+            distro: distro.clone(),
+        };
+        let mut fixture = Self {
+            source,
+            attested_distro: None,
+        };
         // These bounded fixture commands read only the explicitly named distro.
         // No account API is called until both provenance and the executable match.
         let expected_owner = WslFixtureOwner {
@@ -1700,7 +1705,10 @@ impl WslFixture {
         self.require_success("create-case", &output);
         let mut source = self.source.clone();
         source.canonical_path = path;
-        Self { source, attested_distro: self.attested_distro.clone() }
+        Self {
+            source,
+            attested_distro: self.attested_distro.clone(),
+        }
     }
 
     fn assert_cwd_routing(&self) -> Self {
@@ -1953,13 +1961,25 @@ mod wsl_public_comparison {
     const EXPECTED: &[u8] = b"mt-public-start\nmt-public-end\n";
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-    enum Stage { CreateCase, Producer, Readiness }
+    enum Stage {
+        CreateCase,
+        Producer,
+        Readiness,
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
     enum Failure {
-        Ownership, ProgramNotFound, Disconnected, Rejected, Io,
-        SourceChanged, Incomplete, UnexpectedExit, UnexpectedProbeOutput,
-        ThreadStart, ThreadPanic,
+        Ownership,
+        ProgramNotFound,
+        Disconnected,
+        Rejected,
+        Io,
+        SourceChanged,
+        Incomplete,
+        UnexpectedExit,
+        UnexpectedProbeOutput,
+        ThreadStart,
+        ThreadPanic,
     }
 
     #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -1980,11 +2000,19 @@ mod wsl_public_comparison {
     }
 
     impl Reply {
-        fn received(stage: Stage, result: Result<HostCommandResult, CommandExecutionError>) -> Self {
+        fn received(
+            stage: Stage,
+            result: Result<HostCommandResult, CommandExecutionError>,
+        ) -> Self {
             let mut metadata = Metadata {
-                stage, failure: None, exit: None, timed_out: false,
-                stdout_truncated: false, stderr_truncated: false,
-                stdout_bytes: 0, stderr_bytes: 0,
+                stage,
+                failure: None,
+                exit: None,
+                timed_out: false,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                stdout_bytes: 0,
+                stderr_bytes: 0,
             };
             let result = match result {
                 Ok(result) => result,
@@ -1995,7 +2023,10 @@ mod wsl_public_comparison {
                         CommandExecutionErrorKind::Rejected => Failure::Rejected,
                         CommandExecutionErrorKind::Io => Failure::Io,
                     });
-                    return Self { metadata, producer_output: None };
+                    return Self {
+                        metadata,
+                        producer_output: None,
+                    };
                 }
             };
             let output = result.output;
@@ -2007,14 +2038,21 @@ mod wsl_public_comparison {
             metadata.stderr_bytes = output.stderr.len();
             if result.observed_connection_epoch.is_some() {
                 metadata.failure = Some(Failure::SourceChanged);
-            } else if output.timed_out || output.stdout_truncated || output.stderr_truncated
+            } else if output.timed_out
+                || output.stdout_truncated
+                || output.stderr_truncated
                 || output.stdout.len() > WSL_FIXTURE_OUTPUT_CAP
-                || output.stderr.len() > WSL_FIXTURE_OUTPUT_CAP || output.exit_code.is_none()
+                || output.stderr.len() > WSL_FIXTURE_OUTPUT_CAP
+                || output.exit_code.is_none()
             {
                 metadata.failure = Some(Failure::Incomplete);
             }
-            let producer_output = (stage == Stage::Producer && metadata.failure.is_none()).then_some(output);
-            Self { metadata, producer_output }
+            let producer_output =
+                (stage == Stage::Producer && metadata.failure.is_none()).then_some(output);
+            Self {
+                metadata,
+                producer_output,
+            }
         }
 
         fn success(&self) -> bool {
@@ -2030,26 +2068,38 @@ mod wsl_public_comparison {
     impl PublicCase {
         fn new(fixture: &WslFixture, id: uuid::Uuid) -> Result<Self, Failure> {
             let (ExecutionBackend::Wsl { distro }, Some(attested)) =
-                (&fixture.source.backend, &fixture.attested_distro) else {
-                    return Err(Failure::Ownership);
-                };
-            if distro != attested || fixture.source.canonical_path != "/mini-term-fixture"
+                (&fixture.source.backend, &fixture.attested_distro)
+            else {
+                return Err(Failure::Ownership);
+            };
+            if distro != attested
+                || fixture.source.canonical_path != "/mini-term-fixture"
                 || fixture.source.root_source_path != "/mini-term-fixture"
             {
                 return Err(Failure::Ownership);
             }
             let mut case = fixture.clone();
             case.source.canonical_path = format!("/mini-term-fixture/cases/{id}");
-            Ok(Self { root: fixture.clone(), case })
+            Ok(Self {
+                root: fixture.clone(),
+                case,
+            })
         }
 
         fn plan(&self, stage: Stage) -> (&WslFixture, CommandPlan) {
             match stage {
-                Stage::CreateCase => (&self.root, CommandPlan::new(
-                    "/bin/mkdir", ["--", self.case.source.canonical_path.as_str()],
-                )),
+                Stage::CreateCase => (
+                    &self.root,
+                    CommandPlan::new(
+                        "/bin/mkdir",
+                        ["--", self.case.source.canonical_path.as_str()],
+                    ),
+                ),
                 Stage::Producer => (&self.case, CommandPlan::new("/bin/sh", ["-c", SCRIPT])),
-                Stage::Readiness => (&self.case, CommandPlan::new("/usr/bin/test", ["-f", "ready"])),
+                Stage::Readiness => (
+                    &self.case,
+                    CommandPlan::new("/usr/bin/test", ["-f", "ready"]),
+                ),
             }
         }
 
@@ -2107,7 +2157,11 @@ mod wsl_public_comparison {
         loop {
             let before = elapsed_us(started);
             let reply = case.execute(Stage::Readiness);
-            let probe = Probe { started_us: before, returned_us: elapsed_us(started), command: reply.metadata };
+            let probe = Probe {
+                started_us: before,
+                returned_us: elapsed_us(started),
+                command: reply.metadata,
+            };
             if observation.record(probe, Instant::now() >= deadline) {
                 return observation;
             }
@@ -2131,26 +2185,51 @@ mod wsl_public_comparison {
     ) -> Report {
         let thread = match spawn() {
             Ok(thread) => thread,
-            Err(_) => return Report { failure: Some(Failure::ThreadStart), ..Default::default() },
+            Err(_) => {
+                return Report {
+                    failure: Some(Failure::ThreadStart),
+                    ..Default::default()
+                };
+            }
         };
         let producer = producer();
         match thread.join() {
-            Ok(readiness) => Report { producer: Some(producer), readiness: Some(readiness), ..Default::default() },
-            Err(_) => Report { producer: Some(producer), failure: Some(Failure::ThreadPanic), ..Default::default() },
+            Ok(readiness) => Report {
+                producer: Some(producer),
+                readiness: Some(readiness),
+                ..Default::default()
+            },
+            Err(_) => Report {
+                producer: Some(producer),
+                failure: Some(Failure::ThreadPanic),
+                ..Default::default()
+            },
         }
     }
 
     fn run(fixture: &WslFixture) -> Report {
         let case = match PublicCase::new(fixture, uuid::Uuid::new_v4()) {
             Ok(case) => case,
-            Err(failure) => return Report { failure: Some(failure), ..Default::default() },
+            Err(failure) => {
+                return Report {
+                    failure: Some(failure),
+                    ..Default::default()
+                };
+            }
         };
         // mkdir has no -p: an existing directory is a failure, never reused.
         let setup = case.execute(Stage::CreateCase);
         if !setup.success() {
-            return Report { failure: Some(setup.metadata.failure.unwrap_or(Failure::UnexpectedExit)), setup: Some(setup.metadata), ..Default::default() };
+            return Report {
+                failure: Some(setup.metadata.failure.unwrap_or(Failure::UnexpectedExit)),
+                setup: Some(setup.metadata),
+                ..Default::default()
+            };
         }
-        let peer = PublicCase { root: case.root.clone(), case: case.case.clone() };
+        let peer = PublicCase {
+            root: case.root.clone(),
+            case: case.case.clone(),
+        };
         let started = Instant::now();
         let mut report = collect_pair(
             || std::thread::Builder::new().spawn(move || wait_ready(peer, started)),
@@ -2171,8 +2250,13 @@ mod wsl_public_comparison {
             cancelled_at_return: bool,
             action: impl FnOnce() -> Report,
         ) -> Option<Report> {
-            if self.0 || !matches!(lifecycle, WslLifecycleCase::DataCancel | WslLifecycleCase::LookupCancel)
-                || actual != Some(AccountExecutionError::HostHelperUnavailable) || cancelled_at_return
+            if self.0
+                || !matches!(
+                    lifecycle,
+                    WslLifecycleCase::DataCancel | WslLifecycleCase::LookupCancel
+                )
+                || actual != Some(AccountExecutionError::HostHelperUnavailable)
+                || cancelled_at_return
             {
                 return None;
             }
@@ -2181,8 +2265,11 @@ mod wsl_public_comparison {
         }
 
         pub(super) fn after_failure(
-            &mut self, fixture: &WslFixture, lifecycle: WslLifecycleCase,
-            actual: Option<AccountExecutionError>, cancelled_at_return: bool,
+            &mut self,
+            fixture: &WslFixture,
+            lifecycle: WslLifecycleCase,
+            actual: Option<AccountExecutionError>,
+            cancelled_at_return: bool,
         ) -> Option<Report> {
             self.after_failure_with(lifecycle, actual, cancelled_at_return, || run(fixture))
         }
@@ -2197,7 +2284,11 @@ mod wsl_public_comparison {
             prefix.iter().flat_map(|byte| [0, *byte]).collect(),
         ];
         [&output.stdout, &output.stderr].iter().any(|bytes| {
-            needles.iter().any(|needle| bytes.windows(needle.len()).any(|window| window == needle.as_slice()))
+            needles.iter().any(|needle| {
+                bytes
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_slice())
+            })
         })
     }
 
@@ -2207,7 +2298,9 @@ mod wsl_public_comparison {
         } else if let Some(body) = bytes.strip_prefix(&[0xfe, 0xff]) {
             (body, true)
         } else if !bytes.contains(&0) {
-            return std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes)).ok().map(str::to_owned);
+            return std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes))
+                .ok()
+                .map(str::to_owned);
         } else {
             match bytes.get(..2)? {
                 [0, next] if *next != 0 => (bytes, true),
@@ -2216,16 +2309,28 @@ mod wsl_public_comparison {
             }
         };
         let mut pairs = bytes.chunks_exact(2);
-        let units = pairs.by_ref().map(|pair| {
-            if big_endian { u16::from_be_bytes([pair[0], pair[1]]) }
-            else { u16::from_le_bytes([pair[0], pair[1]]) }
-        }).collect::<Vec<_>>();
-        if !pairs.remainder().is_empty() { return None; }
+        let units = pairs
+            .by_ref()
+            .map(|pair| {
+                if big_endian {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect::<Vec<_>>();
+        if !pairs.remainder().is_empty() {
+            return None;
+        }
         String::from_utf16(&units).ok()
     }
 
     fn previews(reply: &Reply) -> (bool, bool, [Option<String>; 2]) {
-        let Some(output) = reply.producer_output.as_ref().filter(|_| reply.metadata.stage == Stage::Producer) else {
+        let Some(output) = reply
+            .producer_output
+            .as_ref()
+            .filter(|_| reply.metadata.stage == Stage::Producer)
+        else {
             return (false, false, [None, None]);
         };
         let start = output.stdout.starts_with(START);
@@ -2251,8 +2356,15 @@ mod wsl_public_comparison {
 
     impl Report {
         pub(super) fn describe(&self) -> String {
-            let (start, suppressed, texts) = self.producer.as_ref().map(previews).unwrap_or((false, false, [None, None]));
-            let markers_match = self.producer.as_ref().and_then(|reply| reply.producer_output.as_ref())
+            let (start, suppressed, texts) =
+                self.producer
+                    .as_ref()
+                    .map(previews)
+                    .unwrap_or((false, false, [None, None]));
+            let markers_match = self
+                .producer
+                .as_ref()
+                .and_then(|reply| reply.producer_output.as_ref())
                 .is_some_and(|output| output.stdout == EXPECTED && output.stderr.is_empty());
             let mut value = serde_json::json!({
                 "public_comparison": true, "failure": self.failure, "setup": self.setup,
@@ -2262,30 +2374,51 @@ mod wsl_public_comparison {
                 "stdout_preview": texts[0], "stderr_preview": texts[1], "preview_limit": false,
             });
             let rendered = escaped_json(&value);
-            if rendered.len() <= 4096 { return rendered; }
+            if rendered.len() <= 4096 {
+                return rendered;
+            }
             value["stdout_preview"] = serde_json::Value::Null;
             value["stderr_preview"] = serde_json::Value::Null;
             value["preview_limit"] = true.into();
             let metadata = escaped_json(&value);
-            if metadata.len() <= 4096 { metadata } else { r#"{"public_comparison":true,"diagnostic_limit":true}"#.into() }
+            if metadata.len() <= 4096 {
+                metadata
+            } else {
+                r#"{"public_comparison":true,"diagnostic_limit":true}"#.into()
+            }
         }
     }
 
     fn test_root() -> WslFixture {
         let mut source = snapshot(Path::new("/mini-term-fixture"));
-        source.backend = ExecutionBackend::Wsl { distro: "mt-tasks-12345-1".into() };
-        WslFixture { source, attested_distro: Some("mt-tasks-12345-1".into()) }
+        source.backend = ExecutionBackend::Wsl {
+            distro: "mt-tasks-12345-1".into(),
+        };
+        WslFixture {
+            source,
+            attested_distro: Some("mt-tasks-12345-1".into()),
+        }
     }
 
     fn output(stdout: Vec<u8>, stderr: Vec<u8>, exit: i32) -> HostCommandResult {
         HostCommandResult {
-            output: CommandOutput { stdout, stderr, exit_code: Some(exit), ..Default::default() },
+            output: CommandOutput {
+                stdout,
+                stderr,
+                exit_code: Some(exit),
+                ..Default::default()
+            },
             observed_connection_epoch: None,
         }
     }
 
-    fn describe_output(result: Result<HostCommandResult, CommandExecutionError>) -> (String, serde_json::Value) {
-        let report = Report { producer: Some(Reply::received(Stage::Producer, result)), ..Default::default() };
+    fn describe_output(
+        result: Result<HostCommandResult, CommandExecutionError>,
+    ) -> (String, serde_json::Value) {
+        let report = Report {
+            producer: Some(Reply::received(Stage::Producer, result)),
+            ..Default::default()
+        };
         let text = report.describe();
         assert!(text.len() <= 4096);
         assert!(!text.chars().any(char::is_control));
@@ -2297,26 +2430,48 @@ mod wsl_public_comparison {
     fn public_comparison_plans_are_fixed_and_require_the_attested_root() {
         let root = test_root();
         let id = uuid::Uuid::new_v4();
-        let case = PublicCase::new(&root, id).unwrap_or_else(|_| panic!("synthetic owner rejected"));
-        assert_eq!(case.case.source.canonical_path, format!("/mini-term-fixture/cases/{id}"));
+        let case =
+            PublicCase::new(&root, id).unwrap_or_else(|_| panic!("synthetic owner rejected"));
+        assert_eq!(
+            case.case.source.canonical_path,
+            format!("/mini-term-fixture/cases/{id}")
+        );
         assert!(matches!(
             (&case.case.source.backend, &root.source.backend),
             (ExecutionBackend::Wsl { distro: case_distro }, ExecutionBackend::Wsl { distro: root_distro })
                 if case_distro == root_distro
         ));
-        assert_eq!(case.case.source.execution_host_id, root.source.execution_host_id);
-        assert_eq!(case.case.source.root_project_id, root.source.root_project_id);
+        assert_eq!(
+            case.case.source.execution_host_id,
+            root.source.execution_host_id
+        );
+        assert_eq!(
+            case.case.source.root_project_id,
+            root.source.root_project_id
+        );
         assert_eq!(case.case.source.worktree_id, root.source.worktree_id);
         let (source, mkdir) = case.plan(Stage::CreateCase);
         assert_eq!(source.source.canonical_path, "/mini-term-fixture");
         assert_eq!(mkdir.program, "/bin/mkdir");
         assert_eq!(mkdir.args, ["--", case.case.source.canonical_path.as_str()]);
         let (source, producer) = case.plan(Stage::Producer);
-        assert_eq!(source.source.canonical_path, case.case.source.canonical_path);
+        assert_eq!(
+            source.source.canonical_path,
+            case.case.source.canonical_path
+        );
         assert_eq!(producer.program, "/bin/sh");
-        assert_eq!(producer.args, ["-c", r"printf '%s\n' mt-public-start && : > ready && /usr/bin/sleep 1 && printf '%s\n' mt-public-end"]);
+        assert_eq!(
+            producer.args,
+            [
+                "-c",
+                r"printf '%s\n' mt-public-start && : > ready && /usr/bin/sleep 1 && printf '%s\n' mt-public-end"
+            ]
+        );
         let (source, probe) = case.plan(Stage::Readiness);
-        assert_eq!(source.source.canonical_path, case.case.source.canonical_path);
+        assert_eq!(
+            source.source.canonical_path,
+            case.case.source.canonical_path
+        );
         assert_eq!(probe.program, "/usr/bin/test");
         assert_eq!(probe.args, ["-f", "ready"]);
         for change in 0..5 {
@@ -2324,34 +2479,62 @@ mod wsl_public_comparison {
             match change {
                 0 => denied.attested_distro = None,
                 1 => denied.source.backend = ExecutionBackend::Local,
-                2 => denied.source.backend = ExecutionBackend::Wsl { distro: "another-distro".into() },
+                2 => {
+                    denied.source.backend = ExecutionBackend::Wsl {
+                        distro: "another-distro".into(),
+                    }
+                }
                 3 => denied.source.canonical_path = case.case.source.canonical_path.clone(),
                 _ => denied.source.root_source_path = "/sibling".into(),
             }
-            assert!(matches!(PublicCase::new(&denied, id), Err(Failure::Ownership)));
+            assert!(matches!(
+                PublicCase::new(&denied, id),
+                Err(Failure::Ownership)
+            ));
         }
     }
 
     #[test]
     fn public_comparison_attempt_is_exact_once_and_never_replaces_private_failure() {
-        for lifecycle in [WslLifecycleCase::PipeDescendant, WslLifecycleCase::DataTimeout,
-            WslLifecycleCase::LookupTimeout, WslLifecycleCase::DataCancel, WslLifecycleCase::LookupCancel]
-        {
-            for actual in [None, Some(AccountExecutionError::Cancelled), Some(AccountExecutionError::TimedOut),
-                Some(AccountExecutionError::CleanupFailed), Some(AccountExecutionError::HostHelperUnavailable)]
-            {
+        for lifecycle in [
+            WslLifecycleCase::PipeDescendant,
+            WslLifecycleCase::DataTimeout,
+            WslLifecycleCase::LookupTimeout,
+            WslLifecycleCase::DataCancel,
+            WslLifecycleCase::LookupCancel,
+        ] {
+            for actual in [
+                None,
+                Some(AccountExecutionError::Cancelled),
+                Some(AccountExecutionError::TimedOut),
+                Some(AccountExecutionError::CleanupFailed),
+                Some(AccountExecutionError::HostHelperUnavailable),
+            ] {
                 for cancelled in [false, true] {
                     let mut attempt = Attempt::default();
                     let calls = std::cell::Cell::new(0);
-                    let should_run = matches!(lifecycle, WslLifecycleCase::DataCancel | WslLifecycleCase::LookupCancel)
-                        && actual == Some(AccountExecutionError::HostHelperUnavailable) && !cancelled;
+                    let should_run = matches!(
+                        lifecycle,
+                        WslLifecycleCase::DataCancel | WslLifecycleCase::LookupCancel
+                    ) && actual
+                        == Some(AccountExecutionError::HostHelperUnavailable)
+                        && !cancelled;
                     let report = attempt.after_failure_with(lifecycle, actual, cancelled, || {
                         calls.set(calls.get() + 1);
-                        Report { failure: Some(Failure::Ownership), ..Default::default() }
+                        Report {
+                            failure: Some(Failure::Ownership),
+                            ..Default::default()
+                        }
                     });
                     assert_eq!(report.is_some(), should_run);
                     assert_eq!(calls.get(), usize::from(should_run));
-                    assert!(attempt.after_failure_with(lifecycle, actual, cancelled, || panic!("second public attempt")).is_none());
+                    assert!(
+                        attempt
+                            .after_failure_with(lifecycle, actual, cancelled, || panic!(
+                                "second public attempt"
+                            ))
+                            .is_none()
+                    );
                     if let Some(report) = report {
                         assert!(report.describe().contains("Ownership"));
                         assert_eq!(actual, Some(AccountExecutionError::HostHelperUnavailable));
@@ -2359,10 +2542,20 @@ mod wsl_public_comparison {
                 }
             }
         }
-        for result in [Report::default(), Report { failure: Some(Failure::ThreadStart), ..Default::default() }] {
+        for result in [
+            Report::default(),
+            Report {
+                failure: Some(Failure::ThreadStart),
+                ..Default::default()
+            },
+        ] {
             let original = Some(AccountExecutionError::HostHelperUnavailable);
             let mut attempt = Attempt::default();
-            assert!(attempt.after_failure_with(WslLifecycleCase::DataCancel, original, false, || result).is_some());
+            assert!(
+                attempt
+                    .after_failure_with(WslLifecycleCase::DataCancel, original, false, || result)
+                    .is_some()
+            );
             assert_eq!(original, Some(AccountExecutionError::HostHelperUnavailable));
         }
     }
@@ -2373,16 +2566,34 @@ mod wsl_public_comparison {
             let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let peer = finished.clone();
             let report = collect_pair(
-                || std::thread::Builder::new().spawn(move || {
-                    peer.store(true, std::sync::atomic::Ordering::Release);
-                    Readiness { failure: Some(Failure::UnexpectedExit), ..Default::default() }
-                }),
-                || Reply::received(Stage::Producer, if producer_error {
-                    Err(CommandExecutionError::new(CommandExecutionErrorKind::Io, "fixture_credential_not_logged"))
-                } else { Ok(output(EXPECTED.to_vec(), Vec::new(), 0)) }),
+                || {
+                    std::thread::Builder::new().spawn(move || {
+                        peer.store(true, std::sync::atomic::Ordering::Release);
+                        Readiness {
+                            failure: Some(Failure::UnexpectedExit),
+                            ..Default::default()
+                        }
+                    })
+                },
+                || {
+                    Reply::received(
+                        Stage::Producer,
+                        if producer_error {
+                            Err(CommandExecutionError::new(
+                                CommandExecutionErrorKind::Io,
+                                "fixture_credential_not_logged",
+                            ))
+                        } else {
+                            Ok(output(EXPECTED.to_vec(), Vec::new(), 0))
+                        },
+                    )
+                },
             );
             assert!(finished.load(std::sync::atomic::Ordering::Acquire));
-            assert_eq!(report.readiness.as_ref().unwrap().failure, Some(Failure::UnexpectedExit));
+            assert_eq!(
+                report.readiness.as_ref().unwrap().failure,
+                Some(Failure::UnexpectedExit)
+            );
             assert!(!report.describe().contains("fixture_credential_"));
         }
         let report = collect_pair(
@@ -2401,27 +2612,57 @@ mod wsl_public_comparison {
 
     #[test]
     fn public_comparison_readiness_retains_own_probe_timing_and_stops_on_errors() {
-        let missing = Reply::received(Stage::Readiness, Ok(output(Vec::new(), Vec::new(), 1))).metadata;
+        let missing =
+            Reply::received(Stage::Readiness, Ok(output(Vec::new(), Vec::new(), 1))).metadata;
         let mut observation = Readiness::default();
-        let first = Probe { started_us: 0, returned_us: 20, command: missing };
+        let first = Probe {
+            started_us: 0,
+            returned_us: 20,
+            command: missing,
+        };
         assert!(!observation.record(first, false));
-        let ready = Reply::received(Stage::Readiness, Ok(output(Vec::new(), Vec::new(), 0))).metadata;
-        assert!(observation.record(Probe { started_us: 50_020, returned_us: 50_040, command: ready }, false));
+        let ready =
+            Reply::received(Stage::Readiness, Ok(output(Vec::new(), Vec::new(), 0))).metadata;
+        assert!(observation.record(
+            Probe {
+                started_us: 50_020,
+                returned_us: 50_040,
+                command: ready
+            },
+            false
+        ));
         assert!(observation.ready);
         assert_eq!(observation.count, 2);
         assert_eq!(observation.first.unwrap().started_us, 0);
         assert_eq!(observation.last.unwrap().returned_us, 50_040);
         observation.count = u32::MAX;
-        assert!(observation.record(Probe { started_us: 10_000_000, returned_us: 10_000_020, command: missing }, true));
+        assert!(observation.record(
+            Probe {
+                started_us: 10_000_000,
+                returned_us: 10_000_020,
+                command: missing
+            },
+            true
+        ));
         assert_eq!(observation.count, u32::MAX);
         assert_eq!(observation.first.unwrap().returned_us, 20);
         assert!(observation.expired);
         for (result, expected) in [
             (output(Vec::new(), Vec::new(), 23), Failure::UnexpectedExit),
-            (output(b"public unexpected text".to_vec(), Vec::new(), 0), Failure::UnexpectedProbeOutput),
+            (
+                output(b"public unexpected text".to_vec(), Vec::new(), 0),
+                Failure::UnexpectedProbeOutput,
+            ),
         ] {
             let mut failed = Readiness::default();
-            assert!(failed.record(Probe { started_us: 1, returned_us: 2, command: Reply::received(Stage::Readiness, Ok(result)).metadata }, false));
+            assert!(failed.record(
+                Probe {
+                    started_us: 1,
+                    returned_us: 2,
+                    command: Reply::received(Stage::Readiness, Ok(result)).metadata
+                },
+                false
+            ));
             assert_eq!(failed.failure, Some(expected));
         }
     }
@@ -2429,7 +2670,13 @@ mod wsl_public_comparison {
     #[test]
     fn public_previews_reject_nonproducer_incomplete_and_undecodable_sources() {
         for stage in [Stage::CreateCase, Stage::Readiness] {
-            let report = Report { producer: Some(Reply::received(stage, Ok(output(b"never-preview-this".to_vec(), Vec::new(), 0)))), ..Default::default() };
+            let report = Report {
+                producer: Some(Reply::received(
+                    stage,
+                    Ok(output(b"never-preview-this".to_vec(), Vec::new(), 0)),
+                )),
+                ..Default::default()
+            };
             assert!(!report.describe().contains("never-preview-this"));
         }
         for change in 0..7 {
@@ -2447,9 +2694,17 @@ mod wsl_public_comparison {
             assert!(parsed["stdout_preview"].is_null() && parsed["stderr_preview"].is_null());
             assert!(!text.contains("never-preview-this") && !text.contains("nor-this"));
         }
-        let (_, failed) = describe_output(Err(CommandExecutionError::new(CommandExecutionErrorKind::Io, "fixture_credential_private_error")));
+        let (_, failed) = describe_output(Err(CommandExecutionError::new(
+            CommandExecutionErrorKind::Io,
+            "fixture_credential_private_error",
+        )));
         assert!(failed["stdout_preview"].is_null() && failed["stderr_preview"].is_null());
-        for bytes in [vec![0xff], vec![0xff, 0xfe, 0x20], vec![0xff, 0xfe, 0x00, 0xd8], b"mixed\0unsupported".to_vec()] {
+        for bytes in [
+            vec![0xff],
+            vec![0xff, 0xfe, 0x20],
+            vec![0xff, 0xfe, 0x00, 0xd8],
+            b"mixed\0unsupported".to_vec(),
+        ] {
             let (_, parsed) = describe_output(Ok(output(bytes, Vec::new(), -1)));
             assert!(parsed["stdout_preview"].is_null());
         }
@@ -2468,15 +2723,31 @@ mod wsl_public_comparison {
         for encoding in 0..3 {
             for stderr in [false, true] {
                 for after_cutoff in [false, true] {
-                    let secret = format!("{}fixture_credential_hidden", if after_cutoff { "x".repeat(300) } else { String::new() });
+                    let secret = format!(
+                        "{}fixture_credential_hidden",
+                        if after_cutoff {
+                            "x".repeat(300)
+                        } else {
+                            String::new()
+                        }
+                    );
                     let bytes = encode(&secret, encoding);
-                    let mut result = output(b"public-benign".to_vec(), b"public-benign".to_vec(), -1);
-                    if stderr { result.output.stderr = bytes; }
-                    else { result.output.stdout = [START, bytes.as_slice()].concat(); }
+                    let mut result =
+                        output(b"public-benign".to_vec(), b"public-benign".to_vec(), -1);
+                    if stderr {
+                        result.output.stderr = bytes;
+                    } else {
+                        result.output.stdout = [START, bytes.as_slice()].concat();
+                    }
                     let (text, parsed) = describe_output(Ok(result));
                     assert_eq!(parsed["fixture_secret_suppressed"], true);
-                    assert!(parsed["stdout_preview"].is_null() && parsed["stderr_preview"].is_null());
-                    assert!(!text.contains("public-benign") && !text.contains("fixture_credential_hidden"));
+                    assert!(
+                        parsed["stdout_preview"].is_null() && parsed["stderr_preview"].is_null()
+                    );
+                    assert!(
+                        !text.contains("public-benign")
+                            && !text.contains("fixture_credential_hidden")
+                    );
                 }
             }
         }
@@ -2487,16 +2758,35 @@ mod wsl_public_comparison {
         for encoding in 0..3 {
             for start in [false, true] {
                 for bom in [false, true] {
-                    let mut body = if bom { match encoding { 0 => vec![0xef, 0xbb, 0xbf], 1 => vec![0xff, 0xfe], _ => vec![0xfe, 0xff] } } else { Vec::new() };
+                    let mut body = if bom {
+                        match encoding {
+                            0 => vec![0xef, 0xbb, 0xbf],
+                            1 => vec![0xff, 0xfe],
+                            _ => vec![0xfe, 0xff],
+                        }
+                    } else {
+                        Vec::new()
+                    };
                     body.extend(encode("synthetic public transport error\r\n", encoding));
-                    let stdout = if start { [START, body.as_slice()].concat() } else { body };
+                    let stdout = if start {
+                        [START, body.as_slice()].concat()
+                    } else {
+                        body
+                    };
                     let (_, parsed) = describe_output(Ok(output(stdout, Vec::new(), -1)));
                     assert_eq!(parsed["start_marker"], start);
-                    assert_eq!(parsed["stdout_preview"], "synthetic public transport error\r\n");
+                    assert_eq!(
+                        parsed["stdout_preview"],
+                        "synthetic public transport error\r\n"
+                    );
                 }
             }
         }
-        let bytes = [b"mt-public-start\r\n".as_slice(), encode("native error", 1).as_slice()].concat();
+        let bytes = [
+            b"mt-public-start\r\n".as_slice(),
+            encode("native error", 1).as_slice(),
+        ]
+        .concat();
         let (_, parsed) = describe_output(Ok(output(bytes, Vec::new(), -1)));
         assert_eq!(parsed["start_marker"], false);
         assert!(parsed["stdout_preview"].is_null());
@@ -2504,13 +2794,21 @@ mod wsl_public_comparison {
 
     #[test]
     fn public_previews_and_total_json_are_bounded_and_escape_controls() {
-        let directional = ['\u{061c}', '\u{200e}', '\u{200f}', '\u{2028}', '\u{2029}',
-            '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}',
-            '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'];
-        let content = format!("quote=\" slash=\\ newline=\n tab=\t esc=\u{1b} csi=\u{9b} bidi={}{}",
-            directional.iter().copied().collect::<String>(), "\u{754c}".repeat(300));
-        let (text, parsed) = describe_output(Ok(output(content.as_bytes().to_vec(), Vec::new(), -1)));
-        assert_eq!(parsed["stdout_preview"].as_str().unwrap().chars().count(), 256);
+        let directional = [
+            '\u{061c}', '\u{200e}', '\u{200f}', '\u{2028}', '\u{2029}', '\u{202a}', '\u{202b}',
+            '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ];
+        let content = format!(
+            "quote=\" slash=\\ newline=\n tab=\t esc=\u{1b} csi=\u{9b} bidi={}{}",
+            directional.iter().copied().collect::<String>(),
+            "\u{754c}".repeat(300)
+        );
+        let (text, parsed) =
+            describe_output(Ok(output(content.as_bytes().to_vec(), Vec::new(), -1)));
+        assert_eq!(
+            parsed["stdout_preview"].as_str().unwrap().chars().count(),
+            256
+        );
         assert!(!text.contains('\u{1b}') && !text.contains('\u{9b}'));
         for ch in directional {
             assert!(!text.contains(ch));
@@ -3192,7 +3490,8 @@ fn tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host() {
             })
         });
         let actual = result.result.as_ref().err().copied();
-        let public_report = public_attempt.after_failure(&fixture, lifecycle, actual, cancelled_at_return);
+        let public_report =
+            public_attempt.after_failure(&fixture, lifecycle, actual, cancelled_at_return);
         let diagnostic = || {
             let readiness = readiness
                 .as_ref()
@@ -3201,7 +3500,10 @@ fn tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host() {
             format!(
                 "case={lifecycle:?} result={actual:?} returned_us={returned_us} cancelled_at_return={cancelled_at_return} {readiness}\n{}\n{}",
                 diagnostics.describe(),
-                public_report.as_ref().map(wsl_public_comparison::Report::describe).unwrap_or_else(|| "public_comparison=not-run".into())
+                public_report
+                    .as_ref()
+                    .map(wsl_public_comparison::Report::describe)
+                    .unwrap_or_else(|| "public_comparison=not-run".into())
             )
         };
         assert!(
