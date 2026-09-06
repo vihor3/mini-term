@@ -1839,3 +1839,46 @@ Noether's final Flags replacement check is now released with no remaining source
 finding. Main is committing and pushing this script/spec/report correction. Both
 first-run imports and owned cleanups are already complete, so superseding the
 remaining ordinary jobs cannot interrupt either guest import or cleanup.
+
+The Flags correction was pushed as30dce5371fcbdd4936d174c12adfe7dd196807c3,
+starting CI34036603468. Superseded e82d77c CI34035781785 completed CANCELLED:
+its ordinary Linux101493463862 and Windows101493463969 were cancelled, rootfs
+passed and both WSL rows retained their attestation failures and successful
+cleanups. No first-run Rust transport or full-workflow pass is claimed.
+
+Both corrected actual-generation jobs completed SUCCESS. WSL1job101495870630
+attested Flags7, discovered the exact ignored gate once and executed1 pass,
+0 failures/0 ignored in149.41s; cleanup13:50:30.735Z removed only its owned
+mt-tasks-34036603468-1. WSL2job101495870628 attested Flags15 and guest kernel
+6.18.33.2-microsoft-standard-WSL2 after import13:39:38Z and again before test
+13:49:11Z. It discovered the exact gate once and executed1 pass/0 failures/
+0 ignored in154.11s at13:51:47Z. Cleanup13:51:48.133Z removed only its own
+mt-tasks-34036603468-1 on the separate VM. All unchanged original assertions
+and all eight appended concurrent-peer rows therefore completed in both.
+
+The actual WSL1 image was windows-2022/20260830.290.1; the requested
+windows-2025 label resolved to windows-2025-vs2026/20260824.214.3. The earlier
+manifest research was setup guidance, not an assertion of the exact allocated
+image. Same-run rootfs101495742885 passed. Ordinary Linux101495742935 and
+Windows101495742840 are still running. Main read the completed WSL logs and
+updated validation; full-workflow status remains pending. No app/Rust changes,
+new package, local launch, hash/check or fixture execution occurred.
+
+CI34036603468 on30dce5371fcbdd4936d174c12adfe7dd196807c3 is now entirely
+SUCCESS, with all five jobs completed. Linux101495742935 passed the full
+format/dictionary/staging/locked-graph/check/Clippy/test/whitespace gates,
+including mt-ai244, mt-app1223 and all five separately discovered/executed
+actual SSH fixtures, each1 pass/0 ignored. Sidecars passed64/4/15/11.
+Windows101495742840 passed onboarding82/3, Files49/14/5/1, execution-host28,
+Tasks executor49 plus the separately executed WSL gate, Tasksapp/config/domain
+24/2/31, Git24/6/126 and terminal-host31. The native Job-policy and both Git
+launcher-loss/retained-lease regressions explicitly passed. Empty binary
+targets are not test coverage. Main read the completed job logs and exact
+workflow headSha/conclusion, then updated the final validation record.
+
+This explicitly requested WSL2 Actions follow-up is complete. Source was
+implemented and independently checked by Trellis agents; Main recorded the
+attestation failure analysis and corrected executable spec. All agents and
+owned execution sessions are closed. The broader native-feedback parent and
+children remain open for user-observed acceptance, so finish-work does not
+archive them or sweep the original unrelated dirty journals/files into commits.

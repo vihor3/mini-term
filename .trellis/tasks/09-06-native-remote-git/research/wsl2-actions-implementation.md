@@ -1,11 +1,16 @@
 # WSL2 Actions Implementation
 
-Status: RELEASED / FROZEN for Noether's source check and Main's Actions run.
-No blocker remains in this source slice. No local script interpretation,
-compilation, tests, probes, formatting, lint, whitespace checks, Git operations
-or application launches ran. All automated verification of the registry Flags
-correction remains UNRUN. Main reports both prior rows failed the replaced API
-query and completed owned cleanup; their unchanged Rust tests did not run.
+Status: SOURCE RELEASED / FROZEN. Noether reviewed the Flags correction and Main
+validated both actual WSL generations on Actions commit30dce5371fcbdd4936d174c12adfe7dd196807c3,
+run34036603468. WSL1job101495870630 and WSL2job101495870628 each discovered and
+executed the exact gate once with1 pass/0 failures/0 ignored and owned cleanup.
+WSL2 attested kernel6.18.33.2-microsoft-standard-WSL2 and Flags15; WSL1 Flags7.
+See the parent validation record for current ordinary-workflow status and limits.
+
+At source handoff, automated verification was UNRUN and the first API-query
+candidate had failed before either Rust test. No local script interpretation,
+compilation, tests, probes, formatting, lint, whitespace checks or application
+launches ran; all validation remained Actions-only.
 
 ## Changed Files
 
@@ -87,3 +92,46 @@ The selected hosted image advertises WSL2 per Main's research, but nested
 virtualization is not officially guaranteed. Actual import, guest boot, exact
 suite success and cleanup must establish feasibility. Prior f4ee0f9 green WSL1
 is not WSL2 evidence; Main must report the new matrix jobs independently.
+
+## Main Post-Fix Analysis
+
+### 1. Root Cause Category
+
+Cross-layer contract and implicit-assumption errors in CI attestation, not a
+new application regression. The initial managed API was callable but returned
+E_ACCESSDENIED in both hosted jobs. Its version field was also misinterpreted:
+Microsoft's source distinguishes distro/filesystem format from WSL generation.
+The exact managed security cause is unproven and is not needed for the scoped
+read-only registration fix.
+
+### 2. Why The Initial Attempt Failed
+
+The initial source review validated the ABI and memory handling but accepted
+the terse API documentation's version description without checking the actual
+enumeration implementation. Both imports succeeded, then attestation blocked
+the unchanged Rust test before discovery. Querying registry Version instead
+would have retained the semantic defect; Main caught that before committing it.
+
+### 3. Prevention Mechanisms
+
+Use the VM_MODE bit read from the exact owned registration through structured
+read-only APIs, keep the independent WSL2 kernel proof, and require both actual
+generation rows in Actions. Missing/malformed metadata and wrong generation
+fail closed. Preserve the failed setup result, exact cleanup, and distinction
+between environment attestation and completed test execution.
+
+### 4. Systematic Expansion
+
+The source search finds no production WslGetDistributionConfiguration caller
+to change. No COM security changes, generic WSL subsystem redesign, registered
+environment reads or new fixture framework are warranted. Native mini-term has
+no matching Trellis source-template tree to synchronize.
+
+### 5. Knowledge Capture
+
+The release-staging contract now records exact-name/DWORD/UInt32 validation,
+the fixed flags payload, VM_MODE semantics, kernel and output bounds, and the
+prohibition on generation inference from Version. The parent progress file
+retains both failed first-run job IDs and successful owned cleanups. The second
+Actions run is the source of current validation evidence; source review alone
+cannot mark WSL2 or native acceptance complete.

@@ -1,5 +1,43 @@
 # Integrated Feedback Validation
 
+## WSL Generation Extension
+
+- CI-only commit: `30dce5371fcbdd4936d174c12adfe7dd196807c3`.
+- Run: https://github.com/vihor3/mini-term/actions/runs/34036603468
+- Actual WSL1 job101495870630: SUCCESS. Flags7, exact gate discovered once and
+  executed with1 pass/0 failures/0 ignored,149.41s. Owned cleanup13:50:30Z.
+- Actual WSL2 job101495870628: SUCCESS. Flags15 and the exact owned guest kernel
+  `6.18.33.2-microsoft-standard-WSL2` attested both after import and immediately
+  before execution. Exact gate discovered once and executed with1 pass/0 failures/
+  0 ignored,154.11s. Owned cleanup13:51:48Z.
+- Same-run rootfs job101495742885: SUCCESS. Ordinary Linux job101495742935 and
+  Windows job101495742840 also completed SUCCESS. The entire workflow passed
+  on this exact commit.
+
+Both rows preserve and pass the unchanged original account, privacy, captured
+cwd/argv, cancellation/timeout and descendant assertions plus all eight appended
+client-first concurrent-peer rows. Each cleaned only `mt-tasks-34036603468-1`
+inside its own runner. Actual images in the logs are Windows2022
+`20260830.290.1` and, for the requested windows-2025 label, windows-2025-vs2026
+`20260824.214.3`. The logged guest kernel and completed test, not the image
+manifest or WSL package version, establish this WSL2 evidence.
+
+This extension changes CI scripts and records only. Application/workspace source
+is unchanged from the packaged candidate below; no new installer was built or
+local automated verification performed. The initial e82d77c run failed only
+the newly added API attestation and ran neither WSL test. Its correction and
+both successful exact-owned cleanups are recorded chronologically in progress.md.
+Enabled interop, external shared-distro clients, nested Jobs and native UI
+acceptance remain outside these isolated transport tests.
+
+Linux passed compilation, formatting/dictionary/staging/locked-graph/Clippy
+checks, full workspace tests (mt-ai244, mt-app1223), all five separately executed
+actual SSH fixtures with1 pass/0 ignored each, sidecars and whitespace. Windows
+passed onboarding82/3, Files49/14/5/1, execution-host28, Tasks executor49 plus
+the separate actual WSL gate, Tasks app/config/domain24/2/31, Git24/6/126 and
+terminal-host31. The Job policy and WSL uncertain-write regressions passed;
+empty binary targets are not counted as tests. All evidence is from Actions.
+
 ## Latest Completed Candidate
 
 - Product commit: `f4ee0f9aa954142a7552e458760d9254e17701b7`.
@@ -38,8 +76,9 @@ The passed Actions manifest records installer18,851,455 bytes and SHA256
 `77c5fcb8c8ba194760ca31a5181fef753fcd07504f5a54bb666d53d4f6fd25a3`.
 No local installer/app launch, hash check or other automated verification ran.
 
-WSL2, enabled interop, nested Jobs, real shared-distro behavior and the native
-acceptance checklist below remain unverified. Chronological failure evidence,
+WSL2 is now covered by the separate extension above. Enabled interop, nested
+Jobs, real shared-distro behavior and the native acceptance checklist below
+remain unverified. Chronological failure evidence,
 the public timing contrast and all source/review handoffs remain in progress.md.
 
 ## Proven Predecessor
