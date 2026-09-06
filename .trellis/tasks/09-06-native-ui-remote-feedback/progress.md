@@ -940,3 +940,12 @@ full-vector assertion remains authoritative. No production, fixture payload,
 workflow, cancellation, Job or credential policy changed. Main recorded the
 diagnostic contract and is staging only the single source file and four owned
 spec/report/validation paths for the next exact-SHA Actions run.
+
+The test-only discriminator follow-up is committed/pushed as
+`cb8e368db6a90e462afb2eae0d4effae29e7838c`: CI `34012168519`, package
+`34012168544`. Linux `101429759746` stopped at six changed-format hunks in
+the single test source. Main downloaded artifact `9982804374`, read the full
+patch and applied it completely to source/index, without local formatter or
+checks. Windows `101429759611` and actual WSL `101429887871` were still in
+compile/setup, not passing diagnostic evidence. The immediate format-only
+follow-up avoids waiting for their expensive test compilation before restarting.

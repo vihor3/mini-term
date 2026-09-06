@@ -1012,7 +1012,9 @@ fn wsl_literal_result_diagnostic(
     expected: &[u8],
 ) -> String {
     let diagnostic = match result {
-        Ok(output) => wsl_cwd_diagnostic(pre_project, program, WslPreludeStage::LiteralArgv, output),
+        Ok(output) => {
+            wsl_cwd_diagnostic(pre_project, program, WslPreludeStage::LiteralArgv, output)
+        }
         Err(error) => {
             let mode = if pre_project { "PreProject" } else { "Project" };
             format!(
@@ -1634,9 +1636,10 @@ fn wsl_cwd_diagnostics_identify_route_program_and_stage_without_raw_output() {
                 WslPreludeStage::NonDirectoryCwd,
             ] {
                 let diagnostic = wsl_cwd_diagnostic(pre_project, program, stage, &output);
-                assert!(diagnostic.starts_with(&format!(
-                    "mode={mode} program_kind={kind} stage={stage:?} "
-                )));
+                assert!(
+                    diagnostic
+                        .starts_with(&format!("mode={mode} program_kind={kind} stage={stage:?} "))
+                );
                 assert!(diagnostic.contains("exit=Some(-1) exit_hex=0xffffffff"));
                 assert!(diagnostic.contains("stdout_class=windows-invalid-parameter"));
                 assert!(diagnostic.contains("stderr_class=unclassified"));
@@ -1653,7 +1656,10 @@ fn wsl_cwd_diagnostics_identify_route_program_and_stage_without_raw_output() {
 fn wsl_literal_discriminator_plans_are_fixed_and_preserve_edge_cases() {
     for (row, value) in [
         (WslArgvDiscriminator::Ascii, "synthetic-ascii"),
-        (WslArgvDiscriminator::Hostile, "literal '\";$(printf injected)"),
+        (
+            WslArgvDiscriminator::Hostile,
+            "literal '\";$(printf injected)",
+        ),
         (WslArgvDiscriminator::Dash, "-n"),
         (WslArgvDiscriminator::DoubleDash, "--"),
         (WslArgvDiscriminator::Empty, ""),
@@ -1735,9 +1741,11 @@ fn wsl_literal_discriminators_never_run_on_success_or_adopt_alternatives() {
         assert_eq!(probed.iter().filter(|probed| **probed == row).count(), 1);
     }
     assert_eq!(diagnostic.lines().count(), 12);
-    assert!(diagnostic.contains(
-        "baseline mode=Project program_kind=Relative stage=LiteralArgv exit=Some(-1)"
-    ));
+    assert!(
+        diagnostic.contains(
+            "baseline mode=Project program_kind=Relative stage=LiteralArgv exit=Some(-1)"
+        )
+    );
     assert_eq!(diagnostic.matches("program_kind=Absolute").count(), 10);
     assert_eq!(diagnostic.matches("output_matches=true").count(), 10);
     assert_eq!(diagnostic.matches("output_matches=false").count(), 1);
@@ -1780,20 +1788,15 @@ fn wsl_literal_discriminators_reject_incomplete_mismatched_and_dispatch_failures
     }
     for baseline in failures {
         let mut probes = 0;
-        let diagnostic = wsl_require_literal_argv(
-            true,
-            WslCwdProgram::Absolute,
-            baseline,
-            b"expected",
-            |_| {
+        let diagnostic =
+            wsl_require_literal_argv(true, WslCwdProgram::Absolute, baseline, b"expected", |_| {
                 probes += 1;
                 Err(CommandExecutionError::new(
                     CommandExecutionErrorKind::Io,
                     "fixture_credential_probe_error",
                 ))
-            },
-        )
-        .unwrap_err();
+            })
+            .unwrap_err();
         assert_eq!(probes, 10);
         assert_eq!(diagnostic.lines().count(), 12);
         assert_eq!(diagnostic.matches("output_matches=false").count(), 11);

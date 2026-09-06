@@ -1,6 +1,6 @@
 # Integrated Feedback Validation
 
-## Current Candidate
+## Latest Completed Candidate
 
 - Product commit: `2cfd4cf67cac1d08cf2dd320162185b2b00b2abd`.
 - CI: https://github.com/vihor3/mini-term/actions/runs/34010842674
@@ -9,6 +9,9 @@
   literal-argv assertion. Complete transport correction is not validated.
 - All five implementation slices are independently source-reviewed. All
   execution, including diagnostics, formatting and fixtures, remains Actions-only.
+
+Subsequent test-only diagnostic attempts are tracked in `progress.md`; their
+running/failed gates do not inherit a pass from this completed candidate.
 
 Current WSL job101426406119 discovered and executed exactly one test in 1.19 s.
 It passed the original marker/shim/hash/case checks and the registered-project
