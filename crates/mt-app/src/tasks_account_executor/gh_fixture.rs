@@ -58,7 +58,11 @@ fn main() {
         }
         assert!(matches!(
             mode,
-            "cancel-ack" | "cancel-no-ack" | "cancel-cleanup-failed" | "cancel-extra-field"
+            "cancel-ack"
+                | "cancel-no-ack"
+                | "cancel-cleanup-failed"
+                | "cancel-extra-field"
+                | "cancel-array-ack"
         ));
         std::fs::write(evidence_path("MT_FIXTURE_READY", "ready"), b"started").unwrap();
         let mut control = [0];
@@ -69,6 +73,10 @@ fn main() {
         }
         if mode == "cancel-extra-field" {
             println!("{{\"status\":\"cancelled\",\"token\":\"synthetic\"}}");
+            return;
+        }
+        if mode == "cancel-array-ack" {
+            println!("[\"cancelled\"]");
             return;
         }
         let status = if mode == "cancel-ack" {

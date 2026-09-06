@@ -158,6 +158,14 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
   Invalid framing is Protocol during decoding and never a cleanup confirmation;
   a stopped cooperative capture without valid confirmation stays CleanupFailed.
   Do not echo rejected fields or raw parser errors into public diagnostics.
+- Both reply consumers use private `parse_host_reply`: explicitly call
+  `Deserializer::deserialize_map`, pass its original map through
+  `MapAccessDeserializer` to HostReply, then require `deserializer.end()`.
+  Internally tagged struct variants also accept positional sequences, so empty
+  structs alone do not enforce the JSON object boundary. Reject root arrays
+  including `["cancelled"]` and `["output","ok","",0]`, scalar/wrapped values
+  and trailing JSON. Accept ordinary object whitespace. Do not normalize through
+  Value (which would lose duplicate keys) or infer object shape from text prefixes.
 - Foreground access is explicit, not a consequence of rendering or a service
   notification. Showing Tasks, activating its worktree/mode and opening or
   reactivating a WorkItem allocate owned accesses and revalidate origin and the
@@ -225,6 +233,7 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
 | WSL/SSH lacks Python 3.8+ | `HostHelperUnavailable`; native Windows remains Python-free |
 | Credential lookup/token echo/cleanup fails | Static sanitized error, no token or raw diagnostics returned |
 | Host-envelope reply contains extra/duplicate/wrong-type fields | Protocol; false cleanup acknowledgement, not a successful stop |
+| Host-envelope reply is a positional array or has trailing JSON | Protocol; false cleanup acknowledgement; no alternate representation |
 | API rate limit or network failure | Preserve same-identity last-known rows when present |
 | JSON is truncated, invalid UTF-8, malformed, or has an unknown state | Reject as `MalformedResponse` |
 | First SSH stage reconnects before execution | Adopt its observed epoch for the request source |
@@ -274,6 +283,10 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
   scalar/nested/token fields, duplicate status/known fields, missing output
   fields and wrong types. Do not weaken malformed-ack assertions to accommodate
   Serde's unit-variant behavior.
+- Require object-only framing for every status and Output, including positional
+  and nested arrays, scalar wrappers, malformed nested fields, trailing values
+  and valid whitespace. A compiled synthetic child emitting an array after the
+  real cancel byte must yield CleanupFailed, not Cancelled.
 - Linux authenticated loopback SSH uses the shared runner-only fixture, isolated
   HOME/keys and a proven synthetic gh path. Explicit ignored tests inspect actual
   channel stdout/stderr and epoch replacement. Ordinary workspace tests do not

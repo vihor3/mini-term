@@ -387,6 +387,31 @@ enum HostReply {
     Failed {},
 }
 
+fn parse_host_reply(bytes: &[u8]) -> Result<HostReply, serde_json::Error> {
+    use serde::de::value::MapAccessDeserializer;
+    use serde::de::{MapAccess, Visitor};
+
+    struct ReplyVisitor;
+
+    impl<'de> Visitor<'de> for ReplyVisitor {
+        type Value = HostReply;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a host reply JSON object")
+        }
+
+        fn visit_map<M: MapAccess<'de>>(self, map: M) -> Result<Self::Value, M::Error> {
+            HostReply::deserialize(MapAccessDeserializer::new(map))
+        }
+    }
+
+    // Keep duplicate keys visible to the derive; never normalize through Value.
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let reply = serde::Deserializer::deserialize_map(&mut deserializer, ReplyVisitor)?;
+    deserializer.end()?;
+    Ok(reply)
+}
+
 fn decode_host_reply(
     bytes: &[u8],
     output_limit: usize,
@@ -394,7 +419,7 @@ fn decode_host_reply(
     if bytes.len() > wire_limit(output_limit) || std::str::from_utf8(bytes).is_err() {
         return Err(AccountExecutionError::Protocol);
     }
-    match serde_json::from_slice::<HostReply>(bytes).map_err(|_| AccountExecutionError::Protocol)? {
+    match parse_host_reply(bytes).map_err(|_| AccountExecutionError::Protocol)? {
         HostReply::Output {
             stdout,
             stderr,
@@ -430,5 +455,5 @@ fn decode_host_reply(
 }
 
 pub(crate) fn host_reply_confirms_cleanup(bytes: &[u8]) -> bool {
-    matches!(serde_json::from_slice::<HostReply>(bytes), Ok(reply) if !matches!(reply, HostReply::CleanupFailed {}))
+    matches!(parse_host_reply(bytes), Ok(reply) if !matches!(reply, HostReply::CleanupFailed {}))
 }

@@ -1202,3 +1202,68 @@ index, without local formatting/checks. WSL101444696095 had completed import
 and entered its exact test build step before the successor push; no test pass
 is claimed. Windows101444578823 was still compiling. The formatting successor
 restarts unchanged full gates and same-run fixtures.
+
+The complete three-file formatting successor is committed/pushed as
+`c92e54acb4f3b296801b2bb0213c585a671e7273`: CI34017910209 and
+package34017910189. Superseded WSL101444696095 had completed import before
+cancellation during test compilation; exact owned cleanup succeeded. Current
+Linux101444951799 passed formatting and is compiling, Windows101444951923 is
+compiling, rootfs101444951902 passed and actual WSL101445078760 completed import
+and entered the exact test build/execution step. No current protocol regression
+or early-exit/retirement result is claimed yet. All owners are closed and source
+is frozen pending new Actions evidence; original unrelated dirty paths remain.
+
+Main's additional source review found the same locked Serde visitor also accepts
+sequence input for internally tagged enums/struct variants. Empty struct statuses
+therefore do not alone enforce the documented top-level OBJECT shape: positional
+arrays such as ["cancelled"] or ["output","ok","",0] need explicit rejection.
+The new tests covered array-valued status fields, not valid-position root arrays.
+Primary source checked: Serde1.0.229 private/de.rs TaggedContentVisitor::visit_seq
+and serde_derive/src/de/struct_.rs internally tagged visit_seq/deserialize_any.
+No local execution or current-CI array result is claimed. Main resumed Noether
+only for a bounded shared object-only HostReply parser (structured map visitor,
+preserved duplicate detection and trailing-data rejection), focused tests/optional
+synthetic malformed-array acknowledgement and report. No shared process or
+classifier edits belong to that correction.
+
+Actual WSL101445078760 at c92e54a executed exactly one test and FAILED in
+29.79s, this time at DataCancel readiness. First readiness start246us/end123389us;
+its existing TerminateJobObject ran123194-123220us, Count(4), succeeded=true.
+Private capture attached2653us, exited134792us at-1 without stop/control, retired
+134821us, drained135339us with ack=false/stdout118/stderr0 and both native message
+classes Unknown; API returned135376us cancelled=false. No StopLatched/ControlWrite
+occurred. Readiness never became true over66probes; final start9988807/end10091098us,
+retirement10091011-10091027us Count(1)/success, cancellation10091099us. Failed
+result and failed readiness both remain rejected, and final descendant assertion
+was not reached. Exact owned distro cleanup SUCCESS is independently observed.
+The first retirement preceded private exit by about12ms and had four associated
+active-process references, but this does not identify them or prove cross-Job
+causation. Unknown native bytes remain private, not guessed from length.
+
+Main resumed McClintock for a READ-ONLY concrete Windows/WSL ProcessTree proposal
+using those exact logs/source/primary docs. No edits are authorized yet. Need
+minimal ownership/membership evidence or defensible correction covering generic
+WSL Git/Files commands AND private Tasks; no Job bypass, blind breakaway change,
+test serialization, removed concurrent readiness, arbitrary Cancelled remapping,
+indefinitely retained Jobs, retries or weakened host cleanup acknowledgement.
+Noether's independent object-parser scope remains disjoint. Current Linux
+compile/Clippy and Windows compile passed; their tests/package still run.
+
+Noether released/froze the object-only parser follow-up (mod.rs/tests.rs/
+gh_fixture.rs/report) and closed. Main reviewed the single shared deserialize_map
+visitor, unchanged HostReply derive, preserved duplicate-key visibility and end()
+framing. Two new tests cover all status/Output positional arrays, nested/scalar
+forms, trailing values and valid whitespace. Existing strict-field tests remain;
+compiled synthetic cancel-array-ack must still return CleanupFailed. No other
+source surface, dependency, public API, valid wire mapping or process policy
+changed. Main updated the Tasks contract. All follow-up validation is UNRUN.
+
+At c92e54a, Linux101444951799 is entirely SUCCESS. mt-ai244 and mt-app1217
+passed (five actual host tests separately ignored in the ordinary app suite).
+The corrected metadata assertion and both strict-field protocol tests passed.
+All five actual authenticated SSH fixtures were then each discovered/executed
+once and passed with zero ignored cases, followed by sidecars and whitespace.
+Windows101444951923 has passed execution-host/Tasks/Git filters and entered
+sidecar checks; it and package101444939167 are not yet fully complete. These
+results validate the preceding empty-struct correction, not the new map-only
+parser. McClintock's read-only Job-scope proposal remains outstanding.

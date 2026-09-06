@@ -2,11 +2,82 @@
 
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
 pointer still identifies the Git child. Source review and explicitly authorized
-Actions log inspection. No passing build, lint, type-check, formatting, test,
-transport, or native acceptance is claimed for the current protocol correction
-and retirement/classifier diagnostic delta. All new validation is UNRUN.
+Actions log inspection only. The current object-only parser correction, two new
+tests and updated fixture are UNRUN. No local build, test, lint, formatting,
+syntax, whitespace, transport or native acceptance is claimed. The c92e54a
+Actions run predates this follow-up and cannot validate it.
 
-## Strict Host Reply And WSL Retirement Diagnostics: Source Released To Main
+## Object-Only Host Reply: Source Released To Main
+
+The bounded correction is authored and source-reviewed with no implementation
+blocker. Ownership is released to Main and source writes are frozen. Exact
+release paths are `tasks_account_executor/mod.rs`, `tests.rs`, `gh_fixture.rs`
+and this report. No public API, dependency, valid wire object, error mapping,
+size bound, cancellation or credential-policy change was made. Main owns
+specs, CI, formatter artifacts, Git and exact-SHA Actions validation.
+
+### Confirmed Shape Gap And Correction
+
+The locked Serde 1.0.229
+[TaggedContentVisitor::visit_seq](https://raw.githubusercontent.com/serde-rs/serde/v1.0.229/serde/src/private/de.rs)
+accepts the first sequence element as the internally tagged enum's tag. Its
+[struct variant derive](https://raw.githubusercontent.com/serde-rs/serde/v1.0.229/serde_derive/src/de/struct_.rs)
+also accepts sequences. Empty struct statuses therefore close extra fields but
+do not enforce a top-level object: `["cancelled"]` and `["output","ok","",0]`
+still have valid positional shapes. This gap is confirmed
+from the locked primary source, not from running a local probe.
+
+One private `parse_host_reply` now requires `deserialize_map`, passes the
+original map through `MapAccessDeserializer` to the existing HostReply derive,
+and calls `deserializer.end()`. This follows the existing structured object
+boundary in `mt-github/src/accounts.rs` without adding a shared abstraction.
+There is no Value normalization or string-prefix parser: original duplicate
+keys remain visible, and trailing non-whitespace data is rejected.
+
+Both decoding and cleanup acknowledgement use this parser. Valid objects,
+whitespace framing, closed fields and typed Output fields keep their existing
+behavior. Invalid root arrays, scalars, nested shapes or trailing data produce
+Protocol at decode and false at acknowledgement. Parser errors and private
+payloads are not echoed. A stopped request with an array acknowledgement still
+requires CleanupFailed, never a successful cancellation result.
+
+### Two New Tests: Authored UNRUN
+
+- `tasks_account_executor::tests::host_reply_statuses_require_single_objects_not_positional_arrays`
+- `tasks_account_executor::tests::host_reply_output_rejects_positional_nested_scalar_and_trailing_json`
+
+These cover every status-only positional array, nested arrays/object wrappers,
+scalars, the positional Output sequence, nested Output field values, trailing
+JSON values and accepted object whitespace through the shared parser and both
+consumers. Existing all-status valid mappings, extra/token/nested fields,
+duplicate fields, required fields and wrong-type regressions remain intact.
+
+The existing
+`private_capture_diagnostics_keep_cancellation_acknowledgement_required` test
+also gains fixed `cancel-array-ack` fixture mode. It receives the real private
+control byte, emits only synthetic `["cancelled"]`, and must return CleanupFailed
+with false acknowledgement. Original extra-field and metadata safety assertions
+are unchanged. This is an updated guarded-capture test, not a third new function.
+
+### Limits And Separate Investigation
+
+No local executable checks, fixtures, Git writes or child agents occurred.
+The broad existing Tasks test filters cover this slice; Main must run the new
+tests and rebuilt synthetic fixture in Actions. No execution_host, process,
+classifier, Python/SSH envelope, CI or spec edits belong to this follow-up.
+
+Main reports c92e54a actual WSL job 101445078760 failed at DataCancel in 29.79
+seconds, with owned-distro cleanup passing and no final descendant check. Its
+early-exit/Job investigation remains separate and is not marked fixed here.
+No full WSL transport or native hardware acceptance is claimed. Current ordinary
+Actions outcomes remain Main's integration responsibility.
+
+## Earlier Strict Reply And Retirement Handoff (Superseded)
+
+Historical status below describes the prior c92e54a diagnostic release. The
+object-only correction and current validation limits above supersede its
+protocol-completeness and UNRUN statements; its observer/classifier scope is
+not reopened by this follow-up.
 
 The approved slice is authored and source-reviewed, with no implementation
 blocker. Ownership is released to Main and source writes are frozen. Exact

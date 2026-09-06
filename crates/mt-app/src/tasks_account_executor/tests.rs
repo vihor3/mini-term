@@ -391,6 +391,11 @@ fn private_capture_diagnostics_keep_cancellation_acknowledgement_required() {
             AccountExecutionError::CleanupFailed,
             false,
         ),
+        (
+            "cancel-array-ack",
+            AccountExecutionError::CleanupFailed,
+            false,
+        ),
     ] {
         let evidence = DescendantEvidence::new();
         let cancellation = AccountCancellation::default();
@@ -813,6 +818,82 @@ fn host_reply_output_requires_typed_unique_closed_fields() {
     }
     for invalid in [b"null".as_slice(), b"true", b"42", br#""output""#, b"{}"] {
         assert_invalid_host_reply(invalid);
+    }
+}
+
+#[test]
+fn host_reply_statuses_require_single_objects_not_positional_arrays() {
+    for status in [
+        "cancelled",
+        "timed-out",
+        "helper-unavailable",
+        "client-missing",
+        "credential-lookup-failed",
+        "credential-store-unavailable",
+        "named-account-unsupported",
+        "identity-mismatch",
+        "cleanup-failed",
+        "unsafe-output",
+        "malformed",
+        "failed",
+    ] {
+        let object = serde_json::json!({"status": status});
+        let padded = format!(" \n{object}\r\n\t");
+        assert!(parse_host_reply(padded.as_bytes()).is_ok());
+        assert_eq!(
+            host_reply_confirms_cleanup(padded.as_bytes()),
+            status != "cleanup-failed"
+        );
+        for invalid in [
+            serde_json::json!([status]),
+            serde_json::json!([[status]]),
+            serde_json::json!([object.clone()]),
+            serde_json::json!(status),
+            serde_json::Value::Null,
+        ] {
+            assert_invalid_host_reply(&serde_json::to_vec(&invalid).unwrap());
+        }
+        for suffix in ["{}", "[]", "null", "true", r#"["cancelled"]"#] {
+            assert_invalid_host_reply(format!("{object}\n{suffix}").as_bytes());
+        }
+    }
+}
+
+#[test]
+fn host_reply_output_rejects_positional_nested_scalar_and_trailing_json() {
+    let object =
+        serde_json::json!({"status": "output", "stdout": "ok", "stderr": "", "exit_code": 0});
+    let padded = format!("\t{object} \r\n");
+    let output = decode_host_reply(padded.as_bytes(), 64).unwrap();
+    assert_eq!(output.stdout, b"ok");
+    assert!(output.stderr.is_empty());
+    assert_eq!(output.exit_code, Some(0));
+    assert!(host_reply_confirms_cleanup(padded.as_bytes()));
+    for invalid in [
+        serde_json::json!(["output", "ok", "", 0]),
+        serde_json::json!([["output", "ok", "", 0]]),
+        serde_json::json!([object.clone()]),
+        serde_json::json!("output"),
+        serde_json::json!(0),
+        serde_json::json!(false),
+        serde_json::Value::Null,
+    ] {
+        assert_invalid_host_reply(&serde_json::to_vec(&invalid).unwrap());
+    }
+    for field in ["status", "stdout", "stderr", "exit_code"] {
+        let mut invalid = object.clone();
+        invalid[field] = serde_json::json!([object[field].clone()]);
+        assert_invalid_host_reply(&serde_json::to_vec(&invalid).unwrap());
+    }
+    for suffix in [
+        object.to_string(),
+        "[]".into(),
+        "null".into(),
+        "false".into(),
+        "123".into(),
+        r#""fixture_credential_trailing""#.into(),
+    ] {
+        assert_invalid_host_reply(format!("{object}\n{suffix}").as_bytes());
     }
 }
 
