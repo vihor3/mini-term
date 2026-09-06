@@ -504,7 +504,12 @@ mod tests {
         }
         emulator.advance(b"\x1b[H\x1b[2J\x1b[1mlive\x1b[0m\r\n\r\nfooter\x1b[1;5H");
         emulator.with_term_mut(|term| term.scroll_display(alacritty_terminal::grid::Scroll::Top));
-        assert!(emulator.visible_lines().iter().any(|line| line == "old history"));
+        assert!(
+            emulator
+                .visible_lines()
+                .iter()
+                .any(|line| line == "old history")
+        );
         let (before, after) = emulator.advance_with_current_screen(b"\x1b[5n");
         assert_eq!(before, after);
         let screen = after.unwrap();
@@ -520,9 +525,19 @@ mod tests {
         let emulator = TerminalEmulator::new(TermSize::new(80, 8));
         assert!(emulator.advance_with_current_screen(b"\x1b[").1.is_none());
         assert!(emulator.advance_with_current_screen(b"0m").1.is_some());
-        assert!(emulator.advance_with_current_screen(b"\xe2\x80").1.is_none());
+        assert!(
+            emulator
+                .advance_with_current_screen(b"\xe2\x80")
+                .1
+                .is_none()
+        );
         assert!(emulator.advance_with_current_screen(b"\xa2").1.is_some());
-        assert!(emulator.advance_with_current_screen(b"\x1b[?2026hnext").1.is_none());
+        assert!(
+            emulator
+                .advance_with_current_screen(b"\x1b[?2026hnext")
+                .1
+                .is_none()
+        );
         let (before, after) = emulator.advance_with_current_screen(b"\x1b[?2026l");
         assert!(before.is_none());
         assert_eq!(after.unwrap().rows[0].text, "\u{2022}next");
@@ -530,7 +545,12 @@ mod tests {
             let emulator = TerminalEmulator::new(TermSize::new(80, 8));
             emulator.advance(prefix);
             emulator.advance(&vec![b'x'; 2 * 1024 * 1024 + 1]);
-            assert!(emulator.advance_with_current_screen(b"\x1b[?2026l\x07").1.is_none());
+            assert!(
+                emulator
+                    .advance_with_current_screen(b"\x1b[?2026l\x07")
+                    .1
+                    .is_none()
+            );
             emulator.reset_parser_state();
             assert!(emulator.advance_with_current_screen(b"").1.is_some());
         }

@@ -573,8 +573,8 @@ impl AppStore {
         let terminal_routes = &self.terminal_routes;
         let exited_ptys = &self.exited_ptys;
         self.remote_agent_polls.retain(|pty_id, state| {
-            let keep = !exited_ptys.contains(pty_id)
-                && terminal_routes.get(pty_id) == Some(&state.route);
+            let keep =
+                !exited_ptys.contains(pty_id) && terminal_routes.get(pty_id) == Some(&state.route);
             if !keep {
                 state.clear_title_owner();
             }
@@ -1336,9 +1336,21 @@ mod tests {
         observed.received_at_unix_ms = 100;
         registry.apply_process_inventory(observed).unwrap();
         let mut screen = PtyCodexScreen::default();
-        screen.bind_owner(foreground_semantic_owner(&registry, &poll, source.clone(), 100, 100));
-        (request, poll, registry, source,
-            mt_terminal::TerminalEmulator::new(mt_terminal::TermSize::new(100, 30)), screen)
+        screen.bind_owner(foreground_semantic_owner(
+            &registry,
+            &poll,
+            source.clone(),
+            100,
+            100,
+        ));
+        (
+            request,
+            poll,
+            registry,
+            source,
+            mt_terminal::TerminalEmulator::new(mt_terminal::TermSize::new(100, 30)),
+            screen,
+        )
     }
 
     fn codex_working(seconds: u32) -> Vec<u8> {
@@ -1354,8 +1366,11 @@ mod tests {
         sequence: u64,
         now: i64,
     ) -> Option<AgentApplyOutcome> {
-        let mut observed = inventory(request, sequence,
-            process_observations(&poll.foreground.into_iter().collect::<Vec<_>>()).unwrap());
+        let mut observed = inventory(
+            request,
+            sequence,
+            process_observations(&poll.foreground.into_iter().collect::<Vec<_>>()).unwrap(),
+        );
         observed.received_at_unix_ms = now;
         registry.apply_process_inventory(observed).unwrap();
         poll.foreground_observed_at_unix_ms = poll.foreground.map(|_| now);
@@ -1366,24 +1381,76 @@ mod tests {
     #[test]
     fn codex_native_frame_reaches_bracketed_registry_and_accepted_projection() {
         let (mut request, mut poll, mut registry, source, emulator, mut screen) = codex_fixture();
-        let run_id = registry.active_run_for_route(&request.route).unwrap().run_id.clone();
+        let run_id = registry
+            .active_run_for_route(&request.route)
+            .unwrap()
+            .run_id
+            .clone();
         screen.observe_output(&emulator, &codex_working(2), 110);
         request.requested_at_unix_ms = 109;
-        assert!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 2, 120).is_none());
-        assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Unknown);
+        assert!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                2,
+                120
+            )
+            .is_none()
+        );
+        assert_eq!(
+            registry.run(&run_id).unwrap().activity,
+            AgentActivity::Unknown
+        );
         request.requested_at_unix_ms = 121;
-        assert!(matches!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 4, 130), Some(AgentApplyOutcome::Applied { .. })));
-        assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Working);
+        assert!(matches!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                4,
+                130
+            ),
+            Some(AgentApplyOutcome::Applied { .. })
+        ));
+        assert_eq!(
+            registry.run(&run_id).unwrap().activity,
+            AgentActivity::Working
+        );
         let projection = accepted_agent_projection(&registry, &request.route, false);
         assert!(projection.live);
         assert_eq!(projection.status, PaneStatus::AiWorking);
-        assert_eq!(registry.activity_freshness(&run_id, 130), mt_ai::AgentActivityFreshness::Fresh);
+        assert_eq!(
+            registry.activity_freshness(&run_id, 130),
+            mt_ai::AgentActivityFreshness::Fresh
+        );
         // Neither an idle composer nor later liveness can manufacture Waiting/Done.
         screen.observe_output(&emulator, &crate::pane::codex_test_frame(""), 140);
         request.requested_at_unix_ms = 150;
-        assert!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 6, 160).is_none());
-        assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Working);
-        assert_eq!(registry.activity_freshness(&run_id, 15_111), mt_ai::AgentActivityFreshness::Stale);
+        assert!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                6,
+                160
+            )
+            .is_none()
+        );
+        assert_eq!(
+            registry.run(&run_id).unwrap().activity,
+            AgentActivity::Working
+        );
+        assert_eq!(
+            registry.activity_freshness(&run_id, 15_111),
+            mt_ai::AgentActivityFreshness::Stale
+        );
     }
 
     #[test]
@@ -1394,16 +1461,56 @@ mod tests {
         for seconds in 3..50 {
             screen.observe_output(&emulator, &codex_working(seconds), 110 + i64::from(seconds));
         }
-        assert!(matches!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 2, 200), Some(AgentApplyOutcome::Applied { .. })));
-        let run_id = registry.active_run_for_route(&request.route).unwrap().run_id.clone();
-        assert_eq!(registry.activity_freshness(&run_id, 15_111), mt_ai::AgentActivityFreshness::Stale);
+        assert!(matches!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                2,
+                200
+            ),
+            Some(AgentApplyOutcome::Applied { .. })
+        ));
+        let run_id = registry
+            .active_run_for_route(&request.route)
+            .unwrap()
+            .run_id
+            .clone();
+        assert_eq!(
+            registry.activity_freshness(&run_id, 15_111),
+            mt_ai::AgentActivityFreshness::Stale
+        );
         screen.observe_output(&emulator, &codex_working(49), 210);
         screen.observe_output(&emulator, b"\x1b]2;unrelated title\x07\x1b[5n", 220);
         request.requested_at_unix_ms = 230;
-        assert!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 4, 240).is_none());
+        assert!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                4,
+                240
+            )
+            .is_none()
+        );
         screen.observe_output(&emulator, &codex_working(50), 250);
         request.requested_at_unix_ms = 251;
-        assert!(matches!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 6, 260), Some(AgentApplyOutcome::Applied { .. })));
+        assert!(matches!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                6,
+                260
+            ),
+            Some(AgentApplyOutcome::Applied { .. })
+        ));
     }
 
     #[test]
@@ -1411,28 +1518,88 @@ mod tests {
         let (mut request, mut poll, mut registry, source, emulator, mut screen) = codex_fixture();
         screen.bind_owner(None);
         screen.observe_output(&emulator, &codex_working(2), 90);
-        screen.bind_owner(foreground_semantic_owner(&registry, &poll, source.clone(), 100, 100));
+        screen.bind_owner(foreground_semantic_owner(
+            &registry,
+            &poll,
+            source.clone(),
+            100,
+            100,
+        ));
         screen.observe_output(&emulator, b"\x1b[", 110);
         screen.observe_output(&emulator, b"0m", 111);
         request.requested_at_unix_ms = 112;
-        assert!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 2, 120).is_none());
+        assert!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                2,
+                120
+            )
+            .is_none()
+        );
         let frame = codex_working(3);
         for (index, byte) in frame.iter().enumerate() {
             screen.observe_output(&emulator, &[*byte], 130 + index as i64);
         }
         request.requested_at_unix_ms = 500;
-        assert!(matches!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 4, 510), Some(AgentApplyOutcome::Applied { .. })));
-        let run_id = registry.active_run_for_route(&request.route).unwrap().run_id.clone();
+        assert!(matches!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                4,
+                510
+            ),
+            Some(AgentApplyOutcome::Applied { .. })
+        ));
+        let run_id = registry
+            .active_run_for_route(&request.route)
+            .unwrap()
+            .run_id
+            .clone();
         let accepted = registry.run(&run_id).unwrap().clone();
-        screen.observe_output(&emulator, &crate::pane::codex_test_frame("\u{25e6} Working (3s \u{2022} esc to interrupt)"), 520);
-        screen.observe_output(&emulator, "\x1b[5;1Hgpt-6-astra high \u{00b7} ~/another\x1b[K\x1b[3;3H".as_bytes(), 530);
+        screen.observe_output(
+            &emulator,
+            &crate::pane::codex_test_frame("\u{25e6} Working (3s \u{2022} esc to interrupt)"),
+            520,
+        );
+        screen.observe_output(
+            &emulator,
+            "\x1b[5;1Hgpt-6-astra high \u{00b7} ~/another\x1b[K\x1b[3;3H".as_bytes(),
+            530,
+        );
         screen.observe_output(&emulator, b"\x1b[", 540);
         screen.observe_output(&emulator, b"0m", 550);
         request.requested_at_unix_ms = 560;
-        assert!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 6, 570).is_none());
-        assert_eq!(registry.run(&run_id).unwrap().last_event_id, accepted.last_event_id);
-        assert_eq!(registry.run(&run_id).unwrap().received_at_unix_ms, accepted.received_at_unix_ms);
-        assert_eq!(registry.activity_freshness(&run_id, 15_500), mt_ai::AgentActivityFreshness::Stale);
+        assert!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                6,
+                570
+            )
+            .is_none()
+        );
+        assert_eq!(
+            registry.run(&run_id).unwrap().last_event_id,
+            accepted.last_event_id
+        );
+        assert_eq!(
+            registry.run(&run_id).unwrap().received_at_unix_ms,
+            accepted.received_at_unix_ms
+        );
+        assert_eq!(
+            registry.activity_freshness(&run_id, 15_500),
+            mt_ai::AgentActivityFreshness::Stale
+        );
     }
 
     #[test]
@@ -1448,22 +1615,57 @@ mod tests {
             screen.observe_output(&emulator, &codex_working(2), 90);
             screen.observe_output(&emulator, prepare, 91);
             screen.bind_owner(foreground_semantic_owner(
-                &registry, &poll, source.clone(), 100, 100,
+                &registry,
+                &poll,
+                source.clone(),
+                100,
+                100,
             ));
             screen.observe_output(&emulator, reveal, 110);
             request.requested_at_unix_ms = 111;
-            assert!(confirm_codex_fixture(
-                &request, &mut poll, &mut registry, &source, &mut screen, 2, 120,
-            ).is_none());
-            let run_id = registry.active_run_for_route(&request.route).unwrap().run_id.clone();
-            assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Unknown);
-            assert_eq!(registry.activity_freshness(&run_id, 120), mt_ai::AgentActivityFreshness::Unknown);
+            assert!(
+                confirm_codex_fixture(
+                    &request,
+                    &mut poll,
+                    &mut registry,
+                    &source,
+                    &mut screen,
+                    2,
+                    120,
+                )
+                .is_none()
+            );
+            let run_id = registry
+                .active_run_for_route(&request.route)
+                .unwrap()
+                .run_id
+                .clone();
+            assert_eq!(
+                registry.run(&run_id).unwrap().activity,
+                AgentActivity::Unknown
+            );
+            assert_eq!(
+                registry.activity_freshness(&run_id, 120),
+                mt_ai::AgentActivityFreshness::Unknown
+            );
             screen.observe_output(&emulator, &codex_working(3), 130);
             request.requested_at_unix_ms = 131;
-            assert!(matches!(confirm_codex_fixture(
-                &request, &mut poll, &mut registry, &source, &mut screen, 4, 140,
-            ), Some(AgentApplyOutcome::Applied { .. })));
-            assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Working);
+            assert!(matches!(
+                confirm_codex_fixture(
+                    &request,
+                    &mut poll,
+                    &mut registry,
+                    &source,
+                    &mut screen,
+                    4,
+                    140,
+                ),
+                Some(AgentApplyOutcome::Applied { .. })
+            ));
+            assert_eq!(
+                registry.run(&run_id).unwrap().activity,
+                AgentActivity::Working
+            );
         }
     }
 
@@ -1475,23 +1677,60 @@ mod tests {
         screen.bind_owner(None);
         screen.observe_output(&emulator, &frame[8..], 120);
         request.requested_at_unix_ms = 121;
-        assert!(confirm_codex_fixture(
-            &request, &mut poll, &mut registry, &source, &mut screen, 2, 130,
-        ).is_none());
+        assert!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                2,
+                130,
+            )
+            .is_none()
+        );
         screen.observe_output(&emulator, b"\x1b[", 140);
         screen.observe_output(&emulator, b"0m", 141);
         request.requested_at_unix_ms = 142;
-        assert!(confirm_codex_fixture(
-            &request, &mut poll, &mut registry, &source, &mut screen, 4, 150,
-        ).is_none());
-        let run_id = registry.active_run_for_route(&request.route).unwrap().run_id.clone();
-        assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Unknown);
+        assert!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                4,
+                150,
+            )
+            .is_none()
+        );
+        let run_id = registry
+            .active_run_for_route(&request.route)
+            .unwrap()
+            .run_id
+            .clone();
+        assert_eq!(
+            registry.run(&run_id).unwrap().activity,
+            AgentActivity::Unknown
+        );
         screen.observe_output(&emulator, &codex_working(3), 160);
         request.requested_at_unix_ms = 161;
-        assert!(matches!(confirm_codex_fixture(
-            &request, &mut poll, &mut registry, &source, &mut screen, 6, 170,
-        ), Some(AgentApplyOutcome::Applied { .. })));
-        assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Working);
+        assert!(matches!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                6,
+                170,
+            ),
+            Some(AgentApplyOutcome::Applied { .. })
+        ));
+        assert_eq!(
+            registry.run(&run_id).unwrap().activity,
+            AgentActivity::Working
+        );
     }
 
     #[test]
@@ -1501,36 +1740,120 @@ mod tests {
         request.requested_at_unix_ms = 111;
         let frame = codex_working(3);
         screen.observe_output(&emulator, &frame[..frame.len() - 8], 120);
-        assert!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 2, 130).is_none());
+        assert!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                2,
+                130
+            )
+            .is_none()
+        );
         screen.observe_output(&emulator, &frame[frame.len() - 8..], 140);
         request.requested_at_unix_ms = 141;
-        assert!(matches!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 4, 150), Some(AgentApplyOutcome::Applied { .. })));
-        let run_id = registry.active_run_for_route(&request.route).unwrap().run_id.clone();
-        assert_eq!(registry.activity_freshness(&run_id, 15_111), mt_ai::AgentActivityFreshness::Stale);
+        assert!(matches!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                4,
+                150
+            ),
+            Some(AgentApplyOutcome::Applied { .. })
+        ));
+        let run_id = registry
+            .active_run_for_route(&request.route)
+            .unwrap()
+            .run_id
+            .clone();
+        assert_eq!(
+            registry.activity_freshness(&run_id, 15_111),
+            mt_ai::AgentActivityFreshness::Stale
+        );
     }
 
     #[test]
     fn codex_absence_partial_frames_and_older_output_cannot_publish_obsolete_working() {
-        for contradiction in [crate::pane::codex_test_frame(""), crate::pane::codex_test_frame("Please approve"), b"\x1b[2J".to_vec()] {
-            let (mut request, mut poll, mut registry, source, emulator, mut screen) = codex_fixture();
+        for contradiction in [
+            crate::pane::codex_test_frame(""),
+            crate::pane::codex_test_frame("Please approve"),
+            b"\x1b[2J".to_vec(),
+        ] {
+            let (mut request, mut poll, mut registry, source, emulator, mut screen) =
+                codex_fixture();
             screen.observe_output(&emulator, &codex_working(2), 110);
             screen.observe_output(&emulator, &contradiction, 120);
             request.requested_at_unix_ms = 111;
-            assert!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 2, 130).is_none());
-            assert_eq!(registry.active_run_for_route(&request.route).unwrap().activity, AgentActivity::Unknown);
+            assert!(
+                confirm_codex_fixture(
+                    &request,
+                    &mut poll,
+                    &mut registry,
+                    &source,
+                    &mut screen,
+                    2,
+                    130
+                )
+                .is_none()
+            );
+            assert_eq!(
+                registry
+                    .active_run_for_route(&request.route)
+                    .unwrap()
+                    .activity,
+                AgentActivity::Unknown
+            );
         }
         let (mut request, mut poll, mut registry, source, emulator, mut screen) = codex_fixture();
         screen.observe_output(&emulator, &codex_working(2), 110);
         screen.observe_output(&emulator, b"\x1b[?2026h\x1b[2J", 120);
         request.requested_at_unix_ms = 111;
-        assert!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 2, 130).is_none());
+        assert!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                2,
+                130
+            )
+            .is_none()
+        );
         screen.observe_output(&emulator, b"\x1b[?2026l", 140);
         request.requested_at_unix_ms = 141;
-        assert!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 4, 150).is_none());
+        assert!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                4,
+                150
+            )
+            .is_none()
+        );
         screen.observe_output(&emulator, &codex_working(3), 160);
         screen.observe_output(&emulator, &codex_working(4), 159);
         request.requested_at_unix_ms = 161;
-        assert!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 6, 170).is_none());
+        assert!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                6,
+                170
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1539,17 +1862,47 @@ mod tests {
         screen.bind_owner(None);
         screen.observe_output(&emulator, &codex_working(2), 90);
         let snapshot = emulator.snapshot().unwrap();
-        screen.bind_owner(foreground_semantic_owner(&registry, &poll, source.clone(), 100, 100));
+        screen.bind_owner(foreground_semantic_owner(
+            &registry,
+            &poll,
+            source.clone(),
+            100,
+            100,
+        ));
         screen.observe_output(&emulator, b"\x1b[5n", 110);
         emulator.set_scrollback(500);
         emulator.restore_snapshot(&snapshot).unwrap();
-        emulator.with_term_mut(|term| term.scroll_display(mt_terminal::alacritty_terminal::grid::Scroll::Top));
+        emulator.with_term_mut(|term| {
+            term.scroll_display(mt_terminal::alacritty_terminal::grid::Scroll::Top)
+        });
         screen.observe_output(&emulator, b"\x1b]2;Working\x07", 120);
         request.requested_at_unix_ms = 121;
-        assert!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 2, 130).is_none());
+        assert!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                2,
+                130
+            )
+            .is_none()
+        );
         screen.observe_output(&emulator, &codex_working(3), 140);
         request.requested_at_unix_ms = 141;
-        assert!(matches!(confirm_codex_fixture(&request, &mut poll, &mut registry, &source, &mut screen, 4, 150), Some(AgentApplyOutcome::Applied { .. })));
+        assert!(matches!(
+            confirm_codex_fixture(
+                &request,
+                &mut poll,
+                &mut registry,
+                &source,
+                &mut screen,
+                4,
+                150
+            ),
+            Some(AgentApplyOutcome::Applied { .. })
+        ));
     }
 
     #[test]
@@ -1569,7 +1922,13 @@ mod tests {
                 _ => owner.route.worktree_id = route().worktree_id,
             }
             assert!(screen.take_confirmed(Some(&owner), 111, 130).is_none());
-            assert_eq!(registry.active_run_for_route(&request.route).unwrap().activity, AgentActivity::Unknown);
+            assert_eq!(
+                registry
+                    .active_run_for_route(&request.route)
+                    .unwrap()
+                    .activity,
+                AgentActivity::Unknown
+            );
         }
     }
 
@@ -1577,32 +1936,87 @@ mod tests {
     fn codex_owned_screen_never_overrides_hook_or_updates_independent_runs() {
         let (mut request, mut poll, mut registry, source, emulator, mut screen) = codex_fixture();
         let foreground = poll.foreground.unwrap();
-        let background = mt_ssh::RemoteAgentProcess { pid: 20, start_ticks: 200, foreground: false, ..foreground };
-        let mut observed = inventory(&request, 2, process_observations(&[foreground, background]).unwrap());
+        let background = mt_ssh::RemoteAgentProcess {
+            pid: 20,
+            start_ticks: 200,
+            foreground: false,
+            ..foreground
+        };
+        let mut observed = inventory(
+            &request,
+            2,
+            process_observations(&[foreground, background]).unwrap(),
+        );
         observed.received_at_unix_ms = 101;
         registry.apply_process_inventory(observed).unwrap();
-        let run_id = registry.runs().find(|run| run.process.unwrap().pid == 10).unwrap().run_id.clone();
+        let run_id = registry
+            .runs()
+            .find(|run| run.process.unwrap().pid == 10)
+            .unwrap()
+            .run_id
+            .clone();
         screen.observe_output(&emulator, &codex_working(2), 110);
         request.requested_at_unix_ms = 111;
         let owner = foreground_semantic_owner(&registry, &poll, source.clone(), 120, 120);
-        assert!(matches!(apply_codex_screen(&mut registry, &mut screen, owner, &request, 3, 120), Some(AgentApplyOutcome::Applied { .. })));
-        assert_eq!(registry.runs().find(|run| run.process.unwrap().pid == 20).unwrap().activity, AgentActivity::Unknown);
-        assert!(matches!(registry.observe(mt_ai::AgentObservation {
-            event_id: AgentEventId::new(), route: request.route.clone(), provider: "codex".parse().unwrap(),
-            provider_session_id: Some("exact-hook".into()), process: Some(AgentProcessIdentity::new(10, 100).unwrap()),
-            weak_episode: None, activity: AgentActivity::Waiting, connectivity: AgentConnectivity::Live,
-            confirmation: AgentConfirmation::LiveConfirmed, evidence: AgentEvidence::Hook,
-            sequence: 4, connection_epoch: Some(request.connection_epoch), received_at_unix_ms: 130,
-        }), AgentApplyOutcome::Applied { .. }));
+        assert!(matches!(
+            apply_codex_screen(&mut registry, &mut screen, owner, &request, 3, 120),
+            Some(AgentApplyOutcome::Applied { .. })
+        ));
+        assert_eq!(
+            registry
+                .runs()
+                .find(|run| run.process.unwrap().pid == 20)
+                .unwrap()
+                .activity,
+            AgentActivity::Unknown
+        );
+        assert!(matches!(
+            registry.observe(mt_ai::AgentObservation {
+                event_id: AgentEventId::new(),
+                route: request.route.clone(),
+                provider: "codex".parse().unwrap(),
+                provider_session_id: Some("exact-hook".into()),
+                process: Some(AgentProcessIdentity::new(10, 100).unwrap()),
+                weak_episode: None,
+                activity: AgentActivity::Waiting,
+                connectivity: AgentConnectivity::Live,
+                confirmation: AgentConfirmation::LiveConfirmed,
+                evidence: AgentEvidence::Hook,
+                sequence: 4,
+                connection_epoch: Some(request.connection_epoch),
+                received_at_unix_ms: 130,
+            }),
+            AgentApplyOutcome::Applied { .. }
+        ));
         screen.observe_output(&emulator, &codex_working(3), 140);
         request.requested_at_unix_ms = 141;
         let owner = foreground_semantic_owner(&registry, &poll, source.clone(), 150, 150);
-        assert_eq!(apply_codex_screen(&mut registry, &mut screen, owner, &request, 5, 150), Some(AgentApplyOutcome::Ignored(AgentObservationIgnored::StrongerEvidence)));
-        assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Waiting);
-        assert_eq!(accepted_agent_projection(&registry, &request.route, false).status, PaneStatus::AiIdle);
+        assert_eq!(
+            apply_codex_screen(&mut registry, &mut screen, owner, &request, 5, 150),
+            Some(AgentApplyOutcome::Ignored(
+                AgentObservationIgnored::StrongerEvidence
+            ))
+        );
+        assert_eq!(
+            registry.run(&run_id).unwrap().activity,
+            AgentActivity::Waiting
+        );
+        assert_eq!(
+            accepted_agent_projection(&registry, &request.route, false).status,
+            PaneStatus::AiIdle
+        );
         poll.foreground = Some(background);
         assert!(foreground_semantic_owner(&registry, &poll, source, 150, 150).is_none());
-        assert!(unique_foreground(&[foreground, mt_ssh::RemoteAgentProcess { foreground: true, ..background }]).is_none());
+        assert!(
+            unique_foreground(&[
+                foreground,
+                mt_ssh::RemoteAgentProcess {
+                    foreground: true,
+                    ..background
+                }
+            ])
+            .is_none()
+        );
     }
 
     #[test]

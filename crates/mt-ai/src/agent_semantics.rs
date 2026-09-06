@@ -101,9 +101,7 @@ pub fn codex_screen_evidence(
     loop {
         let row = &rows[composer];
         let text = row.text.trim_start();
-        if row.first_cell_bold
-            && (text.starts_with("\u{203a} ") || text.starts_with("\u{00bb} "))
-        {
+        if row.first_cell_bold && (text.starts_with("\u{203a} ") || text.starts_with("\u{00bb} ")) {
             break;
         }
         if composer == 0
@@ -118,8 +116,8 @@ pub fn codex_screen_evidence(
     }
     // A gap and a model/cwd footer distinguish the current composer from quoted
     // transcript prompts. Overlays and truncated/wrapped status rows fail closed.
-    let footer_index = (cursor_row + 1..rows.len())
-        .find(|index| !rows[*index].text.trim().is_empty())?;
+    let footer_index =
+        (cursor_row + 1..rows.len()).find(|index| !rows[*index].text.trim().is_empty())?;
     if footer_index <= cursor_row + 1
         || footer_index > cursor_row + 4
         || rows[footer_index].wrapped
@@ -191,7 +189,9 @@ fn codex_model_cwd_footer(footer: &str) -> bool {
     {
         return false;
     }
-    let known_model = model.strip_prefix("gpt-").is_some_and(|tail| !tail.is_empty())
+    let known_model = model
+        .strip_prefix("gpt-")
+        .is_some_and(|tail| !tail.is_empty())
         || model
             .strip_prefix('o')
             .is_some_and(|tail| tail.starts_with(|ch: char| ch.is_ascii_digit()));
@@ -217,20 +217,24 @@ fn codex_elapsed(elapsed: &str) -> bool {
         3 => &['h', 'm', 's'],
         _ => return false,
     };
-    parts.iter().zip(units).enumerate().all(|(index, (part, unit))| {
-        part.strip_suffix(*unit).is_some_and(|number| {
-            !number.is_empty()
-                && number.bytes().all(|byte| byte.is_ascii_digit())
-                && (index == 0 || number.len() == 2)
-                && number.parse::<u32>().is_ok_and(|value| {
-                    if index == 0 && parts.len() > 1 {
-                        value > 0 && (parts.len() == 3 || value < 60)
-                    } else {
-                        value < 60
-                    }
-                })
+    parts
+        .iter()
+        .zip(units)
+        .enumerate()
+        .all(|(index, (part, unit))| {
+            part.strip_suffix(*unit).is_some_and(|number| {
+                !number.is_empty()
+                    && number.bytes().all(|byte| byte.is_ascii_digit())
+                    && (index == 0 || number.len() == 2)
+                    && number.parse::<u32>().is_ok_and(|value| {
+                        if index == 0 && parts.len() > 1 {
+                            value > 0 && (parts.len() == 3 || value < 60)
+                        } else {
+                            value < 60
+                        }
+                    })
+            })
         })
-    })
 }
 
 #[cfg(test)]
@@ -256,10 +260,20 @@ mod tests {
             "\u{25e6} Working (1h 02m 03s \u{2022} esc to interrupt)",
         ] {
             for prompt in ["\u{203a} Ask Codex to do anything", "\u{203a} next draft"] {
-                let lines = [status, "", prompt, "", "gpt-6-astra max \u{00b7} ~/mini-term", ""];
+                let lines = [
+                    status,
+                    "",
+                    prompt,
+                    "",
+                    "gpt-6-astra max \u{00b7} ~/mini-term",
+                    "",
+                ];
                 let evidence = codex_screen_evidence(&screen(&lines), 2, true).unwrap();
                 assert_eq!(evidence.activity, AgentActivity::Working);
-                assert_eq!(evidence.marker, status.trim_start_matches(['\u{2022}', '\u{25e6}', ' ']));
+                assert_eq!(
+                    evidence.marker,
+                    status.trim_start_matches(['\u{2022}', '\u{25e6}', ' '])
+                );
             }
         }
     }
@@ -267,21 +281,38 @@ mod tests {
     #[test]
     fn codex_screen_idle_and_transcript_words_never_invent_task_state() {
         for status in [
-            "", "Working", "done", "Waiting for input", "Please approve",
+            "",
+            "Working",
+            "done",
+            "Waiting for input",
+            "Please approve",
             "quoted: Working (2s \u{2022} esc to interrupt)",
             "Working (2s \u{2022} esc to interrupt) is a status example",
-            "Working (2s \u{2022} esc to interrupt", "Working (forever \u{2022} esc to interrupt)",
+            "Working (2s \u{2022} esc to interrupt",
+            "Working (forever \u{2022} esc to interrupt)",
             "Working (1m 99s \u{2022} esc to interrupt)",
             "Working (99s \u{2022} esc to interrupt)",
         ] {
-            let lines = [status, "", "\u{203a} Ask Codex to do anything", "", "gpt-5.4 \u{00b7} /repo"];
+            let lines = [
+                status,
+                "",
+                "\u{203a} Ask Codex to do anything",
+                "",
+                "gpt-5.4 \u{00b7} /repo",
+            ];
             assert!(codex_screen_evidence(&screen(&lines), 2, true).is_none());
         }
     }
 
     #[test]
     fn codex_screen_rejects_unframed_hidden_wrapped_or_incomplete_context() {
-        let lines = ["Working (2s \u{2022} esc to interrupt)", "", "\u{203a} draft", "", "gpt-5.4 \u{00b7} /repo"];
+        let lines = [
+            "Working (2s \u{2022} esc to interrupt)",
+            "",
+            "\u{203a} draft",
+            "",
+            "gpt-5.4 \u{00b7} /repo",
+        ];
         let mut rows = screen(&lines);
         assert!(codex_screen_evidence(&rows, 2, false).is_none());
         rows[2].first_cell_bold = false;

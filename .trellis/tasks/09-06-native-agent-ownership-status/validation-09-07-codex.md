@@ -48,6 +48,17 @@ both fixes and their positive counter controls, with no remaining in-scope
 findings. Executed test results are still required; authored tests alone do not
 establish passing verification.
 
+## Actions Iterations
+
+- Initial product commit: `150ac8c84a712d7a26d8b420bdf8ba427b6f5018`.
+  CI https://github.com/vihor3/mini-term/actions/runs/34051663557 and package
+  https://github.com/vihor3/mini-term/actions/runs/34051663551 started on it.
+- Linux job `101536269004` failed changed-line rustfmt before compilation or
+  tests. The complete 42,347-byte formatter patch was downloaded from all three
+  numbered gzip/base64 API annotations and applied as one contextual artifact
+  to four owned Rust files. No local formatter or test was run. Windows
+  compilation and both WSL imports remain pending before a replacement push.
+
 All compilation, tests, fixtures, formatting, lint, syntax/whitespace checks,
 packaging and automated verification remain GitHub Actions-only. No local app,
 installer, user-device probe, credential/configuration change or check was run.

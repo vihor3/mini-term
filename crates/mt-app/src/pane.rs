@@ -309,7 +309,9 @@ fn observe_pty_output(
 ) {
     let observed_at_unix_ms = chrono::Utc::now().timestamp_millis();
     if let Some(screen) = codex_screen {
-        screen.lock().observe_output(emulator, bytes, observed_at_unix_ms);
+        screen
+            .lock()
+            .observe_output(emulator, bytes, observed_at_unix_ms);
     } else {
         emulator.advance(bytes);
     }
@@ -449,12 +451,12 @@ impl PtyCodexScreen {
         if !ordered {
             self.pending = None;
         }
-        let owner_is_fresh = (0..=4_000)
-            .contains(&observed_at_unix_ms.saturating_sub(owner.sampled_at_unix_ms));
+        let owner_is_fresh =
+            (0..=4_000).contains(&observed_at_unix_ms.saturating_sub(owner.sampled_at_unix_ms));
         if after.is_none() {
             if !self.frame_incomplete {
-                self.incomplete_owner = (before.is_some() && ordered && owner_is_fresh)
-                    .then(|| owner.clone());
+                self.incomplete_owner =
+                    (before.is_some() && ordered && owner_is_fresh).then(|| owner.clone());
                 self.incomplete_baseline = before.as_ref().map(CodexMarkerBaseline::from_screen);
             }
             self.frame_incomplete = true;
@@ -491,7 +493,10 @@ impl PtyCodexScreen {
             self.last_markers = vec![evidence.marker];
             return;
         }
-        let marker_row = after.as_ref().expect("complete screen was decoded").first_row
+        let marker_row = after
+            .as_ref()
+            .expect("complete screen was decoded")
+            .first_row
             + evidence.marker_row;
         let changed_by_output = baseline
             .as_ref()
@@ -909,29 +914,35 @@ impl TerminalPane {
             )
         };
 
-        let (transport, codex_screen, terminal_incarnation_id, recovery, backend_notice, spawn_error) =
-            match launch {
-                Ok(outcome) => (
-                    Some(outcome.transport),
-                    outcome.codex_screen,
-                    outcome.terminal_incarnation_id,
-                    outcome.recovery,
-                    outcome.backend_notice,
+        let (
+            transport,
+            codex_screen,
+            terminal_incarnation_id,
+            recovery,
+            backend_notice,
+            spawn_error,
+        ) = match launch {
+            Ok(outcome) => (
+                Some(outcome.transport),
+                outcome.codex_screen,
+                outcome.terminal_incarnation_id,
+                outcome.recovery,
+                outcome.backend_notice,
+                None,
+            ),
+            Err(error) => {
+                let msg = format!("{error:#}");
+                eprintln!("[pane {pty_id}] PTY 启动失败: {msg}");
+                (
                     None,
-                ),
-                Err(error) => {
-                    let msg = format!("{error:#}");
-                    eprintln!("[pane {pty_id}] PTY 启动失败: {msg}");
-                    (
-                        None,
-                        None,
-                        fallback_incarnation.unwrap_or_default(),
-                        TerminalRecovery::Unavailable,
-                        None,
-                        Some(msg),
-                    )
-                }
-            };
+                    None,
+                    fallback_incarnation.unwrap_or_default(),
+                    TerminalRecovery::Unavailable,
+                    None,
+                    Some(msg),
+                )
+            }
+        };
 
         // SSH 远程 pane:密码自动填充**紧贴 spawn** 注册(见 `RemoteLaunchExtras`
         // 的字段注释)。`disarm_on_input = true`:远程项目 pane 起来之后不再写
@@ -1680,7 +1691,11 @@ mod tests {
     #[test]
     fn codex_quoted_status_and_composer_draft_are_not_native_working() {
         let emulator = TerminalEmulator::new(TermSize::new(100, 30));
-        for status in ["quoted Working (2s \u{2022} esc to interrupt)", "", "shell output"] {
+        for status in [
+            "quoted Working (2s \u{2022} esc to interrupt)",
+            "",
+            "shell output",
+        ] {
             let (_, screen) = emulator.advance_with_current_screen(&codex_test_frame(status));
             assert!(decode_codex_screen(&screen.unwrap()).is_none());
         }
