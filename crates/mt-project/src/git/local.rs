@@ -122,6 +122,15 @@ pub fn head(path: &Path) -> Result<HeadState> {
     head_in(&Repository::open(path)?)
 }
 
+fn checked_status_flags(flags: Status, workdir_delta: Option<git2::Delta>) -> Result<Status> {
+    // git2 0.19 truncates the unreadable status bit; its delta retains it.
+    ensure!(
+        workdir_delta != Some(git2::Delta::Unreadable),
+        "Git working entry is unreadable"
+    );
+    Ok(flags)
+}
+
 /// Reuse the existing status projection, but never turn invalid bytes into a
 /// path, or turn embedded repositories into ordinary files.
 pub fn status(path: &Path) -> Result<RepositoryStatus> {
@@ -142,11 +151,10 @@ pub fn status(path: &Path) -> Result<RepositoryStatus> {
     let mut untracked_directories = Vec::new();
     let mut bytes = 0;
     for entry in statuses.iter() {
-        let flags = entry.status();
-        ensure!(
-            !flags.contains(Status::WT_UNREADABLE),
-            "Git working entry is unreadable"
-        );
+        let flags = checked_status_flags(
+            entry.status(),
+            entry.index_to_workdir().map(|delta| delta.status()),
+        )?;
         let staged = super::map_staged_status(flags);
         let unstaged = super::map_unstaged_status(flags, head.oid.is_none());
         if staged.is_none() && unstaged.is_none() {
@@ -504,6 +512,29 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn native_status_flags_reject_unreadable_even_after_truncation() {
+        for flags in [Status::CURRENT, Status::INDEX_NEW, Status::CONFLICTED] {
+            assert_eq!(
+                checked_status_flags(flags, Some(git2::Delta::Unreadable))
+                    .unwrap_err()
+                    .to_string(),
+                "Git working entry is unreadable"
+            );
+            assert_eq!(checked_status_flags(flags, None).unwrap(), flags);
+        }
+        for (flags, delta) in [
+            (Status::WT_NEW, git2::Delta::Untracked),
+            (
+                Status::INDEX_MODIFIED | Status::WT_MODIFIED,
+                git2::Delta::Modified,
+            ),
+            (Status::CONFLICTED, git2::Delta::Conflicted),
+        ] {
+            assert_eq!(checked_status_flags(flags, Some(delta)).unwrap(), flags);
         }
     }
 

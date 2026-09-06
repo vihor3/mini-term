@@ -624,3 +624,23 @@ Both index and working source retain unfinished Agent hunks separately in shared
 store files. No formatter/generator/check was executed locally. Windows compile
 is still running; actual WSL fixture preparation/import succeeded and its test
 step is running. These setup results are not a passed transport or feature gate.
+
+Main accepted Bohr's concrete explicit-resume API proposal in producer-review.md:
+one source-minted internal Hook lifecycle identity, source Started/Observed
+identity discriminator before status delivery, and dedicated start/observe
+registry entries with private exact-route/lifecycle-to-RunId bindings. A real
+explicit resume creates a new RunId while preserving ended audit rows; repeated
+active starts and ordinary events retain strict matching/order rules. The
+incoming wire's same-ID post-resume late-end ambiguity is explicitly not solved
+by internal tokens. Bohr owns this narrow producer/runtime/bridge correction and
+source regressions. Main recorded the already implemented immutable receipt
+contract; final lifecycle signatures will follow the released implementation.
+
+The complete Actions formatting and generated dictionary are committed as
+`a566edf`. Windows `101409559517` for `7e60d31` failed on the pinned git2 0.19
+API: Status::WT_UNREADABLE is not exposed. Resumed McClintock source-reviewed
+and corrected this through the typed workdir Delta::Unreadable before status
+mapping/clean skipping, retaining unreadable rejection and adding one direct
+production-helper regression. Its backend-review addendum records primary
+pinned-version evidence. Main is committing that narrow fix with the next push;
+no local execution gate ran. Agent producer work remains separate and unstaged.

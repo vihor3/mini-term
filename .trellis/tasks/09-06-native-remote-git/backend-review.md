@@ -5,6 +5,41 @@ to main. CLI parity is separately released in `cli-parity-review.md`. No builds,
 tests, fixtures, probes, formatting or whitespace checks have run locally. This
 is not a CI, native acceptance or full-scope feature pass.
 
+## Follow-Up: Pinned Status API
+
+Status: compiler correction SOURCE COMPLETE; `mt-project/src/git/local.rs`
+RELEASED to main. Applied on the existing Actions-formatted source; no formatter
+or other local check was run. No dependency, lockfile or public API change.
+
+- Main reports integration `7e60d31`, formatting/i18n follow-up `a566edf` not yet
+  pushed, and Actions `34004657463` / Windows `101409559517` failing lib/test
+  compilation with E0599 for `Status::WT_UNREADABLE`. That constant is absent
+  from the [pinned git2 0.19.0 Status definition](https://github.com/rust-lang/git2-rs/blob/git2-0.19.0/src/lib.rs#L969).
+- FIXED at `crates/mt-project/src/git/local.rs:125` and `:154`: use the typed
+  workdir delta from `StatusEntry::index_to_workdir()` and reject
+  `git2::Delta::Unreadable` before staged/unstaged mapping or clean-entry skip.
+  [StatusEntry::status](https://github.com/rust-lang/git2-rs/blob/git2-0.19.0/src/status.rs#L306)
+  truncates unknown bits, so testing that returned flag set cannot recover the
+  missing unreadable bit. The pinned
+  [DiffDelta::status mapping](https://github.com/rust-lang/git2-rs/blob/git2-0.19.0/src/diff.rs#L476)
+  exposes Unreadable, and
+  [libgit2 1.8.1 workdir_delta2status](https://github.com/libgit2/libgit2/blob/v1.8.1/src/libgit2/status.c#L56)
+  derives the unreadable flag from exactly that delta. No guessed raw constant,
+  FFI or dependency change is needed. `include_unreadable(true)` remains set;
+  unreadable/unsupported working entries still fail closed, never become clean
+  or actionable staged-only rows. Existing supported flag conversion is intact.
+- Direct production-helper regression at `local.rs:519`:
+  `git::local::tests::native_status_flags_reject_unreadable_even_after_truncation`
+  rejects Unreadable with CURRENT, staged-only and conflict flags, and preserves
+  accepted no-workdir, untracked, partially staged and conflict flags. This is a
+  typed-boundary unit test, not executed native filesystem permission evidence.
+
+Build / Metadata / Tests / Fixtures / Syntax / Lint / Format / Whitespace: UNRUN
+locally. Require exact-head Actions Windows lib/test compilation, the focused
+unit test and existing mt-project regressions, then the blocked mt-app gates.
+No UI/Agent/Tasks/CI/spec or other product file was edited; no staging, commit or
+push. Main may commit this correction with its formatted follow-up and rerun.
+
 ## Follow-Up: Captured Connect Epoch
 
 Status: bounded source correction COMPLETE; `git_backend.rs` and

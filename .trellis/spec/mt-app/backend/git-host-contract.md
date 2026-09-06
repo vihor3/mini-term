@@ -41,6 +41,11 @@ returns status, branches, worktrees and a typed `GitPostcondition`: `Refreshed`,
   `mt_project::git::local`. WSL/SSH use only their captured host. Never accept a
   same-spelling client path or local fallback for an unavailable remote source.
   Native Windows paths are not passed through the remote POSIX path parser.
+- Pinned git2 0.19 status flags omit the unreadable bit and truncate unknown
+  bits. Keep `include_unreadable(true)` and reject typed
+  `StatusEntry::index_to_workdir().status() == Delta::Unreadable` before flag
+  mapping or clean-entry skipping. Do not guess a raw bit, remove the rejection
+  or treat truncated CURRENT/staged-only flags as proof of readability.
 - Repository discovery checks the project and at most five ancestors before
   bounded descendant discovery. FileTree diff resolution is different: start
   at the literal file's parent and walk upward to the project's fifth ancestor,
