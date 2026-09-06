@@ -185,7 +185,8 @@ impl GitBackend {
     pub fn snapshot(&self) -> &ProjectExecutionSnapshot {
         self.host.snapshot()
     }
-    pub fn lifetime(&self) -> GitLifetime {
+    #[cfg(test)]
+    fn lifetime(&self) -> GitLifetime {
         self.lifetime.clone()
     }
     pub fn matches_snapshot(&self, current: &ProjectExecutionSnapshot) -> bool {
@@ -204,13 +205,11 @@ impl GitBackend {
             connection_fingerprint,
             connection_epoch,
         } = &self.snapshot().backend
-        {
-            if connection_epoch.is_none()
+            && (connection_epoch.is_none()
                 || remote_ssh::connection_fingerprint(connection) != *connection_fingerprint
-                || remote_ssh::current_connection_epoch(&connection.id) != *connection_epoch
-            {
-                return Err(GitError::stale());
-            }
+                || remote_ssh::current_connection_epoch(&connection.id) != *connection_epoch)
+        {
+            return Err(GitError::stale());
         }
         Ok(())
     }
@@ -846,12 +845,6 @@ pub struct GitReadRequest {
 impl GitReadRequest {
     pub fn id(&self) -> u64 {
         self.id
-    }
-    pub fn repository(&self) -> &GitRepository {
-        &self.repository
-    }
-    pub fn operation(&self) -> &GitRead {
-        &self.operation
     }
     pub fn execute(self) -> GitResult<GitReadResult> {
         let repository = &self.repository;

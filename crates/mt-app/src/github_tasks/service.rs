@@ -674,9 +674,7 @@ impl GitHubTaskService {
         target: ReadTarget,
         cx: &mut Context<Self>,
     ) -> Option<RequestOwner> {
-        let Some(source) = self.sources.get(&source_key) else {
-            return None;
-        };
+        let source = self.sources.get(&source_key)?;
         let (Some(cache_key), Some(scope), Some(identity)) = (
             source.cache_key.clone(),
             source.scope.clone(),

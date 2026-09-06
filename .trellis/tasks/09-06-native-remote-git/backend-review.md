@@ -5,6 +5,86 @@ to main. CLI parity is separately released in `cli-parity-review.md`. No builds,
 tests, fixtures, probes, formatting or whitespace checks have run locally. This
 is not a CI, native acceptance or full-scope feature pass.
 
+## Follow-Up: Fake Discard HEAD Lookup
+
+Status: bounded fixture correction SOURCE COMPLETE; `git_backend/tests.rs`
+RELEASED to main. No production code or public API changed.
+
+Read the authorized [Windows Actions job log](https://github.com/vihor3/mini-term/actions/runs/34005933974/job/101412979902):
+the Git filter reports 123 passed / 1 failed. The sole failure is
+`git_backend::tests::queued_write_rejects_same_status_changed_bytes_without_dispatch`,
+whose FakeHost panics on the exact literal `ls-tree -z -l --full-tree` lookup.
+
+Source trace: `prepare_write` validates authority, captures status/index and
+the working-byte hash in `Baseline::capture` / `FileGuard::capture`, then
+`plan_steps` checks HEAD with `tree_entry_plan` and `parse_tree_entry` before
+deciding between tracked restore and untracked leaf removal. The fake reports
+all its files as untracked and an empty index, but omitted the corresponding
+HEAD lookup. This is incomplete fake coverage, not a production discard defect.
+
+- `tests.rs:110`: added only that read case. It requires a known fake worktree
+  file and full equality with the production plan for fixture HEAD `OID`, then
+  returns successful, complete empty bytes. The real parser consequently
+  returns no tree entry. Other unexpected reads still panic; no blanket empty
+  response or tracked/untracked reclassification was added.
+- `tests.rs:233`: retained the exact test name, hostile newline/pathspec-like
+  spelling, byte-guard change, NotDispatched, Changed, retained file count and
+  released busy-slot assertions. Added explicit before/after porcelain-byte
+  equality, proof the HEAD lookup was issued, retained changed file value, and
+  a zero-mutation-call assertion. The counter covers both Git mutation plans
+  and host leaf removal, so the test does not infer no dispatch from status alone.
+- Execution still recaptures the baseline before its first dispatch. With
+  unchanged status/index and changed working hash, baseline comparison must
+  reject the captured intent; no write plan, lease semantics or parser changed.
+
+This is synthetic executor evidence only, not real SSH/WSL/native Git proof.
+Tests / Build / Metadata / Lint / Format / Syntax / Whitespace / Fixtures: UNRUN
+for this repair. Require the exact named test and complete Windows/Linux Git
+filters in Actions at the new candidate SHA; retain separate actual host gates.
+No other source, Agent/CI/spec file, staging, commit or push was touched.
+
+## Follow-Up: Backend Clippy
+
+Status: bounded diagnostic repair SOURCE COMPLETE; `git_backend.rs` and
+`git_backend/write.rs` RELEASED to main. No tests or other product files edited.
+
+Read the exact [Actions job log](https://github.com/vihor3/mini-term/actions/runs/34005933974/job/101412980006)
+through the approved `gh api` read. It reports 177 baseline warnings ignored and
+28 changed-line warnings; this handoff addresses only the owned backend subset.
+Main reports `37b4ef9` passed Linux/Windows application and test-target compilation;
+that does not validate this subsequent Clippy repair.
+
+- `git_backend.rs:189`: `lifetime()` has only the existing backend regression
+  caller (`git_backend/tests.rs:269`), so it is now private and `#[cfg(test)]`.
+  The lifetime field and production invalidation/dispatch checks are unchanged.
+- `git_backend.rs:845`: removed unused `GitReadRequest::repository()` and
+  `GitReadRequest::operation()` after source-wide call-site search. Retained
+  request fields, `id()`/`execute()`, and all used result/outcome/prepared-write
+  accessors. These are the only removed callable internal APIs; no caller edit
+  is required.
+- `write.rs:54`, `:75`, `:86`: preserved `GitBusy.source`, WorktreeCreated.head,
+  and GitReconciliation.repository/status/branches/worktrees. Each has its own
+  documented field-level `allow(dead_code)`: original owner, verified creation
+  HEAD, recovery source and same-receipt status/ref/inventory facts must not be
+  erased just because current UI refreshes independently or only consumes the
+  typed postcondition. No module/struct blanket allowance, fake read, black_box,
+  new UI behavior, or fabricated consumer was introduced.
+- Six mechanical collapses: `git_backend.rs:199`; `write.rs:187`, `:324`, `:405`,
+  `:1088`, `:1282`. Pattern/local-source checks still precede host inspection or
+  native target normalization. Target absence still short-circuits the anchor
+  probe. Exact-ID checks precede slot update/removal. The explicit review's
+  existing `writes` guard and phase update's temporary WRITES guard retain their
+  lock scope through mutation; no second lock, replay or automatic lease release.
+  Explicit read-only reconnect and recovery-only survivor behavior are unchanged.
+
+Source/diff review only. Build / Metadata / Tests / Fixtures / Syntax / Lint /
+Format / Whitespace: UNRUN for this delta. Existing lifetime/uncertain/shared
+lease and actual authenticated SSH regressions are retained, not re-executed.
+Require exact-head Actions compilation, Clippy changed-line gate, formatting and
+backend tests, including the existing ignored SSH fixtures. Other owners retain
+all non-backend warnings. No local probes/validation, children, staging, commit
+or push; Agent and all unrelated dirty paths remain untouched.
+
 ## Follow-Up: Pinned Status API
 
 Status: compiler correction SOURCE COMPLETE; `mt-project/src/git/local.rs`

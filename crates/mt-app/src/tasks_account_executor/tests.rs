@@ -785,6 +785,91 @@ struct WslFixtureOwner {
 }
 
 #[cfg(windows)]
+const WSL_FIXTURE_OUTPUT_CAP: usize = 4096;
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug)]
+enum WslPreludeStage {
+    ReadOwner,
+    ResolveGh,
+    ResolvePython,
+    VerifyGhHash,
+    CheckCasesDirectory,
+}
+
+#[cfg(windows)]
+fn wsl_prelude_output_class(bytes: &[u8]) -> &'static str {
+    if bytes.is_empty() {
+        return "empty";
+    }
+    if bytes.len() > WSL_FIXTURE_OUTPUT_CAP {
+        return "over-limit";
+    }
+    let text = if bytes.contains(&0) {
+        let mut pairs = bytes.chunks_exact(2);
+        let units = pairs
+            .by_ref()
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        if !pairs.remainder().is_empty() {
+            return "non-text";
+        }
+        let Ok(text) = String::from_utf16(&units) else {
+            return "non-text";
+        };
+        text
+    } else {
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return "non-text";
+        };
+        text.to_string()
+    };
+    let text = text.to_ascii_lowercase();
+    // Return fixed categories only, never any part of a command's output.
+    for (needle, class) in [
+        ("error_invalid_handle", "invalid-handle"),
+        ("the handle is invalid", "invalid-handle"),
+        ("e_accessdenied", "access-denied"),
+        ("access is denied", "access-denied"),
+        ("permission denied", "access-denied"),
+        ("wsl_e_distro_not_found", "distro-not-found"),
+        ("hcs_e_service_not_available", "service-unavailable"),
+        ("failed to translate", "path-translation"),
+        ("chdir(", "cwd-failed"),
+        ("execvpe(", "exec-failed"),
+        ("error_file_not_found", "file-not-found"),
+        ("no such file or directory", "file-not-found"),
+        ("error_path_not_found", "path-not-found"),
+        ("not supported", "unsupported"),
+        ("wsl/", "wsl-error"),
+    ] {
+        if text.contains(needle) {
+            return class;
+        }
+    }
+    "unclassified"
+}
+
+#[cfg(windows)]
+fn wsl_prelude_diagnostic(stage: WslPreludeStage, output: &CommandOutput) -> String {
+    let exit_hex = output
+        .exit_code
+        .map(|code| format!("0x{:08x}", code as u32))
+        .unwrap_or_else(|| "none".into());
+    format!(
+        "stage={stage:?} exit={:?} exit_hex={exit_hex} timed_out={} stdout_truncated={} stderr_truncated={} stdout_bytes={} stdout_class={} stderr_bytes={} stderr_class={}",
+        output.exit_code,
+        output.timed_out,
+        output.stdout_truncated,
+        output.stderr_truncated,
+        output.stdout.len(),
+        wsl_prelude_output_class(&output.stdout),
+        output.stderr.len(),
+        wsl_prelude_output_class(&output.stderr),
+    )
+}
+
+#[cfg(windows)]
 #[derive(Clone)]
 struct WslFixture {
     source: ProjectExecutionSnapshot,
@@ -839,8 +924,7 @@ impl WslFixture {
         let fixture = Self { source };
         // These bounded fixture commands read only the explicitly named distro.
         // No account API is called until both provenance and the executable match.
-        let output = fixture.command("/bin/cat", &[&marker]);
-        fixture.require_success(&output);
+        let output = fixture.pre_auth_command(WslPreludeStage::ReadOwner, "/bin/cat", &[&marker]);
         let owner: WslFixtureOwner = serde_json::from_slice(&output.stdout)
             .unwrap_or_else(|_| panic!("invalid WSL fixture owner marker"));
         assert!(
@@ -855,36 +939,83 @@ impl WslFixture {
                 },
             "WSL fixture owner marker mismatch"
         );
-        for (command, expected) in [
-            ("command -v gh", "/usr/local/bin/gh\n"),
-            ("command -v python3", "/usr/local/bin/python3\n"),
+        for (stage, command, expected) in [
+            (
+                WslPreludeStage::ResolveGh,
+                "command -v gh",
+                "/usr/local/bin/gh\n",
+            ),
+            (
+                WslPreludeStage::ResolvePython,
+                "command -v python3",
+                "/usr/local/bin/python3\n",
+            ),
         ] {
-            let output = fixture.command("/bin/sh", &["-c", command]);
-            fixture.require_success(&output);
+            let output = fixture.pre_auth_command(stage, "/bin/sh", &["-c", command]);
             assert!(
                 output.stdout == expected.as_bytes(),
-                "WSL resolved a non-fixture executable"
+                "WSL resolved a non-fixture executable at {stage:?}"
             );
         }
-        let output = fixture.command("/usr/bin/sha256sum", &["/usr/local/bin/gh"]);
-        fixture.require_success(&output);
+        let output = fixture.pre_auth_command(
+            WslPreludeStage::VerifyGhHash,
+            "/usr/bin/sha256sum",
+            &["/usr/local/bin/gh"],
+        );
         assert!(
             output.stdout == format!("{gh_hash}  /usr/local/bin/gh\n").as_bytes(),
             "WSL fixture ELF checksum mismatch"
         );
-        let output = fixture.command("/usr/bin/test", &["-d", "/mini-term-fixture/cases"]);
-        fixture.require_success(&output);
+        fixture.pre_auth_command(
+            WslPreludeStage::CheckCasesDirectory,
+            "/usr/bin/test",
+            &["-d", "/mini-term-fixture/cases"],
+        );
         fixture
     }
 
-    fn command(&self, program: &str, args: &[&str]) -> CommandOutput {
-        let result = crate::execution_host::execute_host_command(
+    fn run_command(
+        &self,
+        program: &str,
+        args: &[&str],
+    ) -> Result<crate::execution_host::HostCommandResult, mt_github::CommandExecutionError> {
+        crate::execution_host::execute_host_command(
             &self.source,
             &CommandPlan::new(program, args.iter().copied()),
             Duration::from_secs(5),
-            4096,
+            WSL_FIXTURE_OUTPUT_CAP,
         )
-        .unwrap_or_else(|_| panic!("Actions WSL fixture command could not run"));
+    }
+
+    fn pre_auth_command(
+        &self,
+        stage: WslPreludeStage,
+        program: &str,
+        args: &[&str],
+    ) -> CommandOutput {
+        let result = self.run_command(program, args).unwrap_or_else(|error| {
+            panic!(
+                "Actions WSL pre-auth stage={stage:?} dispatch_kind={:?}",
+                error.kind
+            )
+        });
+        let output = result.output;
+        assert!(
+            result.observed_connection_epoch.is_none()
+                && output.exit_code == Some(0)
+                && !output.timed_out
+                && !output.stdout_truncated
+                && !output.stderr_truncated,
+            "Actions WSL pre-auth command failed: {}",
+            wsl_prelude_diagnostic(stage, &output)
+        );
+        output
+    }
+
+    fn command(&self, program: &str, args: &[&str]) -> CommandOutput {
+        let result = self
+            .run_command(program, args)
+            .unwrap_or_else(|_| panic!("Actions WSL fixture command could not run"));
         assert!(result.observed_connection_epoch.is_none());
         assert!(
             !result.output.timed_out
@@ -895,17 +1026,18 @@ impl WslFixture {
         result.output
     }
 
-    fn require_success(&self, output: &CommandOutput) {
+    fn require_success(&self, stage: &'static str, output: &CommandOutput) {
         assert!(
             output.exit_code == Some(0),
-            "Actions WSL fixture command failed"
+            "Actions WSL fixture stage={stage} exit={:?}",
+            output.exit_code
         );
     }
 
     fn case(&self) -> Self {
         let path = format!("/mini-term-fixture/cases/{}", uuid::Uuid::new_v4());
         let output = self.command("/bin/mkdir", &["--", &path]);
-        self.require_success(&output);
+        self.require_success("create-case", &output);
         let mut source = self.source.clone();
         source.canonical_path = path;
         Self { source }
@@ -921,7 +1053,7 @@ impl WslFixture {
 
     fn touch(&self, name: &str) {
         let output = self.command("/usr/bin/touch", &["--", &self.path(name)]);
-        self.require_success(&output);
+        self.require_success("touch-marker", &output);
     }
 
     fn exists(&self, name: &str) -> bool {
@@ -963,6 +1095,56 @@ impl WslFixture {
             "WSL request left a live Linux descendant"
         );
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_prelude_diagnostics_are_bounded_stage_specific_and_secret_safe() {
+    let mut output = CommandOutput {
+        stdout: br#"{"token":"fixture_credential_stdout"}"#.to_vec(),
+        stderr: "The handle is invalid. fixture_credential_stderr"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+        exit_code: Some(-1),
+        ..Default::default()
+    };
+    for stage in [
+        WslPreludeStage::ReadOwner,
+        WslPreludeStage::ResolveGh,
+        WslPreludeStage::ResolvePython,
+        WslPreludeStage::VerifyGhHash,
+        WslPreludeStage::CheckCasesDirectory,
+    ] {
+        let diagnostic = wsl_prelude_diagnostic(stage, &output);
+        assert!(diagnostic.starts_with(&format!("stage={stage:?} ")));
+        assert!(diagnostic.contains("exit=Some(-1) exit_hex=0xffffffff"));
+        assert!(diagnostic.contains("stdout_class=unclassified"));
+        assert!(diagnostic.contains("stderr_class=invalid-handle"));
+        assert!(!diagnostic.contains("fixture_credential_"));
+        assert!(diagnostic.len() <= 512);
+    }
+    for (text, class) in [
+        ("chdir(/fixture_credential_path) failed 2", "cwd-failed"),
+        ("Error code: Wsl/Service/E_ACCESSDENIED fixture_credential_error", "access-denied"),
+        ("Failed to translate fixture_credential_path", "path-translation"),
+        ("No such file or directory: fixture_credential_path", "file-not-found"),
+    ] {
+        assert_eq!(wsl_prelude_output_class(text.as_bytes()), class);
+    }
+    assert_eq!(wsl_prelude_output_class(&[]), "empty");
+    assert_eq!(wsl_prelude_output_class(&[0xff]), "non-text");
+    assert_eq!(wsl_prelude_output_class(&[0x00, 0xd8]), "non-text");
+    assert_eq!(
+        wsl_prelude_output_class(&vec![b'x'; WSL_FIXTURE_OUTPUT_CAP + 1]),
+        "over-limit"
+    );
+    output.timed_out = true;
+    output.stdout_truncated = true;
+    output.stderr_truncated = true;
+    let diagnostic = wsl_prelude_diagnostic(WslPreludeStage::ReadOwner, &output);
+    assert!(diagnostic.contains("timed_out=true stdout_truncated=true stderr_truncated=true"));
+    assert!(!diagnostic.contains("fixture_credential_"));
 }
 
 #[cfg(windows)]

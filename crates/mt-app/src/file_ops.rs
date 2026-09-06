@@ -62,16 +62,6 @@ impl FileClipboardEntry {
     }
 }
 
-pub fn entry_target_directory(path: &Path, is_dir: bool, project_root: &Path) -> PathBuf {
-    if is_dir {
-        path.to_path_buf()
-    } else {
-        path.parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| project_root.to_path_buf())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,17 +147,5 @@ mod tests {
         assert!(clip.would_copy_into_itself(Path::new("/work/src/nested")));
         assert!(!clip.would_copy_into_itself(Path::new("/work")));
         assert!(!clip.would_copy_into_itself(Path::new("/work/src-other")));
-    }
-
-    #[test]
-    fn file_targets_parent_and_directory_targets_itself() {
-        assert_eq!(
-            entry_target_directory(Path::new("/work/src"), true, Path::new("/work")),
-            PathBuf::from("/work/src")
-        );
-        assert_eq!(
-            entry_target_directory(Path::new("/work/src/main.rs"), false, Path::new("/work")),
-            PathBuf::from("/work/src")
-        );
     }
 }

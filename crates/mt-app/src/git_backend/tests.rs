@@ -44,6 +44,7 @@ fn output(bytes: Vec<u8>, dispatch: Dispatch, code: Option<i32>) -> Attempt {
 struct FakeState {
     commands: Vec<Vec<String>>,
     files: BTreeMap<String, String>,
+    mutation_calls: usize,
     mutation: Option<(Dispatch, Option<i32>)>,
     invalidate_on_dispatch: Option<GitLifetime>,
     malformed_status: bool,
@@ -65,6 +66,7 @@ impl Host for FakeHost {
         let mut state = self.state.lock();
         state.commands.push(plan.args.clone());
         if plan.effect == cli::CommandEffect::Mutation {
+            state.mutation_calls += 1;
             if let Some(lifetime) = &state.invalidate_on_dispatch {
                 lifetime.invalidate();
             }
@@ -104,6 +106,15 @@ impl Host for FakeHost {
                 bytes
             }
         } else if has("ls-files") {
+            Vec::new()
+        } else if has("ls-tree") {
+            let path = plan.args.last().unwrap();
+            assert!(state.files.contains_key(path), "unknown fake worktree file");
+            assert_eq!(
+                plan,
+                &cli::tree_entry_plan(&ObjectId::parse(OID).unwrap(), path).unwrap()
+            );
+            // Fake files are all untracked, absent from both HEAD and the index.
             Vec::new()
         } else if has("hash-object") {
             format!("{}\n", state.files.get(plan.args.last().unwrap()).unwrap()).into_bytes()
@@ -158,7 +169,9 @@ impl Host for FakeHost {
             .unwrap_or(OwnedContent::Missing))
     }
     fn remove_file(&self, _: &str, path: &str) -> Attempt {
-        self.state.lock().files.remove(path);
+        let mut state = self.state.lock();
+        state.mutation_calls += 1;
+        state.files.remove(path);
         output(Vec::new(), Dispatch::Completed, Some(0))
     }
 }
@@ -219,23 +232,27 @@ fn source_lifetime_and_request_id_fence_aba_publication() {
 #[test]
 fn queued_write_rejects_same_status_changed_bytes_without_dispatch() {
     let (repository, state) = fake();
-    state
-        .lock()
-        .files
-        .insert("line\n:literal[1]".into(), OID.into());
+    let path = "line\n:literal[1]";
+    state.lock().files.insert(path.into(), OID.into());
+    let before = repository.command(&cli::status_plan()).unwrap();
     let prepared = repository
         .prepare_write(GitWrite::Discard {
-            paths: vec!["line\n:literal[1]".into()],
+            paths: vec![path.into()],
         })
         .unwrap();
-    state
-        .lock()
-        .files
-        .insert("line\n:literal[1]".into(), OTHER.into());
+    let lookup = cli::tree_entry_plan(&ObjectId::parse(OID).unwrap(), path).unwrap();
+    assert!(state.lock().commands.contains(&lookup.args));
+    state.lock().files.insert(path.into(), OTHER.into());
+    assert_eq!(repository.command(&cli::status_plan()).unwrap(), before);
     let outcome = prepared.execute();
     assert_eq!(outcome.state, GitWriteState::NotDispatched);
     assert_eq!(outcome.error.unwrap().kind, GitErrorKind::Changed);
-    assert_eq!(state.lock().files.len(), 1);
+    {
+        let state = state.lock();
+        assert_eq!(state.files.len(), 1);
+        assert_eq!(state.files.get(path).map(String::as_str), Some(OTHER));
+        assert_eq!(state.mutation_calls, 0);
+    }
     assert!(repository.busy().is_none());
 }
 

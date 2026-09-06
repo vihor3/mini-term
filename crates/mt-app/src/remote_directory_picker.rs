@@ -628,16 +628,14 @@ pub(crate) fn open(
             window,
             |state: &mut PickerState, _, event, window, cx| match event {
                 InputEvent::PressEnter { .. } => state.submit_path(window, cx),
-                InputEvent::Change => {
-                    if state.is_live(cx) {
-                        state.selected = state
-                            .listing
-                            .as_ref()
-                            .map(|listing| listing.location.clone());
-                        state.scroll = ScrollHandle::new();
-                        cx.notify();
-                        window.refresh();
-                    }
+                InputEvent::Change if state.is_live(cx) => {
+                    state.selected = state
+                        .listing
+                        .as_ref()
+                        .map(|listing| listing.location.clone());
+                    state.scroll = ScrollHandle::new();
+                    cx.notify();
+                    window.refresh();
                 }
                 _ => {}
             },

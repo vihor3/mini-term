@@ -524,10 +524,6 @@ async fn delete_remote_directory(
 /// 与 SFTP 看见同一父目录，再优先使用带 `timeout` 的服务端 `rm`；能力不可用时先
 /// 原子改名到随机隔离路径，再用一个复用 SFTP handle 后序删除。叶子 symlink 只删除
 /// 链接自身，路径式 fallback 的每一步仍会重新校验 canonical parent。
-pub fn delete_entry(conn: &SshConnection, project_root: &str, path: &str) -> Result<usize, String> {
-    delete_entry_with_epoch(conn, project_root, path, None)
-}
-
 pub fn delete_entry_at_epoch(
     conn: &SshConnection,
     expected_epoch: u64,

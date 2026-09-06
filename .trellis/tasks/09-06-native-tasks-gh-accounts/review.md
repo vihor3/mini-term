@@ -1,8 +1,85 @@
 # Tasks Accounts Independent Review
 
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
-pointer still identifies the Git child. Source review only. No passing build,
-lint, type-check, formatting, test, transport, or native acceptance is claimed.
+pointer still identifies the Git child. Source review and explicitly authorized
+Actions log inspection. No passing build, lint, type-check, formatting, test,
+transport, or native acceptance is claimed for the current diagnostic patch.
+
+## WSL Failure Resume: Diagnostic Handoff
+
+Scope for this resume is only `tasks_account_executor/tests.rs` and this review.
+The launcher/ELF shim needed no change. No Agent source, Tasks service/view,
+production executor/API, ProcessTree, CI script/workflow, staging or commit was
+changed. Pauli's style-fix ownership was left untouched. This narrow source
+follow-up is ready for Main; its new code and test are UNRUN.
+
+### Actual Actions Evidence
+
+Read the authorized log for
+[run 34005933974, job 101413098858](https://github.com/vihor3/mini-term/actions/runs/34005933974/job/101413098858).
+Main identifies the tested non-Agent base as `37b4ef9` and reports Linux/Windows
+compilation. The inspected Windows job log independently shows the test binary
+finished building, the exact ignored test was discovered once, and execution
+reported `0 passed; 1 failed; 0 ignored` in 0.06 seconds. The panic was the shared
+`require_success` assertion at the then-current `tests.rs:899`. Import and
+owned-distro cleanup succeeded. This supersedes the earlier UNRUN snapshot below
+for that old WSL test execution only, not for this new patch or native acceptance.
+
+### Finding Fixed: Prelude Failure Was Not Attributed
+
+- The old assertion reported neither the failed operation nor numeric exit
+  status. It was shared by marker reading, executable resolution, hash/directory
+  checks and case/marker creation, so the log cannot prove the first marker
+  command was the failing operation.
+- Source tracing rules out a missing `--cd` argument: `snapshot` preserves
+  `/mini-term-fixture`; `plan_host_command` supplies explicit distro, that cwd
+  and structured argv. The fixture has no Windows-path conversion here.
+- Node's owner guard directly spawns WSL with explicit `--user root --cd /`.
+  The test uses `execute_host_command` and `run_process`, including suspended
+  Windows spawn, Job attachment/resume, null stdin and bounded pipe readers.
+  The observed assertion means dispatch returned an output with nonzero/missing
+  exit status, without reported timeout/truncation; it was not the spawn/attach
+  error path. `run_process` saves exit status before successful Job termination,
+  so there is no source evidence that cleanup replaced a successful exit code.
+- Added fixed pre-auth stage labels: `ReadOwner`, `ResolveGh`, `ResolvePython`,
+  `VerifyGhHash`, `CheckCasesDirectory`. Failures report only stage, signed/hex
+  numeric exit, timeout/truncation flags, byte counts and fixed output classes.
+  UTF-8/UTF-16LE diagnostics are classified within the existing 4096-byte bound.
+  Unrecognized output is `unclassified`; malformed/oversized input has a fixed
+  category. No raw output, marker contents, argv, environment, account payload
+  or exception message is formatted.
+- Classification is called only by the five pre-auth probes in `WslFixture::open`,
+  before any account API. Later fixture mkdir/touch failures gain only static
+  operation labels and numeric status, not output classification or dumping.
+- The same `execute_host_command` path, five-second limit, 4096-byte capture,
+  epoch/completeness/exit checks, exact marker/shim/hash checks and account tests
+  remain. No redundant cwd change, direct-spawn retry, guard bypass, skip or
+  weakened assertion was added.
+
+New Windows-only ordinary unit test, authored UNRUN:
+
+`tasks_account_executor::tests::wsl_prelude_diagnostics_are_bounded_stage_specific_and_secret_safe`
+
+It exercises the diagnostic functions used by the actual fixture, including all
+stage labels, numeric exit formatting, UTF-16 invalid-handle classification,
+UTF-8 path/permission classes, synthetic secret suppression, malformed/oversized
+input and timeout/truncation flags. It is not a transport pass claim or a
+source-substring test. The existing actual WSL ignored test/filter and all rootfs
+environment/marker/path/hash requirements below are unchanged.
+
+### Finding Not Fixed: Actual Nonzero Exit Cause Is Unconfirmed
+
+The existing log cannot distinguish a WSL guest/prelude failure from a Windows
+launch/handle/Job interaction. Successful Node import/provenance does not prove
+the production runner path. No production or CI correction is justified by
+the current evidence, and none was made. Main should rerun the unchanged exact
+WSL gate with this patch; its failure will identify the stage/status and a
+secret-safe class. Any resulting production executor or CI setup change still
+requires Main's coordination. No additional setup command is required yet.
+
+Verification for this patch: lint, type-check/build, unit/WSL tests, formatter
+and probes are all UNRUN, Actions-only. Only source/config/docs, read-only Git
+diff/status and the explicitly authorized Actions log were read locally.
 
 ## Approved Follow-Up Complete: Source Handoff
 
@@ -35,8 +112,8 @@ API boundary recorded here before implementation, now authored:
 
 ### WSL Fixture Contract For Main
 
-The actual Windows ignored test and launcher are authored and ready for Main's
-Actions integration, not executed. Read-only inspection of Main's setup script
+The actual Windows ignored test and launcher were authored for Main's Actions
+integration. The resumed execution evidence is recorded above. Read-only inspection of Main's setup script
 and `tasks-wsl-rootfs`/`tasks-wsl` jobs found their marker, paths, environment and
 exact filter aligned with this contract. CI reviewer McClintock owns any setup
 or workflow fixes; this reviewer made none.
@@ -219,9 +296,10 @@ are not source-substring checks or a full GPUI/physical-host acceptance claim.
   cancellation/deadlines. Cancellation waits for the real ready marker. Test-only
   cooperative-capture assertions inspect actual transport stdout and stderr for
   the synthetic token on completed and stopped requests.
-- Remaining limit: neither this fixture nor Main's setup has been executed by
-  this reviewer. WSL capability, stdin/control/cancel/deadline behavior and Linux
-  descendant retirement need the exact-SHA Actions result. Missing capability
+- Remaining limit: the actual Actions fixture now ran once and failed in its
+  prelude with an unattributed nonzero exit; see the resumed evidence above.
+  WSL stdin/control/cancel/deadline behavior and Linux descendant retirement
+  still need a passing exact-SHA Actions result. Missing capability
   must explicitly fail, never silently skip or pass with zero discovered tests.
 - Main owns setup/workflow and CI reviewer McClintock owns their bounded fixes.
   No local WSL probe, execution, or distro mutation was performed.
@@ -276,6 +354,11 @@ These confirm the documented approach, not any target device's installed
 capabilities or credential-store accessibility.
 
 ## Verification
+
+The counts and UNRUN entries below record the earlier source handoff. The WSL
+resume above supersedes its old execution status and adds one Windows ordinary
+unit test (executor source count 13; Windows ordinary count eight). No current
+diagnostic-patch pass is claimed.
 
 - Lint: UNRUN. Actions-only; no local lint, syntax or whitespace check.
 - TypeCheck/build: UNRUN. No local Cargo command or metadata probe.

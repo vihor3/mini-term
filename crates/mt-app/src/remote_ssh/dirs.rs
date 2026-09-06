@@ -133,25 +133,6 @@ pub(super) fn paste_file_name(local_path: &str) -> Result<String, String> {
 // 入口 1:远程文件树
 // ---------------------------------------------------------------------------
 
-/// SFTP readdir 远程目录,返回与本地 `mt_project::fs::list_directory` 同构的
-/// [`FileEntry`] 列表。
-///
-/// 忽略过滤 = 项目根 `.gitignore`(读一次、按 connId+projectRoot 缓存)
-/// + [`ALWAYS_IGNORE`] 固定黑名单(目录直接隐藏)。
-///
-/// `refresh_ignore=true` 强制重读 .gitignore(树顶手动刷新按钮用)。
-///
-/// **阻塞**,丢 `background_executor`。
-pub fn list_directory(
-    conn: &SshConnection,
-    path: &str,
-    project_root: &str,
-    refresh_ignore: bool,
-) -> Result<Vec<FileEntry>, String> {
-    list_directory_with_epoch(conn, path, project_root, refresh_ignore, None, false)
-        .map(|listing| listing.entries)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteFileListingSource {
     pub connection_id: String,
@@ -302,35 +283,6 @@ fn list_directory_with_epoch(
     })
 }
 
-/// 列一个目录的**分流开关**:远程项目走上面的 SFTP 那条,本地项目走
-/// [`mt_project::fs::list_directory`]。两条路返回同一个 [`FileEntry`]。
-///
-/// 文件树只需问一次「这个项目有没有远程连接」
-/// ([`AppStore::remote_connection_of`](crate::store::AppStore::remote_connection_of),
-/// 断链时是 `None`)就能共用同一段加载代码 —— 分流判据只有这一处,不会出现
-/// 「树顶刷新走了本地、展开子目录走了远程」这类半截状态。
-///
-/// 断链项目由 FileTree 在进入此分流函数前拦住，绝不会把远程 POSIX 路径当成本机
-/// 路径读取。
-///
-/// **阻塞**,丢 `background_executor`。
-pub fn list_directory_for(
-    remote: Option<&SshConnection>,
-    project_root: &std::path::Path,
-    dir: &std::path::Path,
-    refresh_ignore: bool,
-) -> Result<Vec<FileEntry>, String> {
-    match remote {
-        Some(conn) => list_directory(
-            conn,
-            &dir.to_string_lossy(),
-            &project_root.to_string_lossy(),
-            refresh_ignore,
-        ),
-        None => mt_project::fs::list_directory(project_root, dir).map_err(|e| format!("{e:#}")),
-    }
-}
-
 /// Read one directory on the exact authenticated onboarding session. Home
 /// expansion belongs to the caller's validated host probe, not a pooled cache.
 /// Blocking: invoke only on a background executor. No project ignore filters.
@@ -450,16 +402,6 @@ fn browser_sftp_error(error: SftpTransferError) -> RemoteDirectoryBrowseError {
 }
 
 /// 在远程项目目录中新建文件或文件夹。
-pub fn create_entry(
-    conn: &SshConnection,
-    project_root: &str,
-    parent_dir: &str,
-    name: &str,
-    is_dir: bool,
-) -> Result<String, String> {
-    create_entry_with_epoch(conn, project_root, parent_dir, name, is_dir, None)
-}
-
 pub fn create_entry_at_epoch(
     conn: &SshConnection,
     expected_epoch: u64,
@@ -516,15 +458,6 @@ fn create_entry_with_epoch(
 }
 
 /// 重命名远程条目；新名称只允许单个 POSIX basename。
-pub fn rename_entry(
-    conn: &SshConnection,
-    project_root: &str,
-    path: &str,
-    new_name: &str,
-) -> Result<String, String> {
-    rename_entry_with_epoch(conn, project_root, path, new_name, None)
-}
-
 pub fn rename_entry_at_epoch(
     conn: &SshConnection,
     expected_epoch: u64,

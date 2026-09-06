@@ -373,13 +373,12 @@ impl GitPanel {
                             && this.selected_repository(cx).is_some_and(|current| {
                                 current.authority() == repository.authority()
                             })
-                        {
-                            if let Some(info) = this.repos.iter_mut().find(|info| {
+                            && let Some(info) = this.repos.iter_mut().find(|info| {
                                 info.path.to_string_lossy() == repository.authority().worktree_root
-                            }) {
-                                info.current_branch = head_label(head);
-                                cx.notify();
-                            }
+                            })
+                        {
+                            info.current_branch = head_label(head);
+                            cx.notify();
                         }
                     }
                 }

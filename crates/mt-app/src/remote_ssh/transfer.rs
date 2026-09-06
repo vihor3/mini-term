@@ -62,15 +62,6 @@ async fn commit_new_remote_staged_directory(
 }
 
 /// 在同一远程项目中复制文件或目录；同名时自动生成副本名。
-pub fn copy_entry_keep_both(
-    conn: &SshConnection,
-    project_root: &str,
-    source_path: &str,
-    target_dir: &str,
-) -> Result<(String, FileOperationSummary), String> {
-    copy_entry_keep_both_with_epoch(conn, project_root, source_path, target_dir, None)
-}
-
 pub fn copy_entry_keep_both_at_epoch(
     conn: &SshConnection,
     expected_epoch: u64,
@@ -479,15 +470,6 @@ pub(super) fn collect_upload_conflicts(
 }
 
 /// 上传前扫描顶层冲突；返回发生冲突的本地条目名称。
-pub fn upload_conflicts(
-    conn: &SshConnection,
-    project_root: &str,
-    target_dir: &str,
-    local_paths: &[PathBuf],
-) -> Result<Vec<String>, String> {
-    upload_conflicts_with_epoch(conn, project_root, target_dir, local_paths, None)
-}
-
 /// FileTree preflight must not adopt a session acquired after its drop target.
 pub fn upload_conflicts_at_epoch(
     conn: &SshConnection,
@@ -875,16 +857,6 @@ async fn upload_path_tree(
 }
 
 /// 上传一批本地文件/文件夹到远程目录。目录 Overwrite 为递归合并并保留目标独有项。
-pub fn upload_paths(
-    conn: &SshConnection,
-    project_root: &str,
-    target_dir: &str,
-    local_paths: &[PathBuf],
-    strategy: FileConflictStrategy,
-) -> Result<FileOperationSummary, String> {
-    upload_paths_with_epoch(conn, project_root, target_dir, local_paths, strategy, None)
-}
-
 /// Use only the drop's authenticated epoch, including after conflict selection.
 /// Once path work starts it is never retried on a replacement session.
 pub fn upload_paths_at_epoch(
@@ -1020,14 +992,6 @@ pub(super) fn checked_local_download_child(
     let target = parent.join(name);
     ensure_local_download_target(download_root, &target)?;
     Ok(target)
-}
-
-/// 下载前检查顶层目标是否已存在。
-pub fn download_conflicts(
-    download_dir: &Path,
-    remote_paths: &[PathBuf],
-) -> Result<Vec<String>, String> {
-    download_conflicts_with_policy(download_dir, remote_paths, false)
 }
 
 /// FileTree paths contain POSIX text even on Windows. This is a local-only
@@ -1332,23 +1296,6 @@ async fn download_remote_tree(
 }
 
 /// 下载一个或多个远程条目到本地目录。
-pub fn download_entries(
-    conn: &SshConnection,
-    project_root: &str,
-    remote_paths: &[PathBuf],
-    download_dir: &Path,
-    strategy: FileConflictStrategy,
-) -> Result<FileOperationSummary, String> {
-    download_entries_with_epoch(
-        conn,
-        project_root,
-        remote_paths,
-        download_dir,
-        strategy,
-        None,
-    )
-}
-
 pub fn download_entries_at_epoch(
     conn: &SshConnection,
     expected_epoch: u64,

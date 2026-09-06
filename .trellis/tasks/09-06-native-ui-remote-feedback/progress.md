@@ -16,10 +16,10 @@
 | Child | State | Evidence |
 | --- | --- | --- |
 | native-terminal-navigation | CI/package passed / Native pending | Full CI33997336854 and package33997336860 passed for `f7b8a7e`; ci.36 artifact accepted, native interaction remains open |
-| native-agent-ownership-status | Reviewing | Source-owned weak detection episodes and accepted supersession are being integrated across runtime and app projections |
-| native-file-browser | Reviewing | FileTree P1 fixes source-complete; Pauli now independently checks R11 onboarding/browser |
-| native-remote-git | Implementing | CLI Actions found one history-body parity failure; backend follow-up and Kepler's full Git UI integration underway |
-| native-tasks-gh-accounts | Reviewing | Domain/executor/app/config source-complete; Noether owns combined independent check; Actions remain open |
+| native-agent-ownership-status | Source reviewed / Actions pending | Full Agent slice committed in `8ab8c27`; producer receipts and explicit lifecycle resume independently reviewed, not yet executed |
+| native-file-browser | Windows regressions passed / Remote pending | Source reviewed; onboarding and Files steps passed at `37b4ef9`; actual SSH and native acceptance remain open |
+| native-remote-git | Source reviewed / CI repair | CLI parity passed; integrated Windows Git filter has 123 passes and one incomplete fake-command failure; Linux Clippy follow-up released |
+| native-tasks-gh-accounts | Native Windows tests passed / WSL failing | Account isolation steps passed at `37b4ef9`; actual WSL executed once and failed in its prelude, secret-safe diagnostics authored |
 
 ## Current Dispatch
 
@@ -678,3 +678,40 @@ source-backed tests are authored, all UNRUN. Main reviewed producer-review.md
 and recorded final lifecycle APIs/limitations in mt-ai and mt-app specs. Agent
 source is ready for its separate scoped commit; the ongoing non-Agent tests
 are not Agent validation. Matching full-source Actions/native gates remain open.
+
+The complete independently reviewed Agent slice is committed locally as
+`8ab8c2770e72a5751ba4002ec0830c9d029a1065` (40 scoped product/spec/report files).
+It is not yet pushed or covered by any Actions result. The shared-file staging
+isolation described earlier is finished; the index was emptied by this commit.
+Original unrelated dirty paths remain untouched.
+
+Non-Agent CI `34005933974` at `37b4ef9` is now complete and FAILED overall.
+Windows `101412979902` passed onboarding (82 and three filtered tests), Files
+(49, 14, five and one), and Tasks (seven native executor passes/one explicitly
+ignored WSL fixture, 24 app, two config and 31 domain passes). Git domain filters
+passed 24 and six tests; the app Git filter passed 123 and failed one:
+`queued_write_rejects_same_status_changed_bytes_without_dispatch`. Its fake
+host rejects the production `ls-tree -z -l --full-tree` read plan. McClintock
+owns only this concrete fake/production-sequence review and focused test repair.
+The terminal-host step was skipped after failure, not passed.
+
+Actual WSL `101413098858` discovered and ran exactly one fixture, failing in
+0.06 seconds at the shared fixture-command success assertion. Its import and
+only-owned distro cleanup succeeded; no account transport assertion is proved.
+Noether released bounded pre-auth stage/numeric-status/output-class diagnostics
+and one Windows unit regression. Raw output, argv and credentials are never
+logged. The existing log does not identify the failed probe or prove a runner
+cause; explicit cwd is already present, and production Job/cancellation guards
+are unchanged. The next exact-SHA Actions run must reproduce with diagnostics.
+
+Pauli released all 16 nonbackend Clippy source corrections, including the sole
+download-preflight test caller and retired directory-listing doc link. Backend
+Clippy corrections are also released: remove only unused APIs, preserve proof
+fields with documented field-level allowances, retain condition order and
+source/lease fencing. New corrections and WSL diagnostics remain UNRUN.
+
+Windows package `34005933967`, job `101412990532`, succeeded at `37b4ef9`,
+including staged payload and extracted NSIS verification. This older non-Agent
+installer does not validate the pending full-source candidate, overall CI,
+actual remote transport or native interaction. Main will push only reviewed
+follow-ups with the Agent commit; all execution remains Actions-only.

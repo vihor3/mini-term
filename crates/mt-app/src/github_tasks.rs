@@ -117,10 +117,8 @@ impl GitHubTasksPanel {
             return;
         }
         self.visible = visible;
-        if visible {
-            if !self.sync_scope(cx) {
-                self.access_current(cx);
-            }
+        if visible && !self.sync_scope(cx) {
+            self.access_current(cx);
         }
         cx.notify();
     }

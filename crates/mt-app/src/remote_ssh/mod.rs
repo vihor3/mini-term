@@ -5,7 +5,7 @@
 //!
 //! | 原版 command | 本模块入口 |
 //! |---|---|
-//! | `ssh_remote_list_directory` | [`list_directory`] |
+//! | `ssh_remote_list_directory` | [`list_directory_at_epoch`] |
 //! | `ssh_remote_validate_dir` | [`validate_dir`] |
 //! | `ssh_remote_upload_paste` | [`upload_paste`] |
 //! | `ssh_remote_ai_sessions` | [`ai_sessions`] |

@@ -248,3 +248,75 @@ Lint/type-check/build/tests/format/metadata/whitespace/codegen/fixtures/probes/
 syntax/app verification: UNRUN locally, Actions-only. No child agents, staging,
 commits, shared index edits, Agent core/probe edits or changes outside the five
 listed source files and this report. No source policy or mutation behavior changed.
+
+## Clippy Repair Coordination
+
+Status: 16/16 assigned nonbackend diagnostics corrected in source; SOURCE
+COMPLETE and RELEASED to main. Both narrow sibling-file scope requests were
+authorized and completed. Read the actual log for run
+`34005933974`, Linux job `101412980006` at HEAD `37b4ef9`; backend diagnostics
+remain exclusively McClintock-owned. No local Clippy/check execution.
+
+Authorized final followup:
+
+- `crates/mt-app/src/remote_ssh/tests.rs`: changed the sole `download_conflicts`
+  assertion to production `download_conflicts_for_files`, preserving the same
+  `/remote/C:evil.exe` unsafe-name input and error expectation in
+  `remote_ssh::tests::local_download_targets_stay_inside_root`. Test UNRUN.
+- `crates/mt-app/src/remote_ssh/transfer.rs`: removed only the now-unused
+  `download_conflicts` wrapper and its comment. Pinned production entrypoints,
+  `download_conflicts_for_files`, shared policy helpers and fixtures unchanged.
+- `crates/mt-app/src/remote_ssh/mod.rs`: changed only the retired listing doc
+  link to `list_directory_at_epoch`. No module declarations, exports or runtime
+  changes.
+- `.trellis/tasks/09-06-native-remote-git/ui-review.md`: recorded this release.
+  These four paths are the exact changed paths for the final authorized followup.
+
+All other listed wrappers have no production, fixture or rollback callers.
+The unused file_ops parent/self helper's isolated test is superseded by the
+existing production `file_tree::tests::creation_and_drop_share_directory_file_parent_and_blank_targets`
+and POSIX-parent tests. Existing pinned implementation and cleanup helpers stay.
+
+Completed source edits (all 16 assigned nonbackend diagnostics):
+
+- Removed unused `entry_target_directory` and its isolated obsolete test from
+  `file_ops.rs`; retained the existing production FileTree target regressions.
+- Removed unused `host_ui::dialog_title` and its now-unused UI imports. Current
+  Diff/Worktree instance-owned close controls and all live host_ui APIs remain.
+- Removed unused unpinned wrappers: `delete_entry`; `list_directory`,
+  `list_directory_for`, `create_entry`, `rename_entry`; `copy_entry_keep_both`,
+  `upload_conflicts`, `upload_paths`, `download_conflicts`, `download_entries`.
+  All `*_at_epoch` bodies,
+  provenance, shared implementation helpers, staged commit/rollback/cleanup,
+  upload_paste behavior and actual SSH fixtures remain unchanged. The sole
+  obsolete download-preflight test caller now exercises the production helper.
+- Applied the exact Clippy style corrections to `git_panel.rs` StatusLoaded,
+  `github_tasks.rs` visibility short-circuit, `github_tasks/service.rs` Option
+  early return, and the live Change arm in `remote_directory_picker.rs`.
+  Condition order and side effects are unchanged; no Tasks redesign.
+
+No assigned nonbackend source finding or scope request remains open. No
+dead-code suppression, fake calls, black_box or unpinned production caller was
+added. No backend or Agent edits. This source release is not a passing Clippy
+or compilation result; execution remains Actions-only.
+
+Changed paths for the full nonbackend Clippy pass:
+
+- `crates/mt-app/src/file_ops.rs`
+- `crates/mt-app/src/git_panel.rs`
+- `crates/mt-app/src/git_panel/host_ui.rs`
+- `crates/mt-app/src/github_tasks.rs`
+- `crates/mt-app/src/github_tasks/service.rs`
+- `crates/mt-app/src/remote_directory_picker.rs`
+- `crates/mt-app/src/remote_ssh/delete.rs`
+- `crates/mt-app/src/remote_ssh/dirs.rs`
+- `crates/mt-app/src/remote_ssh/transfer.rs`
+- `crates/mt-app/src/remote_ssh/tests.rs`
+- `crates/mt-app/src/remote_ssh/mod.rs`
+- `.trellis/tasks/09-06-native-remote-git/ui-review.md`
+
+Verification: only the authorized Actions-log read and source/Git inspection.
+Local lint/build/test/format/metadata/whitespace/syntax/probe/fixture/app checks
+are UNRUN. Existing Linux/Windows compile success at `37b4ef9` predates this
+patch; the next exact-SHA Actions run must establish compilation and Clippy.
+No child agents, staging, commits or changes to shared index/Agent files.

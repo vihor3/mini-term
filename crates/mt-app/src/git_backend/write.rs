@@ -49,6 +49,8 @@ pub enum GitWritePhase {
 pub struct GitBusy {
     pub operation_id: u64,
     pub phase: GitWritePhase,
+    /// Captured owner evidence, even when presentation only needs project/path.
+    #[allow(dead_code)]
     pub source: ExecutionSourceSignature,
     pub project_id: String,
     pub repository: RepositoryAuthority,
@@ -68,6 +70,8 @@ pub enum GitPostcondition {
     WorktreeCreated {
         authority: RepositoryAuthority,
         branch: GitRef,
+        /// Verified target HEAD retained as creation evidence, not a replay input.
+        #[allow(dead_code)]
         head: Option<ObjectId>,
     },
     WorktreeRemoved {
@@ -80,9 +84,17 @@ pub enum GitPostcondition {
 
 #[derive(Clone)]
 pub struct GitReconciliation {
+    /// Source of these facts, including a possible recovery-only survivor.
+    #[allow(dead_code)]
     pub repository: GitRepository,
+    /// Post-operation status evidence; callers currently refresh their own cache.
+    #[allow(dead_code)]
     pub status: RepositoryStatus,
+    /// Ref evidence retained with the same reconciliation receipt.
+    #[allow(dead_code)]
     pub branches: Vec<BranchInfo>,
+    /// Complete inventory behind the typed postcondition, not cleanup consent.
+    #[allow(dead_code)]
     pub worktrees: GitWorktrees,
     pub postcondition: GitPostcondition,
 }
@@ -172,15 +184,14 @@ impl PreparedGitWrite {
                 {
                     return Err(GitError::changed());
                 }
-                if let Step::WorktreeRemove { executor, .. } = step {
-                    if self
+                if let Step::WorktreeRemove { executor, .. } = step
+                    && self
                         .repository
                         .backend
                         .authority_cli_at(&executor.worktree_root)?
                         != *executor
-                    {
-                        return Err(GitError::stale());
-                    }
+                {
+                    return Err(GitError::stale());
                 }
                 if let Some(path) = step.leaf() {
                     let expected = self
@@ -310,34 +321,33 @@ impl GitRepository {
             return Err(GitError::stale());
         }
         self.backend.check()?;
-        if self.backend.local() {
-            if let GitWrite::WorktreeAdd { target, .. } | GitWrite::WorktreeRemove { target, .. } =
+        if self.backend.local()
+            && let GitWrite::WorktreeAdd { target, .. } | GitWrite::WorktreeRemove { target, .. } =
                 &mut operation
-            {
-                self.backend.validate_path(target)?;
-                let path = Path::new(target);
-                if path.components().any(|component| {
-                    matches!(
-                        component,
-                        std::path::Component::ParentDir | std::path::Component::CurDir
-                    )
-                }) {
-                    return Err(GitError::invalid(
-                        "Worktree target must not contain dot components",
-                    ));
-                }
-                let parent = path
-                    .parent()
-                    .and_then(Path::to_str)
-                    .ok_or_else(GitError::stale)?;
-                let leaf = path.file_name().ok_or_else(GitError::stale)?;
-                let canonical =
-                    PathBuf::from(self.backend.host.canonical_directory(parent)?).join(leaf);
-                *target = canonical
-                    .to_str()
-                    .ok_or_else(|| GitError::invalid("Git native target is not UTF-8"))?
-                    .to_owned();
+        {
+            self.backend.validate_path(target)?;
+            let path = Path::new(target);
+            if path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            }) {
+                return Err(GitError::invalid(
+                    "Worktree target must not contain dot components",
+                ));
             }
+            let parent = path
+                .parent()
+                .and_then(Path::to_str)
+                .ok_or_else(GitError::stale)?;
+            let leaf = path.file_name().ok_or_else(GitError::stale)?;
+            let canonical =
+                PathBuf::from(self.backend.host.canonical_directory(parent)?).join(leaf);
+            *target = canonical
+                .to_str()
+                .ok_or_else(|| GitError::invalid("Git native target is not UTF-8"))?
+                .to_owned();
         }
         if self.busy().is_some() {
             return Err(GitError::new(
@@ -392,13 +402,13 @@ impl GitRepository {
         };
         let result = reconcile(&original, &operation, &baseline, false);
         let mut writes = WRITES.lock();
-        if let Some(slot) = writes.get_mut(&key) {
-            if slot.busy.operation_id == operation_id {
-                if result.is_ok() {
-                    writes.remove(&key);
-                } else {
-                    slot.busy.phase = GitWritePhase::Uncertain;
-                }
+        if let Some(slot) = writes.get_mut(&key)
+            && slot.busy.operation_id == operation_id
+        {
+            if result.is_ok() {
+                writes.remove(&key);
+            } else {
+                slot.busy.phase = GitWritePhase::Uncertain;
             }
         }
         result
@@ -1075,32 +1085,29 @@ fn reconcile(
         backend.check()?;
     }
     let mut root = original.authority.worktree_root.clone();
-    if let GitWrite::WorktreeRemove { target, .. } = operation {
-        if backend.host.kind(target)?.is_none()
-            && (root == *target || backend.host.kind(&backend.probe_anchor)?.is_none())
-        {
-            let survivor = baseline
-                .inventory
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .find(|fact| {
-                    !fact.is_bare
-                        && fact_path(fact).ok() != Some(target.as_str())
-                        && fact.path_state == WorktreePathState::Present
-                })
-                .ok_or_else(|| {
-                    GitError::unavailable(
-                        "No verified surviving worktree for removal reconciliation",
-                    )
-                })?;
-            root = fact_path(survivor)?.to_owned();
-            backend.anchor = root.clone();
-            backend.probe_anchor = root.clone();
-            // This handle only transports reconciliation facts. Its original
-            // project/worktree identity cannot authorize new reads or writes.
-            backend.recovery_only = true;
-        }
+    if let GitWrite::WorktreeRemove { target, .. } = operation
+        && backend.host.kind(target)?.is_none()
+        && (root == *target || backend.host.kind(&backend.probe_anchor)?.is_none())
+    {
+        let survivor = baseline
+            .inventory
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|fact| {
+                !fact.is_bare
+                    && fact_path(fact).ok() != Some(target.as_str())
+                    && fact.path_state == WorktreePathState::Present
+            })
+            .ok_or_else(|| {
+                GitError::unavailable("No verified surviving worktree for removal reconciliation")
+            })?;
+        root = fact_path(survivor)?.to_owned();
+        backend.anchor = root.clone();
+        backend.probe_anchor = root.clone();
+        // This handle only transports reconciliation facts. Its original
+        // project/worktree identity cannot authorize new reads or writes.
+        backend.recovery_only = true;
     }
     let repository = backend.repository_at(&root)?;
     if repository.authority.common_dir != original.authority.common_dir
@@ -1273,10 +1280,10 @@ impl Lease {
         })
     }
     fn phase(&self, phase: GitWritePhase) {
-        if let Some(slot) = WRITES.lock().get_mut(&self.key) {
-            if slot.busy.operation_id == self.id {
-                slot.busy.phase = phase;
-            }
+        if let Some(slot) = WRITES.lock().get_mut(&self.key)
+            && slot.busy.operation_id == self.id
+        {
+            slot.busy.phase = phase;
         }
     }
     fn release(&mut self) {
