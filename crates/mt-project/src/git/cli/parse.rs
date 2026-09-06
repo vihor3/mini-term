@@ -426,7 +426,11 @@ pub fn parse_log(bytes: &[u8]) -> Result<Vec<GitCommitInfo>> {
             !author.contains(['\r', '\n']) && !message.contains(['\r', '\n']),
             "Invalid Git log text framing"
         );
-        let body = utf8(fields[5])?;
+        // Match libgit2's commit.body(): trim ASCII boundary whitespace, not
+        // interior formatting or Unicode whitespace, after validating framing.
+        let body = utf8(fields[5])?.trim_matches(|character| {
+            matches!(character, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c')
+        });
         commits.push(GitCommitInfo {
             hash: hash.as_str().to_string(),
             short_hash: hash.as_str()[..7].to_string(),

@@ -543,7 +543,7 @@ fn history_has_length_framing_all_parents_and_no_implicit_head_at_end() {
     let log = parse_log(&bytes).unwrap();
     assert_eq!(log.len(), 2);
     assert_eq!(log[0].parent_hashes, [B, C]);
-    assert_eq!(log[0].body.as_deref(), Some("line 1\n\nline 2\n"));
+    assert_eq!(log[0].body.as_deref(), Some("line 1\n\nline 2"));
     assert_eq!(log[0].timestamp, 1_234_567_890);
     assert!(log[1].body.is_none());
     let plan = log_plan(&[oid(B), oid(C)], 30).unwrap().unwrap();
@@ -564,6 +564,25 @@ fn history_has_length_framing_all_parents_and_no_implicit_head_at_end() {
     );
     assert!(parse_commit_parents(format!("{A}\n").as_bytes(), &oid(B)).is_err());
     assert!(parse_commit_parents(format!("{A} \n").as_bytes(), &oid(A)).is_err());
+}
+
+#[test]
+fn history_body_matches_libgit2_ascii_boundary_whitespace_semantics() {
+    for (body, expected) in [
+        ("", None),
+        (" \t\r\n\x0b\x0c", None),
+        ("root body\n", Some("root body")),
+        (
+            "\n \tfirst line\n\n  indented\tcontent \r\n",
+            Some("first line\n\n  indented\tcontent"),
+        ),
+        ("\u{00a0}body\u{00a0}\n", Some("\u{00a0}body\u{00a0}")),
+    ] {
+        let log = parse_log(&log_record(A, B, "unchanged subject", body)).unwrap();
+        assert_eq!(log[0].message, "unchanged subject");
+        assert_eq!(log[0].body.as_deref(), expected);
+        assert_eq!(log[0].parent_hashes, [B]);
+    }
 }
 
 #[test]
@@ -1441,9 +1460,45 @@ mod actions_fixtures {
             .iter()
             .find(|commit| commit.hash == root.as_str())
             .unwrap();
-        assert_eq!(root_log.body.as_deref(), Some("root body\n"));
+        assert_eq!(root_log.body.as_deref(), Some("root body"));
         fixture.raw(&["checkout", "--detach", root.as_str()]);
         assert!(fixture.status().head.branch.is_none());
+    }
+
+    #[test]
+    fn actual_history_body_boundary_whitespace_matches_existing_local_dtos() {
+        let fixture = Fixture::new();
+        fixture.file("root", b"root\n");
+        fixture.commit("seed");
+        let repo = git2::Repository::open(&fixture.repo).unwrap();
+        let signature = git2::Signature::now("Fixture", "fixture@example.invalid").unwrap();
+        for body in [
+            "root body\n",
+            "\n \tfirst line\n\n  indented\tcontent \r\n",
+            " \t\r\n\x0b\x0c",
+            "\u{00a0}body\u{00a0}\n",
+        ] {
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+            let tree = parent.tree().unwrap();
+            let commit = repo
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    &format!("subject\n\n{body}"),
+                    &tree,
+                    &[&parent],
+                )
+                .unwrap();
+            let tip = ObjectId::parse(&commit.to_string()).unwrap();
+            let actual =
+                parse_log(&fixture.run(&log_plan(&[tip], 1).unwrap().unwrap())).unwrap();
+            let local = crate::git::get_git_log(&fixture.repo, None, Some(1), None).unwrap();
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(local).unwrap()
+            );
+        }
     }
 
     #[test]

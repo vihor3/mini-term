@@ -86,6 +86,10 @@ blob size/content, diff inputs, stage/unstage/discard, commit/sync and worktrees
 - History uses bounded byte-length/NUL framing and all-parent continuation,
   not line parsing, naive offsets or a first-parent walk. Consumers retain their
   frontier and deduplicate graph pages. Branch choice is a view filter.
+  Body projection matches libgit2 `commit.body()`: trim only ASCII boundary
+  space/HT/LF/CR/VT/FF after framing and UTF-8 validation, preserving interior
+  formatting and non-ASCII whitespace. An empty projected body is None. Keep
+  full DTO parity fixtures; do not normalize away differences in assertions.
 - Exact tree/index lookup returns missing only for successful complete empty
   output. Conflicts and non-blob entries are errors, not empty files. Working
   diff compares HEAD to working bytes; staged diff compares HEAD to index.
