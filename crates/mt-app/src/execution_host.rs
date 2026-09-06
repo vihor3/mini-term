@@ -1017,7 +1017,11 @@ pub(crate) mod tasks_wsl_public_timing {
         }
 
         fn elapsed_us(&self) -> u64 {
-            self.0.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+            self.0
+                .started
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64
         }
 
         fn state(&self) -> MutexGuard<'_, State> {
@@ -1148,11 +1152,7 @@ pub(crate) mod tasks_wsl_public_timing {
         }
     }
 
-    pub(super) fn before_retirement(
-        exit: Option<i32>,
-        stdout: &BoundedRead,
-        stderr: &BoundedRead,
-    ) {
+    pub(super) fn before_retirement(exit: Option<i32>, stdout: &BoundedRead, stderr: &BoundedRead) {
         let pair = ACTIVE.with(|slot| slot.borrow().clone());
         if let Some(pair) = pair {
             pair.completed(
@@ -1176,11 +1176,17 @@ pub(crate) mod tasks_wsl_public_timing {
 
         impl<T> ProbeJoin<T> {
             fn is_finished(&self) -> bool {
-                self.thread.as_ref().expect("public probe worker missing").is_finished()
+                self.thread
+                    .as_ref()
+                    .expect("public probe worker missing")
+                    .is_finished()
             }
 
             fn join(mut self) -> thread::Result<T> {
-                self.thread.take().expect("public probe worker missing").join()
+                self.thread
+                    .take()
+                    .expect("public probe worker missing")
+                    .join()
             }
         }
 
@@ -1457,7 +1463,11 @@ pub(crate) mod tasks_wsl_public_timing {
             let timeout = Pair::new(Row::AfterProducer, Instant::now());
             let (result, trace) = tasks_wsl_retirement_trace(timeout.started(), || {
                 timeout.probe(|| {
-                    native("for /l %i in (1,1,2147483647) do @rem", Duration::ZERO, 4096)
+                    native(
+                        "for /l %i in (1,1,2147483647) do @rem",
+                        Duration::ZERO,
+                        4096,
+                    )
                 })
             });
             assert!(result.unwrap().unwrap().timed_out);

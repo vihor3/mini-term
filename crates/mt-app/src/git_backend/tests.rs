@@ -384,14 +384,27 @@ fn wsl_launcher_loss_retains_exact_lease_after_reconciliation_until_explicit_rev
     assert_eq!(outcome.operation_id, id);
     assert_eq!(outcome.state, GitWriteState::Uncertain);
     assert!(!outcome.succeeded());
-    assert_eq!(outcome.error.as_ref().unwrap().kind, GitErrorKind::Unavailable);
+    assert_eq!(
+        outcome.error.as_ref().unwrap().kind,
+        GitErrorKind::Unavailable
+    );
     assert!(outcome.lease_retained);
     assert!(outcome.reconciliation_error.is_none());
     let reconciliation = outcome.reconciliation.as_ref().unwrap();
-    assert!(matches!(reconciliation.postcondition, GitPostcondition::Refreshed));
-    assert_eq!(reconciliation.repository.authority(), repository.authority());
+    assert!(matches!(
+        reconciliation.postcondition,
+        GitPostcondition::Refreshed
+    ));
     assert_eq!(
-        reconciliation.repository.backend.snapshot().source_signature(),
+        reconciliation.repository.authority(),
+        repository.authority()
+    );
+    assert_eq!(
+        reconciliation
+            .repository
+            .backend
+            .snapshot()
+            .source_signature(),
         source
     );
     let busy = repository.busy().unwrap();
@@ -411,7 +424,11 @@ fn wsl_launcher_loss_retains_exact_lease_after_reconciliation_until_explicit_rev
     );
     let review = UncertainReview::UserConfirmedOriginalOperationStopped;
     assert_eq!(
-        repository.review_uncertain(queued_id, review).err().unwrap().kind,
+        repository
+            .review_uncertain(queued_id, review)
+            .err()
+            .unwrap()
+            .kind,
         GitErrorKind::Stale
     );
     assert_eq!(state.lock().commands.len(), commands_after_reconciliation);
@@ -423,7 +440,10 @@ fn wsl_launcher_loss_retains_exact_lease_after_reconciliation_until_explicit_rev
     assert_eq!(repository.busy().unwrap().phase, GitWritePhase::Uncertain);
     state.lock().changed_authority = false;
     let reviewed = repository.review_uncertain(id, review).unwrap();
-    assert!(matches!(reviewed.postcondition, GitPostcondition::Refreshed));
+    assert!(matches!(
+        reviewed.postcondition,
+        GitPostcondition::Refreshed
+    ));
     assert_eq!(reviewed.repository.authority(), repository.authority());
     assert!(repository.busy().is_none());
     assert!(repository.review_uncertain(id, review).is_err());

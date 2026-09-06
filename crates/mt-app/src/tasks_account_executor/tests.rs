@@ -2036,8 +2036,7 @@ mod wsl_public_comparison {
             let output = result.output;
             // Preserve only this suppression bit when incomplete/stale public
             // producer bytes are discarded. Decide for both rows before previews.
-            let fixture_credential =
-                stage == Stage::Producer && has_fixture_credential(&output);
+            let fixture_credential = stage == Stage::Producer && has_fixture_credential(&output);
             metadata.exit = output.exit_code;
             metadata.timed_out = output.timed_out;
             metadata.stdout_truncated = output.stdout_truncated;
@@ -2128,8 +2127,7 @@ mod wsl_public_comparison {
     }
 
     fn read_once(pair: &Pair, probe: impl FnOnce() -> Reply) -> Readiness {
-        let (result, retirement) =
-            tasks_wsl_retirement_trace(pair.started(), || pair.probe(probe));
+        let (result, retirement) = tasks_wsl_retirement_trace(pair.started(), || pair.probe(probe));
         let reply = match result {
             Ok(reply) => reply,
             Err(_) => {
@@ -2282,9 +2280,8 @@ mod wsl_public_comparison {
         let mut report = collect_pair(
             &pair,
             || {
-                std::thread::Builder::new().spawn(move || {
-                    read_once(&probe_pair, || peer.execute(Stage::Readiness))
-                })
+                std::thread::Builder::new()
+                    .spawn(move || read_once(&probe_pair, || peer.execute(Stage::Readiness)))
             },
             || case.execute(Stage::Producer),
         );
@@ -2470,11 +2467,11 @@ mod wsl_public_comparison {
         }
 
         fn value(&self, suppress: bool) -> serde_json::Value {
-            let (start, suppressed, texts) =
-                self.producer
-                    .as_ref()
-                    .map(|reply| previews(reply, suppress))
-                    .unwrap_or((false, false, [None, None]));
+            let (start, suppressed, texts) = self
+                .producer
+                .as_ref()
+                .map(|reply| previews(reply, suppress))
+                .unwrap_or((false, false, [None, None]));
             let markers_match = self
                 .producer
                 .as_ref()
@@ -3111,7 +3108,11 @@ mod wsl_public_comparison {
         for (index, row) in value["rows"].as_array().unwrap().iter().enumerate() {
             assert_eq!(
                 row["row"],
-                if index == 0 { "Immediate" } else { "AfterProducer" }
+                if index == 0 {
+                    "Immediate"
+                } else {
+                    "AfterProducer"
+                }
             );
             assert_eq!(row["producer"]["exit"], -1);
             assert_eq!(row["timing"]["release"], "Deadline");
@@ -3139,8 +3140,7 @@ mod wsl_public_comparison {
                                     if stderr {
                                         result.output.stderr = secret;
                                     } else {
-                                        result.output.stdout =
-                                            [START, secret.as_slice()].concat();
+                                        result.output.stdout = [START, secret.as_slice()].concat();
                                     }
                                     match invalid {
                                         1 => result.output.stdout_truncated = true,
@@ -3169,8 +3169,7 @@ mod wsl_public_comparison {
                                 !rendered.contains("benign-public")
                                     && !rendered.contains("fixture_credential_hidden")
                             );
-                            let value: serde_json::Value =
-                                serde_json::from_str(&rendered).unwrap();
+                            let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
                             assert_eq!(value["fixture_secret_suppressed"], true);
                             for row in value["rows"].as_array().unwrap() {
                                 assert!(
