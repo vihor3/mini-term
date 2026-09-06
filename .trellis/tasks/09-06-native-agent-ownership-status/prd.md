@@ -66,3 +66,9 @@ implementation starts while that navigation candidate runs in Actions; shared
 app files remain reserved until its diagnostics and API handoff are coordinated.
 No native reproduction or automated checks are claimed; all compilation,
 tests/probes, lint/format, and packaging remain Actions-only.
+
+The 2026-09-07 Codex follow-up is implemented, independently reviewed and
+Actions-validated on product `5186575`. The matching `1.2.2-ci.72` installer is
+downloaded. See `validation-09-07-codex.md` for all five successful CI jobs,
+18 passing new Linux/Windows regressions and exact package identity. Native
+acceptance remains open; the parent scope and approved layout are unchanged.

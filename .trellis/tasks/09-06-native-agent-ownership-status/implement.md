@@ -21,9 +21,10 @@ runtime identities. Main owns spec changes; implement/check agents do not recurs
   follow-up, including exact nonlast/last end production and bridge regressions.
 - [x] Complete the independently reviewed explicit same-ID lifecycle resume
   correction and final source integration.
-- [ ] Obtain exact-SHA Actions and matching native artifact evidence.
+- [x] Obtain exact-SHA Actions and matching native artifact evidence.
 
-Source steps above are implemented and reviewed, not tested. The combined review
+At the earlier source handoff, the steps above were implemented and reviewed,
+not yet tested. The combined review
 introduced source-owned weak episodes and sticky accepted fallback supersession
 across every actionable projection. Its final race follow-up makes empty-process
 retirement conditional and atomic against both newer published and pending input
@@ -42,7 +43,13 @@ Actions and native gates; no regression has run yet for this Agent slice.
 - [x] Compare Orca's owned Codex state sources and record precise applicability.
 - [x] Add bounded live-screen semantic decoding and fenced remote integration.
 - [x] Complete independent source review and focused regression coverage.
-- [ ] Obtain exact-commit Actions evidence and a matching Windows artifact.
+- [x] Obtain exact-commit Actions evidence and a matching Windows artifact.
+
+Candidate `5186575` passed exact-commit CI (all five jobs) and Windows package
+validation. All 18 new regressions passed on Linux and Windows; installer
+`1.2.2-ci.72` is downloaded. See `validation-09-07-codex.md` for immutable run/job
+evidence. Native screenshot/status-cadence acceptance remains user-observed and
+open, separate from these automated gates.
 
 This follow-up does not invalidate the previous layout package's build evidence,
 but that package reproduces this newly reported native Agent defect. Keep native

@@ -1,8 +1,27 @@
 # Integrated Feedback Validation
 
+## Codex State Follow-up
+
+- Latest product: `51865754509fc1729920b01d5e6038489c84e355`.
+- CI https://github.com/vihor3/mini-term/actions/runs/34051966889 passed all five
+  Linux, Windows, rootfs, actual WSL1 and WSL2 jobs. All 18 new Codex frame,
+  ownership and freshness regressions passed on Linux and Windows. Existing
+  navigation, Files, Tasks, Git, SSH and terminal-host gates remain green.
+- Package https://github.com/vihor3/mini-term/actions/runs/34051966899 passed on
+  that same commit. Artifact `9995202716`, `Mini-Term_1.2.2-ci.72_windows-x64`,
+  is downloaded to `/home/leo/Downloads/mini-term-1.2.2-ci.72/`; its Actions
+  manifest reports all eight payloads matching and installer validation passed.
+- This supersedes ci.70 for native feedback. It adds owned Codex current-screen
+  Working evidence without changing the approved layout or device discovery
+  scope. Cursor/animation/old frames cannot renew activity; missing evidence
+  does not manufacture Waiting/Done. The reported native screenshot and other
+  parent acceptance items remain open for user observation with this artifact.
+- Full evidence and source-review corrections are recorded in the Agent child's
+  `validation-09-07-codex.md`. All execution was Actions-only.
+
 ## Approved Native Layout
 
-- Latest product commit: `f90993afce7c04f3d6a359fdf5bee0a9016d4de9`.
+- Layout baseline product: `f90993afce7c04f3d6a359fdf5bee0a9016d4de9`.
 - CI: https://github.com/vihor3/mini-term/actions/runs/34046725805
   All five jobs completed SUCCESS: Linux `101523006968`, Windows `101523007135`,
   rootfs `101523007104`, actual WSL1 `101523147769` and WSL2 `101523147759`.
