@@ -852,12 +852,9 @@ mod tests {
     #[test]
     fn capture_diagnostics_preserve_results_and_reset_after_panics() {
         let cancellation = super::super::AccountCancellation::default();
-        let control = AccountExecutionControl::new(
-            Duration::from_secs(15),
-            cancellation.clone(),
-            None,
-        )
-        .unwrap();
+        let control =
+            AccountExecutionControl::new(Duration::from_secs(15), cancellation.clone(), None)
+                .unwrap();
         let deadline = Instant::now() + control.timeout();
         let (result, diagnostics) = trace_capture(Instant::now(), || {
             observe_capture(

@@ -1070,3 +1070,16 @@ credential, CI or rootfs-policy changes. Synthetic-only lifecycle modes preserve
 Cancelled versus CleanupFailed and nonzero exit semantics in focused tests.
 Main recorded the executable diagnostic contract. All new verification is
 UNRUN until the scoped commit and same-run Actions fixture rebuild/rerun.
+
+The released diagnostic slice is committed/pushed as
+`d3766364cbe32349e7d4a82b5f540f9077352b43`: CI34015574888 and
+package34015574931. Linux101438614801 stopped on four formatting hunks across
+process.rs/tests.rs; generated i18n passed. Main downloaded artifact9983786019,
+read and applied its complete full-rustfmt.patch to source/index. No local
+formatter/check ran and no behavior changed. Windows101438614858 was compiling;
+actual WSL101438728422 was setting up, with no diagnostic execution claimed.
+The immediate formatting successor restarts the full gates. Main also downloaded
+the already-passing ci.53 package to
+`/home/leo/.cache/mini-term/artifacts/5a070e1-integration` and offered its Actions
+artifact link for native pre-acceptance, explicitly retaining the failed WSL gate.
+No installer launch or local artifact verification was performed.

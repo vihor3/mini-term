@@ -389,12 +389,9 @@ fn private_capture_diagnostics_keep_cancellation_acknowledgement_required() {
     ] {
         let evidence = DescendantEvidence::new();
         let cancellation = AccountCancellation::default();
-        let bounded = AccountExecutionControl::new(
-            Duration::from_secs(15),
-            cancellation.clone(),
-            None,
-        )
-        .unwrap();
+        let bounded =
+            AccountExecutionControl::new(Duration::from_secs(15), cancellation.clone(), None)
+                .unwrap();
         let mut command = Command::new(&fixture().executable);
         command.args(["--capture-lifecycle", mode]);
         evidence.configure(&mut command);
@@ -423,12 +420,8 @@ fn private_capture_diagnostics_keep_cancellation_acknowledgement_required() {
 #[test]
 fn private_capture_unstopped_exit_is_not_relabelled_by_later_cancellation() {
     let cancellation = AccountCancellation::default();
-    let bounded = AccountExecutionControl::new(
-        Duration::from_secs(15),
-        cancellation.clone(),
-        None,
-    )
-    .unwrap();
+    let bounded =
+        AccountExecutionControl::new(Duration::from_secs(15), cancellation.clone(), None).unwrap();
     let mut command = Command::new(&fixture().executable);
     command.args(["--capture-lifecycle", "exit-no-ack"]);
     let (result, diagnostics) = process::trace_capture(Instant::now(), || {
@@ -2279,12 +2272,8 @@ fn tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host() {
     ] {
         let (login, cancel, expected) = match lifecycle {
             WslLifecycleCase::PipeDescendant => ("PipeDescendant", false, None),
-            WslLifecycleCase::DataTimeout => {
-                ("Slow", false, Some(AccountExecutionError::TimedOut))
-            }
-            WslLifecycleCase::DataCancel => {
-                ("Slow", true, Some(AccountExecutionError::Cancelled))
-            }
+            WslLifecycleCase::DataTimeout => ("Slow", false, Some(AccountExecutionError::TimedOut)),
+            WslLifecycleCase::DataCancel => ("Slow", true, Some(AccountExecutionError::Cancelled)),
             WslLifecycleCase::LookupTimeout => {
                 ("LookupSlow", false, Some(AccountExecutionError::TimedOut))
             }
