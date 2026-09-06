@@ -632,3 +632,85 @@ and exact owned cleanup. Ordinary unit passes do not validate its transport.
 Wrong: expose private account bytes because an isolated fixture is in use.
 Correct: create a separate fixed public command boundary, retain the original
 failure and require separately reviewed source changes with fresh Actions proof.
+
+## Scenario: Public WSL Retirement Timing Contrast
+
+### 1. Scope / Trigger
+
+After the explicit WSL follow-up approval and the public instance-terminated
+reproduction, the existing exact-once public attempt may contain two fixed
+rows: Immediate then AfterProducer. This narrow diagnostic exception replaces
+ONLY the public comparison's readiness polling with one probe in each row.
+Original private lifecycle tests and production cleanup remain unchanged.
+
+### 2. Signatures
+
+A Windows-test-only thread-local scope observes the existing ordinary runner's
+final normal retirement boundary. A constant-size pair coordinator carries the
+producer return/abort state, an absolute deadline and typed timing metadata.
+It never exports, clones or stores a ProcessTree/Job handle outside its original
+readiness invocation. Outside the explicit scope the runner is unchanged.
+
+### 3. Contracts
+
+- Keep exact attested source, fresh UUID/no-reuse mkdir, immutable producer and
+  fixed own-marker probe. At most two setup, two producer and two probe commands
+  per original failing test; no new start barrier or retries-until-success.
+- Both rows use existing suspended/no-window creation, exact Job attachment,
+  kill-on-close, timeout/error cleanup and normal termination arguments. No
+  breakaway flag, production wait, extra kill, process inventory or private log.
+- Observe normal completion only after direct child exit and joined readers.
+  Only complete empty-output exits 0 or 1 may wait. Errors/timeouts/truncation
+  bypass the wait and retain existing cleanup/results. Exit1 is absence, not
+  evidence of readiness; never reuse it to satisfy a private assertion.
+- Immediate observes and continues; AfterProducer holds the exact guard on its
+  readiness stack until producer return, producer-owner unwind/drop or the
+  absolute pair-start-plus-10-second deadline. Wakeups never extend the deadline.
+  Preserve command 5-second/4096-byte limits plus existing cleanup grace.
+- Record producer return and signal BEFORE joining readiness. An unwind owner
+  signals abort before joining, without a second panic. On release fall through
+  to the SAME existing TerminateJobObject and Drop/handle closure. Never mark a
+  tree terminated early or hide an API failure. OS failure/runner loss remains
+  an explicit limit, not a claimed cleanup success.
+- Scope/coordination are per row and thread, reset on return/unwind, reject nested
+  scope reuse, and retain at most one waiting guard. Store only fixed metadata:
+  row, probe start/completion/return, producer start/return, release reason and
+  existing bounded retirement records. Both rows together remain within the
+  existing 4096-byte escaped diagnostic limit and public-only sentinel rules.
+- Resolve sentinel suppression across both producer receipts before decoding
+  either preview. Scan both bounded captured streams in all supported encodings
+  before cropping; preserve only the suppression bit when incomplete or stale
+  captured bytes are discarded. A hit in either row suppresses ALL previews.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| No explicit diagnostic scope | Existing normal execution and immediate retirement |
+| Completed empty-output exit0 or exit1 | Record boundary; only AfterProducer may wait |
+| Capture error, timeout, malformed or truncated probe | Immediate existing cleanup; comparison inconclusive |
+| Producer returns or unwinds | Signal return/abort before readiness join |
+| Absolute deadline expires | Release and retire; typed inconclusive result |
+| Final retirement fails | Preserve error and existing Drop retry/closure |
+| Immediate does not reproduce or hold starts too late | Inconclusive, not proof of a fix |
+
+### 5. Good / Base / Bad
+
+Good: separate completed root exit from final Job retirement in an owned public
+fixture. Base: differing startup order limits inference. Bad: copy this wait
+into production or retain shared per-distro Jobs as an unreviewed fix.
+
+### 6. Tests Required
+
+Actions-only coverage pins two-row/one-probe caps, exit0/exit1 eligibility,
+inactive parity, error bypass, signal-before-join, producer/probe unwind,
+deadline release, TLS reset/isolation, actual retirement/closure and unchanged
+result/privacy bounds. The original actual WSL test must still execute exactly
+once and preserve every baseline and descendant assertion plus owned cleanup.
+
+### 7. Wrong vs Correct
+
+Wrong: accept successful delayed output as a production cancellation fix.
+Correct: require an overlapping normal completion and the observed retirement
+difference, preserve the baseline failure, then review production containment
+separately. This does not identify a kernel member or establish WSL2 behavior.

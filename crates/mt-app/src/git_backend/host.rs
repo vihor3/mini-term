@@ -38,6 +38,18 @@ pub(super) enum Dispatch {
     Uncertain,
 }
 
+pub(super) fn process_dispatch(backend: &ExecutionBackend, output: &CommandOutput) -> Dispatch {
+    // WSL launcher loss is not a Git exit or proof that guest work stopped.
+    if output.timed_out
+        || output.exit_code.is_none()
+        || matches!(backend, ExecutionBackend::Wsl { .. }) && output.exit_code == Some(-1)
+    {
+        Dispatch::Uncertain
+    } else {
+        Dispatch::Completed
+    }
+}
+
 pub(super) struct Attempt {
     pub dispatch: Dispatch,
     pub output: Option<CommandOutput>,
@@ -207,11 +219,7 @@ impl Host for ExecutionGitHost {
                             output.stderr_truncated = true;
                         }
                         Attempt {
-                            dispatch: if output.timed_out || output.exit_code.is_none() {
-                                Dispatch::Uncertain
-                            } else {
-                                Dispatch::Completed
-                            },
+                            dispatch: process_dispatch(&snapshot.backend, output),
                             output: Some(result.output),
                             error: None,
                         }

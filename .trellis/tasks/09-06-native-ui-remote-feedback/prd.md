@@ -180,3 +180,19 @@ including single-terminal tabs, global right-tool choice, retained tab ordering,
 owned background Agents, and existing remote Git workflows. Implementation is
 authorized in the ordered child plan; activation and execution evidence are
 recorded per child. This approval does not waive the Actions-only constraint.
+
+## Explicit WSL Follow-Up Approval
+
+After asking why WSL work was included, the user explicitly requested solving
+the WSL issue together on 2026-09-06. The preceding feedback did not itself
+request new WSL functionality; preserve that scope distinction in reporting.
+The project already supported local Windows WSL project roots and terminals.
+
+This follow-up owns the reproduced WSL1 background-command lifetime failure:
+concurrent short-command retirement overlaps an early peer transport exit, and
+an isolated non-credential producer reports that the WSL instance terminated.
+First establish the causal boundary using bounded Actions-only fixtures, then
+correct only the affected execution/cleanup behavior. Preserve SSH/native
+semantics, private credential boundaries, truthful cancellation/cleanup results
+and all original lifecycle assertions. Do not infer WSL2 or real-device impact
+from the Windows Server 2022 WSL1 fixture. Native UI acceptance remains separate.

@@ -4,7 +4,7 @@ use mt_github::CommandOutput;
 use mt_identity::{ExecutionHostId, HostInstallId, RepoId, WorktreeId};
 use parking_lot::Mutex;
 
-use super::host::{Attempt, Dispatch};
+use super::host::{Attempt, Dispatch, process_dispatch};
 use super::*;
 
 const OID: &str = "1111111111111111111111111111111111111111";
@@ -46,6 +46,7 @@ struct FakeState {
     files: BTreeMap<String, String>,
     mutation_calls: usize,
     mutation: Option<(Dispatch, Option<i32>)>,
+    mutation_output: Option<CommandOutput>,
     invalidate_on_dispatch: Option<GitLifetime>,
     malformed_status: bool,
     changed_authority: bool,
@@ -69,6 +70,13 @@ impl Host for FakeHost {
             state.mutation_calls += 1;
             if let Some(lifetime) = &state.invalidate_on_dispatch {
                 lifetime.invalidate();
+            }
+            if let Some(output) = state.mutation_output.clone() {
+                return Attempt {
+                    dispatch: process_dispatch(&self.snapshot.backend, &output),
+                    output: Some(output),
+                    error: None,
+                };
             }
             let (dispatch, code) = state.mutation.unwrap_or((Dispatch::Completed, Some(0)));
             return output(Vec::new(), dispatch, code);
@@ -199,6 +207,47 @@ fn fake() -> (GitRepository, Arc<Mutex<FakeState>>) {
 }
 
 #[test]
+fn process_dispatch_distinguishes_wsl_launcher_loss_from_native_and_git_exits() {
+    for (backend, launcher_loss) in [
+        (ExecutionBackend::Local, Dispatch::Completed),
+        (
+            ExecutionBackend::Wsl {
+                distro: "fake-only".into(),
+            },
+            Dispatch::Uncertain,
+        ),
+    ] {
+        for (exit_code, timed_out, expected) in [
+            (Some(-1), false, launcher_loss),
+            (Some(-2), false, Dispatch::Completed),
+            (Some(0), false, Dispatch::Completed),
+            (Some(1), false, Dispatch::Completed),
+            (Some(128), false, Dispatch::Completed),
+            (Some(255), false, Dispatch::Completed),
+            (Some(-1), true, Dispatch::Uncertain),
+            (Some(0), true, Dispatch::Uncertain),
+            (Some(1), true, Dispatch::Uncertain),
+            (None, false, Dispatch::Uncertain),
+            (None, true, Dispatch::Uncertain),
+        ] {
+            let output = CommandOutput {
+                stdout: b"captured stdout\n".to_vec(),
+                stderr: b"captured stderr\n".to_vec(),
+                exit_code,
+                timed_out,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            };
+            assert_eq!(
+                process_dispatch(&backend, &output),
+                expected,
+                "{backend:?}, exit {exit_code:?}, timed_out {timed_out}"
+            );
+        }
+    }
+}
+
+#[test]
 fn readiness_epoch_bootstraps_none_but_never_replaces_a_captured_epoch() {
     assert_eq!(GitBackend::checked_readiness_epoch(None, 7), Ok(7));
     assert_eq!(GitBackend::checked_readiness_epoch(None, 8), Ok(8));
@@ -302,6 +351,86 @@ fn uncertain_write_outlives_view_and_only_its_id_can_release_quarantine() {
     assert_eq!(
         state
             .lock()
+            .commands
+            .iter()
+            .filter(|args| args.iter().any(|arg| arg == "commit"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn wsl_launcher_loss_retains_exact_lease_after_reconciliation_until_explicit_review() {
+    let (repository, state) = fake();
+    let prepared = repository
+        .prepare_write(GitWrite::Commit {
+            message: "one WSL attempt".into(),
+        })
+        .unwrap();
+    let id = prepared.id();
+    let queued = repository.prepare_write(GitWrite::Push).unwrap();
+    let queued_id = queued.id();
+    let source = repository.backend.snapshot().source_signature();
+    state.lock().mutation_output = Some(CommandOutput {
+        stdout: b"captured mutation output\n".to_vec(),
+        stderr: b"The Windows Subsystem for Linux instance has terminated.\r\r\n".to_vec(),
+        exit_code: Some(-1),
+        timed_out: false,
+        stdout_truncated: false,
+        stderr_truncated: false,
+    });
+
+    let outcome = prepared.execute();
+    assert_eq!(outcome.operation_id, id);
+    assert_eq!(outcome.state, GitWriteState::Uncertain);
+    assert!(!outcome.succeeded());
+    assert_eq!(outcome.error.as_ref().unwrap().kind, GitErrorKind::Unavailable);
+    assert!(outcome.lease_retained);
+    assert!(outcome.reconciliation_error.is_none());
+    let reconciliation = outcome.reconciliation.as_ref().unwrap();
+    assert!(matches!(reconciliation.postcondition, GitPostcondition::Refreshed));
+    assert_eq!(reconciliation.repository.authority(), repository.authority());
+    assert_eq!(
+        reconciliation.repository.backend.snapshot().source_signature(),
+        source
+    );
+    let busy = repository.busy().unwrap();
+    assert_eq!(busy.operation_id, id);
+    assert_eq!(busy.phase, GitWritePhase::Uncertain);
+    assert_eq!(busy.source, source);
+    assert_eq!(busy.project_id, repository.backend.snapshot().project_id);
+    assert_eq!(busy.repository, *repository.authority());
+
+    let commands_after_reconciliation = state.lock().commands.len();
+    let blocked = queued.execute();
+    assert_eq!(blocked.state, GitWriteState::NotDispatched);
+    assert_eq!(blocked.error.unwrap().kind, GitErrorKind::Busy);
+    assert_eq!(
+        repository.prepare_write(GitWrite::Pull).err().unwrap().kind,
+        GitErrorKind::Busy
+    );
+    let review = UncertainReview::UserConfirmedOriginalOperationStopped;
+    assert_eq!(
+        repository.review_uncertain(queued_id, review).err().unwrap().kind,
+        GitErrorKind::Stale
+    );
+    assert_eq!(state.lock().commands.len(), commands_after_reconciliation);
+    assert_eq!(repository.busy().unwrap().operation_id, id);
+
+    state.lock().changed_authority = true;
+    assert!(repository.review_uncertain(id, review).is_err());
+    assert_eq!(repository.busy().unwrap().operation_id, id);
+    assert_eq!(repository.busy().unwrap().phase, GitWritePhase::Uncertain);
+    state.lock().changed_authority = false;
+    let reviewed = repository.review_uncertain(id, review).unwrap();
+    assert!(matches!(reviewed.postcondition, GitPostcondition::Refreshed));
+    assert_eq!(reviewed.repository.authority(), repository.authority());
+    assert!(repository.busy().is_none());
+    assert!(repository.review_uncertain(id, review).is_err());
+    let state = state.lock();
+    assert_eq!(state.mutation_calls, 1);
+    assert_eq!(
+        state
             .commands
             .iter()
             .filter(|args| args.iter().any(|arg| arg == "commit"))

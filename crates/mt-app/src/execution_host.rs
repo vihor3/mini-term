@@ -931,6 +931,589 @@ fn observe_tasks_wsl_retirement(
     });
 }
 
+#[cfg(all(test, windows))]
+pub(crate) mod tasks_wsl_public_timing {
+    use std::cell::RefCell;
+    use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+
+    use super::*;
+
+    pub(crate) const ROWS: [Row; 2] = [Row::Immediate, Row::AfterProducer];
+    const HOLD_LIMIT: Duration = Duration::from_secs(10);
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+    pub(crate) enum Row {
+        Immediate,
+        AfterProducer,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+    pub(crate) enum Release {
+        Immediate,
+        ProducerReturned,
+        ProducerAborted,
+        ProbeAborted,
+        Deadline,
+        Late,
+        Ineligible,
+        Bypassed,
+        ScopeRejected,
+        CoordinationFailed,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+    pub(crate) struct Timing {
+        pub(crate) producer_start_us: Option<u64>,
+        pub(crate) producer_return_us: Option<u64>,
+        pub(crate) probe_start_us: Option<u64>,
+        pub(crate) probe_completed_us: Option<u64>,
+        pub(crate) probe_return_us: Option<u64>,
+        pub(crate) released_us: Option<u64>,
+        pub(crate) release: Option<Release>,
+        pub(crate) eligible: bool,
+    }
+
+    #[derive(Default, PartialEq, Eq)]
+    enum Producer {
+        #[default]
+        Pending,
+        Returned,
+        Aborted,
+    }
+
+    #[derive(Default)]
+    struct State {
+        used: bool,
+        producer: Producer,
+        timing: Timing,
+    }
+
+    struct Coordination {
+        row: Row,
+        started: Instant,
+        deadline: Instant,
+        state: Mutex<State>,
+        changed: Condvar,
+    }
+
+    // This owner contains no process or Job reference. The only waiting guard
+    // stays in the ordinary runner's original readiness invocation.
+    #[derive(Clone)]
+    pub(crate) struct Pair(Arc<Coordination>);
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Pair>> = const { RefCell::new(None) };
+    }
+
+    impl Pair {
+        pub(crate) fn new(row: Row, started: Instant) -> Self {
+            Self(Arc::new(Coordination {
+                row,
+                started,
+                deadline: started.checked_add(HOLD_LIMIT).unwrap_or(started),
+                state: Mutex::new(State::default()),
+                changed: Condvar::new(),
+            }))
+        }
+
+        fn elapsed_us(&self) -> u64 {
+            self.0.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+        }
+
+        fn state(&self) -> MutexGuard<'_, State> {
+            self.0.state.lock().unwrap_or_else(|error| {
+                let mut state = error.into_inner();
+                state.timing.release = Some(Release::CoordinationFailed);
+                self.0.changed.notify_all();
+                state
+            })
+        }
+
+        pub(crate) fn row(&self) -> Row {
+            self.0.row
+        }
+
+        pub(crate) fn started(&self) -> Instant {
+            self.0.started
+        }
+
+        pub(crate) fn timing(&self) -> Timing {
+            self.state().timing
+        }
+
+        pub(crate) fn producer_started(&self) {
+            self.state().timing.producer_start_us = Some(self.elapsed_us());
+        }
+
+        pub(crate) fn producer_returned(&self) {
+            let mut state = self.state();
+            state.timing.producer_return_us = Some(self.elapsed_us());
+            if state.producer == Producer::Pending {
+                state.producer = Producer::Returned;
+            }
+            self.0.changed.notify_all();
+        }
+
+        pub(crate) fn abort(&self) {
+            let mut state = self.state();
+            state.producer = Producer::Aborted;
+            self.0.changed.notify_all();
+        }
+
+        fn completed(&self, eligible: bool) {
+            let mut state = self.state();
+            if state.timing.probe_completed_us.is_some() {
+                state.timing.release = Some(Release::ScopeRejected);
+                return;
+            }
+            state.timing.probe_completed_us = Some(self.elapsed_us());
+            state.timing.eligible = eligible;
+            self.0.changed.notify_all();
+            let release = if state.timing.release == Some(Release::CoordinationFailed) {
+                Release::CoordinationFailed
+            } else if !eligible {
+                Release::Ineligible
+            } else if Instant::now() >= self.0.deadline {
+                Release::Deadline
+            } else if state.producer == Producer::Aborted {
+                Release::ProducerAborted
+            } else if state.producer == Producer::Returned {
+                Release::Late
+            } else if self.0.row == Row::Immediate {
+                Release::Immediate
+            } else {
+                loop {
+                    let now = Instant::now();
+                    if now >= self.0.deadline {
+                        break Release::Deadline;
+                    }
+                    if state.producer == Producer::Aborted {
+                        break Release::ProducerAborted;
+                    }
+                    if state.producer == Producer::Returned {
+                        break Release::ProducerReturned;
+                    }
+                    // Spurious wakeups cannot move the absolute pair deadline.
+                    match self.0.changed.wait_timeout(state, self.0.deadline - now) {
+                        Ok((next, _)) => state = next,
+                        Err(error) => {
+                            state = error.into_inner().0;
+                            break Release::CoordinationFailed;
+                        }
+                    }
+                }
+            };
+            state.timing.release = Some(release);
+            state.timing.released_us = Some(self.elapsed_us());
+        }
+
+        pub(crate) fn probe<T>(&self, action: impl FnOnce() -> T) -> Result<T, Release> {
+            if ACTIVE.with(|slot| slot.borrow().is_some()) {
+                return Err(Release::ScopeRejected);
+            }
+            {
+                let mut state = self.state();
+                if state.used || state.timing.release == Some(Release::CoordinationFailed) {
+                    return Err(Release::ScopeRejected);
+                }
+                state.used = true;
+                state.timing.probe_start_us = Some(self.elapsed_us());
+            }
+            ACTIVE.with(|slot| *slot.borrow_mut() = Some(self.clone()));
+            struct Reset<'a> {
+                pair: &'a Pair,
+                returned: bool,
+            }
+            impl Drop for Reset<'_> {
+                fn drop(&mut self) {
+                    ACTIVE.with(|slot| *slot.borrow_mut() = None);
+                    let mut state = self.pair.state();
+                    if self.returned {
+                        state.timing.probe_return_us = Some(self.pair.elapsed_us());
+                        state.timing.release.get_or_insert(Release::Bypassed);
+                    } else {
+                        state.timing.release = Some(Release::ProbeAborted);
+                        state.producer = Producer::Aborted;
+                    }
+                    self.pair.0.changed.notify_all();
+                }
+            }
+            let mut reset = Reset {
+                pair: self,
+                returned: false,
+            };
+            let result = action();
+            reset.returned = true;
+            Ok(result)
+        }
+    }
+
+    pub(super) fn before_retirement(
+        exit: Option<i32>,
+        stdout: &BoundedRead,
+        stderr: &BoundedRead,
+    ) {
+        let pair = ACTIVE.with(|slot| slot.borrow().clone());
+        if let Some(pair) = pair {
+            pair.completed(
+                matches!(exit, Some(0 | 1))
+                    && stdout.bytes.is_empty()
+                    && stderr.bytes.is_empty()
+                    && !stdout.truncated
+                    && !stderr.truncated,
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        struct ProbeJoin<T> {
+            pair: Pair,
+            thread: Option<thread::JoinHandle<T>>,
+        }
+
+        impl<T> ProbeJoin<T> {
+            fn is_finished(&self) -> bool {
+                self.thread.as_ref().expect("public probe worker missing").is_finished()
+            }
+
+            fn join(mut self) -> thread::Result<T> {
+                self.thread.take().expect("public probe worker missing").join()
+            }
+        }
+
+        impl<T> Drop for ProbeJoin<T> {
+            fn drop(&mut self) {
+                if let Some(thread) = self.thread.take() {
+                    self.pair.abort();
+                    let _ = thread.join();
+                }
+            }
+        }
+
+        fn empty() -> BoundedRead {
+            BoundedRead {
+                bytes: Vec::new(),
+                truncated: false,
+            }
+        }
+
+        fn wait_completed(pair: &Pair) {
+            let (state, _) = pair
+                .0
+                .changed
+                .wait_timeout_while(pair.state(), Duration::from_secs(5), |state| {
+                    state.timing.probe_completed_us.is_none()
+                })
+                .unwrap();
+            assert!(state.timing.probe_completed_us.is_some());
+        }
+
+        fn native(
+            script: &str,
+            timeout: Duration,
+            cap: usize,
+        ) -> Result<CommandOutput, CommandExecutionError> {
+            assert_eq!(
+                std::env::var("GITHUB_ACTIONS").as_deref(),
+                Ok("true"),
+                "Actions-only fixture"
+            );
+            run_process(
+                "cmd.exe",
+                &["/d", "/c", script].map(String::from),
+                None,
+                timeout,
+                cap,
+            )
+        }
+
+        #[test]
+        fn public_timing_inactive_and_exit_zero_one_eligibility() {
+            before_retirement(Some(0), &empty(), &empty());
+            assert!(ACTIVE.with(|slot| slot.borrow().is_none()));
+            for exit in [None, Some(-1), Some(0), Some(1), Some(23)] {
+                for change in 0..5 {
+                    let mut stdout = empty();
+                    let mut stderr = empty();
+                    match change {
+                        1 => stdout.bytes.push(b'x'),
+                        2 => stderr.bytes.push(b'x'),
+                        3 => stdout.truncated = true,
+                        4 => stderr.truncated = true,
+                        _ => {}
+                    }
+                    let eligible = matches!(exit, Some(0 | 1)) && change == 0;
+                    let pair = Pair::new(
+                        if eligible {
+                            Row::Immediate
+                        } else {
+                            Row::AfterProducer
+                        },
+                        Instant::now(),
+                    );
+                    let result = pair.probe(|| {
+                        before_retirement(exit, &stdout, &stderr);
+                        Err::<(), _>(23)
+                    });
+                    assert_eq!(result, Ok(Err(23)));
+                    let timing = pair.timing();
+                    assert_eq!(timing.eligible, eligible);
+                    assert_eq!(
+                        timing.release,
+                        Some(if eligible {
+                            Release::Immediate
+                        } else {
+                            Release::Ineligible
+                        })
+                    );
+                    assert!(timing.probe_start_us <= timing.probe_completed_us);
+                    assert!(timing.probe_completed_us <= timing.released_us);
+                    assert!(timing.released_us <= timing.probe_return_us);
+                }
+            }
+        }
+
+        #[test]
+        fn public_timing_wait_releases_on_return_abort_and_absolute_deadline() {
+            for abort in [false, true] {
+                let pair = Pair::new(Row::AfterProducer, Instant::now());
+                pair.producer_started();
+                let peer = pair.clone();
+                let thread = ProbeJoin {
+                    pair: pair.clone(),
+                    thread: Some(thread::spawn(move || {
+                        peer.probe(|| before_retirement(Some(1), &empty(), &empty()))
+                    })),
+                };
+                wait_completed(&pair);
+                assert!(!thread.is_finished());
+                if abort {
+                    pair.abort();
+                } else {
+                    pair.producer_returned();
+                }
+                assert_eq!(thread.join().unwrap(), Ok(()));
+                let timing = pair.timing();
+                assert_eq!(
+                    timing.release,
+                    Some(if abort {
+                        Release::ProducerAborted
+                    } else {
+                        Release::ProducerReturned
+                    })
+                );
+                if !abort {
+                    assert!(timing.producer_return_us <= timing.released_us);
+                }
+            }
+            let pair = Pair::new(Row::AfterProducer, Instant::now());
+            let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let peer_finished = finished.clone();
+            let peer = pair.clone();
+            let result = std::panic::catch_unwind(|| {
+                let _worker = ProbeJoin {
+                    pair: pair.clone(),
+                    thread: Some(thread::spawn(move || {
+                        let (result, trace) = tasks_wsl_retirement_trace(peer.started(), || {
+                            peer.probe(|| native("exit /b 1", Duration::from_secs(5), 4096))
+                        });
+                        assert_eq!(result.unwrap().unwrap().exit_code, Some(1));
+                        assert_eq!(trace.calls, 1);
+                        assert!(trace.first.unwrap().succeeded);
+                        peer_finished.store(true, std::sync::atomic::Ordering::Release);
+                    })),
+                };
+                wait_completed(&pair);
+                panic!("synthetic timing controller unwind");
+            });
+            assert!(result.is_err());
+            assert!(finished.load(std::sync::atomic::Ordering::Acquire));
+            assert_eq!(pair.timing().release, Some(Release::ProducerAborted));
+            let started = Instant::now() - HOLD_LIMIT + Duration::from_millis(30);
+            let pair = Pair::new(Row::AfterProducer, started);
+            let peer = pair.clone();
+            thread::scope(|scope| {
+                let notifications = scope.spawn(move || {
+                    for _ in 0..10 {
+                        peer.0.changed.notify_all();
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                });
+                assert_eq!(
+                    pair.probe(|| before_retirement(Some(0), &empty(), &empty())),
+                    Ok(())
+                );
+                notifications.join().unwrap();
+            });
+            assert_eq!(pair.timing().release, Some(Release::Deadline));
+            assert!(pair.timing().released_us.unwrap() >= 10_000_000);
+            assert!(started.elapsed() < HOLD_LIMIT + Duration::from_secs(2));
+            let late = Pair::new(Row::AfterProducer, Instant::now());
+            late.producer_returned();
+            late.probe(|| before_retirement(Some(0), &empty(), &empty()))
+                .unwrap();
+            assert_eq!(late.timing().release, Some(Release::Late));
+        }
+
+        #[test]
+        fn public_timing_scopes_reset_isolate_and_reject_nested_or_reused_owners() {
+            let pair = Pair::new(Row::Immediate, Instant::now());
+            let other = Pair::new(Row::Immediate, Instant::now());
+            assert_eq!(
+                pair.probe(|| {
+                    assert_eq!(
+                        other.probe(|| panic!("nested probe ran")),
+                        Err::<(), _>(Release::ScopeRejected)
+                    );
+                    thread::spawn(|| {
+                        before_retirement(Some(0), &empty(), &empty());
+                        assert!(ACTIVE.with(|slot| slot.borrow().is_none()));
+                    })
+                    .join()
+                    .unwrap();
+                    assert!(pair.timing().probe_completed_us.is_none());
+                    Err::<(), _>(23)
+                }),
+                Ok(Err(23))
+            );
+            assert_eq!(pair.timing().release, Some(Release::Bypassed));
+            assert_eq!(
+                pair.probe(|| panic!("reused probe ran")),
+                Err::<(), _>(Release::ScopeRejected)
+            );
+            assert_eq!(other.probe(|| 7), Ok(7));
+            let panicking = Pair::new(Row::AfterProducer, Instant::now());
+            assert!(
+                std::panic::catch_unwind(|| {
+                    let _ = panicking.probe(|| panic!("synthetic probe unwind"));
+                })
+                .is_err()
+            );
+            assert_eq!(panicking.timing().release, Some(Release::ProbeAborted));
+            assert!(ACTIVE.with(|slot| slot.borrow().is_none()));
+            let poisoned = Pair::new(Row::AfterProducer, Instant::now());
+            let peer = poisoned.clone();
+            let _ = thread::spawn(move || {
+                let _state = peer.state();
+                panic!("synthetic coordination failure");
+            })
+            .join();
+            assert_eq!(
+                poisoned.probe(|| panic!("poisoned probe ran")),
+                Err::<(), _>(Release::ScopeRejected)
+            );
+            assert_eq!(poisoned.timing().release, Some(Release::CoordinationFailed));
+        }
+
+        #[test]
+        fn public_timing_native_runner_preserves_output_and_retires_after_release() {
+            for exit in [0, 1] {
+                let script = format!("exit /b {exit}");
+                let baseline = native(&script, Duration::from_secs(5), 4096).unwrap();
+                for row in ROWS {
+                    let pair = Pair::new(row, Instant::now());
+                    pair.producer_started();
+                    let peer = pair.clone();
+                    let script = script.clone();
+                    let thread = ProbeJoin {
+                        pair: pair.clone(),
+                        thread: Some(thread::spawn(move || {
+                            tasks_wsl_retirement_trace(peer.started(), || {
+                                peer.probe(|| native(&script, Duration::from_secs(5), 4096))
+                            })
+                        })),
+                    };
+                    if row == Row::AfterProducer {
+                        wait_completed(&pair);
+                        assert!(!thread.is_finished());
+                        pair.producer_returned();
+                    }
+                    let (result, trace) = thread.join().unwrap();
+                    assert_eq!(result.unwrap().unwrap(), baseline);
+                    assert_eq!(trace.calls, 1);
+                    assert_eq!(trace.first, trace.last);
+                    let retired = trace.first.unwrap();
+                    assert!(retired.succeeded);
+                    let timing = pair.timing();
+                    assert!(u128::from(timing.released_us.unwrap()) <= retired.before_us);
+                    assert!(retired.after_us <= u128::from(timing.probe_return_us.unwrap()));
+                    assert_eq!(
+                        timing.release,
+                        Some(if row == Row::Immediate {
+                            Release::Immediate
+                        } else {
+                            Release::ProducerReturned
+                        })
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn public_timing_native_timeout_truncation_and_dispatch_errors_bypass_hold() {
+            let timeout = Pair::new(Row::AfterProducer, Instant::now());
+            let (result, trace) = tasks_wsl_retirement_trace(timeout.started(), || {
+                timeout.probe(|| {
+                    native("for /l %i in (1,1,2147483647) do @rem", Duration::ZERO, 4096)
+                })
+            });
+            assert!(result.unwrap().unwrap().timed_out);
+            assert_eq!(timeout.timing().release, Some(Release::Bypassed));
+            assert!(timeout.timing().probe_completed_us.is_none());
+            assert_eq!(trace.calls, 1);
+            for script in ["echo public", "echo public 1>&2"] {
+                let pair = Pair::new(Row::AfterProducer, Instant::now());
+                let output = pair
+                    .probe(|| native(script, Duration::from_secs(5), 0))
+                    .unwrap()
+                    .unwrap();
+                assert!(output.stdout_truncated || output.stderr_truncated);
+                assert_eq!(pair.timing().release, Some(Release::Ineligible));
+            }
+            let pair = Pair::new(Row::AfterProducer, Instant::now());
+            let result = pair.probe(|| {
+                run_process(
+                    "mini-term-absent-public-fixture.exe",
+                    &[],
+                    None,
+                    Duration::from_secs(5),
+                    4096,
+                )
+            });
+            assert_eq!(
+                result.unwrap().unwrap_err().kind,
+                CommandExecutionErrorKind::ProgramNotFound
+            );
+            assert_eq!(pair.timing().release, Some(Release::Bypassed));
+        }
+
+        #[test]
+        fn public_timing_read_failure_preserves_the_error_without_completion() {
+            struct FailedRead;
+            impl Read for FailedRead {
+                fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                    Err(std::io::Error::other("synthetic capture read failure"))
+                }
+            }
+            let pair = Pair::new(Row::AfterProducer, Instant::now());
+            let result = pair.probe(|| {
+                let stdout = read_bounded(FailedRead, 4096)?;
+                before_retirement(Some(0), &stdout, &empty());
+                Ok::<_, CommandExecutionError>(())
+            });
+            assert_eq!(
+                result.unwrap().unwrap_err().kind,
+                CommandExecutionErrorKind::Io
+            );
+            assert_eq!(pair.timing().release, Some(Release::Bypassed));
+            assert!(pair.timing().probe_completed_us.is_none());
+        }
+    }
+}
+
 #[cfg(windows)]
 impl ProcessTree {
     pub(crate) fn configure(command: &mut Command) -> Result<Self, CommandExecutionError> {
@@ -1418,6 +2001,12 @@ fn run_process_with_stdin(
         .join()
         .map_err(|_| command_error(CommandExecutionErrorKind::Io, "stderr reader failed"))??;
     if !timed_out {
+        #[cfg(all(test, windows))]
+        tasks_wsl_public_timing::before_retirement(
+            status.and_then(|status| status.code()),
+            &stdout,
+            &stderr,
+        );
         process_tree.terminate()?;
     }
     Ok(CommandOutput {

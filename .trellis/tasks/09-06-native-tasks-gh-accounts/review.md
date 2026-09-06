@@ -2,9 +2,134 @@
 
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
 pointer still identifies the Git child. Source review and explicitly authorized
-Actions log inspection only. The current public-comparison slice is UNRUN.
+Actions log inspection only. The current combined diagnostic/Git receipt slices
+are UNRUN; source review is complete, not an execution gate.
 No local build, test, lint, formatting, syntax, whitespace, transport or native
 acceptance is claimed. WSL early-exit causality remains unresolved.
+
+## Final Combined Check: Source Released To Main
+
+Read Newton's released wsl-retirement-implementation.md, the finalized timing
+contract/research and all eighteen diagnostic test functions. The prior Tesla
+Git receipt review remains clean and consistent with the diagnostic boundary.
+No unresolved source finding remains. The exact check-owned paths are released
+and frozen:
+
+- `crates/mt-app/src/execution_host.rs`
+- `crates/mt-app/src/tasks_account_executor/tests.rs`
+- `.trellis/tasks/09-06-native-tasks-gh-accounts/review.md`
+
+The final checker changed only a test-worker cleanup guard/regression in
+execution_host.rs and this report. Newton's finalized Tasks tests needed no
+additional edit. No Git source, private capture/envelope, ProcessTree method,
+creation/Job flag, public API, dependency, workflow or spec was changed.
+
+### Findings Resolved
+
+Both earlier WIP findings are resolved in Newton's release. Reply::received
+scans both full public producer streams in UTF8/UTF16LE/UTF16BE before rejecting
+incomplete/stale captures; only the sentinel boolean survives rejection.
+Report::describe computes combined suppression before decoding either row.
+Both row directions, streams, encodings, beyond-cutoff sentinels and rejected
+captures are covered. The old single-row constructors, helper calls and polling
+record tests have been migrated to the final two-row types.
+
+The final check found and corrected one additional test-only ownership defect:
+the shared timing tests used bare JoinHandles, so a controller assertion/unwind
+before join could detach a held worker until its deadline. The local ProbeJoin
+owner now aborts before joining on unwind and preserves the normal join result.
+Both held synthetic and native test workers use it. The deadline-notification
+worker is scoped so assertion unwind joins it too. The existing
+public_timing_wait_releases_on_return_abort_and_absolute_deadline regression
+now also unwinds a controller while an actual guarded native child is held,
+then requires native exit 1, exactly one successful retirement, worker completion
+before unwind returns and ProducerAborted release. No new test function or
+production synchronization was added.
+
+### Final Boundary Review
+
+- Only cfg(test,windows) timing code is active. The ordinary runner's hook is
+  after direct child exit and both joined readers, before the same existing
+  process_tree.terminate()?. Complete empty untruncated exits 0 and 1 are
+  eligible; timeout/read/dispatch errors bypass the hold and retain their result.
+- Pair owns fixed coordination/metadata only. Its absolute start-plus-ten-second
+  deadline cannot be extended by wakeups. No Job/process handle is exported,
+  stored in the coordinator, pre-disarmed or replaced. Normal release and
+  unwind retain the original guard, explicit termination and handle closure.
+- Public producer return or abort is signalled before readiness join.
+  ProbeOwner supplies the fallback abort/join on controller unwind, with typed
+  probe/producer errors. TLS resets on return/unwind and rejects nested/reused
+  scope owners. Only one public probe per row can wait.
+- Rows remain Immediate then AfterProducer, each using its own attested UUID,
+  no-reuse mkdir, unchanged literal producer and own-marker probe: at most six
+  host commands. Command bounds remain five seconds/4096 bytes plus existing
+  cleanup grace. No startup barrier or retry was added to the actual comparison.
+- The final escaped diagnostic is at most 4096 bytes across both rows. Its
+  compact fallback remains explicitly inconclusive; only public producer bytes
+  can preview. Exact ASCII-prefix separation, strict UTF decoding and all prior
+  control/bidi escaping remain. No private stream or arbitrary error is exposed.
+- Original private 50-ms polling, ten-second readiness budget, control/clock
+  ordering, strict acknowledgement, baseline result checks and final descendant
+  assertions remain in place. Diagnostic success cannot replace any assertion.
+- Fallible native cleanup was source-traced: pre-spawn Job ownership drops on
+  spawn failure, post-spawn attach/read setup errors use the existing bounded
+  cleanup/direct-child fallback, and the native root fixture constructs its
+  owner before the fallible attachment assertion. No successful Windows cleanup
+  is inferred from a test timeout, API failure or missing retirement record.
+- Tesla's typed WSL Some(-1) classification only affects Git receipt uncertainty;
+  this diagnostic neither calls it for public commands nor remaps private
+  results. Native/SSH/positive-exit behavior and exact-ID/no-replay lease review
+  remain as independently reviewed below.
+
+### Eighteen Functions Inspected: UNRUN
+
+Under `execution_host::tasks_wsl_public_timing::tests::`:
+
+- `public_timing_inactive_and_exit_zero_one_eligibility`
+- `public_timing_wait_releases_on_return_abort_and_absolute_deadline`
+- `public_timing_scopes_reset_isolate_and_reject_nested_or_reused_owners`
+- `public_timing_native_runner_preserves_output_and_retires_after_release`
+- `public_timing_native_timeout_truncation_and_dispatch_errors_bypass_hold`
+- `public_timing_read_failure_preserves_the_error_without_completion`
+
+Under `tasks_account_executor::tests::wsl_public_comparison::`:
+
+- `public_comparison_plans_are_fixed_and_require_the_attested_root`
+- `public_comparison_attempt_is_exact_once_and_never_replaces_private_failure`
+- `public_comparison_joins_readiness_on_producer_and_thread_errors`
+- `public_comparison_two_rows_each_probe_once_even_when_absent_or_failed`
+- `public_comparison_signals_before_join_on_return_error_and_producer_unwind`
+- `public_comparison_owner_unwind_aborts_before_join_and_probe_panic_is_inconclusive`
+- `public_previews_reject_nonproducer_incomplete_and_undecodable_sources`
+- `public_previews_scan_full_both_streams_all_encodings_before_cropping`
+- `public_previews_decode_only_exact_start_prefix_and_native_error_framing`
+- `public_previews_and_total_json_are_bounded_and_escape_controls`
+- `public_two_row_privacy_and_total_budget_keep_metadata_when_previews_are_dropped`
+- `public_retirement_api_failure_and_missing_or_late_evidence_remain_inconclusive`
+
+This is source inspection of all eighteen, not eighteen passing executions.
+The final check strengthens an existing function, leaving the count unchanged.
+Real native runner cases exercise normal retirement and timeout/truncation
+paths; failed-retirement projection is synthetic. No actual failing Windows
+termination API injection or independent handle-closure probe is claimed.
+
+### Gates And Limits
+
+Main's 35fe653 ordinary Linux/Windows passes validate the earlier public slice,
+not these new timing/receipt changes. Its actual WSL gate still failed with a
+public instance-termination reproduction; no causal conclusion is added here.
+Exact-SHA Actions compilation, tests, formatting and the original nonempty actual
+WSL ignored gate plus owned-distro cleanup remain pending. Both new Git safety
+tests remain UNRUN as recorded in the Tesla check below.
+
+The diagnostic remains post-failure, single-pair-per-row and scheduler-sensitive.
+No overlap, abort/deadline, transport/cleanup error or differing startup order
+is a passing fix. Its delay cannot identify a kernel member, prove guest
+descendant cleanup or establish WSL2/interop/native UI acceptance. No production
+wait or Job-flag contrast is selected. No local automated verification, probes,
+Git writes, app launches or child agents occurred. Main owns all integration,
+formatter artifacts, specs, Git and Actions. Earlier handoffs below are history;
+this section is the current source-release status.
 
 ## Post-Failure Public Comparison: Source Released To Main
 
@@ -1499,3 +1624,248 @@ restart, global-active changes in both directions, revocation/logout, actual
 noninteractive credential-store access, reconnect, foreground cached reopen and narrow/
 high-DPI toolbar/menu sizing. Synthetic fixtures cannot establish secure-store
 compatibility or actual desktop rendering. No app was launched by this reviewer.
+
+## Conditional WSL Root Containment Review
+
+Read-only source proposal following Main's 35fe653 evidence. Only this addendum
+was authored; no source/spec/CI/Git changes, local verification or child agents.
+This is conditional on Socrates' causal A/B establishing the per-command Job
+retirement mechanism. It does not authorize applying a breakaway flag now.
+
+### Evidence Boundary
+
+Main reports CI 34026742549 ordinary Linux/Windows FULL PASS, including all eight
+public-comparison tests, while actual WSL job 101469109594 failed LookupCancel.
+The private request exited before cancellation; the separately owned public
+producer emitted its start but not end marker and reported instance termination
+while its own readiness probe succeeded. Owned distro cleanup passed. This
+establishes a public-command reproduction, not the driver/Job causal mechanism.
+Private buffers remain unlogged. Main's upstream parent-process/instance-handle
+findings are context, not proof of this runner's inbox WSL1 implementation.
+
+### Smallest Conditional Boundary
+
+Keep public command plans and snapshot identities unchanged. Select a small
+crate-private StrictTree versus WslClientRoot policy while backend identity is
+still available, before the plan becomes an arbitrary Command:
+
+| Integration point | Required selection |
+| --- | --- |
+| execution_host.rs:343, execute_pre_project_local_command | Match PreProjectLocalContext::Wsl; Native stays strict |
+| execution_host.rs:383, execute_host_command | Match snapshot.backend Wsl in the Process arm; Local stays strict and SSH stays separate |
+| tasks_account_executor/process.rs:644, run_wsl | Pass explicit WSL policy into private capture; native lookup/proof/data captures stay strict |
+
+Thread that policy only through the private process runner/capture to the Job
+constructor. Keep ProcessTree::configure's default strict for existing callers;
+factor its flag setup narrowly if needed. Do not infer WSL from executable text,
+cwd, a cooperative-stdin boolean, or a global flag. No new public API, dependency,
+WSL version probe, generic environment channel or planner representation is
+needed. Native, SSH and interactive PTY paths must remain unchanged.
+
+For WSL only, the candidate flags are KILL_ON_JOB_CLOSE together with
+SILENT_BREAKAWAY_OK. Microsoft's
+[Job limit contract](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_limit_information)
+allows children to escape this Job without changing the explicitly assigned
+root's membership. The flag does not selectively exempt only shared WSL
+infrastructure. Nested ancestor Jobs can still constrain breakaway. Preserve
+suspended/no-window creation, exact root assignment before resume, assignment
+and resume failure cleanup, explicit existing termination, direct-child bounded
+reaping and final handle closure. Add no CREATE_BREAKAWAY_FROM_JOB launch flag,
+Job retention, retry, or fallback when assignment/configuration fails.
+
+### Guarantees And Guest Helper Decision
+
+Current ordinary execution (execution_host.rs:1277 onward) bounds waiting and
+output, kills current Windows Job members on timeout/error and also retires the
+Job after normal completion. It has no guest process-group/control channel or
+guest cleanup acknowledgement. This is true for both WSL versions: source has
+no WSL1/WSL2 branch. A Windows Job membership/count/result cannot prove Linux
+descendant cleanup in either version.
+
+The candidate retains root cleanup but deliberately gives up automatic Windows
+descendant containment on WSL calls. If A/B confirms the hypothesis, the gain is
+survival of shared instance infrastructure and unrelated concurrent commands.
+The cost is that escaped relays, interop processes or guest work may outlive the
+client, including on timeout/crash; inherited output handles can still require
+the existing bounded drain error. Do not report such errors as clean success.
+WSL2 compatibility is a separate required acceptance case, not implied by WSL1
+success or by the absence of a version branch.
+
+Tasks already has the necessary guest cleanup mechanism: host_envelope.py:66
+kills the spawned gh process group and waits for its direct child; :79 creates
+a new session, monitors control/EOF and owns cleanup in finally. Private capture
+still requires the strict object-shaped host acknowledgement after a latched
+stop (process.rs:902). Keep Cancelled/TimedOut versus CleanupFailed distinct and
+all secret, source, deadline, pre/post-proof and descendant checks unchanged.
+This does not establish containment of deliberately escaped daemon/interop
+descendants outside that guest group.
+
+A new ordinary guest helper is not inherently needed for this containment fix.
+Git already treats timeout, absent exit and executor errors as uncertain
+(git_backend/host.rs:193); write.rs:292 retains the original lease even when
+reconciliation succeeds, and exact-ID review requires user confirmation that
+the original operation stopped. Preserve those contracts; bounded caller return
+is not bounded guest lifetime. A helper would be needed to promise the stronger
+new guarantee of positive guest-stop acknowledgement for ordinary commands,
+which is not established by the current runner and need not be invented here.
+
+One concrete qualification needs Main's attention before relying on that safety
+argument: host.rs:210 currently classifies every present non-timeout exit code
+as Completed, including WSL launcher -1. write.rs can release the lease after
+successful reconciliation of such a failed command. A lost launcher does not
+prove guest quiescence. The conditional implementation should preserve or
+establish uncertainty for proven launcher-loss outcomes rather than treating
+them as ordinary Git exit status. This is a narrow result-classification review
+point, not a request for a new guest supervisor or a fix authored here.
+
+### Required Gates And Residual Risks
+
+- Actions A/B must establish the proposed Job-retirement difference on the same
+  owned fixture; the public instance-terminated message alone is insufficient.
+- Test both ordinary project and pre-project WSL routing and private capture;
+  retiring/timeout of one client must preserve a concurrent peer, with no probe
+  serialization or changed original cadence. Keep all original actual cases.
+- Run private cancellation and timeout during lookup/data, pipe descendants,
+  invalid/missing acknowledgement and early launcher failure. A valid stop must
+  still have host acknowledgement and descendant evidence, not merely root exit.
+- Pin exact strict/native versus WSL flags and suspended attachment ordering;
+  native descendant retirement, pre-assignment cleanup, attach/resume failure
+  and root cleanup/result preservation must remain effective.
+- Retain Git uncertain-lease/no-retry/exact-ID-review tests, adding focused
+  launcher-loss coverage if that classification is corrected. No clean mutation
+  or guest-stop claim may follow a transport-only exit.
+
+The disposable fixture disables interop and tests one inbox WSL1 environment.
+Installed WSL variants, WSL2, nested launcher Jobs, enabled Windows interop and
+shared distros used by external clients remain compatibility/acceptance risks.
+Application restart also ends the current process-local Git lease; no durable
+recovery promise is introduced. No global distro shutdown/configuration change,
+UI expansion or extra diagnostic framework is proposed. Main owns the causal
+decision, any resulting source authorization, contract changes and Actions.
+
+## Newton Timing Contrast: Independent Read-Only WIP Check
+
+Read the selected Public WSL Retirement Timing Contrast release contract and
+finalized Git-child research/wsl-instance-retirement.md, then the current
+execution_host.rs and Tasks tests.rs WIP. Only this report changed. Newton keeps
+all diagnostic source ownership; no fixes, local verification, Git operations,
+children or duplicated upstream/CI investigation occurred. This is not a final
+source release or an Actions pass. The selected experiment is the on-stack
+pre-retirement timing contrast, NOT a Job-flag contrast.
+
+### Concrete WIP Findings
+
+1. Cross-row preview suppression is missing. tests.rs:2459 RowReport::value
+   calls previews independently; :2487 Report::describe collects both values
+   without a shared sentinel decision. A fixture sentinel in one producer's
+   stream suppresses only that row, leaving the peer row's previews visible.
+   The approved contract requires ALL previews suppressed across both rows.
+   Compute the attempt-wide sentinel decision before decoding/cropping either
+   row, covering both complete bounded streams and all three encodings. The
+   decision also needs to survive discarding an incomplete/stale producer's
+   bytes in Reply::received (:2052), so a bounded captured sentinel cannot be
+   forgotten before the other row is rendered. No private buffers or raw error
+   text should be added. Regress both row directions, streams, encodings and
+   beyond-preview-cutoff input, including metadata-only producer outcomes.
+
+2. Test migration is incomplete in this WIP snapshot. Report now contains only
+   rows (:2175), but describe_output (:2536) and tests (:2642, :2791) still
+   construct removed producer/failure fields. collect_pair now requires Pair
+   (:2213), while existing calls at :2686/:2717/:2723 omit it. The old readiness
+   test (:2732) still constructs removed Probe/record/count fields. These are
+   source-visible release blockers, not a claimed compiler run; Newton may
+   already be addressing them. The reviewed snapshot also lacks the new shared
+   hold/deadline/unwind/TLS/real-retirement regression coverage required by the
+   contract. Recheck the released version rather than treating old green tests
+   as evidence for this new coordination surface.
+
+### Boundaries Inspected
+
+- execution_host.rs:1654 enters the cfg(test,windows) hook only after direct
+  child exit and both readers have joined, and only on the existing non-timeout
+  path. Empty, untruncated exits 0 and 1 are eligible (:1150); other exits/output
+  do not wait. Spawn/attach/read/timeout errors keep their earlier cleanup path.
+- The existing process_tree.terminate()? follows the hook at :1661. The Pair
+  owns only fixed coordination/metadata, not Job/process handles. No early
+  terminated state, substitute termination result or moved guard was observed.
+  Configure/attach/terminate/Drop still use the existing strict Job policy.
+- Pair's deadline is fixed at creation plus ten seconds (:1009). Condvar wakes
+  recompute only remaining duration (:1084), and return/abort/deadline release
+  the hold. State critical sections contain no command execution or peer join.
+- collect_pair signals producer_returned or abort before owner.join
+  (tests.rs:2231). ProbeOwner::Drop signals abort before its fallback join
+  (:2202); producer panic is caught as typed failure. Ordinary producer errors
+  follow the same signal/join order. The probe itself retains original command
+  bounds plus cleanup grace; OS failure/runner loss remains an explicit limit.
+- The scoped TLS rejects nested activation/reuse before installing a new scope
+  (execution_host.rs:1109), and its Reset clears TLS on return/unwind. Pair has
+  one used latch; run_rows has exactly two fixed rows, each with one mkdir,
+  producer and probe. Original private polling/assertions are not replaced.
+- Combined escaped output has a 4096-byte cap and metadata-only fallback
+  (tests.rs:2487). The actual public entry remains typed and attested with no
+  private-buffer input. This cap does not repair finding 1's cross-row policy.
+
+No additional hold/RAII/result-preservation defect was identified in this source
+snapshot. Final review must cover the completed regressions and source changes
+after Newton's explicit release; all execution remains Actions-only. Main's
+separate typed WSL Some(-1) uncertainty correction has its own writer and is
+reserved for the post-release combined check. No broader negative/HRESULT
+classification, production wait or containment policy change is implied.
+
+## Tesla WSL Receipt Safety: Independent Source Check
+
+Reviewed the released/frozen git_backend/host.rs and git_backend/tests.rs slice,
+Tesla's wsl-launcher-outcome-implementation.md handoff, and the real write lease
+and reconciliation paths. No findings in the authorized correction. Only this
+review addendum changed; source remains untouched, including Newton's WIP.
+No tests, build, formatter, lint, probes, Git operations or children ran locally.
+
+### Production Boundary
+
+host.rs:41 process_dispatch adds exactly one new uncertain receipt: a typed
+ExecutionBackend::Wsl with exit_code Some(-1). Existing timeout/missing-exit
+uncertainty remains. Local -1, other negative values and positive WSL statuses
+retain their prior classification. The production adapter calls this helper at
+:222 using the captured snapshot backend after the existing output clipping.
+The helper only borrows the output; bytes, exit/timeout/truncation flags, source
+identity and epoch ownership are not rewritten. SSH remains in its separate
+branch; ProgramNotFound and other executor error handling at :227 is unchanged.
+No message/program/cwd inference, Job policy or cleanup change was introduced.
+
+The newly uncertain receipt reaches Attempt::checked (:68), which rejects it
+with an unavailable outcome rather than treating launcher loss as a Git exit.
+PreparedGitWrite::execute records that dispatch before checking the result
+(write.rs:250); successful reconciliation cannot clear the uncertainty at :292.
+This closes the specific source finding without requiring coordinator changes
+or making a claim that guest execution stopped.
+
+### Regression Strength
+
+- `git_backend::tests::process_dispatch_distinguishes_wsl_launcher_loss_from_native_and_git_exits`
+  directly calls the production helper for Local/WSL -1, -2, 0, 1, 128, 255,
+  existing timeouts and missing exits (tests.rs:210). It pins the narrow -1
+  exception rather than expanding the policy to all negative/HRESULT values.
+- `git_backend::tests::wsl_launcher_loss_retains_exact_lease_after_reconciliation_until_explicit_review`
+  uses fake()'s actual typed WSL snapshot (:187). Its raw non-timeout,
+  untruncated -1 mutation receipt is fed to the same production classifier by
+  FakeHost::run (:74), not a scripted Dispatch::Uncertain. The test then uses
+  the real prepare/execute/reconcile/lease/review code (:363).
+
+The lease test asserts successful original-source reconciliation with retained
+operation ID, source signature, project and repository ownership. A previously
+prepared conflicting write and a new write are both refused without extra host
+commands. A different valid operation ID cannot review/release the lease.
+Exact-ID review with changed current authority fails and preserves quarantine;
+restored authority plus UserConfirmedOriginalOperationStopped permits the
+existing read-only release. Repeating that review fails. Mutation and commit
+counts remain one across every review, covering no replay. Reconciliation clones
+the scripted host (write.rs:1064); fresh valid WSL backend checks do not replace
+it with a real execution adapter, so the test does not secretly launch WSL.
+
+Both new test functions remain authored UNRUN pending exact-SHA Actions. This
+is synthetic receipt-to-production-classifier-to-real-coordinator coverage,
+not an actual Windows/WSL transport run. Earlier ordinary CI does not validate
+this patch. The lease remains process-local and explicit release still relies
+on the user's stopped-operation confirmation; no durable recovery, positive
+guest-stop proof or causal Job conclusion is claimed. Newton's released version
+still requires its separate final/combined check when Main authorizes it.

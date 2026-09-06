@@ -68,6 +68,12 @@ returns status, branches, worktrees and a typed `GitPostcondition`: `Refreshed`,
   releases it. Explicit exact-ID review requires
   `UserConfirmedOriginalOperationStopped` and re-reads the original repository.
   It does not authorize replay, registration or configuration cleanup.
+- A typed WSL process receipt with exit `-1` is launcher loss, not a completed
+  Git command or proof that guest work stopped. Classify it as `Uncertain`
+  even without timeout, preserving the receipt and original write lease after
+  successful reconciliation. Native `-1`, SSH handling and ordinary positive
+  WSL exits (including 255) keep their existing classification. Do not infer
+  launcher loss from diagnostic text or broaden it to unproven negative codes.
 - Reconciliation may establish a new read-only SSH epoch without rewriting the
   original write receipt. If the original worktree was removed, a proven
   survivor can transport recovery facts only; that handle cannot authorize
@@ -97,6 +103,7 @@ returns status, branches, worktrees and a typed `GitPostcondition`: `Refreshed`,
 | Different project/SSH alias opens same common directory | Existing lease still blocks conflicting write |
 | HEAD/index/selection changed after confirmation | Changed error; no implicit fresh confirmation |
 | Write may have run, reply/cleanup uncertain | Quarantine and reconcile original source; no retry |
+| Typed WSL receipt has exit -1 without timeout | Uncertain; successful reconciliation alone cannot release its exact write lease |
 | Exact-ID explicit stopped-operation review | Re-read original authority; no cleanup inference |
 | Deleted file inside a nested repository | Nearest existing repository, exact relative path |
 | Remote path happens to exist locally | Ignore local state; only captured host is relevant |
@@ -119,6 +126,11 @@ resolution, no host-command native reads and fake-host path isolation. Exercise
 production write leases across project/worktree/credential/SSH alias/epoch
 changes. Real authenticated loopback exec/SFTP tests separately prove dispatch,
 containment, epoch rejection and uncertain review; synthetic transports do not.
+Exercise the production process classifier with native versus WSL `-1`, other
+negative and ordinary positive exits, absent exits and timeout. Feed a WSL
+launcher-loss receipt through the real write coordinator: successful original
+source reconciliation retains the exact lease, conflicting writes stay blocked,
+and only successful exact-ID stopped-operation review releases it without replay.
 
 Full UI/store review and matching-SHA Windows/WSL/SSH/native artifact gates
 remain required for confirmations, stale result publication, drafts, worktree

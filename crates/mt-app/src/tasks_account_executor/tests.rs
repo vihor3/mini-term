@@ -1955,6 +1955,7 @@ impl WslFixture {
 #[cfg(windows)]
 mod wsl_public_comparison {
     use super::*;
+    use crate::execution_host::tasks_wsl_public_timing::{Pair, ROWS, Release, Row, Timing};
 
     const SCRIPT: &str = r"printf '%s\n' mt-public-start && : > ready && /usr/bin/sleep 1 && printf '%s\n' mt-public-end";
     const START: &[u8] = b"mt-public-start\n";
@@ -1980,6 +1981,7 @@ mod wsl_public_comparison {
         UnexpectedProbeOutput,
         ThreadStart,
         ThreadPanic,
+        ScopeRejected,
     }
 
     #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -1997,6 +1999,7 @@ mod wsl_public_comparison {
     struct Reply {
         metadata: Metadata,
         producer_output: Option<CommandOutput>,
+        fixture_credential: bool,
     }
 
     impl Reply {
@@ -2026,10 +2029,15 @@ mod wsl_public_comparison {
                     return Self {
                         metadata,
                         producer_output: None,
+                        fixture_credential: false,
                     };
                 }
             };
             let output = result.output;
+            // Preserve only this suppression bit when incomplete/stale public
+            // producer bytes are discarded. Decide for both rows before previews.
+            let fixture_credential =
+                stage == Stage::Producer && has_fixture_credential(&output);
             metadata.exit = output.exit_code;
             metadata.timed_out = output.timed_out;
             metadata.stdout_truncated = output.stdout_truncated;
@@ -2052,6 +2060,7 @@ mod wsl_public_comparison {
             Self {
                 metadata,
                 producer_output,
+                fixture_credential,
             }
         }
 
@@ -2110,133 +2119,183 @@ mod wsl_public_comparison {
         }
     }
 
-    #[derive(Clone, Copy, Debug, serde::Serialize)]
-    struct Probe {
-        started_us: u64,
-        returned_us: u64,
-        command: Metadata,
-    }
-
-    #[derive(Default, serde::Serialize)]
-    struct Readiness {
-        count: u32,
-        first: Option<Probe>,
-        last: Option<Probe>,
-        ready: bool,
-        expired: bool,
-        failure: Option<Failure>,
-    }
-
-    impl Readiness {
-        fn record(&mut self, probe: Probe, expired: bool) -> bool {
-            self.count = self.count.saturating_add(1);
-            self.first.get_or_insert(probe);
-            self.last = Some(probe);
-            self.expired = expired;
-            self.failure = probe.command.failure;
-            if self.failure.is_none() {
-                if !matches!(probe.command.exit, Some(0 | 1)) {
-                    self.failure = Some(Failure::UnexpectedExit);
-                } else if probe.command.stdout_bytes != 0 || probe.command.stderr_bytes != 0 {
-                    self.failure = Some(Failure::UnexpectedProbeOutput);
-                } else {
-                    self.ready = probe.command.exit == Some(0);
-                }
-            }
-            self.ready || self.expired || self.failure.is_some()
-        }
-    }
-
-    fn elapsed_us(started: Instant) -> u64 {
-        started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
-    }
-
-    fn wait_ready(case: PublicCase, started: Instant) -> Readiness {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut observation = Readiness::default();
-        loop {
-            let before = elapsed_us(started);
-            let reply = case.execute(Stage::Readiness);
-            let probe = Probe {
-                started_us: before,
-                returned_us: elapsed_us(started),
-                command: reply.metadata,
-            };
-            if observation.record(probe, Instant::now() >= deadline) {
-                return observation;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
     #[derive(Default)]
-    pub(super) struct Report {
+    struct Readiness {
+        command: Option<Metadata>,
+        ready: bool,
         failure: Option<Failure>,
-        setup: Option<Metadata>,
-        producer: Option<Reply>,
-        readiness: Option<Readiness>,
+        retirement: TasksWslRetirementTrace,
     }
 
-    // All ordinary producer results, including dispatch/read failures, join the
-    // readiness thread. Nothing here changes the earlier private result.
-    fn collect_pair(
-        spawn: impl FnOnce() -> std::io::Result<std::thread::JoinHandle<Readiness>>,
-        producer: impl FnOnce() -> Reply,
-    ) -> Report {
-        let thread = match spawn() {
-            Ok(thread) => thread,
+    fn read_once(pair: &Pair, probe: impl FnOnce() -> Reply) -> Readiness {
+        let (result, retirement) =
+            tasks_wsl_retirement_trace(pair.started(), || pair.probe(probe));
+        let reply = match result {
+            Ok(reply) => reply,
             Err(_) => {
-                return Report {
-                    failure: Some(Failure::ThreadStart),
+                return Readiness {
+                    failure: Some(Failure::ScopeRejected),
+                    retirement,
                     ..Default::default()
                 };
             }
         };
-        let producer = producer();
-        match thread.join() {
-            Ok(readiness) => Report {
-                producer: Some(producer),
-                readiness: Some(readiness),
-                ..Default::default()
-            },
-            Err(_) => Report {
-                producer: Some(producer),
-                failure: Some(Failure::ThreadPanic),
-                ..Default::default()
-            },
+        let command = reply.metadata;
+        let failure = command.failure.or_else(|| {
+            if !matches!(command.exit, Some(0 | 1)) {
+                Some(Failure::UnexpectedExit)
+            } else if command.stdout_bytes != 0 || command.stderr_bytes != 0 {
+                Some(Failure::UnexpectedProbeOutput)
+            } else {
+                None
+            }
+        });
+        Readiness {
+            command: Some(command),
+            ready: failure.is_none() && command.exit == Some(0),
+            failure,
+            retirement,
         }
     }
 
-    fn run(fixture: &WslFixture) -> Report {
+    struct RowReport {
+        row: Row,
+        failure: Option<Failure>,
+        setup: Option<Metadata>,
+        producer: Option<Reply>,
+        readiness: Option<Readiness>,
+        timing: Timing,
+    }
+
+    impl RowReport {
+        fn new(row: Row) -> Self {
+            Self {
+                row,
+                failure: None,
+                setup: None,
+                producer: None,
+                readiness: None,
+                timing: Timing::default(),
+            }
+        }
+    }
+
+    pub(super) struct Report {
+        rows: [RowReport; 2],
+    }
+
+    impl Default for Report {
+        fn default() -> Self {
+            Self {
+                rows: ROWS.map(RowReport::new),
+            }
+        }
+    }
+
+    struct ProbeOwner {
+        pair: Pair,
+        thread: Option<std::thread::JoinHandle<Readiness>>,
+    }
+
+    impl ProbeOwner {
+        fn join(&mut self) -> Result<Readiness, Failure> {
+            self.thread
+                .take()
+                .ok_or(Failure::ThreadPanic)?
+                .join()
+                .map_err(|_| Failure::ThreadPanic)
+        }
+    }
+
+    impl Drop for ProbeOwner {
+        fn drop(&mut self) {
+            if let Some(thread) = self.thread.take() {
+                // The single probe retains its 5s runner/cleanup bounds; abort
+                // also releases its at-most-10s hold before this unwind join.
+                self.pair.abort();
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn collect_pair(
+        pair: &Pair,
+        spawn: impl FnOnce() -> std::io::Result<std::thread::JoinHandle<Readiness>>,
+        producer: impl FnOnce() -> Reply,
+    ) -> RowReport {
+        let mut report = RowReport::new(pair.row());
+        let thread = match spawn() {
+            Ok(thread) => thread,
+            Err(_) => {
+                report.failure = Some(Failure::ThreadStart);
+                return report;
+            }
+        };
+        let mut owner = ProbeOwner {
+            pair: pair.clone(),
+            thread: Some(thread),
+        };
+        pair.producer_started();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(producer)) {
+            Ok(producer) => {
+                pair.producer_returned();
+                report.producer = Some(producer);
+            }
+            Err(_) => {
+                pair.abort();
+                report.failure = Some(Failure::ThreadPanic);
+            }
+        }
+        match owner.join() {
+            Ok(readiness) => report.readiness = Some(readiness),
+            Err(failure) => report.failure = Some(failure),
+        }
+        report.timing = pair.timing();
+        report
+    }
+
+    fn run_row(fixture: &WslFixture, row: Row) -> RowReport {
         let case = match PublicCase::new(fixture, uuid::Uuid::new_v4()) {
             Ok(case) => case,
             Err(failure) => {
-                return Report {
+                return RowReport {
                     failure: Some(failure),
-                    ..Default::default()
+                    ..RowReport::new(row)
                 };
             }
         };
         // mkdir has no -p: an existing directory is a failure, never reused.
         let setup = case.execute(Stage::CreateCase);
         if !setup.success() {
-            return Report {
+            return RowReport {
                 failure: Some(setup.metadata.failure.unwrap_or(Failure::UnexpectedExit)),
                 setup: Some(setup.metadata),
-                ..Default::default()
+                ..RowReport::new(row)
             };
         }
         let peer = PublicCase {
             root: case.root.clone(),
             case: case.case.clone(),
         };
-        let started = Instant::now();
+        let pair = Pair::new(row, Instant::now());
+        let probe_pair = pair.clone();
         let mut report = collect_pair(
-            || std::thread::Builder::new().spawn(move || wait_ready(peer, started)),
+            &pair,
+            || {
+                std::thread::Builder::new().spawn(move || {
+                    read_once(&probe_pair, || peer.execute(Stage::Readiness))
+                })
+            },
             || case.execute(Stage::Producer),
         );
         report.setup = Some(setup.metadata);
         report
+    }
+
+    fn run_rows(mut run: impl FnMut(Row) -> RowReport) -> Report {
+        Report {
+            rows: ROWS.map(&mut run),
+        }
     }
 
     #[derive(Default)]
@@ -2271,7 +2330,9 @@ mod wsl_public_comparison {
             actual: Option<AccountExecutionError>,
             cancelled_at_return: bool,
         ) -> Option<Report> {
-            self.after_failure_with(lifecycle, actual, cancelled_at_return, || run(fixture))
+            self.after_failure_with(lifecycle, actual, cancelled_at_return, || {
+                run_rows(|row| run_row(fixture, row))
+            })
         }
     }
 
@@ -2325,18 +2386,17 @@ mod wsl_public_comparison {
         String::from_utf16(&units).ok()
     }
 
-    fn previews(reply: &Reply) -> (bool, bool, [Option<String>; 2]) {
+    fn previews(reply: &Reply, suppress: bool) -> (bool, bool, [Option<String>; 2]) {
         let Some(output) = reply
             .producer_output
             .as_ref()
             .filter(|_| reply.metadata.stage == Stage::Producer)
         else {
-            return (false, false, [None, None]);
+            return (false, reply.fixture_credential, [None, None]);
         };
         let start = output.stdout.starts_with(START);
-        // Scan BOTH full streams before any public-prefix removal or cropping.
-        if has_fixture_credential(output) {
-            return (start, true, [None, None]);
+        if suppress {
+            return (start, reply.fixture_credential, [None, None]);
         }
         let stdout = output.stdout.strip_prefix(START).unwrap_or(&output.stdout);
         let texts = [stdout, output.stderr.as_slice()].map(|bytes| {
@@ -2354,37 +2414,128 @@ mod wsl_public_comparison {
         }).collect()
     }
 
-    impl Report {
-        pub(super) fn describe(&self) -> String {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+    enum TimingIssue {
+        Missing,
+        ProbeFailure,
+        RetirementFailed,
+        RetirementUnavailable,
+        Release,
+        NonOverlapping,
+    }
+
+    impl RowReport {
+        fn timing_issue(&self) -> Option<TimingIssue> {
+            let Some(readiness) = &self.readiness else {
+                return Some(TimingIssue::Missing);
+            };
+            if readiness
+                .retirement
+                .first
+                .is_some_and(|entry| !entry.succeeded)
+                || readiness
+                    .retirement
+                    .last
+                    .is_some_and(|entry| !entry.succeeded)
+            {
+                return Some(TimingIssue::RetirementFailed);
+            }
+            if self.failure.is_some() || readiness.failure.is_some() {
+                return Some(TimingIssue::ProbeFailure);
+            }
+            if readiness.retirement.calls != 1 {
+                return Some(TimingIssue::RetirementUnavailable);
+            }
+            if !self.timing.eligible
+                || !matches!(
+                    (self.row, self.timing.release),
+                    (Row::Immediate, Some(Release::Immediate))
+                        | (Row::AfterProducer, Some(Release::ProducerReturned))
+                )
+            {
+                return Some(TimingIssue::Release);
+            }
+            match (
+                self.timing.producer_start_us,
+                self.timing.probe_completed_us,
+                self.timing.producer_return_us,
+            ) {
+                (Some(start), Some(completed), Some(returned))
+                    if start <= completed && completed < returned =>
+                {
+                    None
+                }
+                _ => Some(TimingIssue::NonOverlapping),
+            }
+        }
+
+        fn value(&self, suppress: bool) -> serde_json::Value {
             let (start, suppressed, texts) =
                 self.producer
                     .as_ref()
-                    .map(previews)
+                    .map(|reply| previews(reply, suppress))
                     .unwrap_or((false, false, [None, None]));
             let markers_match = self
                 .producer
                 .as_ref()
                 .and_then(|reply| reply.producer_output.as_ref())
                 .is_some_and(|output| output.stdout == EXPECTED && output.stderr.is_empty());
-            let mut value = serde_json::json!({
-                "public_comparison": true, "failure": self.failure, "setup": self.setup,
+            serde_json::json!({
+                "row": self.row, "failure": self.failure, "setup": self.setup,
                 "producer": self.producer.as_ref().map(|reply| reply.metadata),
-                "readiness": self.readiness, "start_marker": start, "markers_match": markers_match,
+                "readiness": self.readiness.as_ref().map(|readiness| serde_json::json!({
+                    "command": readiness.command, "ready": readiness.ready,
+                    "failure": readiness.failure,
+                    "retirement": format!("{:?}", readiness.retirement),
+                })),
+                "timing": self.timing, "timing_issue": self.timing_issue(),
+                "start_marker": start, "markers_match": markers_match,
                 "fixture_secret_suppressed": suppressed,
-                "stdout_preview": texts[0], "stderr_preview": texts[1], "preview_limit": false,
+                "stdout_preview": texts[0], "stderr_preview": texts[1],
+            })
+        }
+    }
+
+    impl Report {
+        pub(super) fn describe(&self) -> String {
+            let suppress = self.rows.iter().any(|row| {
+                row.producer
+                    .as_ref()
+                    .is_some_and(|reply| reply.fixture_credential)
+            });
+            let mut value = serde_json::json!({
+                "public_comparison": true, "inconclusive": true, "preview_limit": false,
+                "fixture_secret_suppressed": suppress,
+                "rows": self.rows.each_ref().map(|row| row.value(suppress)),
             });
             let rendered = escaped_json(&value);
             if rendered.len() <= 4096 {
                 return rendered;
             }
-            value["stdout_preview"] = serde_json::Value::Null;
-            value["stderr_preview"] = serde_json::Value::Null;
+            for row in value["rows"].as_array_mut().unwrap() {
+                row["stdout_preview"] = serde_json::Value::Null;
+                row["stderr_preview"] = serde_json::Value::Null;
+            }
             value["preview_limit"] = true.into();
             let metadata = escaped_json(&value);
             if metadata.len() <= 4096 {
                 metadata
             } else {
-                r#"{"public_comparison":true,"diagnostic_limit":true}"#.into()
+                let compact = escaped_json(&serde_json::json!({
+                    "public_comparison": true, "inconclusive": true, "diagnostic_limit": true,
+                    "retirement_omitted": true, "fixture_secret_suppressed": suppress,
+                    "rows": self.rows.each_ref().map(|row| serde_json::json!({
+                        "row": row.row, "failure": row.failure, "timing": row.timing,
+                        "producer": row.producer.as_ref().map(|reply| reply.metadata),
+                        "readiness": row.readiness.as_ref().map(|probe| probe.command),
+                        "timing_issue": row.timing_issue(),
+                    })),
+                }));
+                if compact.len() <= 4096 {
+                    compact
+                } else {
+                    r#"{"public_comparison":true,"inconclusive":true,"diagnostic_limit":true,"rows":[{"row":"Immediate"},{"row":"AfterProducer"}]}"#.into()
+                }
             }
         }
     }
@@ -2415,15 +2566,22 @@ mod wsl_public_comparison {
     fn describe_output(
         result: Result<HostCommandResult, CommandExecutionError>,
     ) -> (String, serde_json::Value) {
-        let report = Report {
+        let row = RowReport {
             producer: Some(Reply::received(Stage::Producer, result)),
-            ..Default::default()
+            ..RowReport::new(Row::Immediate)
         };
-        let text = report.describe();
+        let text = describe_row(row);
         assert!(text.len() <= 4096);
         assert!(!text.chars().any(char::is_control));
-        let parsed = serde_json::from_str(&text).unwrap();
-        (text, parsed)
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        (text, parsed["rows"][0].clone())
+    }
+
+    fn describe_row(row: RowReport) -> String {
+        Report {
+            rows: [row, RowReport::new(Row::AfterProducer)],
+        }
+        .describe()
     }
 
     #[test]
@@ -2521,10 +2679,10 @@ mod wsl_public_comparison {
                         && !cancelled;
                     let report = attempt.after_failure_with(lifecycle, actual, cancelled, || {
                         calls.set(calls.get() + 1);
-                        Report {
+                        run_rows(|row| RowReport {
                             failure: Some(Failure::Ownership),
-                            ..Default::default()
-                        }
+                            ..RowReport::new(row)
+                        })
                     });
                     assert_eq!(report.is_some(), should_run);
                     assert_eq!(calls.get(), usize::from(should_run));
@@ -2536,7 +2694,8 @@ mod wsl_public_comparison {
                             .is_none()
                     );
                     if let Some(report) = report {
-                        assert!(report.describe().contains("Ownership"));
+                        assert_eq!(report.rows[0].failure, Some(Failure::Ownership));
+                        assert_eq!(report.rows[1].failure, Some(Failure::Ownership));
                         assert_eq!(actual, Some(AccountExecutionError::HostHelperUnavailable));
                     }
                 }
@@ -2544,10 +2703,10 @@ mod wsl_public_comparison {
         }
         for result in [
             Report::default(),
-            Report {
+            run_rows(|row| RowReport {
                 failure: Some(Failure::ThreadStart),
-                ..Default::default()
-            },
+                ..RowReport::new(row)
+            }),
         ] {
             let original = Some(AccountExecutionError::HostHelperUnavailable);
             let mut attempt = Attempt::default();
@@ -2565,7 +2724,9 @@ mod wsl_public_comparison {
         for producer_error in [false, true] {
             let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let peer = finished.clone();
+            let pair = Pair::new(Row::AfterProducer, Instant::now());
             let report = collect_pair(
+                &pair,
                 || {
                     std::thread::Builder::new().spawn(move || {
                         peer.store(true, std::sync::atomic::Ordering::Release);
@@ -2594,15 +2755,20 @@ mod wsl_public_comparison {
                 report.readiness.as_ref().unwrap().failure,
                 Some(Failure::UnexpectedExit)
             );
-            assert!(!report.describe().contains("fixture_credential_"));
+            assert!(pair.timing().producer_return_us.is_some());
+            assert!(!describe_row(report).contains("fixture_credential_"));
         }
+        let pair = Pair::new(Row::AfterProducer, Instant::now());
         let report = collect_pair(
+            &pair,
             || Err(std::io::Error::other("fixture_credential_thread_error")),
             || panic!("producer started without readiness thread"),
         );
         assert_eq!(report.failure, Some(Failure::ThreadStart));
-        assert!(!report.describe().contains("fixture_credential_"));
+        assert!(pair.timing().producer_start_us.is_none());
+        assert!(!describe_row(report).contains("fixture_credential_"));
         let report = collect_pair(
+            &Pair::new(Row::AfterProducer, Instant::now()),
             || std::thread::Builder::new().spawn(|| panic!("synthetic public probe failure")),
             || Reply::received(Stage::Producer, Ok(output(Vec::new(), Vec::new(), -1))),
         );
@@ -2611,42 +2777,37 @@ mod wsl_public_comparison {
     }
 
     #[test]
-    fn public_comparison_readiness_retains_own_probe_timing_and_stops_on_errors() {
-        let missing =
-            Reply::received(Stage::Readiness, Ok(output(Vec::new(), Vec::new(), 1))).metadata;
-        let mut observation = Readiness::default();
-        let first = Probe {
-            started_us: 0,
-            returned_us: 20,
-            command: missing,
-        };
-        assert!(!observation.record(first, false));
-        let ready =
-            Reply::received(Stage::Readiness, Ok(output(Vec::new(), Vec::new(), 0))).metadata;
-        assert!(observation.record(
-            Probe {
-                started_us: 50_020,
-                returned_us: 50_040,
-                command: ready
-            },
-            false
-        ));
-        assert!(observation.ready);
-        assert_eq!(observation.count, 2);
-        assert_eq!(observation.first.unwrap().started_us, 0);
-        assert_eq!(observation.last.unwrap().returned_us, 50_040);
-        observation.count = u32::MAX;
-        assert!(observation.record(
-            Probe {
-                started_us: 10_000_000,
-                returned_us: 10_000_020,
-                command: missing
-            },
-            true
-        ));
-        assert_eq!(observation.count, u32::MAX);
-        assert_eq!(observation.first.unwrap().returned_us, 20);
-        assert!(observation.expired);
+    fn public_comparison_two_rows_each_probe_once_even_when_absent_or_failed() {
+        for exit in [0, 1, 23] {
+            let mut rows = Vec::new();
+            let calls = std::cell::Cell::new(0);
+            let report = run_rows(|row| {
+                rows.push(row);
+                let pair = Pair::new(row, Instant::now());
+                let readiness = read_once(&pair, || {
+                    calls.set(calls.get() + 1);
+                    Reply::received(Stage::Readiness, Ok(output(Vec::new(), Vec::new(), exit)))
+                });
+                assert_eq!(readiness.ready, exit == 0);
+                assert_eq!(
+                    readiness.failure,
+                    (exit == 23).then_some(Failure::UnexpectedExit)
+                );
+                let rejected = read_once(&pair, || panic!("second public probe"));
+                assert_eq!(rejected.failure, Some(Failure::ScopeRejected));
+                RowReport {
+                    readiness: Some(readiness),
+                    timing: pair.timing(),
+                    ..RowReport::new(row)
+                }
+            });
+            assert_eq!(rows, [Row::Immediate, Row::AfterProducer]);
+            assert_eq!(calls.get(), 2);
+            for row in report.rows {
+                assert!(row.timing.probe_start_us <= row.timing.probe_return_us);
+                assert_eq!(row.timing.release, Some(Release::Bypassed));
+            }
+        }
         for (result, expected) in [
             (output(Vec::new(), Vec::new(), 23), Failure::UnexpectedExit),
             (
@@ -2654,30 +2815,136 @@ mod wsl_public_comparison {
                 Failure::UnexpectedProbeOutput,
             ),
         ] {
-            let mut failed = Readiness::default();
-            assert!(failed.record(
-                Probe {
-                    started_us: 1,
-                    returned_us: 2,
-                    command: Reply::received(Stage::Readiness, Ok(result)).metadata
-                },
-                false
-            ));
+            let failed = read_once(&Pair::new(Row::Immediate, Instant::now()), || {
+                Reply::received(Stage::Readiness, Ok(result))
+            });
             assert_eq!(failed.failure, Some(expected));
         }
+    }
+
+    fn native_readiness() -> Reply {
+        assert_eq!(
+            std::env::var("GITHUB_ACTIONS").as_deref(),
+            Ok("true"),
+            "Actions-only fixture"
+        );
+        Reply::received(
+            Stage::Readiness,
+            crate::execution_host::execute_host_command(
+                &snapshot(Path::new(".")),
+                &CommandPlan::new("cmd.exe", ["/d", "/c", "exit /b 1"]),
+                Duration::from_secs(5),
+                WSL_FIXTURE_OUTPUT_CAP,
+            ),
+        )
+    }
+
+    #[test]
+    fn public_comparison_signals_before_join_on_return_error_and_producer_unwind() {
+        for outcome in 0..3 {
+            let pair = Pair::new(Row::AfterProducer, Instant::now());
+            let peer = pair.clone();
+            let report = collect_pair(
+                &pair,
+                || std::thread::Builder::new().spawn(move || read_once(&peer, native_readiness)),
+                || match outcome {
+                    0 => Reply::received(
+                        Stage::Producer,
+                        Ok(output(EXPECTED.to_vec(), Vec::new(), 0)),
+                    ),
+                    1 => Reply::received(
+                        Stage::Producer,
+                        Err(CommandExecutionError::new(
+                            CommandExecutionErrorKind::Io,
+                            "synthetic producer error",
+                        )),
+                    ),
+                    _ => panic!("synthetic producer unwind"),
+                },
+            );
+            let readiness = report.readiness.unwrap();
+            assert_eq!(readiness.command.unwrap().exit, Some(1));
+            assert!(!readiness.ready);
+            assert_eq!(readiness.retirement.calls, 1);
+            assert!(readiness.retirement.first.unwrap().succeeded);
+            assert!(pair.timing().probe_return_us.is_some());
+            if outcome == 2 {
+                assert_eq!(report.failure, Some(Failure::ThreadPanic));
+                assert!(report.producer.is_none());
+                assert!(pair.timing().producer_return_us.is_none());
+                assert_eq!(pair.timing().release, Some(Release::ProducerAborted));
+            } else {
+                assert!(matches!(
+                    pair.timing().release,
+                    Some(Release::ProducerReturned | Release::Late)
+                ));
+                assert!(pair.timing().producer_return_us <= pair.timing().probe_return_us);
+                assert_eq!(
+                    report.producer.unwrap().metadata.failure,
+                    (outcome == 1).then_some(Failure::Io)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn public_comparison_owner_unwind_aborts_before_join_and_probe_panic_is_inconclusive() {
+        for probe_panics in [false, true] {
+            let pair = Pair::new(Row::AfterProducer, Instant::now());
+            let peer = pair.clone();
+            let thread = std::thread::spawn(move || {
+                read_once(&peer, || {
+                    if probe_panics {
+                        panic!("synthetic probe unwind during owner unwind");
+                    }
+                    native_readiness()
+                })
+            });
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _owner = ProbeOwner {
+                    pair: pair.clone(),
+                    thread: Some(thread),
+                };
+                panic!("synthetic owner unwind");
+            }));
+            assert!(result.is_err());
+            assert_eq!(
+                pair.timing().release,
+                Some(if probe_panics {
+                    Release::ProbeAborted
+                } else {
+                    Release::ProducerAborted
+                })
+            );
+            assert_eq!(pair.timing().probe_return_us.is_some(), !probe_panics);
+        }
+        let pair = Pair::new(Row::AfterProducer, Instant::now());
+        let peer = pair.clone();
+        let report = collect_pair(
+            &pair,
+            || {
+                std::thread::Builder::new()
+                    .spawn(move || read_once(&peer, || panic!("synthetic probe unwind")))
+            },
+            || Reply::received(Stage::Producer, Ok(output(Vec::new(), Vec::new(), -1))),
+        );
+        assert_eq!(report.failure, Some(Failure::ThreadPanic));
+        assert_eq!(report.producer.as_ref().unwrap().metadata.exit, Some(-1));
+        assert_eq!(report.timing.release, Some(Release::ProbeAborted));
+        assert_eq!(report.timing_issue(), Some(TimingIssue::Missing));
     }
 
     #[test]
     fn public_previews_reject_nonproducer_incomplete_and_undecodable_sources() {
         for stage in [Stage::CreateCase, Stage::Readiness] {
-            let report = Report {
+            let report = RowReport {
                 producer: Some(Reply::received(
                     stage,
                     Ok(output(b"never-preview-this".to_vec(), Vec::new(), 0)),
                 )),
-                ..Default::default()
+                ..RowReport::new(Row::Immediate)
             };
-            assert!(!report.describe().contains("never-preview-this"));
+            assert!(!describe_row(report).contains("never-preview-this"));
         }
         for change in 0..7 {
             let mut result = output(b"never-preview-this".to_vec(), b"nor-this".to_vec(), -1);
@@ -2818,6 +3085,158 @@ mod wsl_public_comparison {
         assert_eq!(parsed["stdout_preview"], "public\0text");
         let (text, _) = describe_output(Ok(output(vec![7; 256], vec![7; 256], -1)));
         assert!(text.len() <= 4096);
+    }
+
+    #[test]
+    fn public_two_row_privacy_and_total_budget_keep_metadata_when_previews_are_dropped() {
+        let report = run_rows(|row| RowReport {
+            producer: Some(Reply::received(
+                Stage::Producer,
+                Ok(output(vec![7; 256], vec![7; 256], -1)),
+            )),
+            timing: Timing {
+                release: Some(Release::Deadline),
+                released_us: Some(u64::MAX),
+                ..Default::default()
+            },
+            ..RowReport::new(row)
+        });
+        let rendered = report.describe();
+        assert!(rendered.len() <= 4096);
+        assert!(!rendered.chars().any(char::is_control));
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value["preview_limit"], true);
+        assert_eq!(value["inconclusive"], true);
+        assert_eq!(value["rows"].as_array().unwrap().len(), 2);
+        for (index, row) in value["rows"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(
+                row["row"],
+                if index == 0 { "Immediate" } else { "AfterProducer" }
+            );
+            assert_eq!(row["producer"]["exit"], -1);
+            assert_eq!(row["timing"]["release"], "Deadline");
+            assert!(row["stdout_preview"].is_null() && row["stderr_preview"].is_null());
+        }
+        for encoding in 0..3 {
+            for secret_row in ROWS {
+                for stderr in [false, true] {
+                    for after_cutoff in [false, true] {
+                        for invalid in 0..8 {
+                            let report = run_rows(|row| {
+                                let mut result = output(
+                                    b"benign-public".to_vec(),
+                                    b"benign-public".to_vec(),
+                                    -1,
+                                );
+                                if row == secret_row {
+                                    let secret = encode(
+                                        &format!(
+                                            "{}fixture_credential_hidden",
+                                            "x".repeat(if after_cutoff { 300 } else { 0 })
+                                        ),
+                                        encoding,
+                                    );
+                                    if stderr {
+                                        result.output.stderr = secret;
+                                    } else {
+                                        result.output.stdout =
+                                            [START, secret.as_slice()].concat();
+                                    }
+                                    match invalid {
+                                        1 => result.output.stdout_truncated = true,
+                                        2 => result.output.stderr_truncated = true,
+                                        3 => result.output.timed_out = true,
+                                        4 => result.observed_connection_epoch = Some(1),
+                                        5 => result.output.exit_code = None,
+                                        6 => result.output.stdout.resize(4097, b'x'),
+                                        7 => result.output.stderr.resize(4097, b'x'),
+                                        _ => {}
+                                    }
+                                }
+                                let reply = Reply::received(Stage::Producer, Ok(result));
+                                if row == secret_row {
+                                    assert!(reply.fixture_credential);
+                                    assert_eq!(reply.producer_output.is_none(), invalid != 0);
+                                }
+                                RowReport {
+                                    producer: Some(reply),
+                                    ..RowReport::new(row)
+                                }
+                            });
+                            let rendered = report.describe();
+                            assert!(rendered.len() <= 4096);
+                            assert!(
+                                !rendered.contains("benign-public")
+                                    && !rendered.contains("fixture_credential_hidden")
+                            );
+                            let value: serde_json::Value =
+                                serde_json::from_str(&rendered).unwrap();
+                            assert_eq!(value["fixture_secret_suppressed"], true);
+                            for row in value["rows"].as_array().unwrap() {
+                                assert!(
+                                    row["stdout_preview"].is_null()
+                                        && row["stderr_preview"].is_null()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn public_retirement_api_failure_and_missing_or_late_evidence_remain_inconclusive() {
+        use crate::execution_host::{TasksWslActiveProcesses, TasksWslRetirement};
+
+        let failed = TasksWslRetirement {
+            before_us: u128::MAX,
+            after_us: u128::MAX,
+            active_processes: TasksWslActiveProcesses::QueryFailed,
+            roots: None,
+            succeeded: false,
+        };
+        let mut row = RowReport {
+            readiness: Some(Readiness {
+                failure: Some(Failure::Io),
+                retirement: TasksWslRetirementTrace {
+                    calls: 2,
+                    first: Some(failed),
+                    last: Some(failed),
+                },
+                ..Default::default()
+            }),
+            ..RowReport::new(Row::AfterProducer)
+        };
+        assert_eq!(row.timing_issue(), Some(TimingIssue::RetirementFailed));
+        row.readiness.as_mut().unwrap().retirement = TasksWslRetirementTrace::default();
+        assert_eq!(row.timing_issue(), Some(TimingIssue::ProbeFailure));
+        row.readiness.as_mut().unwrap().failure = None;
+        assert_eq!(row.timing_issue(), Some(TimingIssue::RetirementUnavailable));
+        row.readiness.as_mut().unwrap().retirement = TasksWslRetirementTrace {
+            calls: 1,
+            first: Some(TasksWslRetirement {
+                succeeded: true,
+                ..failed
+            }),
+            last: Some(TasksWslRetirement {
+                succeeded: true,
+                ..failed
+            }),
+        };
+        for release in [
+            Release::Late,
+            Release::Deadline,
+            Release::Bypassed,
+            Release::ScopeRejected,
+            Release::ProducerAborted,
+        ] {
+            row.timing.release = Some(release);
+            row.timing.eligible = true;
+            assert_eq!(row.timing_issue(), Some(TimingIssue::Release));
+        }
+        row.timing.release = Some(Release::ProducerReturned);
+        assert_eq!(row.timing_issue(), Some(TimingIssue::NonOverlapping));
     }
 }
 

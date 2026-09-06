@@ -3,3 +3,6 @@
 {"file":".trellis/spec/mt-app/backend/project-onboarding-contract.md","reason":"Existing bounded execution-host Git and uncertain-dispatch patterns."}
 {"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Exact project/worktree/host routing for Git panel operations."}
 {"file":".trellis/tasks/09-05-sidebar-agent-status/research/09-06-remote-git-action-surface.md","reason":"Complete reachable action/backend matrix, parser reuse, mutation and registration risks."}
+{"file":".trellis/tasks/09-06-native-ui-remote-feedback/prd.md","reason":"Explicit user approval now includes the reproduced WSL lifecycle issue without changing SSH/UI scope."}
+{"file":".trellis/tasks/09-06-native-remote-git/research/wsl-instance-retirement.md","reason":"Bounded public two-row single-probe causal comparison; no production Job-policy change."}
+{"file":".trellis/spec/mt-app/backend/release-staging-contract.md","reason":"Private/public output boundaries and narrowly authorized test-only pre-retirement wait."}

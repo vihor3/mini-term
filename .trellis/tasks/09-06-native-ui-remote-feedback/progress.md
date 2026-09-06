@@ -1563,3 +1563,101 @@ Only tests.rs changed in that generated patch. Rootfs101468522782 succeeded;
 Windows101468522620 is compiling and actualWSL101468664122 is importing.
 No local formatter, syntax/test/whitespace check or native launch occurred.
 Main will push the formatting successor only after owned import completes.
+
+Formatting successor35fe65367c122e011f12154a5da2e36530dda575 was pushed only
+after fe25593's import completed. Superseded WSL101468664122 cancelled during
+test compilation and cleaned only mt-tasks-34026585804-1 successfully10:11:54Z;
+its actual test did not run. Successor CI34026742549/Package34026742604 started.
+
+Actual WSL101469109594 executed exactly one test and failed25.72s at LookupCancel.
+First readiness147-103183us retired103113-103145us Count8, private NotInJob/Alive.
+Private attached1997us, exited113517us(-1), retired113541us, drained119651us
+with false ack/stdout118/stderr0 and Unknown native classification. It returned
+HostHelperUnavailable119686us before cancellation236160us. Second readiness
+153336-236159us was ready, Count1/private exited. The failed-case descendant
+assertion was not reached; earlier lifecycle assertions passed by source order.
+Owned mt-tasks-34026742549-1 cleanup succeeded10:22:54Z.
+
+The isolated PUBLIC pair also failed: producer start marker present/end absent,
+exit-1, complete bounded capture; its single readiness probe exited0 at103400us.
+The strict public-only preview reported 'The Windows Subsystem for Linux instance
+has terminated.' No private bytes were reported or inferred from their length.
+This establishes non-credential reproduction in the post-failure fixture, not
+yet Job-retirement causality or proof about another WSL version. Linux101468976555
+completed SUCCESS, including mt-ai244, mt-app1219 plus5 separately executed SSH
+fixtures, sidecars and whitespace. Windows101468976679 and package101468961657
+were still running at the latest check; no new ordinary-Windows pass is claimed.
+
+The user questioned the WSL scope. Main confirmed from pre-task history that
+c17b22a (2026-05-25) already supported Windows WSL UNC project roots/terminals,
+but acknowledged the original screenshot feedback did not request WSL expansion.
+The user then explicitly authorized solving this WSL issue together. Main added
+the scope clarification to the parent PRD and dispatched a bounded code-side
+causal-test proposal; no production Job policy change is approved yet.
+
+Read-only Microsoft sources provide a stronger lifetime lead than the earlier
+console-id hypothesis: LxssInstance.cpp opens the calling process with
+PROCESS_CREATE_PROCESS | SYNCHRONIZE and passes it to LxssClientInstanceStart;
+lxssclient.cpp describes it as the parent process for the instance and forwards
+it in StartParentProcessHandle to the driver. That does not expose the driver's
+Job inheritance implementation or prove the runner's precise kernel behavior.
+
+All35fe653 ordinary/package gates have now completed SUCCESS. Windows101468976679
+passed onboarding82/3, Files49/14/5/1, execution-host19, Tasks executor40 plus1
+separate ignored WSL test, Tasksapp/config/domain24/2/31, Git24/6/124 and
+terminal-host31. All eight new public-comparison tests explicitly passed.
+Package101468961657/run34026742604 artifact9987655617 is
+Mini-Term_1.2.2-ci.64_windows-x64, downloaded only to
+`/home/leo/.cache/mini-term/artifacts/35fe653-integration` after one transient
+archive-download EOF. The passed Actions manifest records installer18,849,232
+bytes and SHA256
+`67e612b341414b1abfc885f8d0c091038e57f0b2d7fc8285e0dc88e55a72b316`.
+No local verification/hash/app/installer launch occurred. Main updated the
+validation candidate without claiming a full WSL or native acceptance pass.
+
+Main approved Socrates' bounded two-row SINGLE-PROBE public retirement-timing
+contrast: Immediate versus an on-stack wait after normal root exit/readers,
+released by producer return/abort or absolute10s deadline. No Job handles leave
+the readiness stack; actual TerminateJobObject/Drop remain unchanged. Both public
+rows use identical fixed commands and one probe (normal0/1 eligible), maximumsix
+host commands; original PRIVATE polling and all assertions remain untouched.
+Main added the narrow release-contract exception and curated context. Newton
+owns implementation only in execution_host.rs/tests.rs plus its handoff. Noether
+separately reviews conditional production containment guarantees; no production
+flag change, dependency or shared-distro lifetime policy is approved yet.
+
+Noether's independent containment review identified a separate Git receipt gap:
+typed WSL exit -1 was classified Completed, allowing successful reconciliation
+to release a possibly still-running write's lease. Main authorized the narrow
+classification correction independently of the timing experiment. Tesla released
+host.rs/tests.rs plus the Git-child handoff: only typed WSL Some(-1) newly becomes
+Uncertain, with a production-classifier matrix and real coordinator/exact-ID
+review regression. Native, SSH, positive WSL exits and write.rs remain unchanged.
+Main source-reviewed the release and updated the Git host contract. Automated
+verification is UNRUN; Noether now owns its independent source review.
+
+Noether's read-only Newton WIP check found attempt-wide public preview suppression
+missing and old tests still being migrated. Main relayed both findings before
+release; a sentinel in either row, including bounded bytes discarded for an
+incomplete receipt, must suppress BOTH rows' previews. No additional hold/RAII
+or production-cleanup change was found in that snapshot. Newton still owns both
+diagnostic source files; no CI run or production containment approval follows
+from this WIP review.
+
+Newton released/froze execution_host.rs, the nested public-comparison module
+and the Git-child wsl-retirement-implementation.md handoff. Both WIP findings
+are addressed in the authored release, including suppression carried across
+discarded incomplete/stale public receipts. Eighteen focused regressions are
+authored/migrated; none has executed. Main reviewed the narrow hook placement,
+unchanged production ProcessTree methods and baseline private assertions, then
+transferred the two source files to Noether for final combined check. Tesla's
+Git correction passed independent source review without findings. No production
+containment policy or new passing Actions evidence exists yet.
+
+Noether released the final combined check with no unresolved source blocker.
+It added a test-only abort-before-join owner for held workers and strengthened
+the existing unwind regression, preventing failed controller assertions from
+detaching a native test worker. The eighteen diagnostic functions and both Git
+safety tests remain UNRUN. Main read the final report and guard, retained all
+original private/production behavior, and is preparing the scoped Actions
+candidate. Unrelated pre-existing dirty files remain outside this submission.

@@ -4,3 +4,6 @@
 {"file":".trellis/spec/mt-app/backend/project-onboarding-contract.md","reason":"Check no uncertain mutation replay and execution-host fencing."}
 {"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Prevent same-path or stale binding from selecting another repository."}
 {"file":".trellis/tasks/09-05-sidebar-agent-status/research/09-06-remote-git-action-surface.md","reason":"Audit every reachable child/dialog action for local fallback and uncertain-mutation safety."}
+{"file":".trellis/tasks/09-06-native-ui-remote-feedback/prd.md","reason":"Explicit WSL follow-up approval and unchanged native acceptance constraints."}
+{"file":".trellis/tasks/09-06-native-remote-git/research/wsl-instance-retirement.md","reason":"Review the exact causal A/B bounds, on-stack ownership, result preservation and inference limits."}
+{"file":".trellis/spec/mt-app/backend/release-staging-contract.md","reason":"Enforce the public-only diagnostic exception without relaxing production cleanup or logging."}
