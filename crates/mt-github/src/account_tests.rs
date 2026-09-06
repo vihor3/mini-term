@@ -133,9 +133,7 @@ fn identity_normalizes_comparison_without_changing_lookup_spelling() {
     assert_eq!(plan.account().host(), "github.com");
     assert!(GitHubAccountIdentity::new("ghe.example.com", "octo_admin").is_ok());
     assert!(GitHubAccountIdentity::new("org.ghe.com", "Alice").is_ok());
-    assert!(
-        GitHubAccountIdentity::new("github.com", &"a".repeat(ACCOUNT_LOGIN_LIMIT)).is_ok()
-    );
+    assert!(GitHubAccountIdentity::new("github.com", &"a".repeat(ACCOUNT_LOGIN_LIMIT)).is_ok());
 }
 
 #[test]
@@ -254,7 +252,10 @@ fn duplicate_accounts_duplicate_fields_wrong_hosts_and_invalid_schema_fail() {
         Err(AccountError::WrongHostOrAccount)
     );
     assert_eq!(
-        parse_known_accounts("github.com", &output(r#"{"hosts":{"github.example.com":[]}}"#)),
+        parse_known_accounts(
+            "github.com",
+            &output(r#"{"hosts":{"github.example.com":[]}}"#)
+        ),
         Err(AccountError::WrongHostOrAccount)
     );
 
@@ -400,11 +401,17 @@ fn per_account_problems_have_static_distinct_categories_and_do_not_drop_peers() 
             AccountError::PermissionDenied,
         ),
         ("missing required scope", AccountError::ScopeRequired),
-        ("HTTP 403: API rate limit exceeded", AccountError::RateLimited),
+        (
+            "HTTP 403: API rate limit exceeded",
+            AccountError::RateLimited,
+        ),
         ("HTTP 429", AccountError::RateLimited),
         ("Get: dial tcp: no such host", AccountError::Offline),
         ("context deadline exceeded", AccountError::Offline),
-        ("keyring is locked", AccountError::CredentialStoreUnavailable),
+        (
+            "keyring is locked",
+            AccountError::CredentialStoreUnavailable,
+        ),
         (
             "no oauth token found for github.com account Bob",
             AccountError::CredentialLookupFailed,
@@ -430,7 +437,10 @@ fn per_account_problems_have_static_distinct_categories_and_do_not_drop_peers() 
 #[test]
 fn fatal_enumeration_errors_are_not_successful_empty_or_partial_lists() {
     for (diagnostic, expected) in [
-        ("unknown flag: --json", AccountError::UnsupportedAuthStatusJson),
+        (
+            "unknown flag: --json",
+            AccountError::UnsupportedAuthStatusJson,
+        ),
         (
             "Unknown JSON field: hosts",
             AccountError::UnsupportedAuthStatusJson,
@@ -540,7 +550,14 @@ fn known_account_plan_is_explicit_json_without_active_or_secret_flags() {
             "hosts",
         ]
     );
-    for forbidden in ["--active", "--show-token", "login", "switch", "token", "--web"] {
+    for forbidden in [
+        "--active",
+        "--show-token",
+        "login",
+        "switch",
+        "token",
+        "--web",
+    ] {
         assert!(!plan.args.iter().any(|arg| arg == forbidden));
     }
 }
@@ -575,10 +592,9 @@ fn selected_request_plans_keep_existing_data_dtos_fields_limits_and_explicit_hos
                     .any(|args| args == ["--repo", "github.com/owner/repo"])
             );
             assert!(
-                !command
-                    .args
-                    .iter()
-                    .any(|arg| ["auth", "login", "switch", "token", "--web"].contains(&arg.as_str()))
+                !command.args.iter().any(
+                    |arg| ["auth", "login", "switch", "token", "--web"].contains(&arg.as_str())
+                )
             );
         }
     }
@@ -601,7 +617,10 @@ fn selected_request_plans_keep_existing_data_dtos_fields_limits_and_explicit_hos
 fn selected_identity_proof_rejects_wrong_auth_invalid_login_and_failed_commands() {
     let identity = GitHubAccountIdentity::new("github.com", "Alice").unwrap();
     assert_eq!(
-        verify_selected_account(&identity, &output(r#"{"login":"ALICE","token":"SENTINEL"}"#)),
+        verify_selected_account(
+            &identity,
+            &output(r#"{"login":"ALICE","token":"SENTINEL"}"#)
+        ),
         Ok(())
     );
     assert_eq!(
@@ -649,7 +668,10 @@ fn selected_data_errors_and_execution_errors_do_not_retain_raw_diagnostics() {
                 AccountError::AuthenticationFailed,
             ),
             ("HTTP 403: forbidden", AccountError::PermissionDenied),
-            ("HTTP 403: API rate limit exceeded", AccountError::RateLimited),
+            (
+                "HTTP 403: API rate limit exceeded",
+                AccountError::RateLimited,
+            ),
             ("HTTP 404: Not Found", AccountError::NotFound),
             ("could not resolve host", AccountError::Offline),
         ] {
@@ -664,7 +686,10 @@ fn selected_data_errors_and_execution_errors_do_not_retain_raw_diagnostics() {
             CommandExecutionErrorKind::ProgramNotFound,
             AccountError::ClientMissing,
         ),
-        (CommandExecutionErrorKind::Disconnected, AccountError::Offline),
+        (
+            CommandExecutionErrorKind::Disconnected,
+            AccountError::Offline,
+        ),
         (CommandExecutionErrorKind::Rejected, AccountError::Offline),
         (CommandExecutionErrorKind::Io, AccountError::CommandFailed),
     ] {
@@ -728,7 +753,10 @@ fn capability_and_identity_outputs_require_complete_bounded_captures() {
             verify_selected_account(&identity, &capture),
             Err(AccountError::MalformedResponse)
         );
-        for capability in [AccountCapability::AuthStatusJson, AccountCapability::NamedAccountLookup] {
+        for capability in [
+            AccountCapability::AuthStatusJson,
+            AccountCapability::NamedAccountLookup,
+        ] {
             assert_eq!(
                 verify_account_capability(capability, &capture),
                 Err(AccountError::MalformedResponse)
@@ -739,7 +767,13 @@ fn capability_and_identity_outputs_require_complete_bounded_captures() {
 
 #[test]
 fn identity_host_length_boundaries_and_no_login_trim_are_explicit() {
-    let maximal = format!("{}.{}.{}.{}", "a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(61));
+    let maximal = format!(
+        "{}.{}.{}.{}",
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61)
+    );
     assert_eq!(maximal.len(), 253);
     assert!(GitHubAccountIdentity::new(&maximal, "Alice").is_ok());
     assert!(GitHubAccountIdentity::new(&format!("{maximal}."), "Alice").is_ok());

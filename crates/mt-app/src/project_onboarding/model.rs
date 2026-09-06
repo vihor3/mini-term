@@ -101,8 +101,7 @@ fn wsl_browser_host_path(distro: &str, path: &str) -> Result<String, DirectoryBr
         }
         components.push(component);
     }
-    let root = crate::execution_host::wsl_host_visible_path(distro, "/")
-        .map_err(|_| invalid())?;
+    let root = crate::execution_host::wsl_host_visible_path(distro, "/").map_err(|_| invalid())?;
     // Never join unchecked POSIX text with a native Path: drive/UNC prefixes
     // and literal POSIX backslashes can redirect native I/O to another source.
     Ok(if components.is_empty() {
@@ -658,25 +657,55 @@ mod tests {
     #[test]
     fn browser_wsl_unc_mapping_rejects_native_redirection_and_unrepresentable_names() {
         let location = |path: &str| DirectoryLocation {
-            source: DirectorySource::Wsl { distro: "Ubuntu".into() },
+            source: DirectorySource::Wsl {
+                distro: "Ubuntu".into(),
+            },
             path: path.into(),
         };
-        assert_eq!(location("/home/User/.config").host_path().unwrap(), r"\\wsl.localhost\Ubuntu\home\User\.config");
-        assert_eq!(location("/home/../etc").host_path().unwrap(), r"\\wsl.localhost\Ubuntu\home\..\etc");
-        assert_eq!(location("/").host_path().unwrap(), r"\\wsl.localhost\Ubuntu");
+        assert_eq!(
+            location("/home/User/.config").host_path().unwrap(),
+            r"\\wsl.localhost\Ubuntu\home\User\.config"
+        );
+        assert_eq!(
+            location("/home/../etc").host_path().unwrap(),
+            r"\\wsl.localhost\Ubuntu\home\..\etc"
+        );
+        assert_eq!(
+            location("/").host_path().unwrap(),
+            r"\\wsl.localhost\Ubuntu"
+        );
         for path in [
-            r"/C:\client\folder", r"/\\server\share", r"/\\?\C:\client", r"/a\b",
-            "/colon:name", "/CON", "/file.", "/file ", "/nul\0name", "/../other",
-            "/home/../../other", "relative", "",
+            r"/C:\client\folder",
+            r"/\\server\share",
+            r"/\\?\C:\client",
+            r"/a\b",
+            "/colon:name",
+            "/CON",
+            "/file.",
+            "/file ",
+            "/nul\0name",
+            "/../other",
+            "/home/../../other",
+            "relative",
+            "",
         ] {
-            assert_eq!(location(path).host_path().unwrap_err().kind, DirectoryBrowseErrorKind::InvalidPath, "{path:?}");
+            assert_eq!(
+                location(path).host_path().unwrap_err().kind,
+                DirectoryBrowseErrorKind::InvalidPath,
+                "{path:?}"
+            );
         }
         for distro in ["", "..", r"Ubuntu\other", "Ubuntu/other", "C:", "Ubuntu."] {
-            assert!(wsl_browser_host_path(distro, "/home").is_err(), "{distro:?}");
+            assert!(
+                wsl_browser_host_path(distro, "/home").is_err(),
+                "{distro:?}"
+            );
         }
         let ssh = DirectoryLocation {
             source: DirectorySource::Ssh {
-                connection_id: "remote".into(), connection_fingerprint: 1, connection_epoch: 2,
+                connection_id: "remote".into(),
+                connection_fingerprint: 1,
+                connection_epoch: 2,
             },
             path: r"/C:\client\folder".into(),
         };

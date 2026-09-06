@@ -177,7 +177,14 @@ pub fn list_directory_at_epoch(
     project_root: &str,
     refresh_ignore: bool,
 ) -> Result<RemoteFileListing, String> {
-    list_directory_with_epoch(conn, path, project_root, refresh_ignore, expected_epoch, true)
+    list_directory_with_epoch(
+        conn,
+        path,
+        project_root,
+        refresh_ignore,
+        expected_epoch,
+        true,
+    )
 }
 
 fn list_directory_with_epoch(
@@ -353,11 +360,7 @@ pub fn browse_directory(
                 .await
                 .map_err(browser_sftp_error)?;
             validate_browser_path(&canonical)?;
-            if !sftp
-                .is_dir(&canonical)
-                .await
-                .map_err(browser_sftp_error)?
-            {
+            if !sftp.is_dir(&canonical).await.map_err(browser_sftp_error)? {
                 return Err(RemoteDirectoryBrowseError::new(
                     RemoteDirectoryBrowseErrorKind::InvalidPath,
                     "The remote path is not a directory",
@@ -423,10 +426,12 @@ fn validate_browser_path(path: &str) -> Result<(), RemoteDirectoryBrowseError> {
 fn validate_browser_node(kind: Option<SftpNodeKind>) -> Result<(), RemoteDirectoryBrowseError> {
     match kind {
         Some(SftpNodeKind::Directory | SftpNodeKind::Symlink) => Ok(()),
-        None | Some(SftpNodeKind::File | SftpNodeKind::Other) => Err(RemoteDirectoryBrowseError::new(
-            RemoteDirectoryBrowseErrorKind::InvalidPath,
-            "The remote path is missing or is not a directory",
-        )),
+        None | Some(SftpNodeKind::File | SftpNodeKind::Other) => {
+            Err(RemoteDirectoryBrowseError::new(
+                RemoteDirectoryBrowseErrorKind::InvalidPath,
+                "The remote path is missing or is not a directory",
+            ))
+        }
     }
 }
 
@@ -464,7 +469,14 @@ pub fn create_entry_at_epoch(
     name: &str,
     is_dir: bool,
 ) -> Result<String, String> {
-    create_entry_with_epoch(conn, project_root, parent_dir, name, is_dir, Some(expected_epoch))
+    create_entry_with_epoch(
+        conn,
+        project_root,
+        parent_dir,
+        name,
+        is_dir,
+        Some(expected_epoch),
+    )
 }
 
 fn create_entry_with_epoch(
@@ -564,7 +576,9 @@ pub fn probe_connection(conn: &SshConnection) -> Result<RemoteConnectionProbe, S
         let (session, sftp) = open_sftp_with_session(st, conn).await?;
         let connection_epoch = session.connection_epoch().get();
         let context = RemoteProjectContext::new(
-            conn.clone(), super::connection_fingerprint(conn), Some(connection_epoch),
+            conn.clone(),
+            super::connection_fingerprint(conn),
+            Some(connection_epoch),
         );
         let result = async {
             ensure_operation_session(st, &context, &session).await?;
@@ -588,7 +602,9 @@ pub fn probe_connection(conn: &SshConnection) -> Result<RemoteConnectionProbe, S
         }
         .await;
         sftp.close().await;
-        ensure_operation_session(st, &context, &session).await.and(result)
+        ensure_operation_session(st, &context, &session)
+            .await
+            .and(result)
     })
 }
 
@@ -610,7 +626,15 @@ mod browser_tests {
             }
         }
         let _cleanup = Cleanup(root.clone());
-        for name in [".git", ".hidden", "dir2", "dir10", "empty", r"a\b:folder", "trailing "] {
+        for name in [
+            ".git",
+            ".hidden",
+            "dir2",
+            "dir10",
+            "empty",
+            r"a\b:folder",
+            "trailing ",
+        ] {
             std::fs::create_dir(root.join(name)).unwrap();
         }
         std::fs::create_dir(root.join("dir2/nested")).unwrap();
@@ -621,75 +645,160 @@ mod browser_tests {
         let root_text = root.to_str().unwrap();
         let fingerprint = crate::remote_ssh::connection_fingerprint(&connection);
         let st = state();
-        let (epoch, authenticated_home) = st.block_on(async {
-            let (session, sftp) = open_sftp_with_session(st, &connection).await?;
-            let epoch = session.connection_epoch().get();
-            let home = sftp.canonicalize(".").await.map_err(|error| error.message().to_string())?;
-            sftp.close().await;
-            Ok((epoch, home))
-        }).unwrap();
+        let (epoch, authenticated_home) = st
+            .block_on(async {
+                let (session, sftp) = open_sftp_with_session(st, &connection).await?;
+                let epoch = session.connection_epoch().get();
+                let home = sftp
+                    .canonicalize(".")
+                    .await
+                    .map_err(|error| error.message().to_string())?;
+                sftp.close().await;
+                Ok((epoch, home))
+            })
+            .unwrap();
         assert_ne!(authenticated_home, root_text);
         lock(&st.home_cache).insert(connection.id.clone(), root_text.to_string());
         let probe = probe_connection(&connection).unwrap();
         assert_eq!(probe.canonical_home, authenticated_home);
         assert_eq!(probe.connection_epoch, epoch);
-        assert_eq!(lock(&st.home_cache).get(&connection.id).cloned(), Some(root_text.to_string()));
+        assert_eq!(
+            lock(&st.home_cache).get(&connection.id).cloned(),
+            Some(root_text.to_string())
+        );
         let context = RemoteProjectContext::new(connection.clone(), fingerprint, Some(epoch));
         let listing = browse_directory(&context, root_text).unwrap();
         assert_eq!(listing.canonical_path, root_text);
         assert_eq!(listing.connection_epoch, epoch);
         assert_eq!(listing.connection_fingerprint, fingerprint);
-        let names = listing.directories.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>();
+        let names = listing
+            .directories
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(names.len(), 8);
-        for name in [".git", ".hidden", "dir2", "dir10", "empty", r"a\b:folder", "trailing ", "directory-link"] {
+        for name in [
+            ".git",
+            ".hidden",
+            "dir2",
+            "dir10",
+            "empty",
+            r"a\b:folder",
+            "trailing ",
+            "directory-link",
+        ] {
             assert!(names.contains(&name), "{name:?}");
         }
-        assert!(names.iter().position(|name| *name == "dir2") < names.iter().position(|name| *name == "dir10"));
+        assert!(
+            names.iter().position(|name| *name == "dir2")
+                < names.iter().position(|name| *name == "dir10")
+        );
         assert!(!names.contains(&"nested"));
-        let link = listing.directories.iter().find(|entry| entry.name == "directory-link").unwrap();
+        let link = listing
+            .directories
+            .iter()
+            .find(|entry| entry.name == "directory-link")
+            .unwrap();
         assert!(link.is_symlink);
-        assert_eq!(browse_directory(&context, &link.path).unwrap().canonical_path, root.join("dir2").to_str().unwrap());
+        assert_eq!(
+            browse_directory(&context, &link.path)
+                .unwrap()
+                .canonical_path,
+            root.join("dir2").to_str().unwrap()
+        );
         for name in [r"a\b:folder", "trailing ", "empty"] {
-            let entry = listing.directories.iter().find(|entry| entry.name == name).unwrap();
+            let entry = listing
+                .directories
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap();
             let empty = browse_directory(&context, &entry.path).unwrap();
             assert!(empty.directories.is_empty());
             assert_eq!(empty.canonical_path, root.join(name).to_str().unwrap());
         }
         for name in ["file", "file-link", "missing"] {
-            assert_eq!(browse_directory(&context, root.join(name).to_str().unwrap()).unwrap_err().kind, RemoteDirectoryBrowseErrorKind::InvalidPath);
+            assert_eq!(
+                browse_directory(&context, root.join(name).to_str().unwrap())
+                    .unwrap_err()
+                    .kind,
+                RemoteDirectoryBrowseErrorKind::InvalidPath
+            );
         }
-        let wrong_fingerprint = RemoteProjectContext::new(connection.clone(), fingerprint ^ 1, Some(epoch));
-        assert_eq!(browse_directory(&wrong_fingerprint, root_text).unwrap_err().kind, RemoteDirectoryBrowseErrorKind::Unavailable);
+        let wrong_fingerprint =
+            RemoteProjectContext::new(connection.clone(), fingerprint ^ 1, Some(epoch));
+        assert_eq!(
+            browse_directory(&wrong_fingerprint, root_text)
+                .unwrap_err()
+                .kind,
+            RemoteDirectoryBrowseErrorKind::Unavailable
+        );
 
-        let (replacement_epoch, replacement_home) = st.block_on(async {
-            let (session, sftp) = open_sftp_with_session(st, &connection).await?;
-            ensure_operation_session(st, &context, &session).await?;
-            sftp.close().await;
-            assert!(crate::remote_ssh::evict_session_if_same(st, &st.pool(), &connection.id, &session).await);
-            let (replacement, replacement_sftp) = open_sftp_with_session(st, &connection).await?;
-            assert!(ensure_operation_session(st, &context, &session).await.is_err());
-            assert!(ensure_operation_session(st, &context, &replacement).await.is_err());
-            let epoch = replacement.connection_epoch().get();
-            let home = replacement_sftp.canonicalize(".").await.map_err(|error| error.message().to_string())?;
-            replacement_sftp.close().await;
-            Ok((epoch, home))
-        }).unwrap();
+        let (replacement_epoch, replacement_home) = st
+            .block_on(async {
+                let (session, sftp) = open_sftp_with_session(st, &connection).await?;
+                ensure_operation_session(st, &context, &session).await?;
+                sftp.close().await;
+                assert!(
+                    crate::remote_ssh::evict_session_if_same(
+                        st,
+                        &st.pool(),
+                        &connection.id,
+                        &session
+                    )
+                    .await
+                );
+                let (replacement, replacement_sftp) =
+                    open_sftp_with_session(st, &connection).await?;
+                assert!(
+                    ensure_operation_session(st, &context, &session)
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    ensure_operation_session(st, &context, &replacement)
+                        .await
+                        .is_err()
+                );
+                let epoch = replacement.connection_epoch().get();
+                let home = replacement_sftp
+                    .canonicalize(".")
+                    .await
+                    .map_err(|error| error.message().to_string())?;
+                replacement_sftp.close().await;
+                Ok((epoch, home))
+            })
+            .unwrap();
         assert_ne!(epoch, replacement_epoch);
         let probe = probe_connection(&connection).unwrap();
         assert_eq!(probe.canonical_home, replacement_home);
         assert_ne!(probe.canonical_home, root_text);
         assert_eq!(probe.connection_epoch, replacement_epoch);
-        assert_eq!(lock(&st.home_cache).get(&connection.id).cloned(), Some(root_text.to_string()));
+        assert_eq!(
+            lock(&st.home_cache).get(&connection.id).cloned(),
+            Some(root_text.to_string())
+        );
         assert_eq!(listing.connection_epoch, epoch);
-        assert_eq!(browse_directory(&context, root_text).unwrap_err().kind, RemoteDirectoryBrowseErrorKind::Unavailable);
+        assert_eq!(
+            browse_directory(&context, root_text).unwrap_err().kind,
+            RemoteDirectoryBrowseErrorKind::Unavailable
+        );
         // Even a proven non-directory must reject the stale source before probing it.
-        assert_eq!(browse_directory(&context, root.join("file").to_str().unwrap()).unwrap_err().kind, RemoteDirectoryBrowseErrorKind::Unavailable);
-        let replacement = RemoteProjectContext::new(connection, fingerprint, Some(replacement_epoch));
+        assert_eq!(
+            browse_directory(&context, root.join("file").to_str().unwrap())
+                .unwrap_err()
+                .kind,
+            RemoteDirectoryBrowseErrorKind::Unavailable
+        );
+        let replacement =
+            RemoteProjectContext::new(connection, fingerprint, Some(replacement_epoch));
         let current = browse_directory(&replacement, root_text).unwrap();
         assert_eq!(current.connection_epoch, replacement_epoch);
         assert_eq!(current.connection_fingerprint, fingerprint);
         assert_eq!(current.directories.len(), listing.directories.len());
-        assert_eq!(std::fs::read(root.join("file")).unwrap(), b"read-only sentinel");
+        assert_eq!(
+            std::fs::read(root.join("file")).unwrap(),
+            b"read-only sentinel"
+        );
         assert!(!root.join("empty/.git").exists());
         assert_eq!(std::fs::read_dir(root.join(".git")).unwrap().count(), 0);
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 11);
@@ -698,11 +807,20 @@ mod browser_tests {
 
     #[test]
     fn browser_requires_absolute_paths_without_rewriting_posix_names() {
-        for path in ["/", "/home/User/.config", r"/names/a\b:folder", "/with spaces/ ", "/link/../peer"] {
+        for path in [
+            "/",
+            "/home/User/.config",
+            r"/names/a\b:folder",
+            "/with spaces/ ",
+            "/link/../peer",
+        ] {
             assert!(validate_browser_path(path).is_ok());
         }
         for path in ["", "~", "relative/path", "C:\\client", "/nul\0path"] {
-            assert_eq!(validate_browser_path(path).unwrap_err().kind, RemoteDirectoryBrowseErrorKind::InvalidPath);
+            assert_eq!(
+                validate_browser_path(path).unwrap_err().kind,
+                RemoteDirectoryBrowseErrorKind::InvalidPath
+            );
         }
     }
 
@@ -711,7 +829,10 @@ mod browser_tests {
         assert!(validate_browser_node(Some(SftpNodeKind::Directory)).is_ok());
         assert!(validate_browser_node(Some(SftpNodeKind::Symlink)).is_ok());
         for kind in [None, Some(SftpNodeKind::File), Some(SftpNodeKind::Other)] {
-            assert_eq!(validate_browser_node(kind).unwrap_err().kind, RemoteDirectoryBrowseErrorKind::InvalidPath);
+            assert_eq!(
+                validate_browser_node(kind).unwrap_err().kind,
+                RemoteDirectoryBrowseErrorKind::InvalidPath
+            );
         }
         assert!(valid_sftp_child_name(".git"));
         assert!(valid_sftp_child_name(".config"));
@@ -728,7 +849,10 @@ mod browser_tests {
             SftpTransferError::Sftp("No such file".into()),
             SftpTransferError::Transport("disconnected".into()),
         ] {
-            assert_eq!(browser_sftp_error(error).kind, RemoteDirectoryBrowseErrorKind::Unavailable);
+            assert_eq!(
+                browser_sftp_error(error).kind,
+                RemoteDirectoryBrowseErrorKind::Unavailable
+            );
         }
     }
 }

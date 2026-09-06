@@ -14,10 +14,25 @@ use super::{AccountExecutionControl, AccountExecutionError, CLEANUP_TIMEOUT};
 const SECRET_LIMIT: usize = 4096;
 const POLL: Duration = Duration::from_millis(10);
 const REMOVED_ENV: &[&str] = &[
-    "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-    "GH_HOST", "GH_REPO", "GH_DEBUG", "DEBUG", "GH_FORCE_TTY", "CLICOLOR_FORCE",
-    "GH_BROWSER", "BROWSER", "SSH_ASKPASS", "GIT_ASKPASS", "BASH_ENV", "ENV",
-    "SHELLOPTS", "BASHOPTS", "WSLENV",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GH_HOST",
+    "GH_REPO",
+    "GH_DEBUG",
+    "DEBUG",
+    "GH_FORCE_TTY",
+    "CLICOLOR_FORCE",
+    "GH_BROWSER",
+    "BROWSER",
+    "SSH_ASKPASS",
+    "GIT_ASKPASS",
+    "BASH_ENV",
+    "ENV",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "WSLENV",
 ];
 
 // Neither captured credential streams nor token buffers implement Debug/Clone.
@@ -39,10 +54,16 @@ struct PrivateCapture {
 }
 
 fn sanitize(command: &mut Command) {
-    for key in REMOVED_ENV { command.env_remove(key); }
-    command.env("GH_PROMPT_DISABLED", "1")
-        .env("GH_PAGER", "cat").env("PAGER", "cat")
-        .env("NO_COLOR", "1").env("TERM", "dumb").env("LC_ALL", "C");
+    for key in REMOVED_ENV {
+        command.env_remove(key);
+    }
+    command
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_PAGER", "cat")
+        .env("PAGER", "cat")
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .env("LC_ALL", "C");
 }
 
 fn data_command(
@@ -51,7 +72,9 @@ fn data_command(
     make_gh: &impl Fn() -> Command,
 ) -> Command {
     let mut command = make_gh();
-    command.args(&data.args).current_dir(&snapshot.canonical_path);
+    command
+        .args(&data.args)
+        .current_dir(&snapshot.canonical_path);
     sanitize(&mut command);
     command
 }
@@ -63,7 +86,9 @@ pub(super) fn run_native(
     control: &AccountExecutionControl,
     output_limit: usize,
 ) -> Result<CommandOutput, AccountExecutionError> {
-    run_native_with(snapshot, data, selected, control, output_limit, &|| Command::new("gh"))
+    run_native_with(snapshot, data, selected, control, output_limit, &|| {
+        Command::new("gh")
+    })
 }
 
 fn run_native_with(
@@ -76,12 +101,26 @@ fn run_native_with(
 ) -> Result<CommandOutput, AccountExecutionError> {
     let deadline = Instant::now() + control.timeout();
     let Some(selected) = selected else {
-        let captured = capture(data_command(snapshot, data, make_gh), control, deadline, output_limit, false)?;
+        let captured = capture(
+            data_command(snapshot, data, make_gh),
+            control,
+            deadline,
+            output_limit,
+            false,
+        )?;
         control.check(deadline)?;
         return public_unselected(data, captured);
     };
     let mut lookup = make_gh();
-    lookup.args(["auth", "token", "--hostname", selected.account().host(), "--user", selected.lookup_login()])
+    lookup
+        .args([
+            "auth",
+            "token",
+            "--hostname",
+            selected.account().host(),
+            "--user",
+            selected.lookup_login(),
+        ])
         .current_dir(&snapshot.canonical_path);
     sanitize(&mut lookup);
     let captured = capture(lookup, control, deadline, SECRET_LIMIT + 2, false)?;
@@ -99,7 +138,9 @@ fn run_native_with(
     };
     let before = run_data(&proof, mt_github::COMMAND_OUTPUT_LIMIT)?;
     mt_github::verify_selected_account(selected.account(), &before)?;
-    if selected.stage() == mt_github::AccountCommandStage::Identity { return Ok(before); }
+    if selected.stage() == mt_github::AccountCommandStage::Identity {
+        return Ok(before);
+    }
     let output = run_data(data, output_limit)?;
     let after = run_data(&proof, mt_github::COMMAND_OUTPUT_LIMIT)?;
     mt_github::verify_selected_account(selected.account(), &after)?;
@@ -110,66 +151,100 @@ fn run_native_with(
 fn credential(mut captured: PrivateCapture) -> Result<PrivateBytes, AccountExecutionError> {
     if captured.exit_code != Some(0) {
         let error = if has_ascii(&captured.stderr.0, b"unknown flag: --user")
-            || has_ascii(&captured.stderr.0, b"unknown shorthand flag: 'u'") {
+            || has_ascii(&captured.stderr.0, b"unknown shorthand flag: 'u'")
+        {
             AccountError::UnsupportedNamedAccountLookup
         } else if [
-            b"keyring is locked".as_slice(), b"keyring access denied", b"failed to unlock keyring",
-            b"cannot access keyring", b"failed to open keyring", b"credential store is unavailable",
-            b"secure storage is unavailable", b"org.freedesktop.secrets", b"interaction is not allowed",
+            b"keyring is locked".as_slice(),
+            b"keyring access denied",
+            b"failed to unlock keyring",
+            b"cannot access keyring",
+            b"failed to open keyring",
+            b"credential store is unavailable",
+            b"secure storage is unavailable",
+            b"org.freedesktop.secrets",
+            b"interaction is not allowed",
         ]
-            .iter().any(|text| has_ascii(&captured.stderr.0, text)) {
+        .iter()
+        .any(|text| has_ascii(&captured.stderr.0, text))
+        {
             AccountError::CredentialStoreUnavailable
-        } else { AccountError::CredentialLookupFailed };
+        } else {
+            AccountError::CredentialLookupFailed
+        };
         return Err(error.into());
     }
     if captured.stdout.0.last() == Some(&b'\n') {
         captured.stdout.0.pop();
-        if captured.stdout.0.last() == Some(&b'\r') { captured.stdout.0.pop(); }
+        if captured.stdout.0.last() == Some(&b'\r') {
+            captured.stdout.0.pop();
+        }
     }
-    if captured.stdout.0.is_empty() || captured.stdout.0.len() > SECRET_LIMIT
-        || !captured.stdout.0.iter().all(u8::is_ascii_graphic) {
+    if captured.stdout.0.is_empty()
+        || captured.stdout.0.len() > SECRET_LIMIT
+        || !captured.stdout.0.iter().all(u8::is_ascii_graphic)
+    {
         return Err(AccountError::CredentialLookupFailed.into());
     }
     Ok(captured.stdout)
 }
 
 fn has_ascii(bytes: &[u8], expected: &[u8]) -> bool {
-    bytes.windows(expected.len()).any(|part| part.eq_ignore_ascii_case(expected))
+    bytes
+        .windows(expected.len())
+        .any(|part| part.eq_ignore_ascii_case(expected))
 }
 
-fn public_unselected(data: &CommandPlan, captured: PrivateCapture) -> Result<CommandOutput, AccountExecutionError> {
+fn public_unselected(
+    data: &CommandPlan,
+    captured: PrivateCapture,
+) -> Result<CommandOutput, AccountExecutionError> {
     let output = public_data(captured, None)?;
     let enumeration = data.args.get(1).is_some_and(|arg| arg == "status")
         && data.args.iter().any(|arg| arg == "--json");
     if !enumeration {
         let capability = if data.args.get(1).is_some_and(|arg| arg == "token") {
             mt_github::AccountCapability::NamedAccountLookup
-        } else { mt_github::AccountCapability::AuthStatusJson };
-        mt_github::require_account_success(mt_github::AccountCommandStage::Capability(capability), &output)?;
+        } else {
+            mt_github::AccountCapability::AuthStatusJson
+        };
+        mt_github::require_account_success(
+            mt_github::AccountCommandStage::Capability(capability),
+            &output,
+        )?;
         return Ok(output);
     }
-    let host = data.args.windows(2).find(|pair| pair[0] == "--hostname")
-        .map(|pair| pair[1].as_str()).ok_or(AccountExecutionError::InvalidContext)?;
+    let host = data
+        .args
+        .windows(2)
+        .find(|pair| pair[0] == "--hostname")
+        .map(|pair| pair[1].as_str())
+        .ok_or(AccountExecutionError::InvalidContext)?;
     let known = mt_github::parse_known_accounts(host, &output)?;
-    let rows: Vec<_> = known.accounts().iter().map(|account| {
-        let state = match account.state() {
-            mt_github::KnownAccountState::Success => "success",
-            mt_github::KnownAccountState::Error => "error",
-            mt_github::KnownAccountState::Timeout => "timeout",
-        };
-        let mut row = serde_json::json!({
-            "host": account.identity().host(), "login": account.login(),
-            "active": account.is_active(), "state": state,
-        });
-        if let Some(problem) = account.problem() {
-            row["error"] = serde_json::Value::String(nonsecret_diagnostic(problem).into());
-        }
-        row
-    }).collect();
+    let rows: Vec<_> = known
+        .accounts()
+        .iter()
+        .map(|account| {
+            let state = match account.state() {
+                mt_github::KnownAccountState::Success => "success",
+                mt_github::KnownAccountState::Error => "error",
+                mt_github::KnownAccountState::Timeout => "timeout",
+            };
+            let mut row = serde_json::json!({
+                "host": account.identity().host(), "login": account.login(),
+                "active": account.is_active(), "state": state,
+            });
+            if let Some(problem) = account.problem() {
+                row["error"] = serde_json::Value::String(nonsecret_diagnostic(problem).into());
+            }
+            row
+        })
+        .collect();
     Ok(CommandOutput {
         stdout: serde_json::to_vec(&serde_json::json!({"hosts": {(known.host()): rows}}))
             .map_err(|_| AccountError::MalformedResponse)?,
-        exit_code: Some(0), ..CommandOutput::default()
+        exit_code: Some(0),
+        ..CommandOutput::default()
     })
 }
 
@@ -192,14 +267,21 @@ fn nonsecret_diagnostic(error: AccountError) -> &'static str {
     }
 }
 
-fn public_data(mut captured: PrivateCapture, token: Option<&PrivateBytes>) -> Result<CommandOutput, AccountExecutionError> {
-    if token.is_some_and(|token| [&captured.stdout.0, &captured.stderr.0].iter()
-        .any(|bytes| bytes.windows(token.0.len()).any(|part| part == token.0))) {
+fn public_data(
+    mut captured: PrivateCapture,
+    token: Option<&PrivateBytes>,
+) -> Result<CommandOutput, AccountExecutionError> {
+    if token.is_some_and(|token| {
+        [&captured.stdout.0, &captured.stderr.0]
+            .iter()
+            .any(|bytes| bytes.windows(token.0.len()).any(|part| part == token.0))
+    }) {
         return Err(AccountExecutionError::SecretOutputRejected);
     }
     Ok(CommandOutput {
         stdout: std::mem::take(&mut captured.stdout.0),
-        stderr: std::mem::take(&mut captured.stderr.0), exit_code: captured.exit_code,
+        stderr: std::mem::take(&mut captured.stderr.0),
+        exit_code: captured.exit_code,
         ..CommandOutput::default()
     })
 }
@@ -210,12 +292,28 @@ pub(super) fn run_wsl(
     control: &AccountExecutionControl,
     wire_cap: usize,
 ) -> Result<Vec<u8>, AccountExecutionError> {
-    let ExecutionBackend::Wsl { distro } = &snapshot.backend else { return Err(AccountExecutionError::InvalidContext); };
+    let ExecutionBackend::Wsl { distro } = &snapshot.backend else {
+        return Err(AccountExecutionError::InvalidContext);
+    };
     let mut command = Command::new("wsl.exe");
-    command.args(["--distribution", distro, "--cd", &snapshot.canonical_path, "--exec", &envelope.program])
+    command
+        .args([
+            "--distribution",
+            distro,
+            "--cd",
+            &snapshot.canonical_path,
+            "--exec",
+            &envelope.program,
+        ])
         .args(&envelope.args);
     sanitize(&mut command);
-    let mut captured = capture(command, control, Instant::now() + control.timeout(), wire_cap, true)?;
+    let mut captured = capture(
+        command,
+        control,
+        Instant::now() + control.timeout(),
+        wire_cap,
+        true,
+    )?;
     if captured.exit_code != Some(0) {
         return Err(AccountExecutionError::HostHelperUnavailable);
     }
@@ -230,7 +328,9 @@ struct OwnedChild {
 
 impl OwnedChild {
     fn cleanup(&mut self) -> Result<(), AccountExecutionError> {
-        if self.cleaned { return Ok(()); }
+        if self.cleaned {
+            return Ok(());
+        }
         let tree_ok = self.tree.terminate().is_ok();
         let _ = self.child.kill();
         let deadline = Instant::now() + CLEANUP_TIMEOUT;
@@ -238,9 +338,15 @@ impl OwnedChild {
             match self.child.try_wait() {
                 Ok(Some(_)) => {
                     self.cleaned = true;
-                    return if tree_ok { Ok(()) } else { Err(AccountExecutionError::CleanupFailed) };
+                    return if tree_ok {
+                        Ok(())
+                    } else {
+                        Err(AccountExecutionError::CleanupFailed)
+                    };
                 }
-                _ if Instant::now() >= deadline => return Err(AccountExecutionError::CleanupFailed),
+                _ if Instant::now() >= deadline => {
+                    return Err(AccountExecutionError::CleanupFailed);
+                }
                 _ => thread::sleep(POLL),
             }
         }
@@ -248,7 +354,9 @@ impl OwnedChild {
 }
 
 impl Drop for OwnedChild {
-    fn drop(&mut self) { let _ = self.cleanup(); }
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
 }
 
 fn capture(
@@ -259,27 +367,45 @@ fn capture(
     cooperative: bool,
 ) -> Result<PrivateCapture, AccountExecutionError> {
     control.check(deadline)?;
-    command.stdin(if cooperative { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(if cooperative {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let tree = ProcessTree::configure(&mut command).map_err(|_| AccountError::CommandFailed)?;
     let child = command.spawn().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound { AccountError::ClientMissing } else { AccountError::CommandFailed }
+        if error.kind() == std::io::ErrorKind::NotFound {
+            AccountError::ClientMissing
+        } else {
+            AccountError::CommandFailed
+        }
     })?;
     // Drop Command's private environment immediately; it is never formatted.
     drop(command);
-    let mut owned = OwnedChild { child, tree, cleaned: false };
+    let mut owned = OwnedChild {
+        child,
+        tree,
+        cleaned: false,
+    };
     if owned.tree.attach(&owned.child).is_err() {
         let _ = owned.cleanup();
         return Err(AccountExecutionError::CleanupFailed);
     }
-    let (Some(stdout), Some(stderr)) = (owned.child.stdout.take(), owned.child.stderr.take()) else {
+    let (Some(stdout), Some(stderr)) = (owned.child.stdout.take(), owned.child.stderr.take())
+    else {
         owned.cleanup()?;
         return Err(AccountError::CommandFailed.into());
     };
     let overflow = Arc::new(AtomicBool::new(false));
     let stdout_reader = match reader(stdout, output_limit, overflow.clone()) {
         Ok(reader) => reader,
-        Err(error) => { owned.cleanup()?; return Err(error); }
+        Err(error) => {
+            owned.cleanup()?;
+            return Err(error);
+        }
     };
     let stderr_reader = match reader(stderr, mt_github::COMMAND_OUTPUT_LIMIT, overflow.clone()) {
         Ok(reader) => reader,
@@ -287,7 +413,9 @@ fn capture(
             owned.cleanup()?;
             let deadline = Instant::now() + CLEANUP_TIMEOUT;
             while !stdout_reader.is_finished() {
-                if Instant::now() >= deadline { return Err(AccountExecutionError::CleanupFailed); }
+                if Instant::now() >= deadline {
+                    return Err(AccountExecutionError::CleanupFailed);
+                }
                 thread::sleep(POLL);
             }
             let _ = stdout_reader.join();
@@ -305,7 +433,9 @@ fn capture(
             }
             if stopped.is_some() {
                 if cooperative {
-                    if let Some(mut stdin) = owned.child.stdin.take() { let _ = stdin.write_all(b"x"); }
+                    if let Some(mut stdin) = owned.child.stdin.take() {
+                        let _ = stdin.write_all(b"x");
+                    }
                     stop_deadline = Instant::now() + CLEANUP_TIMEOUT;
                 } else {
                     owned.cleanup()?;
@@ -320,7 +450,10 @@ fn capture(
                 break;
             }
             Ok(None) => {}
-            Err(_) => { stopped = Some(AccountError::CommandFailed.into()); break; }
+            Err(_) => {
+                stopped = Some(AccountError::CommandFailed.into());
+                break;
+            }
         }
         if stopped.is_some() && Instant::now() >= stop_deadline {
             owned.cleanup()?;
@@ -331,16 +464,24 @@ fn capture(
     owned.cleanup()?;
     let drain_deadline = Instant::now() + CLEANUP_TIMEOUT;
     while !stdout_reader.is_finished() || !stderr_reader.is_finished() {
-        if Instant::now() >= drain_deadline { return Err(AccountExecutionError::CleanupFailed); }
+        if Instant::now() >= drain_deadline {
+            return Err(AccountExecutionError::CleanupFailed);
+        }
         thread::sleep(POLL);
     }
-    let stdout = stdout_reader.join().map_err(|_| AccountError::CommandFailed)??;
-    let stderr = stderr_reader.join().map_err(|_| AccountError::CommandFailed)??;
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| AccountError::CommandFailed)??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| AccountError::CommandFailed)??;
     #[cfg(test)]
     if cooperative {
         for bytes in [&stdout.0, &stderr.0] {
-            assert!(!String::from_utf8_lossy(bytes).contains("fixture_credential_"),
-                "host transport exposed the synthetic credential");
+            assert!(
+                !String::from_utf8_lossy(bytes).contains("fixture_credential_"),
+                "host transport exposed the synthetic credential"
+            );
         }
     }
     if let Some(error) = stopped {
@@ -349,16 +490,27 @@ fn capture(
         }
         return Err(error);
     }
-    Ok(PrivateCapture { stdout, stderr, exit_code })
+    Ok(PrivateCapture {
+        stdout,
+        stderr,
+        exit_code,
+    })
 }
 
 #[cfg(all(test, windows))]
 pub(super) fn suspended_cleanup_fixture(mut command: Command) {
-    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     let tree = ProcessTree::configure(&mut command).unwrap();
     let child = command.spawn().unwrap();
     // Exercise the same fallback as a failed Job assignment, before any resume.
-    let mut owned = OwnedChild { child, tree, cleaned: false };
+    let mut owned = OwnedChild {
+        child,
+        tree,
+        cleaned: false,
+    };
     assert_eq!(owned.cleanup(), Err(AccountExecutionError::CleanupFailed));
     assert!(owned.child.try_wait().unwrap().is_some());
 }
@@ -367,24 +519,30 @@ fn reader(
     mut pipe: impl Read + Send + 'static,
     cap: usize,
     overflow: Arc<AtomicBool>,
-) -> Result<thread::JoinHandle<Result<PrivateBytes, AccountExecutionError>>, AccountExecutionError> {
-    thread::Builder::new().name("tasks-account-pipe".into()).spawn(move || {
-        let mut bytes = PrivateBytes(Vec::with_capacity(cap.min(16 * 1024)));
-        let mut chunk = PrivateBytes(vec![0; 8192]);
-        loop {
-            let n = match pipe.read(&mut chunk.0) {
-                Ok(n) => n,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(AccountError::CommandFailed.into()),
-            };
-            if n == 0 { return Ok(bytes); }
-            if n > cap.saturating_sub(bytes.0.len()) {
-                overflow.store(true, Ordering::Release);
-                return Err(AccountError::MalformedResponse.into());
+) -> Result<thread::JoinHandle<Result<PrivateBytes, AccountExecutionError>>, AccountExecutionError>
+{
+    thread::Builder::new()
+        .name("tasks-account-pipe".into())
+        .spawn(move || {
+            let mut bytes = PrivateBytes(Vec::with_capacity(cap.min(16 * 1024)));
+            let mut chunk = PrivateBytes(vec![0; 8192]);
+            loop {
+                let n = match pipe.read(&mut chunk.0) {
+                    Ok(n) => n,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => return Err(AccountError::CommandFailed.into()),
+                };
+                if n == 0 {
+                    return Ok(bytes);
+                }
+                if n > cap.saturating_sub(bytes.0.len()) {
+                    overflow.store(true, Ordering::Release);
+                    return Err(AccountError::MalformedResponse.into());
+                }
+                bytes.0.extend_from_slice(&chunk.0[..n]);
             }
-            bytes.0.extend_from_slice(&chunk.0[..n]);
-        }
-    }).map_err(|_| AccountError::CommandFailed.into())
+        })
+        .map_err(|_| AccountError::CommandFailed.into())
 }
 
 #[cfg(test)]
@@ -405,8 +563,16 @@ pub(super) fn envelope_fixture(
     control: &AccountExecutionControl,
     wire_cap: usize,
 ) -> Result<Vec<u8>, AccountExecutionError> {
-    let mut result = capture(command, control, Instant::now() + control.timeout(), wire_cap, true)?;
-    if result.exit_code != Some(0) { return Err(AccountExecutionError::HostHelperUnavailable); }
+    let mut result = capture(
+        command,
+        control,
+        Instant::now() + control.timeout(),
+        wire_cap,
+        true,
+    )?;
+    if result.exit_code != Some(0) {
+        return Err(AccountExecutionError::HostHelperUnavailable);
+    }
     assert!(!String::from_utf8_lossy(&result.stderr.0).contains("fixture_credential_"));
     Ok(std::mem::take(&mut result.stdout.0))
 }

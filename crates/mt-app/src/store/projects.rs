@@ -670,13 +670,19 @@ pub enum ProjectPlacement<'a> {
 
 impl AppStore {
     pub(crate) fn project_ids_for_location(&self, location: &ProjectLocationKey) -> Vec<String> {
-        let mut ids = self.config.projects.iter().filter(|project| {
-            project_matches_location(
-                project,
-                self.onboarding_canonical_path_for_project(project),
-                location,
-            )
-        }).map(|project| project.id.clone()).collect::<Vec<_>>();
+        let mut ids = self
+            .config
+            .projects
+            .iter()
+            .filter(|project| {
+                project_matches_location(
+                    project,
+                    self.onboarding_canonical_path_for_project(project),
+                    location,
+                )
+            })
+            .map(|project| project.id.clone())
+            .collect::<Vec<_>>();
         ids.sort();
         ids
     }

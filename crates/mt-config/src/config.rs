@@ -1445,8 +1445,10 @@ mod tests {
                 root_project_id: "root".into(),
                 execution_host_id: host,
                 backend: WorktreeVisibilityBackend::Ssh {
-                    connection_id: "ssh".into(), host: "example.test".into(),
-                    port: 22, user: "developer".into(),
+                    connection_id: "ssh".into(),
+                    host: "example.test".into(),
+                    port: 22,
+                    user: "developer".into(),
                 },
                 github_host: "github.com".into(),
             },
@@ -1459,7 +1461,10 @@ mod tests {
         assert_eq!(entries[0]["scope"]["backend"].as_object().unwrap().len(), 5);
         assert_eq!(entries[0]["login"], "alice");
         let restored: AppConfig = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.tasks_account_selections, config.tasks_account_selections);
+        assert_eq!(
+            restored.tasks_account_selections,
+            config.tasks_account_selections
+        );
         assert_eq!(restored.default_shell, config.default_shell);
     }
 
@@ -1471,18 +1476,26 @@ mod tests {
         let mut loaded = store.load().unwrap();
         let host = ExecutionHostId::derive("fixture-host", &mt_identity::HostInstallId::new());
         for (project, login) in [("project-a", "alice"), ("project-b", "bob")] {
-            loaded.config.tasks_account_selections.push(TasksAccountSelection {
-                scope: TasksAccountScope {
-                    root_project_id: project.into(), execution_host_id: host.clone(),
-                    backend: WorktreeVisibilityBackend::Local, github_host: "github.com".into(),
-                },
-                login: login.into(),
-            });
+            loaded
+                .config
+                .tasks_account_selections
+                .push(TasksAccountSelection {
+                    scope: TasksAccountScope {
+                        root_project_id: project.into(),
+                        execution_host_id: host.clone(),
+                        backend: WorktreeVisibilityBackend::Local,
+                        github_host: "github.com".into(),
+                    },
+                    login: login.into(),
+                });
         }
         store.save(loaded.token, &loaded.config).unwrap();
         drop(store);
         let reopened = ConfigStore::at(path).load().unwrap();
-        assert_eq!(reopened.config.tasks_account_selections, loaded.config.tasks_account_selections);
+        assert_eq!(
+            reopened.config.tasks_account_selections,
+            loaded.config.tasks_account_selections
+        );
         assert_eq!(reopened.config.projects.len(), loaded.config.projects.len());
     }
 

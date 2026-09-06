@@ -12,9 +12,9 @@ use crate::Namespace;
 /// 命名空间总数（生成器对账用，测试断言防漂移）
 pub const NAMESPACE_COUNT: usize = 33;
 /// 中文条目总数
-pub const ZH_ENTRY_COUNT: usize = 952;
+pub const ZH_ENTRY_COUNT: usize = 968;
 /// 英文条目总数
-pub const EN_ENTRY_COUNT: usize = 952;
+pub const EN_ENTRY_COUNT: usize = 968;
 
 #[rustfmt::skip]
 static APP_ZH: &[(&str, &str)] = &[
@@ -296,7 +296,10 @@ static FILE_TREE_ZH: &[(&str, &str)] = &[
     ("operation.downloading", "正在下载…"),
     ("operation.failedMessage", "文件操作失败：{error}"),
     ("operation.failedTitle", "文件操作失败"),
+    ("operation.invalidName", "名称必须是单个文件名，不能包含路径分隔符、冒号或空字符。"),
+    ("operation.invalidTarget", "无法确定目标的父目录，请刷新后重试。"),
     ("operation.renaming", "正在重命名…"),
+    ("operation.sourceUnavailable", "文件操作来源已不可用，请刷新后重试。"),
     ("operation.summary", "完成 {completed} 项，跳过 {skipped} 项，失败 {failed} 项。"),
     ("operation.uploading", "正在上传…"),
     ("prompt.newFileMessage", "请输入文件名"),
@@ -373,7 +376,10 @@ static FILE_TREE_EN: &[(&str, &str)] = &[
     ("operation.downloading", "Downloading…"),
     ("operation.failedMessage", "File operation failed: {error}"),
     ("operation.failedTitle", "File Operation Failed"),
+    ("operation.invalidName", "Enter a single name without path separators, colons, or NUL characters."),
+    ("operation.invalidTarget", "The target parent directory is unavailable. Refresh and try again."),
     ("operation.renaming", "Renaming…"),
+    ("operation.sourceUnavailable", "The file operation source is unavailable. Refresh and try again."),
     ("operation.summary", "Completed {completed}, skipped {skipped}, failed {failed}."),
     ("operation.uploading", "Uploading…"),
     ("prompt.newFileMessage", "Enter a file name"),
@@ -919,6 +925,19 @@ static PROJECT_ONBOARDING_ZH: &[(&str, &str)] = &[
     ("hostStatus.ready", "已连接"),
     ("localHost", "本机"),
     ("manageRemoteHosts", "管理 SSH 连接"),
+    ("picker.empty", "此文件夹中没有子文件夹"),
+    ("picker.go", "打开路径"),
+    ("picker.home", "主目录"),
+    ("picker.invalidPath", "路径不存在或不是文件夹"),
+    ("picker.link", "链接"),
+    ("picker.loading", "正在读取文件夹…"),
+    ("picker.noMatches", "没有匹配的文件夹"),
+    ("picker.pathPlaceholder", "路径或文件夹名称"),
+    ("picker.permissionDenied", "无权读取此文件夹"),
+    ("picker.select", "选择文件夹"),
+    ("picker.title", "选择文件夹"),
+    ("picker.unavailable", "文件夹或执行主机不可用"),
+    ("picker.up", "上一级"),
     ("reconnect", "重新连接"),
     ("status.complete", "项目已添加"),
     ("status.running", "正在执行…"),
@@ -983,6 +1002,19 @@ static PROJECT_ONBOARDING_EN: &[(&str, &str)] = &[
     ("hostStatus.ready", "Connected"),
     ("localHost", "Local machine"),
     ("manageRemoteHosts", "Manage SSH connections"),
+    ("picker.empty", "This folder has no subfolders"),
+    ("picker.go", "Open path"),
+    ("picker.home", "Home directory"),
+    ("picker.invalidPath", "The path does not exist or is not a folder"),
+    ("picker.link", "Link"),
+    ("picker.loading", "Loading folders..."),
+    ("picker.noMatches", "No matching folders"),
+    ("picker.pathPlaceholder", "Path or folder name"),
+    ("picker.permissionDenied", "Permission denied for this folder"),
+    ("picker.select", "Select Folder"),
+    ("picker.title", "Select Folder"),
+    ("picker.unavailable", "The folder or execution host is unavailable"),
+    ("picker.up", "Parent directory"),
     ("reconnect", "Reconnect"),
     ("status.complete", "Project added"),
     ("status.running", "Running…"),

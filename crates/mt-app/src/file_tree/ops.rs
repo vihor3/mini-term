@@ -25,7 +25,14 @@ fn begin_tree_preflight(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<FileTreeOperationOwner> {
-    reserve_tree_operation(tree, target, FileTreeOperationPhase::Preflight, label, window, cx)
+    reserve_tree_operation(
+        tree,
+        target,
+        FileTreeOperationPhase::Preflight,
+        label,
+        window,
+        cx,
+    )
 }
 
 fn reserve_tree_operation(
@@ -98,7 +105,10 @@ fn retain_tree_preflight_for_choice(
             }
             return false;
         }
-        if !tree.operations.transition(owner, FileTreeOperationPhase::Choice) {
+        if !tree
+            .operations
+            .transition(owner, FileTreeOperationPhase::Choice)
+        {
             return false;
         }
         tree.operation_label = Some(t("fileTree", "conflict.title").to_string());
@@ -131,17 +141,29 @@ pub(super) fn spawn_tree_op(
                     }
                     return false;
                 }
-                if !tree.operations.transition(&owner, FileTreeOperationPhase::Running) {
+                if !tree
+                    .operations
+                    .transition(&owner, FileTreeOperationPhase::Running)
+                {
                     return false;
                 }
                 tree.operation_label = Some(label.to_string());
                 true
             });
-            if !started { return false; }
+            if !started {
+                return false;
+            }
             owner
         }
         None => {
-            let Some(owner) = reserve_tree_operation(&tree, &target, FileTreeOperationPhase::Running, label, window, cx) else {
+            let Some(owner) = reserve_tree_operation(
+                &tree,
+                &target,
+                FileTreeOperationPhase::Running,
+                label,
+                window,
+                cx,
+            ) else {
                 return false;
             };
             owner
@@ -574,7 +596,12 @@ pub(super) fn start_upload(
                                 );
                             },
                             move |_window, cx| {
-                                finish_tree_preflight(&cancel_tree, &cancel_owner, &cancel_target, cx);
+                                finish_tree_preflight(
+                                    &cancel_tree,
+                                    &cancel_owner,
+                                    &cancel_target,
+                                    cx,
+                                );
                             },
                             window,
                             cx,
@@ -631,7 +658,9 @@ fn run_download(
         None,
         t("fileTree", "operation.downloading").into(),
         move || {
-            for path in &remote_paths { remote_path_text(path)?; }
+            for path in &remote_paths {
+                remote_path_text(path)?;
+            }
             crate::remote_ssh::download_entries_at_epoch(
                 &conn,
                 expected_epoch,
@@ -696,9 +725,9 @@ pub(super) fn start_download(
     };
     let scan_dir = download_dir.clone();
     let scan_paths = remote_paths.clone();
-    let task = cx
-        .background_executor()
-        .spawn(async move { crate::remote_ssh::download_conflicts_for_files(&scan_dir, &scan_paths) });
+    let task = cx.background_executor().spawn(async move {
+        crate::remote_ssh::download_conflicts_for_files(&scan_dir, &scan_paths)
+    });
     window
         .spawn(cx, async move |cx| {
             let result = task.await;

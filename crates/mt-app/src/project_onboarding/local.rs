@@ -42,10 +42,7 @@ pub(crate) fn browse_local_directory(
         let home = local_browser_home(&location.source)?;
         let suffix = location.path.strip_prefix("~/").unwrap_or("");
         location.path = match &location.source {
-            DirectorySource::Local => Path::new(&home)
-                .join(suffix)
-                .to_string_lossy()
-                .into_owned(),
+            DirectorySource::Local => Path::new(&home).join(suffix).to_string_lossy().into_owned(),
             DirectorySource::Wsl { .. } => crate::remote_ssh::join_posix(&home, suffix),
             DirectorySource::Ssh { .. } => unreachable!(),
         };
@@ -77,8 +74,7 @@ pub(crate) fn browse_local_directory(
             "An absolute directory path is required",
         ));
     }
-    let canonical = fs::canonicalize(&host_path)
-        .map_err(DirectoryBrowseError::from_io)?;
+    let canonical = fs::canonicalize(&host_path).map_err(DirectoryBrowseError::from_io)?;
     // The shared Windows prefix helper is lossy. Reject unrepresentable
     // canonical targets before that conversion, not after it.
     browser_path_text(&canonical)?;
@@ -140,7 +136,9 @@ fn browser_path_text(path: &Path) -> Result<&str, DirectoryBrowseError> {
     #[cfg(windows)]
     for component in path.components() {
         if let std::path::Component::Normal(name) = component
-            && name.to_str().is_none_or(|name| validate_portable_basename(name).is_err())
+            && name
+                .to_str()
+                .is_none_or(|name| validate_portable_basename(name).is_err())
         {
             return Err(DirectoryBrowseError::new(
                 DirectoryBrowseErrorKind::InvalidPath,
@@ -158,8 +156,8 @@ fn browser_location_from_host_path(
     let path = browser_path_text(path)?;
     let path = match source {
         DirectorySource::Wsl { distro } => {
-            let wsl = mt_core::parse_wsl_unc(path)
-                .filter(|wsl| wsl.distro.eq_ignore_ascii_case(distro));
+            let wsl =
+                mt_core::parse_wsl_unc(path).filter(|wsl| wsl.distro.eq_ignore_ascii_case(distro));
             wsl.ok_or_else(|| {
                 DirectoryBrowseError::new(
                     DirectoryBrowseErrorKind::Unavailable,
@@ -195,7 +193,11 @@ fn local_browser_home(source: &DirectorySource) -> Result<String, DirectoryBrows
                 )
             }),
         DirectorySource::Wsl { distro } => {
-            DirectoryLocation { source: source.clone(), path: "/".into() }.host_path()?;
+            DirectoryLocation {
+                source: source.clone(),
+                path: "/".into(),
+            }
+            .host_path()?;
             let output = execute_pre_project_local_command(
                 &PreProjectLocalContext::Wsl {
                     distro: distro.clone(),
@@ -287,7 +289,9 @@ pub(crate) fn local_browser_places() -> Vec<(String, DirectoryLocation)> {
         places.push((
             format!("WSL: {}", distro.name),
             DirectoryLocation {
-                source: DirectorySource::Wsl { distro: distro.name },
+                source: DirectorySource::Wsl {
+                    distro: distro.name,
+                },
                 path: "~".into(),
             },
         ));
@@ -766,9 +770,16 @@ mod tests {
         let listing = browse_local_directory(&DirectoryLocation {
             source: DirectorySource::Local,
             path: root.to_str().unwrap().into(),
-        }).unwrap();
-        assert_eq!(listing.directories.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
-            [".git", ".hidden", "project2", "project10"]);
+        })
+        .unwrap();
+        assert_eq!(
+            listing
+                .directories
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            [".git", ".hidden", "project2", "project10"]
+        );
         let empty = browse_local_directory(&listing.directories[1].location).unwrap();
         assert!(empty.directories.is_empty());
         assert!(!root.join(".hidden").join(".git").exists());
@@ -789,37 +800,82 @@ mod tests {
         let listing = browse_local_directory(&DirectoryLocation {
             source: DirectorySource::Local,
             path: root.to_str().unwrap().into(),
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(listing.directories.len(), 2);
-        assert!(listing.directories.iter().any(|entry| entry.name == "directory-link" && entry.is_symlink));
+        assert!(
+            listing
+                .directories
+                .iter()
+                .any(|entry| entry.name == "directory-link" && entry.is_symlink)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn browser_projects_wsl_identity_and_classifies_typed_local_errors() {
-        let source = DirectorySource::Wsl { distro: "Ubuntu".into() };
-        let location = browser_location_from_host_path(&source, Path::new(r"\\wsl.localhost\Ubuntu\home\User")).unwrap();
+        let source = DirectorySource::Wsl {
+            distro: "Ubuntu".into(),
+        };
+        let location = browser_location_from_host_path(
+            &source,
+            Path::new(r"\\wsl.localhost\Ubuntu\home\User"),
+        )
+        .unwrap();
         assert_eq!(location.path, "/home/User");
         assert_eq!(location.source, source);
-        assert!(browser_location_from_host_path(&source, Path::new(r"\\wsl$\Debian\home\User")).is_err());
+        assert!(
+            browser_location_from_host_path(&source, Path::new(r"\\wsl$\Debian\home\User"))
+                .is_err()
+        );
         assert!(browser_location_from_host_path(&source, Path::new("/client/home")).is_err());
         for (io_kind, expected) in [
-            (std::io::ErrorKind::PermissionDenied, DirectoryBrowseErrorKind::PermissionDenied),
-            (std::io::ErrorKind::NotFound, DirectoryBrowseErrorKind::InvalidPath),
-            (std::io::ErrorKind::NotADirectory, DirectoryBrowseErrorKind::InvalidPath),
-            (std::io::ErrorKind::TimedOut, DirectoryBrowseErrorKind::Unavailable),
+            (
+                std::io::ErrorKind::PermissionDenied,
+                DirectoryBrowseErrorKind::PermissionDenied,
+            ),
+            (
+                std::io::ErrorKind::NotFound,
+                DirectoryBrowseErrorKind::InvalidPath,
+            ),
+            (
+                std::io::ErrorKind::NotADirectory,
+                DirectoryBrowseErrorKind::InvalidPath,
+            ),
+            (
+                std::io::ErrorKind::TimedOut,
+                DirectoryBrowseErrorKind::Unavailable,
+            ),
         ] {
-            assert_eq!(DirectoryBrowseError::from_io(std::io::Error::from(io_kind)).kind, expected);
+            assert_eq!(
+                DirectoryBrowseError::from_io(std::io::Error::from(io_kind)).kind,
+                expected
+            );
         }
     }
 
     #[test]
     fn browser_wsl_home_removes_only_the_record_terminator_and_never_rewrites_path_data() {
-        assert_eq!(parse_wsl_browser_path(b"/home/User\n").unwrap(), "/home/User");
+        assert_eq!(
+            parse_wsl_browser_path(b"/home/User\n").unwrap(),
+            "/home/User"
+        );
         assert_eq!(parse_wsl_browser_path(b"/home/User").unwrap(), "/home/User");
-        assert_eq!(parse_wsl_browser_path(b"/home/with space \n").unwrap(), "/home/with space ");
-        for output in [b"/home/User\n\n".as_slice(), b"/home/User\r\n", b"/home/\xff\n", b"relative\n", b"/nul\0path\n"] {
-            assert_eq!(parse_wsl_browser_path(output).unwrap_err().kind, DirectoryBrowseErrorKind::InvalidPath);
+        assert_eq!(
+            parse_wsl_browser_path(b"/home/with space \n").unwrap(),
+            "/home/with space "
+        );
+        for output in [
+            b"/home/User\n\n".as_slice(),
+            b"/home/User\r\n",
+            b"/home/\xff\n",
+            b"relative\n",
+            b"/nul\0path\n",
+        ] {
+            assert_eq!(
+                parse_wsl_browser_path(output).unwrap_err().kind,
+                DirectoryBrowseErrorKind::InvalidPath
+            );
         }
     }
 
@@ -833,7 +889,10 @@ mod tests {
             stdout_truncated: false,
             stderr_truncated: false,
         };
-        assert_eq!(wsl_browser_command_path(&output).unwrap(), "/physical/parent");
+        assert_eq!(
+            wsl_browser_command_path(&output).unwrap(),
+            "/physical/parent"
+        );
         for index in 0..5 {
             let mut failed = output.clone();
             match index {
@@ -843,7 +902,10 @@ mod tests {
                 3 => failed.exit_code = Some(1),
                 _ => failed.exit_code = None,
             }
-            assert_eq!(wsl_browser_command_path(&failed).unwrap_err().kind, DirectoryBrowseErrorKind::Unavailable);
+            assert_eq!(
+                wsl_browser_command_path(&failed).unwrap_err().kind,
+                DirectoryBrowseErrorKind::Unavailable
+            );
         }
     }
 
@@ -852,7 +914,10 @@ mod tests {
     fn browser_rejects_non_unicode_canonical_paths_before_lossy_prefix_conversion() {
         use std::os::unix::ffi::OsStringExt;
         let path = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/bad-\xff".to_vec()));
-        assert_eq!(browser_path_text(&path).unwrap_err().kind, DirectoryBrowseErrorKind::InvalidPath);
+        assert_eq!(
+            browser_path_text(&path).unwrap_err().kind,
+            DirectoryBrowseErrorKind::InvalidPath
+        );
         assert!(browser_location_from_host_path(&DirectorySource::Local, &path).is_err());
     }
 
@@ -863,18 +928,33 @@ mod tests {
         let mut units: Vec<u16> = r"\\?\C:\directory-".encode_utf16().collect();
         units.push(0xD800);
         let path = PathBuf::from(std::ffi::OsString::from_wide(&units));
-        assert_eq!(browser_path_text(&path).unwrap_err().kind, DirectoryBrowseErrorKind::InvalidPath);
+        assert_eq!(
+            browser_path_text(&path).unwrap_err().kind,
+            DirectoryBrowseErrorKind::InvalidPath
+        );
         assert!(browser_location_from_host_path(&DirectorySource::Local, &path).is_err());
     }
 
     #[cfg(windows)]
     #[test]
     fn browser_rejects_verbatim_only_names_before_native_registration_reinterpretation() {
-        for path in [r"\\?\C:\ordinary\directory", r"\\?\UNC\server\share\ordinary", r"\\?\UNC\wsl$\Ubuntu\home\User"] {
+        for path in [
+            r"\\?\C:\ordinary\directory",
+            r"\\?\UNC\server\share\ordinary",
+            r"\\?\UNC\wsl$\Ubuntu\home\User",
+        ] {
             assert_eq!(browser_path_text(Path::new(path)).unwrap(), path);
         }
-        for path in [r"\\?\C:\directory.", r"\\?\C:\directory ", r"\\?\C:\CON", r"\\?\UNC\server\share\directory."] {
-            assert_eq!(browser_path_text(Path::new(path)).unwrap_err().kind, DirectoryBrowseErrorKind::InvalidPath);
+        for path in [
+            r"\\?\C:\directory.",
+            r"\\?\C:\directory ",
+            r"\\?\C:\CON",
+            r"\\?\UNC\server\share\directory.",
+        ] {
+            assert_eq!(
+                browser_path_text(Path::new(path)).unwrap_err().kind,
+                DirectoryBrowseErrorKind::InvalidPath
+            );
         }
     }
 

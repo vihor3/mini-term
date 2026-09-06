@@ -31,18 +31,18 @@ use gpui::{
 use mt_identity::WorktreeId;
 use mt_project::git::{BranchInfo, GitCommitInfo};
 
+use crate::git_backend::{GitRead, GitReadValue, GitRepository};
 use crate::git_graph::{
     self, GRAPH_ROW_HEIGHT, GraphLayout, GraphRow, SegPath, palette_color, segment_path,
 };
-use crate::git_panel::{GitScope, swap_worktree_scope};
 use crate::git_panel::host_ui;
-use crate::git_backend::{GitRead, GitReadValue, GitRepository};
-use mt_project::git::cli::{GitRef, ObjectId, RepositoryAuthority};
+use crate::git_panel::{GitScope, swap_worktree_scope};
 use crate::i18n::{t, tr};
 use crate::menu;
 use crate::store::AppStore;
 use crate::ui;
 use crate::{git_diff, git_watch};
+use mt_project::git::cli::{GitRef, ObjectId, RepositoryAuthority};
 
 /// 每页条数(`GitHistoryContent.tsx:244`)。
 const PAGE_SIZE: usize = 30;
@@ -97,29 +97,52 @@ fn merge_commits(commits: &mut Vec<GitCommitInfo>, page: Vec<GitCommitInfo>, lim
     let before = commits.len();
     let full_page = page.len() >= limit;
     for commit in page {
-        if !commits.iter().any(|existing| existing.hash == commit.hash) { commits.push(commit); }
+        if !commits.iter().any(|existing| existing.hash == commit.hash) {
+            commits.push(commit);
+        }
     }
     full_page && commits.len() > before
 }
 
 fn history_page_limit(first: bool, replace: bool, reset_scroll: bool, loaded: usize) -> usize {
-    if first && replace && !reset_scroll { loaded.max(PAGE_SIZE) } else { PAGE_SIZE }
+    if first && replace && !reset_scroll {
+        loaded.max(PAGE_SIZE)
+    } else {
+        PAGE_SIZE
+    }
 }
 
-fn history_read(commits: &[GitCommitInfo], branches: &[BranchInfo], view_branch: Option<&str>, first: bool, limit: usize) -> Result<GitRead, String> {
+fn history_read(
+    commits: &[GitCommitInfo],
+    branches: &[BranchInfo],
+    view_branch: Option<&str>,
+    first: bool,
+    limit: usize,
+) -> Result<GitRead, String> {
     let branch = match view_branch.filter(|_| first) {
         Some(name) => {
-            let branch = branches.iter().find(|branch| branch.name == name)
+            let branch = branches
+                .iter()
+                .find(|branch| branch.name == name)
                 .ok_or("Selected history branch is unavailable")?;
             Some(GitRef::from_branch(branch).map_err(|error| error.to_string())?)
         }
         None => None,
     };
-    let before = if first { None } else {
-        commits.last().map(|commit| ObjectId::parse(&commit.hash))
-            .transpose().map_err(|error| error.to_string())?
+    let before = if first {
+        None
+    } else {
+        commits
+            .last()
+            .map(|commit| ObjectId::parse(&commit.hash))
+            .transpose()
+            .map_err(|error| error.to_string())?
     };
-    Ok(GitRead::History { before, branch, limit })
+    Ok(GitRead::History {
+        before,
+        branch,
+        limit,
+    })
 }
 
 pub struct GitHistoryContent {
@@ -240,7 +263,9 @@ impl GitHistoryContent {
             let current_key = self.scope.cache_key().cloned();
             let next_key = scope.cache_key().cloned();
             if current_key.is_some() || next_key.is_some() {
-                if let Some(key) = &current_key { self.cache_sources.insert(key.clone(), self.scope.clone()); }
+                if let Some(key) = &current_key {
+                    self.cache_sources.insert(key.clone(), self.scope.clone());
+                }
                 let current_state = self.take_scope_state();
                 let (mut state, was_cached) = swap_worktree_scope(
                     &mut self.scope_cache,
@@ -249,8 +274,11 @@ impl GitHistoryContent {
                     current_state,
                     GitHistoryScopeState::empty,
                 );
-                if !next_key.as_ref().and_then(|key| self.cache_sources.get(key))
-                    .is_some_and(|saved| saved.same_source(&scope)) {
+                if !next_key
+                    .as_ref()
+                    .and_then(|key| self.cache_sources.get(key))
+                    .is_some_and(|saved| saved.same_source(&scope))
+                {
                     state = GitHistoryScopeState::empty();
                 }
                 restored = was_cached;
@@ -279,10 +307,20 @@ impl GitHistoryContent {
                     || a.is_remote != b.is_remote
                     || a.commit_hash != b.commit_hash
             });
-        let authority = self.repository.as_ref().map(|repo| repo.authority().clone());
-        let authority_changed = authority.as_ref().zip(self.repo_authority.as_ref()).is_some_and(|(new, old)| new != old);
-        let route_changed = self.repo_path != repo_path || self.view_branch.as_deref() != view_branch || authority_changed;
-        if authority.is_some() { self.repo_authority = authority; }
+        let authority = self
+            .repository
+            .as_ref()
+            .map(|repo| repo.authority().clone());
+        let authority_changed = authority
+            .as_ref()
+            .zip(self.repo_authority.as_ref())
+            .is_some_and(|(new, old)| new != old);
+        let route_changed = self.repo_path != repo_path
+            || self.view_branch.as_deref() != view_branch
+            || authority_changed;
+        if authority.is_some() {
+            self.repo_authority = authority;
+        }
         self.repo_path = repo_path.to_string();
         self.view_branch = view_branch.map(str::to_string);
         if branches_changed {
@@ -301,7 +339,9 @@ impl GitHistoryContent {
             self.loading = false;
             self.refresh_again = false;
             self.reload(cx);
-        } else if became_ready || (scope_changed && (!restored || refresh_needed) && !self.repo_path.is_empty()) {
+        } else if became_ready
+            || (scope_changed && (!restored || refresh_needed) && !self.repo_path.is_empty())
+        {
             self.refresh(cx);
         } else if scope_changed {
             cx.notify();
@@ -314,7 +354,10 @@ impl GitHistoryContent {
     /// 全部丢弃 —— 这里的效果一致(规格 §11 第 26 条,原版行为,照抄)。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.reset_scroll = true;
-        if self.loading { self.refresh_again = true; return; }
+        if self.loading {
+            self.refresh_again = true;
+            return;
+        }
         self.request = self.request.wrapping_add(1);
         // ⚠️ loading 必须复位:令牌已 +1,在途响应注定被丢弃,而丢弃分支
         // 不会走到 `loading = false` —— 不复位的话这次 load_page 被 loading
@@ -324,7 +367,10 @@ impl GitHistoryContent {
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.loading { self.refresh_again = true; return; }
+        if self.loading {
+            self.refresh_again = true;
+            return;
+        }
         self.request = self.request.wrapping_add(1);
         self.loading = false;
         self.load_page(true, true, cx);
@@ -349,16 +395,36 @@ impl GitHistoryContent {
         if self.repo_path.is_empty() || self.loading {
             return;
         }
-        let Some(repository) = self.repository.as_ref().filter(|repo| host_ui::active_repository(repo, &self.store, cx)).cloned() else { return; };
+        let Some(repository) = self
+            .repository
+            .as_ref()
+            .filter(|repo| host_ui::active_repository(repo, &self.store, cx))
+            .cloned()
+        else {
+            return;
+        };
         let owner = self.current_owner();
         let limit = history_page_limit(first, replace, self.reset_scroll, self.commits.len());
-        let operation = match history_read(&self.commits, &self.branches, self.view_branch.as_deref(), first, limit) {
+        let operation = match history_read(
+            &self.commits,
+            &self.branches,
+            self.view_branch.as_deref(),
+            first,
+            limit,
+        ) {
             Ok(operation) => operation,
-            Err(error) => { self.error = Some(error); cx.notify(); return; }
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
         };
         let request = match repository.request(operation) {
             Ok(request) => request,
-            Err(error) => { self.error = Some(error.to_string()); return; }
+            Err(error) => {
+                self.error = Some(error.to_string());
+                return;
+            }
         };
         self.loading = true;
         self.request = request.id();
@@ -369,7 +435,10 @@ impl GitHistoryContent {
                 .spawn(async move { request.execute() })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
-                if this.request != req || !this.owner_matches(&owner) || !owner.scope.matches_active(&this.store, cx) {
+                if this.request != req
+                    || !this.owner_matches(&owner)
+                    || !owner.scope.matches_active(&this.store, cx)
+                {
                     return;
                 }
                 this.loading = false;
@@ -379,9 +448,17 @@ impl GitHistoryContent {
                 }
                 match result {
                     Ok(result) => {
-                        let Some(current) = &this.repository else { return; };
-                        if !host_ui::active_repository(current, &this.store, cx) || !result.is_current(current, req) { return; }
-                        let GitReadValue::History(page) = result.value else { return; };
+                        let Some(current) = &this.repository else {
+                            return;
+                        };
+                        if !host_ui::active_repository(current, &this.store, cx)
+                            || !result.is_current(current, req)
+                        {
+                            return;
+                        }
+                        let GitReadValue::History(page) = result.value else {
+                            return;
+                        };
                         this.error = None;
                         if replace {
                             this.commits.clear();
@@ -422,28 +499,49 @@ impl GitHistoryContent {
         if !self.owner_matches(&owner) {
             return;
         }
-        let Some(repository) = self.repository.as_ref().filter(|repo| host_ui::active_repository(repo, &self.store, cx)).cloned() else { return; };
-        let commit = match ObjectId::parse(&hash) { Ok(commit) => commit, Err(_) => return };
-        let request = match repository.request(GitRead::CommitFiles { commit }) { Ok(request) => request, Err(_) => return };
+        let Some(repository) = self
+            .repository
+            .as_ref()
+            .filter(|repo| host_ui::active_repository(repo, &self.store, cx))
+            .cloned()
+        else {
+            return;
+        };
+        let commit = match ObjectId::parse(&hash) {
+            Ok(commit) => commit,
+            Err(_) => return,
+        };
+        let request = match repository.request(GitRead::CommitFiles { commit }) {
+            Ok(request) => request,
+            Err(_) => return,
+        };
         self.file_request = request.id();
         let req = self.file_request;
         let store = self.store.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let files =
-                cx.background_executor()
-                    .spawn(async move { request.execute() })
-                    .await;
+            let files = cx
+                .background_executor()
+                .spawn(async move { request.execute() })
+                .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if !this.owner_matches(&owner) || this.file_request != req || !host_ui::active_repository(&repository, &this.store, cx) {
+                if !this.owner_matches(&owner)
+                    || this.file_request != req
+                    || !host_ui::active_repository(&repository, &this.store, cx)
+                {
                     return;
                 }
                 match files {
                     Ok(result) if result.is_current(&repository, req) => {
                         if let GitReadValue::CommitFiles(files) = result.value {
-                            git_diff::open_repository_commit_diff(store, repository, hash, message, files, window, cx);
+                            git_diff::open_repository_commit_diff(
+                                store, repository, hash, message, files, window, cx,
+                            );
                         }
                     }
-                    Err(error) => { this.error = Some(error.to_string()); cx.notify(); }
+                    Err(error) => {
+                        this.error = Some(error.to_string());
+                        cx.notify();
+                    }
                     _ => {}
                 }
             });
@@ -503,7 +601,13 @@ impl Render for GitHistoryContent {
             .px(px(4.0))
             .py(px(4.0));
         if let Some(error) = &self.error {
-            body = body.child(div().p(px(8.0)).text_size(ui::font_px(11.0)).text_color(ui::color_error()).child(error.clone()));
+            body = body.child(
+                div()
+                    .p(px(8.0))
+                    .text_size(ui::font_px(11.0))
+                    .text_color(ui::color_error())
+                    .child(error.clone()),
+            );
         }
 
         if self.repo_path.is_empty() {
@@ -516,7 +620,9 @@ impl Render for GitHistoryContent {
         }
 
         if self.commits.is_empty() {
-            if self.error.is_some() { return div().size_full().flex().flex_col().child(body); }
+            if self.error.is_some() {
+                return div().size_full().flex().flex_col().child(body);
+            }
             return div()
                 .size_full()
                 .flex()
@@ -1053,7 +1159,9 @@ mod tests {
 
     #[test]
     fn restored_history_depth_uses_the_requested_page_limit() {
-        let page: Vec<_> = (0..45).map(|index| test_commit(&format!("c{index}"), &[])).collect();
+        let page: Vec<_> = (0..45)
+            .map(|index| test_commit(&format!("c{index}"), &[]))
+            .collect();
         let mut commits = Vec::new();
         assert!(!merge_commits(&mut commits, page.clone(), 60));
         assert_eq!(commits.len(), 45);
@@ -1094,7 +1202,11 @@ mod tests {
             is_head: false,
             commit_hash: "a".repeat(40),
         };
-        let GitRead::History { branch, before, .. } = history_read(&[], &[branch], Some("origin/main"), true, PAGE_SIZE).unwrap() else { panic!("not a history read"); };
+        let GitRead::History { branch, before, .. } =
+            history_read(&[], &[branch], Some("origin/main"), true, PAGE_SIZE).unwrap()
+        else {
+            panic!("not a history read");
+        };
         assert_eq!(branch.unwrap().as_str(), "refs/remotes/origin/main");
         assert!(before.is_none());
         assert!(history_read(&[], &[], Some("(aaaaaaa)"), true, PAGE_SIZE).is_err());
@@ -1104,7 +1216,11 @@ mod tests {
     fn history_continuation_captures_last_commit_not_one_of_its_parents() {
         let last = "a".repeat(40);
         let commits = vec![test_commit(&last, &[&"b".repeat(40), &"c".repeat(40)])];
-        let GitRead::History { branch, before, .. } = history_read(&commits, &[], Some("main"), false, PAGE_SIZE).unwrap() else { panic!("not a history read"); };
+        let GitRead::History { branch, before, .. } =
+            history_read(&commits, &[], Some("main"), false, PAGE_SIZE).unwrap()
+        else {
+            panic!("not a history read");
+        };
         assert!(branch.is_none());
         assert_eq!(before.unwrap().as_str(), last);
     }

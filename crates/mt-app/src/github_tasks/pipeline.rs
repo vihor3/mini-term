@@ -4,9 +4,9 @@
 use std::time::Duration;
 
 use mt_github::{
-    AccountCapability, CommandExecutionError, CommandOutput, CommandStage, GitHubAccountIdentity,
-    GitHubError, GitHubErrorKind, GitHubRepoIdentity, GitHubWorkItemDetail, GitHubWorkItemSummary,
-    KnownGitHubAccounts, SelectedAccountRequestPlan, WorkItemKind, COMMAND_OUTPUT_LIMIT,
+    AccountCapability, COMMAND_OUTPUT_LIMIT, CommandExecutionError, CommandOutput, CommandStage,
+    GitHubAccountIdentity, GitHubError, GitHubErrorKind, GitHubRepoIdentity, GitHubWorkItemDetail,
+    GitHubWorkItemSummary, KnownGitHubAccounts, SelectedAccountRequestPlan, WorkItemKind,
     classify_execution_error, discover_remote_plan, parse_remote_url, parse_work_item_detail,
     parse_work_item_list, require_success,
 };
@@ -26,36 +26,69 @@ const ACCOUNT_TIMEOUT: Duration = Duration::from_secs(12);
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub(super) trait TasksExecutor {
-    fn origin(&mut self, snapshot: &ProjectExecutionSnapshot)
-        -> Result<HostCommandResult, CommandExecutionError>;
-    fn capability(&mut self, snapshot: &ProjectExecutionSnapshot, capability: AccountCapability,
-        control: &AccountExecutionControl) -> AccountHostResult<()>;
-    fn accounts(&mut self, snapshot: &ProjectExecutionSnapshot, host: &str,
-        control: &AccountExecutionControl) -> AccountHostResult<KnownGitHubAccounts>;
-    fn selected(&mut self, snapshot: &ProjectExecutionSnapshot, plan: &SelectedAccountRequestPlan,
-        control: &AccountExecutionControl) -> AccountHostResult<CommandOutput>;
+    fn origin(
+        &mut self,
+        snapshot: &ProjectExecutionSnapshot,
+    ) -> Result<HostCommandResult, CommandExecutionError>;
+    fn capability(
+        &mut self,
+        snapshot: &ProjectExecutionSnapshot,
+        capability: AccountCapability,
+        control: &AccountExecutionControl,
+    ) -> AccountHostResult<()>;
+    fn accounts(
+        &mut self,
+        snapshot: &ProjectExecutionSnapshot,
+        host: &str,
+        control: &AccountExecutionControl,
+    ) -> AccountHostResult<KnownGitHubAccounts>;
+    fn selected(
+        &mut self,
+        snapshot: &ProjectExecutionSnapshot,
+        plan: &SelectedAccountRequestPlan,
+        control: &AccountExecutionControl,
+    ) -> AccountHostResult<CommandOutput>;
 }
 
 pub(super) struct HostExecutor;
 
 impl TasksExecutor for HostExecutor {
-    fn origin(&mut self, snapshot: &ProjectExecutionSnapshot)
-        -> Result<HostCommandResult, CommandExecutionError> {
-        execute_host_command(snapshot, &discover_remote_plan(), ORIGIN_TIMEOUT, COMMAND_OUTPUT_LIMIT)
+    fn origin(
+        &mut self,
+        snapshot: &ProjectExecutionSnapshot,
+    ) -> Result<HostCommandResult, CommandExecutionError> {
+        execute_host_command(
+            snapshot,
+            &discover_remote_plan(),
+            ORIGIN_TIMEOUT,
+            COMMAND_OUTPUT_LIMIT,
+        )
     }
 
-    fn capability(&mut self, snapshot: &ProjectExecutionSnapshot, capability: AccountCapability,
-        control: &AccountExecutionControl) -> AccountHostResult<()> {
+    fn capability(
+        &mut self,
+        snapshot: &ProjectExecutionSnapshot,
+        capability: AccountCapability,
+        control: &AccountExecutionControl,
+    ) -> AccountHostResult<()> {
         probe_account_capability(snapshot, capability, control)
     }
 
-    fn accounts(&mut self, snapshot: &ProjectExecutionSnapshot, host: &str,
-        control: &AccountExecutionControl) -> AccountHostResult<KnownGitHubAccounts> {
+    fn accounts(
+        &mut self,
+        snapshot: &ProjectExecutionSnapshot,
+        host: &str,
+        control: &AccountExecutionControl,
+    ) -> AccountHostResult<KnownGitHubAccounts> {
         discover_accounts(snapshot, host, control)
     }
 
-    fn selected(&mut self, snapshot: &ProjectExecutionSnapshot, plan: &SelectedAccountRequestPlan,
-        control: &AccountExecutionControl) -> AccountHostResult<CommandOutput> {
+    fn selected(
+        &mut self,
+        snapshot: &ProjectExecutionSnapshot,
+        plan: &SelectedAccountRequestPlan,
+        control: &AccountExecutionControl,
+    ) -> AccountHostResult<CommandOutput> {
         execute_selected_account(snapshot, plan, control)
     }
 }
@@ -73,7 +106,10 @@ pub(super) struct PreparedAccounts {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum ReadTarget { List(WorkItemKind), Detail(WorkItemKind, u64) }
+pub(super) enum ReadTarget {
+    List(WorkItemKind),
+    Detail(WorkItemKind, u64),
+}
 
 #[derive(Debug)]
 pub(super) enum ReadData {
@@ -98,7 +134,9 @@ impl<E: TasksExecutor> Pipeline<'_, E> {
     fn check(&self) -> Result<(), TasksError> {
         if self.cancellation.is_cancelled() {
             Err(AccountExecutionError::Cancelled.into())
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
 
     fn observe(&mut self, epoch: Option<u64>) -> Result<(), TasksError> {
@@ -109,7 +147,10 @@ impl<E: TasksExecutor> Pipeline<'_, E> {
             if changed {
                 return Err(TasksError::changed());
             }
-        } else if matches!(self.snapshot.backend.signature(), ExecutionBackendSignature::Ssh { .. }) {
+        } else if matches!(
+            self.snapshot.backend.signature(),
+            ExecutionBackendSignature::Ssh { .. }
+        ) {
             return Err(TasksError::changed());
         }
         Ok(())
@@ -117,7 +158,11 @@ impl<E: TasksExecutor> Pipeline<'_, E> {
 
     fn control(&self, timeout: Duration) -> Result<AccountExecutionControl, TasksError> {
         self.check()?;
-        Ok(AccountExecutionControl::new(timeout, self.cancellation.clone(), self.epoch)?)
+        Ok(AccountExecutionControl::new(
+            timeout,
+            self.cancellation.clone(),
+            self.epoch,
+        )?)
     }
 
     fn account_result<T>(&mut self, result: AccountHostResult<T>) -> Result<T, TasksError> {
@@ -126,24 +171,37 @@ impl<E: TasksExecutor> Pipeline<'_, E> {
             self.observe(result.observed_connection_epoch)?;
         }
         self.check()?;
-        if result.result.is_ok() && matches!(self.snapshot.backend.signature(),
-            ExecutionBackendSignature::Ssh { .. }) && result.observed_connection_epoch.is_none() {
+        if result.result.is_ok()
+            && matches!(
+                self.snapshot.backend.signature(),
+                ExecutionBackendSignature::Ssh { .. }
+            )
+            && result.observed_connection_epoch.is_none()
+        {
             return Err(TasksError::changed());
         }
         result.result.map_err(Into::into)
     }
 
-    fn origin(&mut self, expected: Option<&GitHubRepoIdentity>) -> Result<GitHubRepoIdentity, TasksError> {
+    fn origin(
+        &mut self,
+        expected: Option<&GitHubRepoIdentity>,
+    ) -> Result<GitHubRepoIdentity, TasksError> {
         self.check()?;
-        let output = self.executor.origin(self.snapshot)
+        let output = self
+            .executor
+            .origin(self.snapshot)
             .map_err(|error| classify_execution_error(CommandStage::DiscoverRemote, &error))?;
         self.observe(output.observed_connection_epoch)?;
         require_success(CommandStage::DiscoverRemote, &output.output)?;
         let text = std::str::from_utf8(&output.output.stdout)
             .map_err(|_| GitHubError::malformed("Git remote discovery"))?;
         let repository = parse_remote_url(text).map_err(|_| {
-            GitHubError::new(GitHubErrorKind::NoGitHubRemote,
-                "The origin remote is not a supported GitHub repository", true)
+            GitHubError::new(
+                GitHubErrorKind::NoGitHubRemote,
+                "The origin remote is not a supported GitHub repository",
+                true,
+            )
         })?;
         if expected.is_some_and(|expected| *expected != repository) {
             return Err(GitHubError::repository_changed().into());
@@ -164,31 +222,54 @@ impl<E: TasksExecutor> Pipeline<'_, E> {
     }
 }
 
-pub(super) fn prepare_with<E: TasksExecutor>(snapshot: &ProjectExecutionSnapshot,
-    cancellation: &AccountCancellation, executor: &mut E) -> PipelineCompletion<PreparedAccounts> {
-    let mut pipeline = Pipeline { snapshot, cancellation, executor, epoch: None };
+pub(super) fn prepare_with<E: TasksExecutor>(
+    snapshot: &ProjectExecutionSnapshot,
+    cancellation: &AccountCancellation,
+    executor: &mut E,
+) -> PipelineCompletion<PreparedAccounts> {
+    let mut pipeline = Pipeline {
+        snapshot,
+        cancellation,
+        executor,
+        epoch: None,
+    };
     let mut repository = None;
     let result = (|| {
         let repo = pipeline.origin(None)?;
         repository = Some(repo.clone());
-        for capability in [AccountCapability::AuthStatusJson, AccountCapability::NamedAccountLookup] {
+        for capability in [
+            AccountCapability::AuthStatusJson,
+            AccountCapability::NamedAccountLookup,
+        ] {
             let control = pipeline.control(ACCOUNT_TIMEOUT)?;
             let result = pipeline.executor.capability(snapshot, capability, &control);
             pipeline.account_result(result)?;
         }
         let accounts = pipeline.accounts(repo.host())?;
-        Ok(PreparedAccounts { repository: repo, accounts })
+        Ok(PreparedAccounts {
+            repository: repo,
+            accounts,
+        })
     })();
     let result = finish_origin(&mut pipeline, repository.as_ref(), result);
-    PipelineCompletion { result, repository,
-        observed_source: snapshot.observed_source_signature(pipeline.epoch) }
+    PipelineCompletion {
+        result,
+        repository,
+        observed_source: snapshot.observed_source_signature(pipeline.epoch),
+    }
 }
 
 // Even an account failure is attached only to the origin that authorized it.
-fn finish_origin<E: TasksExecutor, T>(pipeline: &mut Pipeline<'_, E>,
-    repository: Option<&GitHubRepoIdentity>, result: Result<T, TasksError>) -> Result<T, TasksError> {
+fn finish_origin<E: TasksExecutor, T>(
+    pipeline: &mut Pipeline<'_, E>,
+    repository: Option<&GitHubRepoIdentity>,
+    result: Result<T, TasksError>,
+) -> Result<T, TasksError> {
     pipeline.check()?;
-    if matches!(&result, Err(TasksError::Account(AccountExecutionError::ContextChanged))) {
+    if matches!(
+        &result,
+        Err(TasksError::Account(AccountExecutionError::ContextChanged))
+    ) {
         return result;
     }
     if let Some(repository) = repository {
@@ -197,20 +278,34 @@ fn finish_origin<E: TasksExecutor, T>(pipeline: &mut Pipeline<'_, E>,
     result
 }
 
-pub(super) fn read_with<E: TasksExecutor>(snapshot: &ProjectExecutionSnapshot,
-    repository: &GitHubRepoIdentity, identity: &GitHubAccountIdentity, target: ReadTarget,
-    cancellation: &AccountCancellation, executor: &mut E) -> PipelineCompletion<ReadSuccess> {
+pub(super) fn read_with<E: TasksExecutor>(
+    snapshot: &ProjectExecutionSnapshot,
+    repository: &GitHubRepoIdentity,
+    identity: &GitHubAccountIdentity,
+    target: ReadTarget,
+    cancellation: &AccountCancellation,
+    executor: &mut E,
+) -> PipelineCompletion<ReadSuccess> {
     let epoch = match snapshot.backend.signature() {
-        ExecutionBackendSignature::Ssh { connection_epoch, .. } => connection_epoch,
+        ExecutionBackendSignature::Ssh {
+            connection_epoch, ..
+        } => connection_epoch,
         _ => None,
     };
-    let mut pipeline = Pipeline { snapshot, executor, cancellation, epoch };
+    let mut pipeline = Pipeline {
+        snapshot,
+        executor,
+        cancellation,
+        epoch,
+    };
     let result = (|| {
         pipeline.origin(Some(repository))?;
         let accounts = pipeline.accounts(repository.host())?;
         let selected = resolve_selection(&accounts, Some(identity))?;
         let plan = match target {
-            ReadTarget::List(kind) => SelectedAccountRequestPlan::list(&selected, repository, kind)?,
+            ReadTarget::List(kind) => {
+                SelectedAccountRequestPlan::list(&selected, repository, kind)?
+            }
             ReadTarget::Detail(kind, number) => {
                 SelectedAccountRequestPlan::detail(&selected, repository, kind, number)?
             }
@@ -228,6 +323,9 @@ pub(super) fn read_with<E: TasksExecutor>(snapshot: &ProjectExecutionSnapshot,
         Ok(ReadSuccess { data, accounts })
     })();
     let result = finish_origin(&mut pipeline, Some(repository), result);
-    PipelineCompletion { result, repository: Some(repository.clone()),
-        observed_source: snapshot.observed_source_signature(pipeline.epoch) }
+    PipelineCompletion {
+        result,
+        repository: Some(repository.clone()),
+        observed_source: snapshot.observed_source_signature(pipeline.epoch),
+    }
 }

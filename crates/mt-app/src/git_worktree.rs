@@ -18,25 +18,30 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    Window, div, prelude::FluentBuilder as _, px,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use mt_project::git::{BranchInfo, WorktreeInfo};
 
+use crate::execution_host::{self, ExecutionBackend, ProjectExecutionSnapshot};
+use crate::git_backend::{
+    GitBackend, GitLifetime, GitPostcondition, GitRead, GitReadValue, GitRepository, GitWorktrees,
+    GitWrite, GitWriteOutcome, PreparedGitWrite,
+};
+use crate::git_panel::host_ui;
 use crate::i18n::{t, tr};
 use crate::menu::{self, MenuItem};
 use crate::prompt::{autofocus, kind, open_guarded_with_close, show_alert};
-use crate::git_panel::host_ui;
-use crate::git_backend::{GitBackend, GitLifetime, GitRead, GitReadValue, GitRepository, GitWorktrees, GitWrite, GitWriteOutcome, GitPostcondition, PreparedGitWrite};
-use crate::execution_host::{self, ExecutionBackend, ProjectExecutionSnapshot};
-use mt_project::git::cli::{GitRef, ObjectId, RepositoryAuthority};
-use crate::store::{ProjectLocationKey, ProjectPlacement};
 use crate::store::AppStore;
+use crate::store::{ProjectLocationKey, ProjectPlacement};
 use crate::ui;
+use mt_project::git::cli::{GitRef, ObjectId, RepositoryAuthority};
 
 mod actions;
-use actions::{browse_destination, create, open_remove_confirm, open_worktree, prune, review_uncertain};
+use actions::{
+    browse_destination, create, open_remove_confirm, open_worktree, prune, review_uncertain,
+};
 
 fn host_path_key(backend: &ExecutionBackend, path: &str) -> String {
     match backend {
@@ -45,9 +50,17 @@ fn host_path_key(backend: &ExecutionBackend, path: &str) -> String {
     }
 }
 
-fn discovery_selector_matches(backend: &ExecutionBackend, selector: &str, configured_path: &str) -> bool {
-    let Ok(selector) = execution_host::configured_execution_path(backend, selector) else { return false; };
-    let Ok(configured) = execution_host::configured_execution_path(backend, configured_path) else { return false; };
+fn discovery_selector_matches(
+    backend: &ExecutionBackend,
+    selector: &str,
+    configured_path: &str,
+) -> bool {
+    let Ok(selector) = execution_host::configured_execution_path(backend, selector) else {
+        return false;
+    };
+    let Ok(configured) = execution_host::configured_execution_path(backend, configured_path) else {
+        return false;
+    };
     host_path_key(backend, &selector) == host_path_key(backend, &configured)
 }
 
@@ -56,7 +69,11 @@ fn host_parent<'a>(backend: &ExecutionBackend, path: &'a str) -> &'a str {
         ExecutionBackend::Local => parent_dir(path),
         ExecutionBackend::Wsl { .. } | ExecutionBackend::Ssh { .. } => {
             let path = path.trim_end_matches('/');
-            match path.rfind('/') { Some(0) => "/", Some(index) => &path[..index], None => path }
+            match path.rfind('/') {
+                Some(0) => "/",
+                Some(index) => &path[..index],
+                None => path,
+            }
         }
     }
 }
@@ -64,32 +81,66 @@ fn host_parent<'a>(backend: &ExecutionBackend, path: &'a str) -> &'a str {
 fn host_name<'a>(backend: &ExecutionBackend, path: &'a str) -> &'a str {
     match backend {
         ExecutionBackend::Local => base_name(path),
-        ExecutionBackend::Wsl { .. } | ExecutionBackend::Ssh { .. } => path.trim_end_matches('/').rsplit('/').next().unwrap_or(path),
+        ExecutionBackend::Wsl { .. } | ExecutionBackend::Ssh { .. } => path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(path),
     }
 }
 
 fn host_join(backend: &ExecutionBackend, parent: &str, name: &str) -> String {
     match backend {
-        ExecutionBackend::Local => join_path(parent, name, if cfg!(windows) && parent.contains('\\') { '\\' } else { '/' }),
-        ExecutionBackend::Wsl { .. } | ExecutionBackend::Ssh { .. } => format!("{}/{name}", parent.trim_end_matches('/')),
+        ExecutionBackend::Local => join_path(
+            parent,
+            name,
+            if cfg!(windows) && parent.contains('\\') {
+                '\\'
+            } else {
+                '/'
+            },
+        ),
+        ExecutionBackend::Wsl { .. } | ExecutionBackend::Ssh { .. } => {
+            format!("{}/{name}", parent.trim_end_matches('/'))
+        }
     }
 }
 
-fn project_location(backend: &ExecutionBackend, path: &str) -> Result<(ProjectLocationKey, String), String> {
+fn project_location(
+    backend: &ExecutionBackend,
+    path: &str,
+) -> Result<(ProjectLocationKey, String), String> {
     match backend {
         ExecutionBackend::Ssh { connection, .. } => {
             let path = execution_host::normalize_absolute_posix_path(path)?;
-            Ok((ProjectLocationKey::Ssh { connection_id: connection.id.clone(), normalized_posix_path: path.clone() }, path))
+            Ok((
+                ProjectLocationKey::Ssh {
+                    connection_id: connection.id.clone(),
+                    normalized_posix_path: path.clone(),
+                },
+                path,
+            ))
         }
         ExecutionBackend::Local | ExecutionBackend::Wsl { .. } => {
             let path = match backend {
                 ExecutionBackend::Wsl { distro } => crate::project_onboarding::DirectoryLocation {
-                    source: crate::project_onboarding::DirectorySource::Wsl { distro: distro.clone() },
+                    source: crate::project_onboarding::DirectorySource::Wsl {
+                        distro: distro.clone(),
+                    },
                     path: execution_host::normalize_absolute_posix_path(path)?,
-                }.host_path().map_err(|error| error.detail)?,
+                }
+                .host_path()
+                .map_err(|error| error.detail)?,
                 _ => path.to_string(),
             };
-            Ok((ProjectLocationKey::Local { normalized_canonical_path: execution_host::normalize_host_visible_project_path(&path)? }, path))
+            Ok((
+                ProjectLocationKey::Local {
+                    normalized_canonical_path: execution_host::normalize_host_visible_project_path(
+                        &path,
+                    )?,
+                },
+                path,
+            ))
         }
     }
 }
@@ -107,8 +158,8 @@ pub fn sanitize_branch_for_dir(branch: &str) -> String {
     let mut out = String::new();
     let mut last_dash = false;
     for c in branch.chars() {
-        let bad = matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
-            || c.is_whitespace();
+        let bad =
+            matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_whitespace();
         if bad {
             if !last_dash {
                 out.push('-');
@@ -237,24 +288,32 @@ struct RepoLoad {
     result: Result<GitWorktrees, String>,
 }
 
-fn previous_group_for_path<'a>(previous: &'a [RepoGroup], path: &str, backend: &ExecutionBackend) -> Option<&'a RepoGroup> {
+fn previous_group_for_path<'a>(
+    previous: &'a [RepoGroup],
+    path: &str,
+    backend: &ExecutionBackend,
+) -> Option<&'a RepoGroup> {
     previous.iter().find(|group| {
         host_path_key(backend, &group.main_path) == host_path_key(backend, path)
-            || group
-                .worktrees
-                .iter()
-                .any(|worktree| host_path_key(backend, &worktree.path) == host_path_key(backend, path))
+            || group.worktrees.iter().any(|worktree| {
+                host_path_key(backend, &worktree.path) == host_path_key(backend, path)
+            })
     })
 }
 
 /// 把逐仓库的 catalog 结果归并成组。非权威结果或失败会保留上一帧的组。
-fn merge_groups_on_host(items: Vec<RepoLoad>, previous: &[RepoGroup], backend: &ExecutionBackend) -> Vec<RepoGroup> {
+fn merge_groups_on_host(
+    items: Vec<RepoLoad>,
+    previous: &[RepoGroup],
+    backend: &ExecutionBackend,
+) -> Vec<RepoGroup> {
     let mut out: Vec<RepoGroup> = Vec::new();
     for RepoLoad { path, result } in items {
         match result {
             Ok(GitWorktrees { scan, entries }) => {
                 let mut worktrees = entries;
-                let mut readable = scan.source != mt_project::worktree::WorktreeScanSource::LastKnown;
+                let mut readable =
+                    scan.source != mt_project::worktree::WorktreeScanSource::LastKnown;
                 if !scan.authoritative
                     && scan.source != mt_project::worktree::WorktreeScanSource::Libgit2Fallback
                     && let Some(old) = previous_group_for_path(previous, &path, backend)
@@ -374,40 +433,71 @@ struct WorktreeModal {
 
 impl WorktreeModal {
     fn is_live(&self, cx: &App) -> bool {
-        self.lifetime.is_valid() && self.store.read(cx).project_execution_snapshot(&self.snapshot.project_id).is_ok_and(|current| {
-            if let Some(backend) = &self.backend { backend.matches_snapshot(&current) }
-            else { host_ui::read_source_matches(&self.snapshot, &current) }
-        })
+        self.lifetime.is_valid()
+            && self
+                .store
+                .read(cx)
+                .project_execution_snapshot(&self.snapshot.project_id)
+                .is_ok_and(|current| {
+                    if let Some(backend) = &self.backend {
+                        backend.matches_snapshot(&current)
+                    } else {
+                        host_ui::read_source_matches(&self.snapshot, &current)
+                    }
+                })
     }
 
     fn repository(&self, group: &RepoGroup, cx: &App) -> Option<GitRepository> {
-        if !group.authoritative { return None; }
+        if !group.authoritative {
+            return None;
+        }
         self.read_repository(group, cx)
     }
 
     fn read_repository(&self, group: &RepoGroup, cx: &App) -> Option<GitRepository> {
-        if !self.is_live(cx) || self.loading || !group.readable || group.generation != self.load_generation { return None; }
-        self.repositories.get(&group.key).filter(|repo| host_ui::repository_current(repo, &self.store, cx)).cloned()
+        if !self.is_live(cx)
+            || self.loading
+            || !group.readable
+            || group.generation != self.load_generation
+        {
+            return None;
+        }
+        self.repositories
+            .get(&group.key)
+            .filter(|repo| host_ui::repository_current(repo, &self.store, cx))
+            .cloned()
     }
 
     fn idle(&self, cx: &App) -> bool {
-        self.is_live(cx) && !self.loading && !self.creating && !self.removing && self.pruning_key.is_none()
+        self.is_live(cx)
+            && !self.loading
+            && !self.creating
+            && !self.removing
+            && self.pruning_key.is_none()
     }
 
     fn next_write(&mut self) -> Option<u64> {
-        self.write_request = self.write_request.checked_add(1).or_else(|| { self.invalidate(); None })?;
+        self.write_request = self.write_request.checked_add(1).or_else(|| {
+            self.invalidate();
+            None
+        })?;
         self.bump_picker()?;
         Some(self.write_request)
     }
 
     fn bump_picker(&mut self) -> Option<u64> {
-        self.picker_request = self.picker_request.checked_add(1).or_else(|| { self.invalidate(); None })?;
+        self.picker_request = self.picker_request.checked_add(1).or_else(|| {
+            self.invalidate();
+            None
+        })?;
         Some(self.picker_request)
     }
 
     fn invalidate(&self) {
         self.lifetime.invalidate();
-        for child in &self.child_lifetimes { child.invalidate(); }
+        for child in &self.child_lifetimes {
+            child.invalidate();
+        }
     }
 
     fn dispose(&self) {
@@ -417,7 +507,9 @@ impl WorktreeModal {
 }
 
 impl Drop for WorktreeModal {
-    fn drop(&mut self) { self.dispose(); }
+    fn drop(&mut self) {
+        self.dispose();
+    }
 }
 
 impl Render for WorktreeModal {
@@ -441,31 +533,77 @@ pub fn open(
     }
     let store = AppStore::global(cx);
     let project_id = project_id.or_else(|| store.read(cx).active_project_id.clone());
-    let snapshot = match project_id.as_deref().ok_or("No project selected".to_string())
-        .and_then(|id| store.read(cx).project_execution_snapshot(id)) {
+    let snapshot = match project_id
+        .as_deref()
+        .ok_or("No project selected".to_string())
+        .and_then(|id| store.read(cx).project_execution_snapshot(id))
+    {
         Ok(snapshot) => snapshot,
-        Err(error) => { show_alert("Git", error, window, cx); return; }
+        Err(error) => {
+            show_alert("Git", error, window, cx);
+            return;
+        }
     };
-    if discover_repos && !store.read(cx).project(&snapshot.project_id).is_some_and(|project| {
-        discovery_selector_matches(&snapshot.backend, &repo_path, &project.path)
-    }) {
-        show_alert("Git", "Project folder changed; reopen Worktree Management", window, cx);
+    if discover_repos
+        && !store
+            .read(cx)
+            .project(&snapshot.project_id)
+            .is_some_and(|project| {
+                discovery_selector_matches(&snapshot.backend, &repo_path, &project.path)
+            })
+    {
+        show_alert(
+            "Git",
+            "Project folder changed; reopen Worktree Management",
+            window,
+            cx,
+        );
         return;
     }
-    open_host(snapshot, repo_path, discover_repos, None, Rc::new(on_changed), window, cx);
+    open_host(
+        snapshot,
+        repo_path,
+        discover_repos,
+        None,
+        Rc::new(on_changed),
+        window,
+        cx,
+    );
 }
 
-pub(crate) fn open_repository(repository: GitRepository, on_changed: impl Fn(&mut App) + 'static,
-    window: &mut Window, cx: &mut App) {
+pub(crate) fn open_repository(
+    repository: GitRepository,
+    on_changed: impl Fn(&mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let store = AppStore::global(cx);
-    if !host_ui::repository_current(&repository, &store, cx) { return; }
-    open_host(repository.backend().snapshot().clone(), repository.authority().worktree_root.clone(),
-        false, Some(repository.authority().clone()), Rc::new(on_changed), window, cx);
+    if !host_ui::repository_current(&repository, &store, cx) {
+        return;
+    }
+    open_host(
+        repository.backend().snapshot().clone(),
+        repository.authority().worktree_root.clone(),
+        false,
+        Some(repository.authority().clone()),
+        Rc::new(on_changed),
+        window,
+        cx,
+    );
 }
 
-fn open_host(snapshot: ProjectExecutionSnapshot, repo_path: String, discover_repos: bool,
-    expected_repository: Option<RepositoryAuthority>, on_changed: Rc<dyn Fn(&mut App)>, window: &mut Window, cx: &mut App) {
-    if crate::prompt::is_open(kind::GIT_WORKTREE) { return; }
+fn open_host(
+    snapshot: ProjectExecutionSnapshot,
+    repo_path: String,
+    discover_repos: bool,
+    expected_repository: Option<RepositoryAuthority>,
+    on_changed: Rc<dyn Fn(&mut App)>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if crate::prompt::is_open(kind::GIT_WORKTREE) {
+        return;
+    }
     let store = AppStore::global(cx);
     let state = cx.new(|cx| {
         let source_watch = cx.observe(&store, |state: &mut WorktreeModal, _, cx| {
@@ -477,94 +615,126 @@ fn open_host(snapshot: ProjectExecutionSnapshot, repo_path: String, discover_rep
             }
         });
         WorktreeModal {
-        store: store.clone(),
-        repo_path: repo_path.clone(),
-        discover_repos,
-        snapshot,
-        expected_repository,
-        backend: None,
-        repositories: HashMap::new(),
-        lifetime: GitLifetime::new(),
-        view_lifetime: GitLifetime::new(),
-        child_lifetimes: Vec::new(),
-        branch_requests: HashMap::new(),
-        branch_errors: HashMap::new(),
-        write_request: 0,
-        picker_request: 0,
-        _source_watch: Some(source_watch),
-        _input_watch: Vec::new(),
-        groups: None,
-        load_error: None,
-        load_generation: 0,
-        loading: false,
-        selected_keys: Vec::new(),
-        branches_by_repo: HashMap::new(),
-        mode: Mode::Existing,
-        sel_branch: String::new(),
-        base_branch: String::new(),
-        new_branch: cx.new(|cx| {
-            InputState::new(window, cx).placeholder(t("worktree", "newBranchPlaceholder"))
-        }),
-        wt_path: cx
-            .new(|cx| InputState::new(window, cx).placeholder(t("worktree", "pathPlaceholder"))),
-        path_edited: false,
-        suggested_path: String::new(),
-        // 默认勾选(`GitWorktreeModal.tsx:198`)
-        add_as_project: true,
-        creating: false,
-        create_error: None,
-        create_results: Vec::new(),
-        pruning_key: None,
-        removing: false,
-        on_changed,
-    }});
+            store: store.clone(),
+            repo_path: repo_path.clone(),
+            discover_repos,
+            snapshot,
+            expected_repository,
+            backend: None,
+            repositories: HashMap::new(),
+            lifetime: GitLifetime::new(),
+            view_lifetime: GitLifetime::new(),
+            child_lifetimes: Vec::new(),
+            branch_requests: HashMap::new(),
+            branch_errors: HashMap::new(),
+            write_request: 0,
+            picker_request: 0,
+            _source_watch: Some(source_watch),
+            _input_watch: Vec::new(),
+            groups: None,
+            load_error: None,
+            load_generation: 0,
+            loading: false,
+            selected_keys: Vec::new(),
+            branches_by_repo: HashMap::new(),
+            mode: Mode::Existing,
+            sel_branch: String::new(),
+            base_branch: String::new(),
+            new_branch: cx.new(|cx| {
+                InputState::new(window, cx).placeholder(t("worktree", "newBranchPlaceholder"))
+            }),
+            wt_path: cx.new(|cx| {
+                InputState::new(window, cx).placeholder(t("worktree", "pathPlaceholder"))
+            }),
+            path_edited: false,
+            suggested_path: String::new(),
+            // 默认勾选(`GitWorktreeModal.tsx:198`)
+            add_as_project: true,
+            creating: false,
+            create_error: None,
+            create_results: Vec::new(),
+            pruning_key: None,
+            removing: false,
+            on_changed,
+        }
+    });
 
     state.update(cx, |s, cx| {
-        s._input_watch.push(cx.subscribe(&s.wt_path, |s: &mut WorktreeModal, input, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) && input.read(cx).value().as_ref() != s.suggested_path.as_str() {
-                s.path_edited = true;
-                s.bump_picker();
-                cx.notify();
-            }
-        }));
-        s._input_watch.push(cx.subscribe(&s.new_branch, |s: &mut WorktreeModal, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) { s.bump_picker(); cx.notify(); }
-        }));
+        s._input_watch.push(cx.subscribe(
+            &s.wt_path,
+            |s: &mut WorktreeModal, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change)
+                    && input.read(cx).value().as_ref() != s.suggested_path.as_str()
+                {
+                    s.path_edited = true;
+                    s.bump_picker();
+                    cx.notify();
+                }
+            },
+        ));
+        s._input_watch.push(cx.subscribe(
+            &s.new_branch,
+            |s: &mut WorktreeModal, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    s.bump_picker();
+                    cx.notify();
+                }
+            },
+        ));
     });
     load(&state, cx);
 
     let root_name = host_name(&state.read(cx).snapshot.backend, &repo_path).to_string();
     let close_state = state.clone();
-    open_guarded_with_close(kind::GIT_WORKTREE, window, cx, move |dialog, window, cx| {
-        let body = render_body(&state, window, cx);
-        dialog
-            // 无底部按钮,右上角 ✕ 是唯一看得见的出口(见 `prompt::dialog_title`)
-            .title(actions::manager_title(
-                &state,
-                tr!("worktree", "title", name = root_name.clone()),
-            ))
-            .w(px(600.0))
-            .child(div().px(px(16.0)).child(body))
-    }, move |_, cx| close_state.read(cx).dispose());
+    open_guarded_with_close(
+        kind::GIT_WORKTREE,
+        window,
+        cx,
+        move |dialog, window, cx| {
+            let body = render_body(&state, window, cx);
+            dialog
+                // 无底部按钮,右上角 ✕ 是唯一看得见的出口(见 `prompt::dialog_title`)
+                .title(actions::manager_title(
+                    &state,
+                    tr!("worktree", "title", name = root_name.clone()),
+                ))
+                .w(px(600.0))
+                .child(div().px(px(16.0)).child(body))
+        },
+        move |_, cx| close_state.read(cx).dispose(),
+    );
 }
 
 /// Reload last-known presentation, but revoke row authority until completion.
 fn load(state: &Entity<WorktreeModal>, cx: &mut App) {
-    let Some((snapshot, lifetime, discover, selector, expected, generation)) = state.update(cx, |s, cx| {
-        if !s.is_live(cx) || s.creating || s.removing || s.pruning_key.is_some() { return None; }
-        let Some(generation) = s.load_generation.checked_add(1) else {
-            s.lifetime.invalidate();
-            return None;
-        };
-        s.load_generation = generation;
-        s.loading = true;
-        s.branch_requests.clear();
-        s.branches_by_repo.clear();
-        s.branch_errors.clear();
-        s.load_error = None;
-        cx.notify();
-        Some((s.snapshot.clone(), s.lifetime.clone(), s.discover_repos, s.repo_path.clone(), s.expected_repository.clone(), generation))
-    }) else { return; };
+    let Some((snapshot, lifetime, discover, selector, expected, generation)) =
+        state.update(cx, |s, cx| {
+            if !s.is_live(cx) || s.creating || s.removing || s.pruning_key.is_some() {
+                return None;
+            }
+            let Some(generation) = s.load_generation.checked_add(1) else {
+                s.lifetime.invalidate();
+                return None;
+            };
+            s.load_generation = generation;
+            s.loading = true;
+            s.branch_requests.clear();
+            s.branches_by_repo.clear();
+            s.branch_errors.clear();
+            s.load_error = None;
+            cx.notify();
+            Some((
+                s.snapshot.clone(),
+                s.lifetime.clone(),
+                s.discover_repos,
+                s.repo_path.clone(),
+                s.expected_repository.clone(),
+                generation,
+            ))
+        })
+    else {
+        return;
+    };
     let state = state.clone();
     cx.spawn(async move |cx| {
         let result = cx.background_executor().spawn(async move {
@@ -667,18 +837,33 @@ fn load(state: &Entity<WorktreeModal>, cx: &mut App) {
 fn ensure_branches(state: &Entity<WorktreeModal>, cx: &mut App) {
     let pending = {
         let s = state.read(cx);
-        if !s.is_live(cx) || s.loading { return; }
-        s.groups.as_deref().unwrap_or_default().iter()
+        if !s.is_live(cx) || s.loading {
+            return;
+        }
+        s.groups
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
             .filter(|group| s.selected_keys.contains(&group.key))
-            .filter(|group| !s.branches_by_repo.contains_key(&group.key) && !s.branch_requests.contains_key(&group.key) && !s.branch_errors.contains_key(&group.key))
-            .filter_map(|group| s.read_repository(group, cx).map(|repository| (group.key.clone(), repository)))
+            .filter(|group| {
+                !s.branches_by_repo.contains_key(&group.key)
+                    && !s.branch_requests.contains_key(&group.key)
+                    && !s.branch_errors.contains_key(&group.key)
+            })
+            .filter_map(|group| {
+                s.read_repository(group, cx)
+                    .map(|repository| (group.key.clone(), repository))
+            })
             .collect::<Vec<_>>()
     };
     for (key, repository) in pending {
         let request = match repository.request(GitRead::Branches) {
             Ok(request) => request,
             Err(error) => {
-                state.update(cx, |s, cx| { s.branch_errors.insert(key, error.to_string()); cx.notify(); });
+                state.update(cx, |s, cx| {
+                    s.branch_errors.insert(key, error.to_string());
+                    cx.notify();
+                });
                 continue;
             }
         };
@@ -689,20 +874,40 @@ fn ensure_branches(state: &Entity<WorktreeModal>, cx: &mut App) {
         });
         let state = state.clone();
         cx.spawn(async move |cx| {
-            let result = cx.background_executor().spawn(async move { request.execute() }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { request.execute() })
+                .await;
             let _ = state.update(cx, |s, cx| {
-                if !s.is_live(cx) || s.load_generation != generation || s.branch_requests.get(&key) != Some(&request_id) { return; }
+                if !s.is_live(cx)
+                    || s.load_generation != generation
+                    || s.branch_requests.get(&key) != Some(&request_id)
+                {
+                    return;
+                }
                 s.branch_requests.remove(&key);
                 match result {
-                    Ok(result) if s.repositories.get(&key).is_some_and(|current| result.is_current(current, request_id)) => {
-                        if let GitReadValue::Branches(branches) = result.value { s.branches_by_repo.insert(key, branches); }
+                    Ok(result)
+                        if s.repositories
+                            .get(&key)
+                            .is_some_and(|current| result.is_current(current, request_id)) =>
+                    {
+                        if let GitReadValue::Branches(branches) = result.value {
+                            s.branches_by_repo.insert(key, branches);
+                        }
                     }
-                    Ok(_) => { s.branch_errors.insert(key, "Branch read became stale".into()); }
-                    Err(error) => { s.branch_errors.insert(key, error.to_string()); }
+                    Ok(_) => {
+                        s.branch_errors
+                            .insert(key, "Branch read became stale".into());
+                    }
+                    Err(error) => {
+                        s.branch_errors.insert(key, error.to_string());
+                    }
                 }
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 }
 
@@ -748,14 +953,24 @@ fn render_body(state: &Entity<WorktreeModal>, window: &mut Window, cx: &mut App)
     let s = state.read(cx);
     let mut root = div().flex().flex_col().gap(px(8.0));
     if !s.is_live(cx) {
-        root = root.child(hint_line("Git source changed; reopen Worktree Management", ui::color_error()));
+        root = root.child(hint_line(
+            "Git source changed; reopen Worktree Management",
+            ui::color_error(),
+        ));
     }
     let idle = s.idle(cx);
     let refresh_state = state.clone();
-    root = root.child(div().flex().justify_end().child(
-        ui::ghost_button("worktree-refresh", if s.loading { "Loading..." } else { "Refresh" })
-            .when(idle, |el| el.on_click(move |_: &ClickEvent, _, cx| load(&refresh_state, cx))),
-    ));
+    root = root.child(
+        div().flex().justify_end().child(
+            ui::ghost_button(
+                "worktree-refresh",
+                if s.loading { "Loading..." } else { "Refresh" },
+            )
+            .when(idle, |el| {
+                el.on_click(move |_: &ClickEvent, _, cx| load(&refresh_state, cx))
+            }),
+        ),
+    );
 
     let Some(groups) = s.groups.clone() else {
         return root
@@ -802,7 +1017,9 @@ fn render_body(state: &Entity<WorktreeModal>, window: &mut Window, cx: &mut App)
                     )
                     .on_click(move |_: &ClickEvent, _window, cx| {
                         state_for_toggle.update(cx, |s, cx| {
-                            if !s.idle(cx) { return; }
+                            if !s.idle(cx) {
+                                return;
+                            }
                             s.selected_keys = if all { Vec::new() } else { keys.clone() };
                             reset_form_on_selection(s);
                             cx.notify();
@@ -896,7 +1113,10 @@ struct FormChoiceOwner {
 
 impl FormChoiceOwner {
     fn capture(state: &WorktreeModal) -> Self {
-        Self { generation: state.load_generation, picker_request: state.picker_request }
+        Self {
+            generation: state.load_generation,
+            picker_request: state.picker_request,
+        }
     }
 
     fn is_current(self, current: Self) -> bool {
@@ -918,14 +1138,11 @@ fn render_group(
             s.pruning_key.as_deref() == Some(group.key.as_str()),
         )
     };
-    let mut block = div()
-        .flex()
-        .flex_col()
-        .when(multi_repo, |el| {
-            el.rounded(px(4.0))
-                .border_1()
-                .border_color(ui::border_subtle())
-        });
+    let mut block = div().flex().flex_col().when(multi_repo, |el| {
+        el.rounded(px(4.0))
+            .border_1()
+            .border_color(ui::border_subtle())
+    });
 
     if multi_repo {
         let (state_for_click, key) = (state.clone(), group.key.clone());
@@ -970,7 +1187,9 @@ fn render_group(
                 )
                 .on_click(move |_: &ClickEvent, _window, cx| {
                     state_for_click.update(cx, |s, cx| {
-                        if !s.idle(cx) { return; }
+                        if !s.idle(cx) {
+                            return;
+                        }
                         if let Some(pos) = s.selected_keys.iter().position(|k| *k == key) {
                             s.selected_keys.remove(pos);
                         } else {
@@ -984,15 +1203,14 @@ fn render_group(
     }
 
     if let Some(err) = &group.error {
-        block = block
-            .child(
-                div()
-                    .px(px(8.0))
-                    .py(px(6.0))
-                    .text_size(ui::font_px(11.0))
-                    .text_color(ui::color_error())
-                    .child(err.clone()),
-            );
+        block = block.child(
+            div()
+                .px(px(8.0))
+                .py(px(6.0))
+                .text_size(ui::font_px(11.0))
+                .text_color(ui::color_error())
+                .child(err.clone()),
+        );
     }
 
     let mut rows = div().flex().flex_col().gap(px(2.0));
@@ -1002,7 +1220,11 @@ fn render_group(
     block = block.child(rows);
 
     if group.worktrees.iter().any(|w| !w.is_valid) {
-        let enabled = state.read(cx).idle(cx) && state.read(cx).repository(group, cx).is_some_and(|repo| repo.busy().is_none());
+        let enabled = state.read(cx).idle(cx)
+            && state
+                .read(cx)
+                .repository(group, cx)
+                .is_some_and(|repo| repo.busy().is_none());
         let (state_for_prune, group_for_prune) = (state.clone(), group.clone());
         block = block.child(
             div().flex().justify_end().py(px(4.0)).child(
@@ -1023,12 +1245,27 @@ fn render_group(
         );
     }
 
-    if let Some(busy) = state.read(cx).repositories.get(&group.key).and_then(GitRepository::busy) {
-        block = block.child(hint_line(format!("Git operation {}: {:?}", busy.operation_id, busy.phase), ui::color_warning()));
+    if let Some(busy) = state
+        .read(cx)
+        .repositories
+        .get(&group.key)
+        .and_then(GitRepository::busy)
+    {
+        block = block.child(hint_line(
+            format!("Git operation {}: {:?}", busy.operation_id, busy.phase),
+            ui::color_warning(),
+        ));
         if busy.phase == crate::git_backend::GitWritePhase::Uncertain {
             let (state, group) = (state.clone(), group.clone());
-            block = block.child(ui::ghost_button(SharedString::from(format!("wt-review-{}", group.key)), "Review uncertain operation")
-                .on_click(move |_: &ClickEvent, window, cx| review_uncertain(&state, &group, busy.operation_id, window, cx)));
+            block = block.child(
+                ui::ghost_button(
+                    SharedString::from(format!("wt-review-{}", group.key)),
+                    "Review uncertain operation",
+                )
+                .on_click(move |_: &ClickEvent, window, cx| {
+                    review_uncertain(&state, &group, busy.operation_id, window, cx)
+                }),
+            );
         }
     }
 
@@ -1043,10 +1280,20 @@ fn render_worktree_row(
     cx: &mut App,
 ) -> AnyElement {
     let s = state.read(cx);
-    let is_project = project_location(&s.snapshot.backend, &wt.path).ok()
-        .is_some_and(|(location, _)| !s.store.read(cx).project_ids_for_location(&location).is_empty());
-    let readable = s.idle(cx) && s.read_repository(group, cx).is_some_and(|repository| repository.busy().is_none());
-    let writable = readable && s.repository(group, cx).is_some_and(|repository| repository.busy().is_none());
+    let is_project = project_location(&s.snapshot.backend, &wt.path)
+        .ok()
+        .is_some_and(|(location, _)| {
+            !s.store
+                .read(cx)
+                .project_ids_for_location(&location)
+                .is_empty()
+        });
+    let readable = s.idle(cx)
+        && s.read_repository(group, cx)
+            .is_some_and(|repository| repository.busy().is_none());
+    let writable = readable
+        && s.repository(group, cx)
+            .is_some_and(|repository| repository.busy().is_none());
 
     let mut badges = div().flex().items_center().gap(px(4.0));
     if wt.is_main {
@@ -1077,25 +1324,43 @@ fn render_worktree_row(
     if wt.is_valid {
         for (terminal, label, id) in [
             (true, t("worktree", "openTerminal"), "wt-open"),
-            (false, if is_project { t("worktree", "switchToProject") } else { t("worktree", "addAsProject") }, "wt-project"),
+            (
+                false,
+                if is_project {
+                    t("worktree", "switchToProject")
+                } else {
+                    t("worktree", "addAsProject")
+                },
+                "wt-project",
+            ),
         ] {
             let (state, group, wt) = (state.clone(), group.clone(), wt.clone());
             actions = actions.child(
-                ui::ghost_button(SharedString::from(format!("{id}-{}-{idx}", group.key)), label)
-                    .when(!readable, |el| el.opacity(0.5))
-                    .when(readable, |el| el.on_click(move |_: &ClickEvent, window, cx| {
+                ui::ghost_button(
+                    SharedString::from(format!("{id}-{}-{idx}", group.key)),
+                    label,
+                )
+                .when(!readable, |el| el.opacity(0.5))
+                .when(readable, |el| {
+                    el.on_click(move |_: &ClickEvent, window, cx| {
                         open_worktree(&state, &group, &wt, terminal, window, cx);
-                    })),
+                    })
+                }),
             );
         }
         if !wt.is_main {
             let (state, group, wt) = (state.clone(), group.clone(), wt.clone());
             actions = actions.child(
-                ui::danger_button(SharedString::from(format!("wt-remove-{}-{idx}", group.key)), t("worktree", "remove"))
-                    .when(!writable, |el| el.opacity(0.5))
-                    .when(writable, |el| el.on_click(move |_: &ClickEvent, window, cx| {
+                ui::danger_button(
+                    SharedString::from(format!("wt-remove-{}-{idx}", group.key)),
+                    t("worktree", "remove"),
+                )
+                .when(!writable, |el| el.opacity(0.5))
+                .when(writable, |el| {
+                    el.on_click(move |_: &ClickEvent, window, cx| {
                         open_remove_confirm(&state, &group, &wt, window, cx);
-                    })),
+                    })
+                }),
             );
         }
     }
@@ -1161,16 +1426,12 @@ fn render_create_section(
         .gap(px(6.0));
 
     // 标题行 + 模式段控件
-    let mut head = div()
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .child(
-            div()
-                .text_size(ui::font_px(13.0))
-                .text_color(ui::text_primary())
-                .child(t("worktree", "createTitle")),
-        );
+    let mut head = div().flex().items_center().gap(px(8.0)).child(
+        div()
+            .text_size(ui::font_px(13.0))
+            .text_color(ui::text_primary())
+            .child(t("worktree", "createTitle")),
+    );
     if multi_repo {
         head = head.child(
             div()
@@ -1200,7 +1461,11 @@ fn render_create_section(
             div()
                 .id(SharedString::from(format!(
                     "worktree-mode-{}",
-                    if matches!(mode, Mode::New) { "new" } else { "existing" }
+                    if matches!(mode, Mode::New) {
+                        "new"
+                    } else {
+                        "existing"
+                    }
                 )))
                 .px(px(10.0))
                 .py(px(2.0))
@@ -1213,7 +1478,9 @@ fn render_create_section(
                 .child(label)
                 .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let input = state_for_mode.update(cx, |s, cx| {
-                        if !s.idle(cx) { return None; }
+                        if !s.idle(cx) {
+                            return None;
+                        }
                         s.bump_picker();
                         s.mode = mode;
                         cx.notify();
@@ -1358,7 +1625,9 @@ fn render_create_section(
             .child(t("worktree", "addAsProjectAfterCreate"))
             .on_click(move |_: &ClickEvent, _window, cx| {
                 state_for_check.update(cx, |s, cx| {
-                    if !s.idle(cx) { return; }
+                    if !s.idle(cx) {
+                        return;
+                    }
                     s.bump_picker();
                     s.add_as_project = !s.add_as_project;
                     cx.notify();
@@ -1384,7 +1653,12 @@ fn render_create_section(
     }
 
     let creating = s.creating;
-    let can_create = s.idle(cx) && branches_ready && selected.iter().all(|group| s.repository(group, cx).is_some_and(|repo| repo.busy().is_none()));
+    let can_create = s.idle(cx)
+        && branches_ready
+        && selected.iter().all(|group| {
+            s.repository(group, cx)
+                .is_some_and(|repo| repo.busy().is_none())
+        });
     let state_for_create = state.clone();
     let groups_for_create = groups.to_vec();
     section = section.child(
@@ -1446,7 +1720,9 @@ fn dropdown(
         .child(div().text_color(ui::text_muted()).child("▾"))
         .on_click(move |event: &ClickEvent, window, cx| {
             let current = state.read(cx);
-            if !current.idle(cx) || !owner.is_current(FormChoiceOwner::capture(current)) { return; }
+            if !current.idle(cx) || !owner.is_current(FormChoiceOwner::capture(current)) {
+                return;
+            }
             let entries: Vec<menu::MenuEntry> = options
                 .iter()
                 .map(|option| {
@@ -1454,7 +1730,9 @@ fn dropdown(
                     MenuItem::new(option.clone())
                         .on_click(move |_window, cx| {
                             state.update(cx, |s, cx| {
-                                if !s.idle(cx) || !owner.is_current(FormChoiceOwner::capture(s)) { return; }
+                                if !s.idle(cx) || !owner.is_current(FormChoiceOwner::capture(s)) {
+                                    return;
+                                }
                                 s.bump_picker();
                                 apply(s, option.clone());
                                 cx.notify();
@@ -1475,20 +1753,38 @@ mod tests {
     fn ssh_backend() -> ExecutionBackend {
         ExecutionBackend::Ssh {
             connection: mt_config::SshConnection {
-                id: "host-a".into(), name: "test".into(), host: "example.invalid".into(), port: 22,
-                user: "test".into(), password: None, identity_file: None, group: None,
+                id: "host-a".into(),
+                name: "test".into(),
+                host: "example.invalid".into(),
+                port: 22,
+                user: "test".into(),
+                password: None,
+                identity_file: None,
+                group: None,
             },
-            connection_fingerprint: 1, connection_epoch: Some(3),
+            connection_fingerprint: 1,
+            connection_epoch: Some(3),
         }
     }
 
     #[test]
     fn remote_path_helpers_preserve_case_and_literal_backslashes_on_every_client() {
-        for backend in [ssh_backend(), ExecutionBackend::Wsl { distro: "Ubuntu".into() }] {
-            assert_ne!(host_path_key(&backend, "/Repo"), host_path_key(&backend, "/repo"));
+        for backend in [
+            ssh_backend(),
+            ExecutionBackend::Wsl {
+                distro: "Ubuntu".into(),
+            },
+        ] {
+            assert_ne!(
+                host_path_key(&backend, "/Repo"),
+                host_path_key(&backend, "/repo")
+            );
             assert_eq!(host_parent(&backend, r"/srv/repo\name"), "/srv");
             assert_eq!(host_name(&backend, r"/srv/repo\name"), r"repo\name");
-            assert_eq!(host_join(&backend, r"/srv/parent\", "worktree"), r"/srv/parent\/worktree");
+            assert_eq!(
+                host_join(&backend, r"/srv/parent\", "worktree"),
+                r"/srv/parent\/worktree"
+            );
             assert_eq!(host_join(&backend, "/", "worktree"), "/worktree");
         }
     }
@@ -1499,11 +1795,29 @@ mod tests {
         assert!(discovery_selector_matches(&ssh, "/srv/Repo", "/srv/Repo/"));
         assert!(!discovery_selector_matches(&ssh, "/srv/Repo", "/srv/other"));
         assert!(!discovery_selector_matches(&ssh, "/srv/Repo", "/srv/repo"));
-        assert!(!discovery_selector_matches(&ssh, r"/srv/repo\child", "/srv/repo/child"));
-        let wsl = ExecutionBackend::Wsl { distro: "Ubuntu".into() };
-        assert!(discovery_selector_matches(&wsl, r"\\wsl$\Ubuntu\srv\repo", r"\\wsl.localhost\Ubuntu\srv\repo"));
-        assert!(!discovery_selector_matches(&wsl, r"\\wsl$\Debian\srv\repo", r"\\wsl$\Ubuntu\srv\repo"));
-        assert!(!discovery_selector_matches(&wsl, "/srv/repo", r"\\wsl$\Ubuntu\srv\repo"));
+        assert!(!discovery_selector_matches(
+            &ssh,
+            r"/srv/repo\child",
+            "/srv/repo/child"
+        ));
+        let wsl = ExecutionBackend::Wsl {
+            distro: "Ubuntu".into(),
+        };
+        assert!(discovery_selector_matches(
+            &wsl,
+            r"\\wsl$\Ubuntu\srv\repo",
+            r"\\wsl.localhost\Ubuntu\srv\repo"
+        ));
+        assert!(!discovery_selector_matches(
+            &wsl,
+            r"\\wsl$\Debian\srv\repo",
+            r"\\wsl$\Ubuntu\srv\repo"
+        ));
+        assert!(!discovery_selector_matches(
+            &wsl,
+            "/srv/repo",
+            r"\\wsl$\Ubuntu\srv\repo"
+        ));
     }
 
     #[test]
@@ -1511,41 +1825,95 @@ mod tests {
         let ssh = ssh_backend();
         let (remote, remote_path) = project_location(&ssh, r"/srv/Repo\name").unwrap();
         assert_eq!(remote_path, r"/srv/Repo\name");
-        assert_eq!(remote, ProjectLocationKey::Ssh { connection_id: "host-a".into(), normalized_posix_path: r"/srv/Repo\name".into() });
-        let local = project_location(&ExecutionBackend::Local, "/srv/Repo").unwrap().0;
+        assert_eq!(
+            remote,
+            ProjectLocationKey::Ssh {
+                connection_id: "host-a".into(),
+                normalized_posix_path: r"/srv/Repo\name".into()
+            }
+        );
+        let local = project_location(&ExecutionBackend::Local, "/srv/Repo")
+            .unwrap()
+            .0;
         assert_ne!(local, project_location(&ssh, "/srv/Repo").unwrap().0);
-        let wsl = ExecutionBackend::Wsl { distro: "Ubuntu".into() };
+        let wsl = ExecutionBackend::Wsl {
+            distro: "Ubuntu".into(),
+        };
         let (key, path) = project_location(&wsl, "/srv/Repo").unwrap();
         assert_eq!(path, r"\\wsl.localhost\Ubuntu\srv\Repo");
-        assert_eq!(key, ProjectLocationKey::Local { normalized_canonical_path: "wsl:ubuntu:/srv/Repo".into() });
+        assert_eq!(
+            key,
+            ProjectLocationKey::Local {
+                normalized_canonical_path: "wsl:ubuntu:/srv/Repo".into()
+            }
+        );
         assert!(project_location(&ssh, "/srv/../escape").is_err());
     }
 
     #[test]
     fn worktree_registration_rejects_wsl_names_that_would_retarget_native_paths() {
-        let wsl = ExecutionBackend::Wsl { distro: "Ubuntu".into() };
-        for path in [r"/srv/repo\child", "/srv/name:stream", "/srv/trailing.", "/srv/../escape"] {
+        let wsl = ExecutionBackend::Wsl {
+            distro: "Ubuntu".into(),
+        };
+        for path in [
+            r"/srv/repo\child",
+            "/srv/name:stream",
+            "/srv/trailing.",
+            "/srv/../escape",
+        ] {
             assert!(project_location(&wsl, path).is_err(), "{path}");
         }
-        assert_eq!(project_location(&wsl, "/srv/repo/child").unwrap().1, r"\\wsl.localhost\Ubuntu\srv\repo\child");
-        assert_eq!(project_location(&ssh_backend(), r"/srv/repo\child").unwrap().1, r"/srv/repo\child");
+        assert_eq!(
+            project_location(&wsl, "/srv/repo/child").unwrap().1,
+            r"\\wsl.localhost\Ubuntu\srv\repo\child"
+        );
+        assert_eq!(
+            project_location(&ssh_backend(), r"/srv/repo\child")
+                .unwrap()
+                .1,
+            r"/srv/repo\child"
+        );
     }
 
     #[test]
     fn branch_menu_choice_cannot_adopt_a_refreshed_or_edited_form() {
-        let owner = FormChoiceOwner { generation: 7, picker_request: 2 };
+        let owner = FormChoiceOwner {
+            generation: 7,
+            picker_request: 2,
+        };
         assert!(owner.is_current(owner));
-        assert!(!owner.is_current(FormChoiceOwner { generation: 8, ..owner }));
-        assert!(!owner.is_current(FormChoiceOwner { picker_request: 3, ..owner }));
-        assert!(!owner.is_current(FormChoiceOwner { generation: 9, picker_request: 4 }));
+        assert!(!owner.is_current(FormChoiceOwner {
+            generation: 8,
+            ..owner
+        }));
+        assert!(!owner.is_current(FormChoiceOwner {
+            picker_request: 3,
+            ..owner
+        }));
+        assert!(!owner.is_current(FormChoiceOwner {
+            generation: 9,
+            picker_request: 4
+        }));
     }
 
     #[test]
     fn fresh_libgit2_fallback_is_readable_but_never_mutation_authority() {
-        let previous = merge_groups(vec![RepoLoad { path: "/repo".into(), result: Ok(scan(vec![fact("/repo", true, None)], true)) }], &[]);
+        let previous = merge_groups(
+            vec![RepoLoad {
+                path: "/repo".into(),
+                result: Ok(scan(vec![fact("/repo", true, None)], true)),
+            }],
+            &[],
+        );
         let mut fallback = scan(vec![fact("/repo", true, Some("main"))], false);
         fallback.scan.source = mt_project::worktree::WorktreeScanSource::Libgit2Fallback;
-        let groups = merge_groups(vec![RepoLoad { path: "/repo".into(), result: Ok(fallback) }], &previous);
+        let groups = merge_groups(
+            vec![RepoLoad {
+                path: "/repo".into(),
+                result: Ok(fallback),
+            }],
+            &previous,
+        );
         assert!(groups[0].readable);
         assert!(!groups[0].authoritative);
         assert_eq!(groups[0].worktrees[0].branch.as_deref(), Some("main"));
@@ -1554,8 +1922,20 @@ mod tests {
 
     #[test]
     fn failed_inventory_retains_rows_with_explicit_error_and_no_row_authority() {
-        let previous = merge_groups(vec![RepoLoad { path: "/repo".into(), result: Ok(scan(vec![fact("/repo", true, None)], true)) }], &[]);
-        let groups = merge_groups(vec![RepoLoad { path: "/repo".into(), result: Err("offline".into()) }], &previous);
+        let previous = merge_groups(
+            vec![RepoLoad {
+                path: "/repo".into(),
+                result: Ok(scan(vec![fact("/repo", true, None)], true)),
+            }],
+            &[],
+        );
+        let groups = merge_groups(
+            vec![RepoLoad {
+                path: "/repo".into(),
+                result: Err("offline".into()),
+            }],
+            &previous,
+        );
         assert_eq!(groups[0].worktrees.len(), 1);
         assert_eq!(groups[0].error.as_deref(), Some("offline"));
         assert!(!groups[0].readable);
@@ -1592,7 +1972,10 @@ mod tests {
             worktrees,
             warning: None,
         };
-        GitWorktrees { entries: mt_project::git::project_worktree_scan(&scan), scan }
+        GitWorktrees {
+            entries: mt_project::git::project_worktree_scan(&scan),
+            scan,
+        }
     }
 
     fn branch(name: &str, remote: bool) -> BranchInfo {

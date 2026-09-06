@@ -76,7 +76,9 @@ impl TasksError {
                 AccountError::Offline => "GitHub is unreachable",
                 AccountError::NotFound => "Repository or item not found",
                 AccountError::WrongHostOrAccount => "GitHub account mismatch",
-                AccountError::InvalidHost | AccountError::InvalidLogin => "Invalid account selection",
+                AccountError::InvalidHost | AccountError::InvalidLogin => {
+                    "Invalid account selection"
+                }
                 AccountError::DuplicateAccount | AccountError::MalformedResponse => {
                     "Invalid GitHub account data"
                 }
@@ -88,8 +90,9 @@ impl TasksError {
             }
             Self::Account(AccountExecutionError::Cancelled) => "GitHub request cancelled",
             Self::Account(AccountExecutionError::TimedOut) => "GitHub request timed out",
-            Self::Account(AccountExecutionError::InvalidContext
-                | AccountExecutionError::ContextChanged) => "Tasks context changed",
+            Self::Account(
+                AccountExecutionError::InvalidContext | AccountExecutionError::ContextChanged,
+            ) => "Tasks context changed",
             Self::Account(AccountExecutionError::CleanupFailed) => "Process cleanup unconfirmed",
             Self::Account(AccountExecutionError::SecretOutputRejected) => "Unsafe output rejected",
             Self::Account(AccountExecutionError::Protocol) => "Invalid execution-host response",
@@ -97,10 +100,15 @@ impl TasksError {
     }
 
     pub fn offers_login(&self) -> bool {
-        matches!(self, Self::Account(AccountExecutionError::Account(
-            AccountError::AuthRequired | AccountError::SelectedAccountUnavailable
-                | AccountError::AuthenticationFailed | AccountError::CredentialLookupFailed
-        )))
+        matches!(
+            self,
+            Self::Account(AccountExecutionError::Account(
+                AccountError::AuthRequired
+                    | AccountError::SelectedAccountUnavailable
+                    | AccountError::AuthenticationFailed
+                    | AccountError::CredentialLookupFailed
+            ))
+        )
     }
 
     pub fn retains_last_known(&self) -> bool {
@@ -122,7 +130,11 @@ pub(super) fn account_scope(snapshot: &ProjectExecutionSnapshot, host: &str) -> 
         ExecutionBackend::Ssh { connection, .. } => WorktreeVisibilityBackend::Ssh {
             connection_id: connection.id.clone(),
             host: connection.host.to_ascii_lowercase(),
-            port: if connection.port == 0 { 22 } else { connection.port },
+            port: if connection.port == 0 {
+                22
+            } else {
+                connection.port
+            },
             user: connection.user.clone(),
         },
     };
@@ -138,10 +150,16 @@ pub(super) fn saved_selection(
     config: &AppConfig,
     scope: &TasksAccountScope,
 ) -> Result<Option<GitHubAccountIdentity>, TasksError> {
-    let mut choices = config.tasks_account_selections.iter().filter(|entry| entry.scope == *scope);
-    let selection = choices.next().map(|entry| {
-        GitHubAccountIdentity::new(&scope.github_host, &entry.login).map_err(TasksError::from)
-    }).transpose()?;
+    let mut choices = config
+        .tasks_account_selections
+        .iter()
+        .filter(|entry| entry.scope == *scope);
+    let selection = choices
+        .next()
+        .map(|entry| {
+            GitHubAccountIdentity::new(&scope.github_host, &entry.login).map_err(TasksError::from)
+        })
+        .transpose()?;
     if choices.next().is_some() {
         return Err(AccountError::MalformedResponse.into());
     }
@@ -153,7 +171,9 @@ pub(super) fn write_selection(
     scope: TasksAccountScope,
     identity: &GitHubAccountIdentity,
 ) {
-    config.tasks_account_selections.retain(|entry| entry.scope != scope);
+    config
+        .tasks_account_selections
+        .retain(|entry| entry.scope != scope);
     config.tasks_account_selections.push(TasksAccountSelection {
         scope,
         login: identity.login().to_string(),
@@ -209,9 +229,18 @@ pub(super) struct RepositoryCacheKey {
 }
 
 impl RepositoryCacheKey {
-    pub fn new(source: &ExecutionSourceSignature, repository: GitHubRepoIdentity,
-        account: String, auth_generation: u64) -> Self {
-        Self { source: source.into(), repository, account: account.to_ascii_lowercase(), auth_generation }
+    pub fn new(
+        source: &ExecutionSourceSignature,
+        repository: GitHubRepoIdentity,
+        account: String,
+        auth_generation: u64,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            repository,
+            account: account.to_ascii_lowercase(),
+            auth_generation,
+        }
     }
 }
 
@@ -247,7 +276,13 @@ pub(super) struct RepositoryCache {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum SourcePhase { Idle, Loading, Choosing, Ready, Error }
+pub(super) enum SourcePhase {
+    Idle,
+    Loading,
+    Choosing,
+    Ready,
+    Error,
+}
 
 pub(super) struct SourceRecord {
     pub snapshot: ProjectExecutionSnapshot,
@@ -266,9 +301,20 @@ pub(super) struct SourceRecord {
 
 impl SourceRecord {
     pub fn new(snapshot: ProjectExecutionSnapshot, request_id: u64) -> Self {
-        Self { snapshot, phase: SourcePhase::Idle, repository: None, accounts: None,
-            selected: None, scope: None, error: None, auth_generation: 0, request_id,
-            cache_key: None, list_access_id: request_id, pending_list_access: None }
+        Self {
+            snapshot,
+            phase: SourcePhase::Idle,
+            repository: None,
+            accounts: None,
+            selected: None,
+            scope: None,
+            error: None,
+            auth_generation: 0,
+            request_id,
+            cache_key: None,
+            list_access_id: request_id,
+            pending_list_access: None,
+        }
     }
 
     pub fn invalidate(&mut self, request_id: u64, clear_data: bool) {
@@ -284,7 +330,9 @@ impl SourceRecord {
     }
 
     pub fn begin_list_access(&mut self, access_id: u64, kind: WorkItemKind) {
-        if self.cache_key.is_none() { self.request_id = access_id; }
+        if self.cache_key.is_none() {
+            self.request_id = access_id;
+        }
         self.phase = SourcePhase::Loading;
         self.error = None;
         self.list_access_id = access_id;
@@ -308,15 +356,19 @@ pub(super) struct RequestOwner {
 }
 
 pub(super) fn owns_request(source: Option<&SourceRecord>, owner: &RequestOwner) -> bool {
-    !owner.cancellation.is_cancelled() && source.is_some_and(|source| {
-        source.snapshot.source_signature() == owner.source
-            && source.request_id == owner.source_request
-            && owner.cache_key.as_ref().is_none_or(|key| {
-                source.cache_key.as_ref() == Some(key)
-                    && source.auth_generation == key.auth_generation
-                    && source.selected.as_ref().is_some_and(|id| id.login() == key.account)
-            })
-    })
+    !owner.cancellation.is_cancelled()
+        && source.is_some_and(|source| {
+            source.snapshot.source_signature() == owner.source
+                && source.request_id == owner.source_request
+                && owner.cache_key.as_ref().is_none_or(|key| {
+                    source.cache_key.as_ref() == Some(key)
+                        && source.auth_generation == key.auth_generation
+                        && source
+                            .selected
+                            .as_ref()
+                            .is_some_and(|id| id.login() == key.account)
+                })
+        })
 }
 
 pub(super) fn owns_slot(request_id: u64, loading: bool, owner: &RequestOwner) -> bool {
@@ -329,9 +381,14 @@ pub(super) fn source_is_ready(source: Option<&SourceRecord>, key: &RepositoryCac
 }
 
 pub(super) fn source_has_identity(source: Option<&SourceRecord>, key: &RepositoryCacheKey) -> bool {
-    source.is_some_and(|source| source.cache_key.as_ref() == Some(key)
-        && source.auth_generation == key.auth_generation
-        && source.selected.as_ref().is_some_and(|id| id.login() == key.account))
+    source.is_some_and(|source| {
+        source.cache_key.as_ref() == Some(key)
+            && source.auth_generation == key.auth_generation
+            && source
+                .selected
+                .as_ref()
+                .is_some_and(|id| id.login() == key.account)
+    })
 }
 
 #[derive(Clone)]
@@ -372,12 +429,21 @@ pub struct GitHubWorkItemTabKey {
 
 impl OpenGitHubWorkItem {
     pub fn tab_key(&self) -> GitHubWorkItemTabKey {
-        GitHubWorkItemTabKey { worktree_id: self.worktree_id.clone(),
-            repository: self.repository.clone(), kind: self.summary.kind, number: self.summary.number }
+        GitHubWorkItemTabKey {
+            worktree_id: self.worktree_id.clone(),
+            repository: self.repository.clone(),
+            kind: self.summary.kind,
+            number: self.summary.number,
+        }
     }
 
     pub(super) fn repository_cache_key(&self) -> RepositoryCacheKey {
-        RepositoryCacheKey::new(&self.source, self.repository.clone(), self.account.clone(), self.auth_generation)
+        RepositoryCacheKey::new(
+            &self.source,
+            self.repository.clone(),
+            self.account.clone(),
+            self.auth_generation,
+        )
     }
 }
 

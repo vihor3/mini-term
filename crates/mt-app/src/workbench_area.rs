@@ -879,7 +879,9 @@ impl WorkbenchArea {
                 .read(cx)
                 .matches_request(&request);
             if matches {
-                let viewer = self.worktrees[&worktree_id].work_items[index].viewer.clone();
+                let viewer = self.worktrees[&worktree_id].work_items[index]
+                    .viewer
+                    .clone();
                 viewer.update(cx, |viewer, cx| viewer.on_activated(cx));
                 let documents = self
                     .worktrees
@@ -985,7 +987,9 @@ impl WorkbenchArea {
         let Some(documents) = self.worktrees.get_mut(&key.worktree_id) else {
             return;
         };
-        let Some(index) = documents.work_item_index_of(key) else { return; };
+        let Some(index) = documents.work_item_index_of(key) else {
+            return;
+        };
         let viewer = documents.work_items[index].viewer.clone();
         documents.active = WorkbenchPage::WorkItem(key.clone());
         viewer.update(cx, |viewer, cx| viewer.on_activated(cx));

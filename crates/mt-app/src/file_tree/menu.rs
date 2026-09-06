@@ -135,17 +135,21 @@ pub(super) fn open_rename_prompt(
                 detach_before.clone(),
                 t("fileTree", "operation.renaming").into(),
                 move || match (&operation_target.context.backend, connection) {
-                    (FileBackendIdentity::Remote { .. }, Some(conn)) => crate::remote_ssh::rename_entry_at_epoch(
-                        &conn,
-                        operation_target.remote_epoch(&conn)?,
-                        remote_path_text(&root)?,
-                        remote_path_text(&path)?,
-                        &new_name,
-                    )
-                    .map(|_| None),
-                    (FileBackendIdentity::Local, None) => mt_project::fs::rename_entry(&root, &path, &new_name)
+                    (FileBackendIdentity::Remote { .. }, Some(conn)) => {
+                        crate::remote_ssh::rename_entry_at_epoch(
+                            &conn,
+                            operation_target.remote_epoch(&conn)?,
+                            remote_path_text(&root)?,
+                            remote_path_text(&path)?,
+                            &new_name,
+                        )
                         .map(|_| None)
-                        .map_err(|e| format!("{e:#}")),
+                    }
+                    (FileBackendIdentity::Local, None) => {
+                        mt_project::fs::rename_entry(&root, &path, &new_name)
+                            .map(|_| None)
+                            .map_err(|e| format!("{e:#}"))
+                    }
                     _ => Err(t("fileTree", "operation.sourceUnavailable").to_string()),
                 },
                 window,
@@ -223,14 +227,17 @@ pub(super) fn file_menu(
                     }
                     FileMenuAction::CopyRelativePath => {
                         let relative = match &context.backend {
-                            FileBackendIdentity::Remote { .. } => crate::remote_ssh::posix_relative(
-                                &root.to_string_lossy(),
-                                &path.to_string_lossy(),
-                            )
-                            .unwrap_or_default(),
-                            _ => {
-                                fs_ops::relative_path(&path.to_string_lossy(), &root.to_string_lossy())
+                            FileBackendIdentity::Remote { .. } => {
+                                crate::remote_ssh::posix_relative(
+                                    &root.to_string_lossy(),
+                                    &path.to_string_lossy(),
+                                )
+                                .unwrap_or_default()
                             }
+                            _ => fs_ops::relative_path(
+                                &path.to_string_lossy(),
+                                &root.to_string_lossy(),
+                            ),
                         };
                         cx.write_to_clipboard(ClipboardItem::new_string(relative));
                     }
@@ -304,20 +311,26 @@ pub(super) fn file_menu(
                                         false,
                                         Some(path.clone()),
                                         t("fileTree", "operation.deleting").into(),
-                                        move || match (&operation_target.context.backend, connection) {
-                                            (FileBackendIdentity::Remote { .. }, Some(conn)) => crate::remote_ssh::delete_entry_at_epoch(
-                                                &conn,
-                                                operation_target.remote_epoch(&conn)?,
-                                                remote_path_text(&root)?,
-                                                remote_path_text(&operation_path)?,
-                                            )
-                                            .map(|_| None),
+                                        move || match (
+                                            &operation_target.context.backend,
+                                            connection,
+                                        ) {
+                                            (FileBackendIdentity::Remote { .. }, Some(conn)) => {
+                                                crate::remote_ssh::delete_entry_at_epoch(
+                                                    &conn,
+                                                    operation_target.remote_epoch(&conn)?,
+                                                    remote_path_text(&root)?,
+                                                    remote_path_text(&operation_path)?,
+                                                )
+                                                .map(|_| None)
+                                            }
                                             (FileBackendIdentity::Local, None) => {
                                                 mt_project::fs::delete_entry(&root, &operation_path)
                                                     .map(|_| None)
                                                     .map_err(|e| format!("{e:#}"))
                                             }
-                                            _ => Err(t("fileTree", "operation.sourceUnavailable").to_string()),
+                                            _ => Err(t("fileTree", "operation.sourceUnavailable")
+                                                .to_string()),
                                         },
                                         window,
                                         cx,

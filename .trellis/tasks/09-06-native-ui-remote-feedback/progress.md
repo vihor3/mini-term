@@ -614,3 +614,13 @@ follow-up, leaving staged Worktree and other non-Agent files alone. One concrete
 remaining issue is explicit same-ID resume being rejected by the rich runtime's
 ended-run guard; a minimal lifecycle-start API decision is requested before any
 runtime change. Agent code remains unstaged until that source gate completes.
+
+Reviewed non-Agent integration is committed/pushed as
+`7e60d31bf164526c3eb7205becab4208252c1362`: CI `34004657463`, Windows package
+`34004657434`. The first Linux job stopped at changed Rust formatting and the
+16-key generated dictionary. Main downloaded and applied the complete U3
+`full-rustfmt.patch` and `generated-i18n.patch` from that exact Actions run.
+Both index and working source retain unfinished Agent hunks separately in shared
+store files. No formatter/generator/check was executed locally. Windows compile
+is still running; actual WSL fixture preparation/import succeeded and its test
+step is running. These setup results are not a passed transport or feature gate.

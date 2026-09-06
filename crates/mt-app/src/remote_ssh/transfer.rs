@@ -78,7 +78,13 @@ pub fn copy_entry_keep_both_at_epoch(
     source_path: &str,
     target_dir: &str,
 ) -> Result<(String, FileOperationSummary), String> {
-    copy_entry_keep_both_with_epoch(conn, project_root, source_path, target_dir, Some(expected_epoch))
+    copy_entry_keep_both_with_epoch(
+        conn,
+        project_root,
+        source_path,
+        target_dir,
+        Some(expected_epoch),
+    )
 }
 
 fn copy_entry_keep_both_with_epoch(
@@ -918,7 +924,8 @@ fn upload_paths_with_epoch(
             let mut summary = FileOperationSummary::default();
             let mut remote_cache = RemoteDirectoryCache::new();
             for local in local_paths {
-                if let Err(error) = ensure_upload_session(st, conn, expected_epoch, &session).await {
+                if let Err(error) = ensure_upload_session(st, conn, expected_epoch, &session).await
+                {
                     return finish_upload_summary(Ok(summary), Err(error));
                 }
                 let Some(name) = local.file_name().and_then(|name| name.to_str()) else {
@@ -1034,7 +1041,9 @@ pub fn download_conflicts_for_files(
 
 fn remote_download_name(path: &Path, strict_posix: bool) -> Result<&str, String> {
     if strict_posix {
-        let path = path.to_str().ok_or_else(|| "Remote file path is not valid text".to_string())?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| "Remote file path is not valid text".to_string())?;
         return split_posix_leaf(path).map(|(_, name)| name);
     }
     path.file_name()
@@ -1330,7 +1339,14 @@ pub fn download_entries(
     download_dir: &Path,
     strategy: FileConflictStrategy,
 ) -> Result<FileOperationSummary, String> {
-    download_entries_with_epoch(conn, project_root, remote_paths, download_dir, strategy, None)
+    download_entries_with_epoch(
+        conn,
+        project_root,
+        remote_paths,
+        download_dir,
+        strategy,
+        None,
+    )
 }
 
 pub fn download_entries_at_epoch(
@@ -1342,7 +1358,12 @@ pub fn download_entries_at_epoch(
     strategy: FileConflictStrategy,
 ) -> Result<FileOperationSummary, String> {
     download_entries_with_epoch(
-        conn, project_root, remote_paths, download_dir, strategy, Some(expected_epoch),
+        conn,
+        project_root,
+        remote_paths,
+        download_dir,
+        strategy,
+        Some(expected_epoch),
     )
 }
 
@@ -1393,9 +1414,11 @@ fn download_entries_with_epoch(
                     return finish_upload_summary(Ok(summary), Err(error));
                 }
                 let remote_text = match expected_epoch {
-                    Some(_) => std::borrow::Cow::Borrowed(remote_path.to_str().ok_or_else(|| {
-                        "Remote file path is not valid text".to_string()
-                    })?),
+                    Some(_) => std::borrow::Cow::Borrowed(
+                        remote_path
+                            .to_str()
+                            .ok_or_else(|| "Remote file path is not valid text".to_string())?,
+                    ),
                     None => remote_path.to_string_lossy(),
                 };
                 let remote =
@@ -1514,12 +1537,29 @@ mod epoch_tests {
 
     #[test]
     fn files_download_preflight_uses_posix_leaf_not_windows_path_components() {
-        assert_eq!(remote_download_name(Path::new("/work/src/file.txt"), true).unwrap(), "file.txt");
-        assert_eq!(remote_download_name(Path::new(r"/work/src\part/file.txt"), true).unwrap(), "file.txt");
-        for path in [r"/work/name\with\slashes", "/work/name:stream", "/", "relative"] {
-            assert!(remote_download_name(Path::new(path), true).is_err(), "{path}");
+        assert_eq!(
+            remote_download_name(Path::new("/work/src/file.txt"), true).unwrap(),
+            "file.txt"
+        );
+        assert_eq!(
+            remote_download_name(Path::new(r"/work/src\part/file.txt"), true).unwrap(),
+            "file.txt"
+        );
+        for path in [
+            r"/work/name\with\slashes",
+            "/work/name:stream",
+            "/",
+            "relative",
+        ] {
+            assert!(
+                remote_download_name(Path::new(path), true).is_err(),
+                "{path}"
+            );
         }
-        assert_eq!(remote_download_name(Path::new("legacy.txt"), false).unwrap(), "legacy.txt");
+        assert_eq!(
+            remote_download_name(Path::new("legacy.txt"), false).unwrap(),
+            "legacy.txt"
+        );
     }
 
     #[cfg(any(unix, windows))]
@@ -1620,115 +1660,288 @@ mod epoch_tests {
         std::fs::write(outside.join("keep.txt"), b"outside sentinel").unwrap();
         std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
 
-        let listing = list_directory_at_epoch(&connection, None, root_text, root_text, true).unwrap();
+        let listing =
+            list_directory_at_epoch(&connection, None, root_text, root_text, true).unwrap();
         let epoch = listing.source.connection_epoch;
         assert_eq!(listing.source.connection_id, connection.id);
-        assert_eq!(listing.source.connection_fingerprint, crate::remote_ssh::connection_fingerprint(&connection));
+        assert_eq!(
+            listing.source.connection_fingerprint,
+            crate::remote_ssh::connection_fingerprint(&connection)
+        );
         assert_eq!(listing.source.project_root, root_text);
         assert_eq!(listing.source.directory, root_text);
         assert!(listing.entries.iter().any(|entry| entry.name == "seed.txt"));
 
-        let created = create_entry_at_epoch(&connection, epoch, root_text, root_text, "created.txt", false).unwrap();
+        let created = create_entry_at_epoch(
+            &connection,
+            epoch,
+            root_text,
+            root_text,
+            "created.txt",
+            false,
+        )
+        .unwrap();
         assert!(std::fs::read(&created).unwrap().is_empty());
-        let renamed = rename_entry_at_epoch(&connection, epoch, root_text, &created, "renamed.txt").unwrap();
+        let renamed =
+            rename_entry_at_epoch(&connection, epoch, root_text, &created, "renamed.txt").unwrap();
         assert!(!Path::new(&created).exists());
         assert!(Path::new(&renamed).is_file());
-        let created_dir = create_entry_at_epoch(&connection, epoch, root_text, root_text, "created-dir", true).unwrap();
+        let created_dir = create_entry_at_epoch(
+            &connection,
+            epoch,
+            root_text,
+            root_text,
+            "created-dir",
+            true,
+        )
+        .unwrap();
         assert!(Path::new(&created_dir).is_dir());
 
         let (copied, _) = copy_entry_keep_both_at_epoch(
-            &connection, epoch, root_text, seed.to_str().unwrap(), root_text,
-        ).unwrap();
+            &connection,
+            epoch,
+            root_text,
+            seed.to_str().unwrap(),
+            root_text,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(copied).unwrap(), b"original remote bytes");
         let (copied_dir, _) = copy_entry_keep_both_at_epoch(
-            &connection, epoch, root_text, root.join("bundle").to_str().unwrap(), root_text,
-        ).unwrap();
-        assert_eq!(std::fs::read(Path::new(&copied_dir).join("child.txt")).unwrap(), b"directory bytes");
+            &connection,
+            epoch,
+            root_text,
+            root.join("bundle").to_str().unwrap(),
+            root_text,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(Path::new(&copied_dir).join("child.txt")).unwrap(),
+            b"directory bytes"
+        );
 
-        assert_eq!(upload_conflicts_at_epoch(
-            &connection, epoch, root_text, root_text, std::slice::from_ref(&upload),
-        ).unwrap(), vec!["seed.txt"]);
+        assert_eq!(
+            upload_conflicts_at_epoch(
+                &connection,
+                epoch,
+                root_text,
+                root_text,
+                std::slice::from_ref(&upload),
+            )
+            .unwrap(),
+            vec!["seed.txt"]
+        );
         let skipped = upload_paths_at_epoch(
-            &connection, epoch, root_text, root_text, std::slice::from_ref(&upload), FileConflictStrategy::Skip,
-        ).unwrap();
+            &connection,
+            epoch,
+            root_text,
+            root_text,
+            std::slice::from_ref(&upload),
+            FileConflictStrategy::Skip,
+        )
+        .unwrap();
         assert_eq!(skipped.skipped, 1);
         assert_eq!(std::fs::read(&seed).unwrap(), b"original remote bytes");
         let kept = upload_paths_at_epoch(
-            &connection, epoch, root_text, root_text, std::slice::from_ref(&upload), FileConflictStrategy::KeepBoth,
-        ).unwrap();
+            &connection,
+            epoch,
+            root_text,
+            root_text,
+            std::slice::from_ref(&upload),
+            FileConflictStrategy::KeepBoth,
+        )
+        .unwrap();
         assert_eq!(kept.completed, 1);
         assert_eq!(std::fs::read(&seed).unwrap(), b"original remote bytes");
         let uploaded = upload_paths_at_epoch(
-            &connection, epoch, root_text, root_text, &[upload.clone(), inputs.join("upload-bundle")], FileConflictStrategy::Overwrite,
-        ).unwrap();
+            &connection,
+            epoch,
+            root_text,
+            root_text,
+            &[upload.clone(), inputs.join("upload-bundle")],
+            FileConflictStrategy::Overwrite,
+        )
+        .unwrap();
         assert_eq!(uploaded.failed, 0);
         assert_eq!(std::fs::read(&seed).unwrap(), b"uploaded bytes");
-        assert_eq!(std::fs::read(root.join("upload-bundle/child.txt")).unwrap(), b"staged bytes");
+        assert_eq!(
+            std::fs::read(root.join("upload-bundle/child.txt")).unwrap(),
+            b"staged bytes"
+        );
 
         let remote_paths = [seed.clone(), root.join("bundle")];
         let downloaded = download_entries_at_epoch(
-            &connection, epoch, root_text, &remote_paths, &downloads, FileConflictStrategy::KeepBoth,
-        ).unwrap();
+            &connection,
+            epoch,
+            root_text,
+            &remote_paths,
+            &downloads,
+            FileConflictStrategy::KeepBoth,
+        )
+        .unwrap();
         assert_eq!(downloaded.failed, 0);
-        assert_eq!(std::fs::read(downloads.join("seed.txt")).unwrap(), b"uploaded bytes");
-        assert_eq!(std::fs::read(downloads.join("bundle/child.txt")).unwrap(), b"directory bytes");
-        assert_eq!(download_conflicts_for_files(&downloads, &remote_paths).unwrap(), vec!["seed.txt", "bundle"]);
+        assert_eq!(
+            std::fs::read(downloads.join("seed.txt")).unwrap(),
+            b"uploaded bytes"
+        );
+        assert_eq!(
+            std::fs::read(downloads.join("bundle/child.txt")).unwrap(),
+            b"directory bytes"
+        );
+        assert_eq!(
+            download_conflicts_for_files(&downloads, &remote_paths).unwrap(),
+            vec!["seed.txt", "bundle"]
+        );
         delete_entry_at_epoch(&connection, epoch, root_text, &renamed).unwrap();
         delete_entry_at_epoch(&connection, epoch, root_text, &copied_dir).unwrap();
         assert!(!Path::new(&renamed).exists());
         assert!(!Path::new(&copied_dir).exists());
-        assert!(create_entry_at_epoch(
-            &connection, epoch, root_text, root.join("escape").to_str().unwrap(), "outside.txt", false,
-        ).is_err());
-        assert!(list_directory_at_epoch(
-            &connection, Some(epoch), root.join("escape").to_str().unwrap(), root_text, false,
-        ).is_err());
+        assert!(
+            create_entry_at_epoch(
+                &connection,
+                epoch,
+                root_text,
+                root.join("escape").to_str().unwrap(),
+                "outside.txt",
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            list_directory_at_epoch(
+                &connection,
+                Some(epoch),
+                root.join("escape").to_str().unwrap(),
+                root_text,
+                false,
+            )
+            .is_err()
+        );
         assert!(delete_entry_at_epoch(&connection, epoch, root_text, root_text).is_err());
         assert!(!outside.join("outside.txt").exists());
         delete_entry_at_epoch(
-            &connection, epoch, root_text, root.join("escape").to_str().unwrap(),
-        ).unwrap();
+            &connection,
+            epoch,
+            root_text,
+            root.join("escape").to_str().unwrap(),
+        )
+        .unwrap();
         assert!(std::fs::symlink_metadata(root.join("escape")).is_err());
-        assert_eq!(std::fs::read(outside.join("keep.txt")).unwrap(), b"outside sentinel");
+        assert_eq!(
+            std::fs::read(outside.join("keep.txt")).unwrap(),
+            b"outside sentinel"
+        );
 
         // Use the real pool to retire A and acquire B, retaining A's pin.
         let st = state();
-        let replacement_epoch = st.block_on(async {
-            let (session, sftp) = open_sftp_with_session(st, &connection).await?;
-            let pin = FileSessionPin::new(st, &connection, Some(epoch), &session);
-            pin.check().await?;
-            sftp.close().await;
-            assert!(crate::remote_ssh::evict_session_if_same(st, &st.pool(), &connection.id, &session).await);
-            let (replacement, replacement_sftp) = open_sftp_with_session(st, &connection).await?;
-            assert!(pin.check().await.is_err());
-            let acquired_pin = FileSessionPin::new(st, &connection, Some(epoch), &replacement);
-            assert!(acquired_pin.check().await.is_err());
-            let replacement_epoch = replacement.connection_epoch().get();
-            replacement_sftp.close().await;
-            Ok(replacement_epoch)
-        }).unwrap();
+        let replacement_epoch = st
+            .block_on(async {
+                let (session, sftp) = open_sftp_with_session(st, &connection).await?;
+                let pin = FileSessionPin::new(st, &connection, Some(epoch), &session);
+                pin.check().await?;
+                sftp.close().await;
+                assert!(
+                    crate::remote_ssh::evict_session_if_same(
+                        st,
+                        &st.pool(),
+                        &connection.id,
+                        &session
+                    )
+                    .await
+                );
+                let (replacement, replacement_sftp) =
+                    open_sftp_with_session(st, &connection).await?;
+                assert!(pin.check().await.is_err());
+                let acquired_pin = FileSessionPin::new(st, &connection, Some(epoch), &replacement);
+                assert!(acquired_pin.check().await.is_err());
+                let replacement_epoch = replacement.connection_epoch().get();
+                replacement_sftp.close().await;
+                Ok(replacement_epoch)
+            })
+            .unwrap();
         assert_ne!(epoch, replacement_epoch);
         let entry_count = std::fs::read_dir(&root).unwrap().count();
         std::fs::write(&upload, b"must not replace captured source").unwrap();
-        assert!(list_directory_at_epoch(&connection, Some(epoch), root_text, root_text, false).is_err());
-        assert!(create_entry_at_epoch(&connection, epoch, root_text, root_text, "forbidden.txt", false).is_err());
-        assert!(rename_entry_at_epoch(&connection, epoch, root_text, seed.to_str().unwrap(), "forbidden.txt").is_err());
-        assert!(delete_entry_at_epoch(&connection, epoch, root_text, seed.to_str().unwrap()).is_err());
-        assert!(copy_entry_keep_both_at_epoch(&connection, epoch, root_text, seed.to_str().unwrap(), root_text).is_err());
-        assert!(upload_conflicts_at_epoch(&connection, epoch, root_text, root_text, std::slice::from_ref(&upload)).is_err());
-        assert!(upload_paths_at_epoch(
-            &connection, epoch, root_text, root_text, &[upload], FileConflictStrategy::Overwrite,
-        ).is_err());
+        assert!(
+            list_directory_at_epoch(&connection, Some(epoch), root_text, root_text, false).is_err()
+        );
+        assert!(
+            create_entry_at_epoch(
+                &connection,
+                epoch,
+                root_text,
+                root_text,
+                "forbidden.txt",
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            rename_entry_at_epoch(
+                &connection,
+                epoch,
+                root_text,
+                seed.to_str().unwrap(),
+                "forbidden.txt"
+            )
+            .is_err()
+        );
+        assert!(
+            delete_entry_at_epoch(&connection, epoch, root_text, seed.to_str().unwrap()).is_err()
+        );
+        assert!(
+            copy_entry_keep_both_at_epoch(
+                &connection,
+                epoch,
+                root_text,
+                seed.to_str().unwrap(),
+                root_text
+            )
+            .is_err()
+        );
+        assert!(
+            upload_conflicts_at_epoch(
+                &connection,
+                epoch,
+                root_text,
+                root_text,
+                std::slice::from_ref(&upload)
+            )
+            .is_err()
+        );
+        assert!(
+            upload_paths_at_epoch(
+                &connection,
+                epoch,
+                root_text,
+                root_text,
+                &[upload],
+                FileConflictStrategy::Overwrite,
+            )
+            .is_err()
+        );
         let denied_download = scratch.join("denied-download");
-        assert!(download_entries_at_epoch(
-            &connection, epoch, root_text, std::slice::from_ref(&seed), &denied_download, FileConflictStrategy::Overwrite,
-        ).is_err());
+        assert!(
+            download_entries_at_epoch(
+                &connection,
+                epoch,
+                root_text,
+                std::slice::from_ref(&seed),
+                &denied_download,
+                FileConflictStrategy::Overwrite,
+            )
+            .is_err()
+        );
         assert!(!denied_download.exists());
         assert_eq!(std::fs::read(&seed).unwrap(), b"uploaded bytes");
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), entry_count);
         let current = list_directory_at_epoch(
-            &connection, Some(replacement_epoch), root_text, root_text, false,
-        ).unwrap();
+            &connection,
+            Some(replacement_epoch),
+            root_text,
+            root_text,
+            false,
+        )
+        .unwrap();
         assert_eq!(current.source.connection_epoch, replacement_epoch);
     }
 }

@@ -22,13 +22,26 @@ pub(crate) fn run_tasks_account_envelope(
     control: &AccountExecutionControl,
     wire_cap: usize,
 ) -> AccountHostResult<Vec<u8>> {
-    let ExecutionBackend::Ssh { connection, connection_fingerprint, .. } = &snapshot.backend else {
-        return AccountHostResult { result: Err(AccountExecutionError::InvalidContext), observed_connection_epoch: None };
+    let ExecutionBackend::Ssh {
+        connection,
+        connection_fingerprint,
+        ..
+    } = &snapshot.backend
+    else {
+        return AccountHostResult {
+            result: Err(AccountExecutionError::InvalidContext),
+            observed_connection_epoch: None,
+        };
     };
     let st = state();
     let runtime = match st.runtime() {
         Ok(runtime) => runtime,
-        Err(_) => return AccountHostResult { result: Err(AccountError::Offline.into()), observed_connection_epoch: None },
+        Err(_) => {
+            return AccountHostResult {
+                result: Err(AccountError::Offline.into()),
+                observed_connection_epoch: None,
+            };
+        }
     };
     runtime.block_on(async {
         let deadline = tokio::time::Instant::now() + control.timeout();
@@ -186,10 +199,15 @@ async fn finish_success(
     deadline: tokio::time::Instant,
 ) -> Result<Vec<u8>, AccountExecutionError> {
     let epoch = session.connection_epoch().get();
-    if control.cancellation().is_cancelled() { return Err(AccountExecutionError::Cancelled); }
-    if tokio::time::Instant::now() >= deadline { return Err(AccountExecutionError::TimedOut); }
+    if control.cancellation().is_cancelled() {
+        return Err(AccountExecutionError::Cancelled);
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return Err(AccountExecutionError::TimedOut);
+    }
     if !pool.is_current_session(&connection.id, session).await
-        || !st.connection_epoch_is_current(&connection.id, epoch) {
+        || !st.connection_epoch_is_current(&connection.id, epoch)
+    {
         return Err(AccountExecutionError::ContextChanged);
     }
     if !crate::tasks_account_executor::host_reply_confirms_cleanup(&bytes) {

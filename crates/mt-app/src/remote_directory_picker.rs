@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Entity, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, Pixels, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
+    IntoElement, ParentElement, Pixels, ScrollHandle, SharedString, StatefulInteractiveElement,
+    Styled, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::Scrollbar;
@@ -149,7 +149,9 @@ impl DirectoryRequests {
     }
 
     fn accepts_callback(&self, id: u64) -> bool {
-        self.active.as_ref().is_some_and(|request| request.id == id && self.owns(request))
+        self.active
+            .as_ref()
+            .is_some_and(|request| request.id == id && self.owns(request))
     }
 
     fn close(&mut self) -> bool {
@@ -294,9 +296,7 @@ fn source_epoch_is_current(source: &DirectorySource) -> bool {
             connection_id,
             connection_epoch,
             ..
-        } => {
-            crate::remote_ssh::current_connection_epoch(connection_id) == Some(*connection_epoch)
-        }
+        } => crate::remote_ssh::current_connection_epoch(connection_id) == Some(*connection_epoch),
     }
 }
 
@@ -414,9 +414,7 @@ fn resolve_input(
     if !matches!(&current.source, DirectorySource::Ssh { .. }) {
         if let Some(wsl) = mt_core::parse_wsl_unc(&input.replace('/', "\\")) {
             return Ok(DirectoryLocation {
-                source: DirectorySource::Wsl {
-                    distro: wsl.distro,
-                },
+                source: DirectorySource::Wsl { distro: wsl.distro },
                 path: wsl.unix_path,
             });
         }
@@ -1065,24 +1063,30 @@ fn render_body(state: &Entity<PickerState>, window: &mut Window, cx: &mut App) -
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
-                .text_color(if has_error { ui::color_error() } else { ui::text_muted() })
+                .text_color(if has_error {
+                    ui::color_error()
+                } else {
+                    ui::text_muted()
+                })
                 .when(loading && live, |el| {
                     el.child(ui::spinner(px(16.0), ui::text_muted()))
                 })
                 .children(status.lines().map(|line| {
-                    div().min_w(px(0.0)).overflow_hidden().child(line.to_string())
+                    div()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .child(line.to_string())
                 })),
         );
     } else if entries.is_empty() {
-        list = list.child(
-            div()
-                .p(px(16.0))
-                .text_color(ui::text_muted())
-                .child(t(
-                    "projectOnboarding",
-                    if unfiltered_empty { "picker.empty" } else { "picker.noMatches" },
-                )),
-        );
+        list = list.child(div().p(px(16.0)).text_color(ui::text_muted()).child(t(
+            "projectOnboarding",
+            if unfiltered_empty {
+                "picker.empty"
+            } else {
+                "picker.noMatches"
+            },
+        )));
     } else {
         for (index, entry) in entries.into_iter().enumerate() {
             let row_state = state.clone();
@@ -1091,7 +1095,9 @@ fn render_body(state: &Entity<PickerState>, window: &mut Window, cx: &mut App) -
             let is_selected = selected.as_ref() == Some(&entry.location);
             list = list.child(
                 div()
-                    .id(SharedString::from(format!("directory-row-{request}-{index}")))
+                    .id(SharedString::from(format!(
+                        "directory-row-{request}-{index}"
+                    )))
                     .h(px(34.0))
                     .flex_none()
                     .min_w(px(0.0))
@@ -1105,7 +1111,10 @@ fn render_body(state: &Entity<PickerState>, window: &mut Window, cx: &mut App) -
                     .tooltip(move |_, cx| cx.new(|_| Tooltip::new(inspect_path.clone())).into())
                     .on_click(move |event: &ClickEvent, window, cx| {
                         row_state.update(cx, |state, cx| {
-                            if !state.is_live(cx) || state.loading || !state.requests.accepts_callback(request) {
+                            if !state.is_live(cx)
+                                || state.loading
+                                || !state.requests.accepts_callback(request)
+                            {
                                 return;
                             }
                             if event.click_count() >= 2 {
@@ -1199,16 +1208,21 @@ fn render_body(state: &Entity<PickerState>, window: &mut Window, cx: &mut App) -
                         .gap(px(8.0))
                         .child(
                             ui::ghost_button("directory-cancel", t("projectOnboarding", "cancel"))
-                                .on_click(move |_, window, cx| finish(&cancel_state, None, window, cx)),
+                                .on_click(move |_, window, cx| {
+                                    finish(&cancel_state, None, window, cx)
+                                }),
                         )
                         .child(
-                            ui::primary_button("directory-select", t("projectOnboarding", "picker.select"))
-                                .opacity(if can_select { 1.0 } else { 0.4 })
-                                .on_click(move |_, window, cx| {
-                                    if let Some(selection) = &selection {
-                                        finish(&select_state, Some(selection), window, cx);
-                                    }
-                                }),
+                            ui::primary_button(
+                                "directory-select",
+                                t("projectOnboarding", "picker.select"),
+                            )
+                            .opacity(if can_select { 1.0 } else { 0.4 })
+                            .on_click(move |_, window, cx| {
+                                if let Some(selection) = &selection {
+                                    finish(&select_state, Some(selection), window, cx);
+                                }
+                            }),
                         ),
                 ),
         )
@@ -1258,8 +1272,7 @@ mod tests {
 
     #[test]
     fn a_remote_location_never_falls_back_to_the_client_filesystem() {
-        let error = browse_directory(&ProjectHostSelection::Local, None, &remote("/"))
-            .unwrap_err();
+        let error = browse_directory(&ProjectHostSelection::Local, None, &remote("/")).unwrap_err();
         assert_eq!(error.kind, DirectoryBrowseErrorKind::Unavailable);
         let error = browse_local_directory(&remote("~")).unwrap_err();
         assert_eq!(error.kind, DirectoryBrowseErrorKind::Unavailable);
@@ -1271,15 +1284,23 @@ mod tests {
         let request = requests.begin(remote("/same")).unwrap();
         for source in [
             DirectorySource::Local,
-            DirectorySource::Wsl { distro: "Ubuntu".into() },
-            DirectorySource::Ssh {
-                connection_id: "host-b".into(), connection_fingerprint: 31, connection_epoch: 7,
+            DirectorySource::Wsl {
+                distro: "Ubuntu".into(),
             },
             DirectorySource::Ssh {
-                connection_id: "host-a".into(), connection_fingerprint: 32, connection_epoch: 7,
+                connection_id: "host-b".into(),
+                connection_fingerprint: 31,
+                connection_epoch: 7,
             },
             DirectorySource::Ssh {
-                connection_id: "host-a".into(), connection_fingerprint: 31, connection_epoch: 8,
+                connection_id: "host-a".into(),
+                connection_fingerprint: 32,
+                connection_epoch: 7,
+            },
+            DirectorySource::Ssh {
+                connection_id: "host-a".into(),
+                connection_fingerprint: 31,
+                connection_epoch: 8,
             },
         ] {
             let mut other = request.clone();
@@ -1335,21 +1356,32 @@ mod tests {
         let listing = listing();
         assert_eq!(filter_directories(&listing, "").len(), 5);
         assert_eq!(filter_directories(&listing, "/home/User").len(), 5);
-        let names = filter_directories(&listing, "WORK").into_iter()
-            .map(|entry| entry.name.as_str()).collect::<Vec<_>>();
+        let names = filter_directories(&listing, "WORK")
+            .into_iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(names, ["Workspace", "work2", "work10"]);
         assert_eq!(filter_directories(&listing, ".git")[0].name, ".git");
         assert!(filter_directories(&listing, "/not-loaded").is_empty());
         assert_eq!(listing.location.path, "/home/User");
-        assert_eq!(resolve_input(&listing.location, "Workspace").unwrap().path, "/home/User/Workspace");
+        assert_eq!(
+            resolve_input(&listing.location, "Workspace").unwrap().path,
+            "/home/User/Workspace"
+        );
     }
 
     #[test]
     fn select_accepts_only_a_ready_current_directory_or_its_captured_child() {
         let listing = listing();
         let child = &listing.directories[0].location;
-        assert_eq!(selected_host_path(Some(&listing), Some(child), true), Some("/home/User/.config".into()));
-        assert_eq!(selected_host_path(Some(&listing), Some(&listing.location), true), Some("/home/User".into()));
+        assert_eq!(
+            selected_host_path(Some(&listing), Some(child), true),
+            Some("/home/User/.config".into())
+        );
+        assert_eq!(
+            selected_host_path(Some(&listing), Some(&listing.location), true),
+            Some("/home/User".into())
+        );
         assert!(selected_host_path(Some(&listing), Some(child), false).is_none());
         assert!(selected_host_path(None, Some(child), true).is_none());
         assert!(selected_host_path(Some(&listing), Some(&remote("/other")), true).is_none());
@@ -1364,27 +1396,55 @@ mod tests {
         let mut requests = DirectoryRequests::default();
         let first = requests.begin(listing.location.clone()).unwrap();
         let child = &listing.directories[0].location;
-        let selection = DirectorySelection::capture(
-            &requests, Some(&listing), Some(child), true,
-        ).unwrap();
-        assert_eq!(selection.host_path(&requests, Some(&listing), Some(child), true), Some(child.path.clone()));
-        assert!(selection.host_path(&requests, Some(&listing), Some(&listing.location), true).is_none());
-        assert!(selection.host_path(&requests, Some(&listing), Some(child), false).is_none());
-        assert!(selection.host_path(&requests, None, Some(child), true).is_none());
+        let selection =
+            DirectorySelection::capture(&requests, Some(&listing), Some(child), true).unwrap();
+        assert_eq!(
+            selection.host_path(&requests, Some(&listing), Some(child), true),
+            Some(child.path.clone())
+        );
+        assert!(
+            selection
+                .host_path(&requests, Some(&listing), Some(&listing.location), true)
+                .is_none()
+        );
+        assert!(
+            selection
+                .host_path(&requests, Some(&listing), Some(child), false)
+                .is_none()
+        );
+        assert!(
+            selection
+                .host_path(&requests, None, Some(child), true)
+                .is_none()
+        );
 
         requests.begin(remote("/other")).unwrap();
         let latest = requests.begin(listing.location.clone()).unwrap();
         assert!(!requests.accepts_callback(first.id));
         assert!(requests.accepts_callback(latest.id));
-        assert!(selection.host_path(&requests, Some(&listing), Some(child), true).is_none());
-        let successor = DirectorySelection::capture(&requests, Some(&listing), Some(child), true).unwrap();
-        assert_eq!(successor.host_path(&requests, Some(&listing), Some(child), true), Some(child.path.clone()));
+        assert!(
+            selection
+                .host_path(&requests, Some(&listing), Some(child), true)
+                .is_none()
+        );
+        let successor =
+            DirectorySelection::capture(&requests, Some(&listing), Some(child), true).unwrap();
+        assert_eq!(
+            successor.host_path(&requests, Some(&listing), Some(child), true),
+            Some(child.path.clone())
+        );
 
         let mut rebound = listing.clone();
         rebound.location.source = DirectorySource::Local;
-        assert!(DirectorySelection::capture(&requests, Some(&rebound), Some(child), true).is_none());
+        assert!(
+            DirectorySelection::capture(&requests, Some(&rebound), Some(child), true).is_none()
+        );
         assert!(requests.close());
-        assert!(successor.host_path(&requests, Some(&listing), Some(child), true).is_none());
+        assert!(
+            successor
+                .host_path(&requests, Some(&listing), Some(child), true)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1407,28 +1467,54 @@ mod tests {
     fn remote_navigation_preserves_case_and_posix_filename_characters() {
         let location = remote(r"/home/User/a\b:folder");
         let crumbs = breadcrumbs(&location);
-        assert_eq!(crumbs.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["/", "home", "User", r"a\b:folder"]);
+        assert_eq!(
+            crumbs
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["/", "home", "User", r"a\b:folder"]
+        );
         assert_eq!(crumbs.last().unwrap().1, location);
         assert_eq!(parent_location(&location).unwrap().path, "/home/User");
         assert!(parent_location(&remote("/")).is_none());
-        assert_eq!(resolve_input(&location, "/Case/Sensitive").unwrap().path, "/Case/Sensitive");
+        assert_eq!(
+            resolve_input(&location, "/Case/Sensitive").unwrap().path,
+            "/Case/Sensitive"
+        );
         let windows_spelling = resolve_input(&location, r"C:\client\folder").unwrap();
         assert_eq!(windows_spelling.source, location.source);
-        assert_eq!(windows_spelling.path, r"/home/User/a\b:folder/C:\client\folder");
+        assert_eq!(
+            windows_spelling.path,
+            r"/home/User/a\b:folder/C:\client\folder"
+        );
         assert!(resolve_input(&location, "").is_err());
         assert!(resolve_input(&location, "/nul\0path").is_err());
     }
 
     #[test]
     fn wsl_navigation_keeps_posix_display_and_unc_registration() {
-        let native = DirectoryLocation { source: DirectorySource::Local, path: "~".into() };
+        let native = DirectoryLocation {
+            source: DirectorySource::Local,
+            path: "~".into(),
+        };
         let location = resolve_input(&native, r"\\wsl$\Ubuntu\home\User\Project").unwrap();
-        assert_eq!(location.source, DirectorySource::Wsl { distro: "Ubuntu".into() });
+        assert_eq!(
+            location.source,
+            DirectorySource::Wsl {
+                distro: "Ubuntu".into()
+            }
+        );
         assert_eq!(location.path, "/home/User/Project");
         assert_eq!(parent_location(&location).unwrap().path, "/home/User");
         assert_eq!(breadcrumbs(&location).last().unwrap().1, location);
-        assert_eq!(location.host_path().unwrap(), r"\\wsl.localhost\Ubuntu\home\User\Project");
-        assert_eq!(resolve_input(&location, "/etc").unwrap().source, location.source);
+        assert_eq!(
+            location.host_path().unwrap(),
+            r"\\wsl.localhost\Ubuntu\home\User\Project"
+        );
+        assert_eq!(
+            resolve_input(&location, "/etc").unwrap().source,
+            location.source
+        );
         let other = resolve_input(&location, r"\\wsl.localhost\Debian\srv").unwrap();
         assert_ne!(other.source, location.source);
     }
@@ -1456,16 +1542,25 @@ mod tests {
     #[test]
     fn windows_drives_and_unc_roots_remain_native_and_do_not_escape_their_root() {
         for path in [r"C:\", r"\\server\share\"] {
-            let root = DirectoryLocation { source: DirectorySource::Local, path: path.into() };
+            let root = DirectoryLocation {
+                source: DirectorySource::Local,
+                path: path.into(),
+            };
             assert!(parent_location(&root).is_none());
             let crumbs = breadcrumbs(&root);
             assert_eq!(crumbs.len(), 1);
             assert_eq!(crumbs[0].1.source, DirectorySource::Local);
             assert!(Path::new(&crumbs[0].1.path).is_absolute());
         }
-        let location = DirectoryLocation { source: DirectorySource::Local, path: r"C:\Users\Me".into() };
+        let location = DirectoryLocation {
+            source: DirectorySource::Local,
+            path: r"C:\Users\Me".into(),
+        };
         assert_eq!(parent_location(&location).unwrap().path, r"C:\Users");
-        assert_eq!(resolve_input(&location, r"D:\repo").unwrap().path, r"D:\repo");
+        assert_eq!(
+            resolve_input(&location, r"D:\repo").unwrap().path,
+            r"D:\repo"
+        );
         assert!(resolve_input(&location, "D:relative").is_err());
         let share = resolve_input(&location, r"\\server\share\repo").unwrap();
         assert_eq!(share.source, DirectorySource::Local);

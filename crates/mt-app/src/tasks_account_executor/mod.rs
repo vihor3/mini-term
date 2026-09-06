@@ -58,7 +58,11 @@ impl AccountExecutionControl {
         if timeout < Duration::from_millis(100) || timeout > MAX_TIMEOUT {
             return Err(AccountExecutionError::InvalidContext);
         }
-        Ok(Self { timeout, cancellation, expected_connection_epoch })
+        Ok(Self {
+            timeout,
+            cancellation,
+            expected_connection_epoch,
+        })
     }
 
     pub(crate) fn timeout(&self) -> Duration {
@@ -105,7 +109,9 @@ impl fmt::Display for AccountExecutionError {
             Self::TimedOut => "The Tasks account request timed out",
             Self::InvalidContext => "The Tasks execution context is invalid",
             Self::ContextChanged => "The Tasks execution host changed during the request",
-            Self::HostHelperUnavailable => "Tasks account isolation requires Python 3.8+ on this host",
+            Self::HostHelperUnavailable => {
+                "Tasks account isolation requires Python 3.8+ on this host"
+            }
             Self::CleanupFailed => "Tasks account process cleanup could not be confirmed",
             Self::SecretOutputRejected => "The Tasks account request produced unsafe output",
             Self::Protocol => "The Tasks account execution host returned invalid data",
@@ -145,9 +151,14 @@ pub fn probe_account_capability(
     capability: AccountCapability,
     control: &AccountExecutionControl,
 ) -> AccountHostResult<()> {
-    run(snapshot, &account_capability_plan(capability), None, control,
-        mt_github::COMMAND_OUTPUT_LIMIT)
-        .map(|output| verify_account_capability(capability, &output).map_err(Into::into))
+    run(
+        snapshot,
+        &account_capability_plan(capability),
+        None,
+        control,
+        mt_github::COMMAND_OUTPUT_LIMIT,
+    )
+    .map(|output| verify_account_capability(capability, &output).map_err(Into::into))
 }
 
 pub fn discover_accounts(
@@ -157,10 +168,21 @@ pub fn discover_accounts(
 ) -> AccountHostResult<KnownGitHubAccounts> {
     let plan = match known_accounts_plan(host) {
         Ok(plan) => plan,
-        Err(error) => return AccountHostResult { result: Err(error.into()), observed_connection_epoch: None },
+        Err(error) => {
+            return AccountHostResult {
+                result: Err(error.into()),
+                observed_connection_epoch: None,
+            };
+        }
     };
-    run(snapshot, &plan, None, control, mt_github::COMMAND_OUTPUT_LIMIT)
-        .map(|output| parse_known_accounts(host, &output).map_err(Into::into))
+    run(
+        snapshot,
+        &plan,
+        None,
+        control,
+        mt_github::COMMAND_OUTPUT_LIMIT,
+    )
+    .map(|output| parse_known_accounts(host, &output).map_err(Into::into))
 }
 
 /// Lookup plus data read; list/detail also prove identity before and after using
@@ -170,7 +192,14 @@ pub fn execute_selected_account(
     plan: &SelectedAccountRequestPlan,
     control: &AccountExecutionControl,
 ) -> AccountHostResult<CommandOutput> {
-    run(snapshot, &plan.data_plan(), Some(plan), control, plan.output_limit()).map(|output| {
+    run(
+        snapshot,
+        &plan.data_plan(),
+        Some(plan),
+        control,
+        plan.output_limit(),
+    )
+    .map(|output| {
         require_account_success(plan.stage(), &output)?;
         if plan.stage() == AccountCommandStage::Identity {
             verify_selected_account(plan.account(), &output)?;
@@ -187,7 +216,10 @@ fn run(
     output_limit: usize,
 ) -> AccountHostResult<CommandOutput> {
     if let Err(error) = validate_context(snapshot, control) {
-        return AccountHostResult { result: Err(error), observed_connection_epoch: None };
+        return AccountHostResult {
+            result: Err(error),
+            observed_connection_epoch: None,
+        };
     }
     if matches!(snapshot.backend, ExecutionBackend::Local) {
         return AccountHostResult {
@@ -197,7 +229,12 @@ fn run(
     }
     let envelope = match host_envelope_plan(snapshot, data, selected, control, output_limit) {
         Ok(plan) => plan,
-        Err(error) => return AccountHostResult { result: Err(error), observed_connection_epoch: None },
+        Err(error) => {
+            return AccountHostResult {
+                result: Err(error),
+                observed_connection_epoch: None,
+            };
+        }
     };
     let wire_cap = wire_limit(output_limit);
     match &snapshot.backend {
@@ -210,7 +247,12 @@ fn run(
         ExecutionBackend::Ssh { .. } => {
             let command = match ssh_envelope_command(&envelope) {
                 Ok(command) => command,
-                Err(_) => return AccountHostResult { result: Err(AccountExecutionError::InvalidContext), observed_connection_epoch: None },
+                Err(_) => {
+                    return AccountHostResult {
+                        result: Err(AccountExecutionError::InvalidContext),
+                        observed_connection_epoch: None,
+                    };
+                }
             };
             crate::remote_ssh::run_tasks_account_envelope(snapshot, &command, control, wire_cap)
                 .map(|bytes| decode_host_reply(&bytes, output_limit))
@@ -251,7 +293,11 @@ fn validate_context(
             crate::execution_host::normalize_absolute_posix_path(&snapshot.canonical_path)
                 .map_err(|_| AccountExecutionError::InvalidContext)?;
         }
-        ExecutionBackend::Ssh { connection, connection_fingerprint, .. } => {
+        ExecutionBackend::Ssh {
+            connection,
+            connection_fingerprint,
+            ..
+        } => {
             if crate::remote_ssh::connection_fingerprint(connection) != *connection_fingerprint {
                 return Err(AccountExecutionError::ContextChanged);
             }
@@ -270,13 +316,23 @@ fn host_envelope_plan(
     output_limit: usize,
 ) -> Result<CommandPlan, AccountExecutionError> {
     let (host, login, expected, proof) = selected.map_or(("", "", "", Vec::new()), |plan| {
-        (plan.account().host(), plan.lookup_login(), plan.account().login(),
-            account_plan(plan.account().host()).args)
+        (
+            plan.account().host(),
+            plan.lookup_login(),
+            plan.account().login(),
+            account_plan(plan.account().host()).args,
+        )
     });
     let args = vec![
-        "-I".into(), "-c".into(), HOST_ENVELOPE.into(), snapshot.canonical_path.clone(),
-        control.timeout.as_millis().to_string(), output_limit.to_string(), host.into(),
-        login.into(), expected.into(),
+        "-I".into(),
+        "-c".into(),
+        HOST_ENVELOPE.into(),
+        snapshot.canonical_path.clone(),
+        control.timeout.as_millis().to_string(),
+        output_limit.to_string(),
+        host.into(),
+        login.into(),
+        expected.into(),
         serde_json::to_string(&data.args).map_err(|_| AccountExecutionError::InvalidContext)?,
         serde_json::to_string(&proof).map_err(|_| AccountExecutionError::InvalidContext)?,
     ];
@@ -284,7 +340,11 @@ fn host_envelope_plan(
 }
 
 pub(super) fn auth_variable(host: &str) -> &'static str {
-    if host == "github.com" || host.ends_with(".ghe.com") { "GH_TOKEN" } else { "GH_ENTERPRISE_TOKEN" }
+    if host == "github.com" || host.ends_with(".ghe.com") {
+        "GH_TOKEN"
+    } else {
+        "GH_ENTERPRISE_TOKEN"
+    }
 }
 
 fn wire_limit(output_limit: usize) -> usize {
@@ -295,7 +355,11 @@ fn wire_limit(output_limit: usize) -> usize {
 #[serde(tag = "status", deny_unknown_fields)]
 enum HostReply {
     #[serde(rename = "output")]
-    Output { stdout: String, stderr: String, exit_code: i32 },
+    Output {
+        stdout: String,
+        stderr: String,
+        exit_code: i32,
+    },
     #[serde(rename = "cancelled")]
     Cancelled,
     #[serde(rename = "timed-out")]
@@ -322,17 +386,26 @@ enum HostReply {
     Failed,
 }
 
-fn decode_host_reply(bytes: &[u8], output_limit: usize) -> Result<CommandOutput, AccountExecutionError> {
+fn decode_host_reply(
+    bytes: &[u8],
+    output_limit: usize,
+) -> Result<CommandOutput, AccountExecutionError> {
     if bytes.len() > wire_limit(output_limit) || std::str::from_utf8(bytes).is_err() {
         return Err(AccountExecutionError::Protocol);
     }
     match serde_json::from_slice::<HostReply>(bytes).map_err(|_| AccountExecutionError::Protocol)? {
-        HostReply::Output { stdout, stderr, exit_code } => {
+        HostReply::Output {
+            stdout,
+            stderr,
+            exit_code,
+        } => {
             if stdout.len() > output_limit || stderr.len() > mt_github::COMMAND_OUTPUT_LIMIT {
                 return Err(AccountError::MalformedResponse.into());
             }
             Ok(CommandOutput {
-                stdout: stdout.into_bytes(), stderr: stderr.into_bytes(), exit_code: Some(exit_code),
+                stdout: stdout.into_bytes(),
+                stderr: stderr.into_bytes(),
+                exit_code: Some(exit_code),
                 ..CommandOutput::default()
             })
         }
@@ -341,8 +414,12 @@ fn decode_host_reply(bytes: &[u8], output_limit: usize) -> Result<CommandOutput,
         HostReply::HelperUnavailable => Err(AccountExecutionError::HostHelperUnavailable),
         HostReply::ClientMissing => Err(AccountError::ClientMissing.into()),
         HostReply::CredentialLookupFailed => Err(AccountError::CredentialLookupFailed.into()),
-        HostReply::CredentialStoreUnavailable => Err(AccountError::CredentialStoreUnavailable.into()),
-        HostReply::NamedAccountUnsupported => Err(AccountError::UnsupportedNamedAccountLookup.into()),
+        HostReply::CredentialStoreUnavailable => {
+            Err(AccountError::CredentialStoreUnavailable.into())
+        }
+        HostReply::NamedAccountUnsupported => {
+            Err(AccountError::UnsupportedNamedAccountLookup.into())
+        }
         HostReply::IdentityMismatch => Err(AccountError::WrongHostOrAccount.into()),
         HostReply::CleanupFailed => Err(AccountExecutionError::CleanupFailed),
         HostReply::UnsafeOutput => Err(AccountExecutionError::SecretOutputRejected),

@@ -319,9 +319,9 @@ async fn remove_remote_leaf_via_isolation(
                 let restore = restore_isolated_remote_entry(sftp, &isolated, &target).await;
                 return match restore {
                     Ok(()) => Err(format!("删除远程条目失败: {error}")),
-                    Err(restore_error) => Err(format!(
-                        "删除远程条目失败: {error}; {restore_error}"
-                    )),
+                    Err(restore_error) => {
+                        Err(format!("删除远程条目失败: {error}; {restore_error}"))
+                    }
                 };
             }
             Ok(1)

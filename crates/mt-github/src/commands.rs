@@ -117,7 +117,14 @@ pub fn known_accounts_plan(host: &str) -> Result<CommandPlan, AccountError> {
     let host = normalize_account_host(host)?;
     Ok(CommandPlan::new(
         "gh",
-        ["auth", "status", "--hostname", host.as_str(), "--json", "hosts"],
+        [
+            "auth",
+            "status",
+            "--hostname",
+            host.as_str(),
+            "--json",
+            "hosts",
+        ],
     ))
 }
 

@@ -10,7 +10,9 @@ fn worktree(hex: char) -> WorktreeId {
 
 fn context_row(path: &str, is_dir: bool) -> Row {
     Row {
-        listing_directory: PathBuf::from(crate::remote_ssh::parent_posix(path).unwrap_or_else(|| "/work".into())),
+        listing_directory: PathBuf::from(
+            crate::remote_ssh::parent_posix(path).unwrap_or_else(|| "/work".into()),
+        ),
         name: path.rsplit('/').next().unwrap().to_string(),
         path: PathBuf::from(path),
         is_dir,
@@ -51,7 +53,11 @@ fn context_target(entry: FileTreeContextEntry, remote: bool) -> FileTreeContextT
 
 fn menu_target(is_dir: bool, has_git_status: bool, remote: bool) -> FileTreeContextTarget {
     let mut row = context_row(
-        if is_dir { "/work/src" } else { "/work/src/main.rs" },
+        if is_dir {
+            "/work/src"
+        } else {
+            "/work/src/main.rs"
+        },
         is_dir,
     );
     row.git = has_git_status.then(|| ("M".into(), is_dir));
@@ -120,7 +126,10 @@ fn 同路径工作树恢复各自文件状态选择与滚动() {
         swap_file_tree_scope(&mut cache, Some(&worktree_a), Some(&worktree_b), restored_a);
     assert!(cached_b);
     assert_eq!(restored_b.entries[&root][0].name, "b.rs");
-    assert_eq!(restored_b.git_status.get("b.rs").map(String::as_str), Some("A"));
+    assert_eq!(
+        restored_b.git_status.get("b.rs").map(String::as_str),
+        Some("A")
+    );
     assert_eq!(
         restored_b.selected_path.as_deref(),
         Some(Path::new("/repo/shared/b.rs"))
@@ -258,18 +267,33 @@ fn listing_publication_requires_exact_request_source_and_generation() {
     assert!(!owner.matches(Some(&owner.source), Some("other"), 41, Some(41)));
     assert!(!owner.matches(None, signature, 41, Some(41)));
     for changed in [
-        FileTreeSource { worktree_id: Some(worktree('b')), ..owner.source.clone() },
-        FileTreeSource { connection_epoch: Some(12), ..owner.source.clone() },
         FileTreeSource {
-            context: FileOperationContext { generation: 5, ..owner.source.context.clone() },
+            worktree_id: Some(worktree('b')),
             ..owner.source.clone()
         },
         FileTreeSource {
-            context: FileOperationContext { project_id: "project-b".into(), ..owner.source.context.clone() },
+            connection_epoch: Some(12),
             ..owner.source.clone()
         },
         FileTreeSource {
-            context: FileOperationContext { root: PathBuf::from("/other"), ..owner.source.context.clone() },
+            context: FileOperationContext {
+                generation: 5,
+                ..owner.source.context.clone()
+            },
+            ..owner.source.clone()
+        },
+        FileTreeSource {
+            context: FileOperationContext {
+                project_id: "project-b".into(),
+                ..owner.source.context.clone()
+            },
+            ..owner.source.clone()
+        },
+        FileTreeSource {
+            context: FileOperationContext {
+                root: PathBuf::from("/other"),
+                ..owner.source.context.clone()
+            },
             ..owner.source.clone()
         },
     ] {
@@ -282,24 +306,56 @@ fn listing_provenance_uses_actual_producer_never_the_observed_replacement() {
     let owner = listing_owner(true);
     let producer = remote_listing_source();
     let directory = Path::new("/work/src");
-    let accepted = owner.result_source(directory, Some(&producer), Some(11)).unwrap();
+    let accepted = owner
+        .result_source(directory, Some(&producer), Some(11))
+        .unwrap();
     assert_eq!(accepted, owner.source);
     for observed in [None, Some(12)] {
-        assert!(owner.result_source(directory, Some(&producer), observed).is_none());
+        assert!(
+            owner
+                .result_source(directory, Some(&producer), observed)
+                .is_none()
+        );
     }
     for changed in [
-        crate::remote_ssh::RemoteFileListingSource { connection_id: "ssh-b".into(), ..producer.clone() },
-        crate::remote_ssh::RemoteFileListingSource { connection_fingerprint: 8, ..producer.clone() },
-        crate::remote_ssh::RemoteFileListingSource { connection_epoch: 12, ..producer.clone() },
-        crate::remote_ssh::RemoteFileListingSource { project_root: "/other".into(), ..producer.clone() },
-        crate::remote_ssh::RemoteFileListingSource { directory: "/work/other".into(), ..producer.clone() },
+        crate::remote_ssh::RemoteFileListingSource {
+            connection_id: "ssh-b".into(),
+            ..producer.clone()
+        },
+        crate::remote_ssh::RemoteFileListingSource {
+            connection_fingerprint: 8,
+            ..producer.clone()
+        },
+        crate::remote_ssh::RemoteFileListingSource {
+            connection_epoch: 12,
+            ..producer.clone()
+        },
+        crate::remote_ssh::RemoteFileListingSource {
+            project_root: "/other".into(),
+            ..producer.clone()
+        },
+        crate::remote_ssh::RemoteFileListingSource {
+            directory: "/work/other".into(),
+            ..producer.clone()
+        },
     ] {
-        assert!(owner.result_source(directory, Some(&changed), Some(changed.connection_epoch)).is_none());
+        assert!(
+            owner
+                .result_source(directory, Some(&changed), Some(changed.connection_epoch))
+                .is_none()
+        );
     }
     assert!(owner.result_source(directory, None, Some(11)).is_none());
     let local = listing_owner(false);
-    assert_eq!(local.result_source(directory, None, None), Some(local.source.clone()));
-    assert!(local.result_source(directory, Some(&producer), Some(11)).is_none());
+    assert_eq!(
+        local.result_source(directory, None, None),
+        Some(local.source.clone())
+    );
+    assert!(
+        local
+            .result_source(directory, Some(&producer), Some(11))
+            .is_none()
+    );
     assert!(local.result_source(directory, None, Some(11)).is_none());
 }
 
@@ -309,13 +365,26 @@ fn only_bootstrap_read_can_adopt_its_producing_epoch() {
     owner.source.connection_epoch = None;
     let producer = remote_listing_source();
     let directory = Path::new("/work/src");
-    let accepted = owner.result_source(directory, Some(&producer), Some(11)).unwrap();
+    let accepted = owner
+        .result_source(directory, Some(&producer), Some(11))
+        .unwrap();
     assert_eq!(accepted.connection_epoch, Some(11));
     assert_eq!(owner.source.connection_epoch, None);
-    assert!(owner.result_source(directory, Some(&producer), Some(12)).is_none());
+    assert!(
+        owner
+            .result_source(directory, Some(&producer), Some(12))
+            .is_none()
+    );
     let pinned = listing_owner(true);
-    let replacement = crate::remote_ssh::RemoteFileListingSource { connection_epoch: 12, ..producer };
-    assert!(pinned.result_source(directory, Some(&replacement), Some(12)).is_none());
+    let replacement = crate::remote_ssh::RemoteFileListingSource {
+        connection_epoch: 12,
+        ..producer
+    };
+    assert!(
+        pinned
+            .result_source(directory, Some(&replacement), Some(12))
+            .is_none()
+    );
 }
 
 #[test]
@@ -324,14 +393,22 @@ fn cached_rows_keep_original_provenance_across_aba_and_same_worktree_rebinding()
     let root = original.context.root.clone();
     let worktree_a = original.worktree_id.as_ref().unwrap();
     let worktree_b = worktree('b');
-    let owner = DirectoryListingOwner { source: original.clone(), request_id: 41 };
+    let owner = DirectoryListingOwner {
+        source: original.clone(),
+        request_id: 41,
+    };
     let mut state = FileTreeScopeState::empty();
-    state.entries.insert(root.clone(), vec![entry("old.rs", "/work/old.rs", false, false)]);
+    state.entries.insert(
+        root.clone(),
+        vec![entry("old.rs", "/work/old.rs", false, false)],
+    );
     state.entry_sources.insert(root.clone(), owner.clone());
     let mut cache = HashMap::new();
     let (other, _) = swap_file_tree_scope(&mut cache, Some(worktree_a), Some(&worktree_b), state);
-    let (restored, _) = swap_file_tree_scope(&mut cache, Some(&worktree_b), Some(worktree_a), other);
-    let (preserved, _) = swap_file_tree_scope(&mut cache, Some(worktree_a), Some(worktree_a), restored);
+    let (restored, _) =
+        swap_file_tree_scope(&mut cache, Some(&worktree_b), Some(worktree_a), other);
+    let (preserved, _) =
+        swap_file_tree_scope(&mut cache, Some(worktree_a), Some(worktree_a), restored);
     assert_eq!(preserved.entries[&root][0].name, "old.rs");
     assert_eq!(preserved.entry_sources[&root], owner);
     assert!(owner.matches(&original, 41));
@@ -372,26 +449,48 @@ fn running_busy_owner_survives_scope_swaps_without_aba_presentation_authority() 
     let target = context_target(FileTreeContextEntry::Blank, true);
     let source = target.source();
     let mut operations = FileTreeOperations::default();
-    let owner = operations.reserve(&target, FileTreeOperationPhase::Running).unwrap();
+    let owner = operations
+        .reserve(&target, FileTreeOperationPhase::Running)
+        .unwrap();
     let mut cache = HashMap::new();
     let other_worktree = worktree('b');
     let (other, _) = swap_file_tree_scope(
-        &mut cache, source.worktree_id.as_ref(), Some(&other_worktree), FileTreeScopeState::empty(),
+        &mut cache,
+        source.worktree_id.as_ref(),
+        Some(&other_worktree),
+        FileTreeScopeState::empty(),
     );
     let mut rebound = source.clone();
     rebound.worktree_id = Some(other_worktree.clone());
     let mut rebound_target = target.clone();
     rebound_target.worktree_id = rebound.worktree_id.clone();
-    assert!(operations.reserve(&rebound_target, FileTreeOperationPhase::Running).is_none());
+    assert!(
+        operations
+            .reserve(&rebound_target, FileTreeOperationPhase::Running)
+            .is_none()
+    );
     assert!(!owner.source.same_stable_source(&rebound));
-    let _ = swap_file_tree_scope(&mut cache, Some(&other_worktree), source.worktree_id.as_ref(), other);
+    let _ = swap_file_tree_scope(
+        &mut cache,
+        Some(&other_worktree),
+        source.worktree_id.as_ref(),
+        other,
+    );
     rebound = source.clone();
     rebound.context.generation += 2;
     assert!(owner.source.same_stable_source(&rebound));
-    assert!(!owner.source.matches(Some(&rebound.context), rebound.worktree_id.as_ref(), rebound.connection_epoch));
+    assert!(!owner.source.matches(
+        Some(&rebound.context),
+        rebound.worktree_id.as_ref(),
+        rebound.connection_epoch
+    ));
     rebound_target = target;
     rebound_target.context.generation = rebound.context.generation;
-    assert!(operations.reserve(&rebound_target, FileTreeOperationPhase::Running).is_none());
+    assert!(
+        operations
+            .reserve(&rebound_target, FileTreeOperationPhase::Running)
+            .is_none()
+    );
     rebound.connection_epoch = Some(12);
     assert!(!owner.source.same_stable_source(&rebound));
     assert!(operations.finish(&owner, true));
@@ -402,23 +501,33 @@ fn running_busy_owner_survives_scope_swaps_without_aba_presentation_authority() 
 fn download_choice_cancellation_cannot_release_running_or_successor_operation() {
     let target = menu_target(false, false, true);
     let mut operations = FileTreeOperations::default();
-    let preflight = operations.reserve(&target, FileTreeOperationPhase::Preflight).unwrap();
+    let preflight = operations
+        .reserve(&target, FileTreeOperationPhase::Preflight)
+        .unwrap();
     assert!(!operations.finish(&preflight, true));
     assert!(operations.transition(&preflight, FileTreeOperationPhase::Choice));
     assert!(!operations.transition(&preflight, FileTreeOperationPhase::Choice));
-    assert!(operations.reserve(&target, FileTreeOperationPhase::Running).is_none());
+    assert!(
+        operations
+            .reserve(&target, FileTreeOperationPhase::Running)
+            .is_none()
+    );
     assert!(operations.transition(&preflight, FileTreeOperationPhase::Running));
     assert!(!operations.finish(&preflight, false));
     assert!(!operations.transition(&preflight, FileTreeOperationPhase::Running));
     assert!(operations.finish(&preflight, true));
-    let successor = operations.reserve(&target, FileTreeOperationPhase::Preflight).unwrap();
+    let successor = operations
+        .reserve(&target, FileTreeOperationPhase::Preflight)
+        .unwrap();
     assert_ne!(successor.id, preflight.id);
     assert!(!operations.finish(&preflight, false));
     assert!(!operations.finish(&preflight, true));
     assert!(!operations.transition(&preflight, FileTreeOperationPhase::Running));
     assert_eq!(operations.active.as_ref().unwrap().0, successor);
     assert!(operations.finish(&successor, false));
-    let no_conflicts = operations.reserve(&target, FileTreeOperationPhase::Preflight).unwrap();
+    let no_conflicts = operations
+        .reserve(&target, FileTreeOperationPhase::Preflight)
+        .unwrap();
     assert!(operations.transition(&no_conflicts, FileTreeOperationPhase::Running));
     assert!(!operations.finish(&successor, false));
     assert!(operations.finish(&no_conflicts, true));
@@ -428,14 +537,20 @@ fn download_choice_cancellation_cannot_release_running_or_successor_operation() 
 fn operation_ids_never_wrap_and_cannot_release_a_different_captured_source() {
     let target = context_target(FileTreeContextEntry::Blank, true);
     let mut operations = FileTreeOperations::default();
-    let owner = operations.reserve(&target, FileTreeOperationPhase::Preflight).unwrap();
+    let owner = operations
+        .reserve(&target, FileTreeOperationPhase::Preflight)
+        .unwrap();
     let mut wrong_source = owner.clone();
     wrong_source.source.context.generation += 2;
     assert!(!operations.transition(&wrong_source, FileTreeOperationPhase::Choice));
     assert!(!operations.finish(&wrong_source, false));
     assert!(operations.finish(&owner, false));
     operations.next_id = u64::MAX;
-    assert!(operations.reserve(&target, FileTreeOperationPhase::Preflight).is_none());
+    assert!(
+        operations
+            .reserve(&target, FileTreeOperationPhase::Preflight)
+            .is_none()
+    );
     assert!(operations.active.is_none());
 }
 
@@ -443,7 +558,9 @@ fn operation_ids_never_wrap_and_cannot_release_a_different_captured_source() {
 fn preflight_owner_requires_the_full_captured_target_at_choice_dispatch() {
     let target = menu_target(false, false, true);
     let mut operations = FileTreeOperations::default();
-    let owner = operations.reserve(&target, FileTreeOperationPhase::Preflight).unwrap();
+    let owner = operations
+        .reserve(&target, FileTreeOperationPhase::Preflight)
+        .unwrap();
     assert!(owner.matches_target(&target));
     let mut changed = target.clone();
     changed.entry = FileTreeContextEntry::Blank;
@@ -471,7 +588,13 @@ fn remote_source_identity_compares_posix_text_without_host_path_normalization() 
     different.context.root = PathBuf::from("/work/a/b");
     assert_ne!(source, different);
     assert!(!source.same_stable_source(&different));
-    assert!(!remote_download_context_matches(&source.context, "project-a", "/work/a/b", "ssh-a", 7));
+    assert!(!remote_download_context_matches(
+        &source.context,
+        "project-a",
+        "/work/a/b",
+        "ssh-a",
+        7
+    ));
 }
 
 #[test]
@@ -970,7 +1093,10 @@ fn 汇总优先级与原版一致() {
 fn blank_menus_expose_exactly_creation_on_the_displayed_root() {
     for remote in [false, true] {
         let target = context_target(FileTreeContextEntry::Blank, remote);
-        assert_eq!(file_menu_actions(&target), vec![Some(NewFile), Some(NewFolder)]);
+        assert_eq!(
+            file_menu_actions(&target),
+            vec![Some(NewFile), Some(NewFolder)]
+        );
         assert_eq!(target.directory(), Some(PathBuf::from("/work")));
         assert!(target.row().is_none());
     }
@@ -1017,12 +1143,23 @@ fn row_relative_paths_preserve_posix_backslashes_before_the_git_diff_handoff() {
         for root in ["/work", r"/work\root", "/home/User/wsl-project"] {
             context.root = PathBuf::from(root);
             let path = format!(r"{root}/src\part/name\with:slashes");
-            assert_eq!(row_relative_path(&context, Path::new(&path)), Some(r"src\part/name\with:slashes".into()));
-            assert_eq!(row_relative_path(&context, Path::new(root)), Some(".".into()));
-            assert!(row_relative_path(&context, Path::new(&format!("{root}-other/file"))).is_none());
+            assert_eq!(
+                row_relative_path(&context, Path::new(&path)),
+                Some(r"src\part/name\with:slashes".into())
+            );
+            assert_eq!(
+                row_relative_path(&context, Path::new(root)),
+                Some(".".into())
+            );
+            assert!(
+                row_relative_path(&context, Path::new(&format!("{root}-other/file"))).is_none()
+            );
         }
         context.root = PathBuf::from("/");
-        assert_eq!(row_relative_path(&context, Path::new(r"/name\with\slashes")), Some(r"name\with\slashes".into()));
+        assert_eq!(
+            row_relative_path(&context, Path::new(r"/name\with\slashes")),
+            Some(r"name\with\slashes".into())
+        );
         assert!(row_relative_path(&context, Path::new("/nul\0path")).is_none());
     }
 }
@@ -1034,14 +1171,23 @@ fn row_relative_paths_convert_only_actual_native_windows_drive_and_unc_separator
     for (root, path) in [
         (r"C:\work", r"C:\work\src\file.rs"),
         (r"\\server\share", r"\\server\share\src\file.rs"),
-        (r"\\wsl.localhost\Ubuntu\home\User", r"\\wsl.localhost\Ubuntu\home\User\src\file.rs"),
+        (
+            r"\\wsl.localhost\Ubuntu\home\User",
+            r"\\wsl.localhost\Ubuntu\home\User\src\file.rs",
+        ),
     ] {
         context.root = PathBuf::from(root);
-        assert_eq!(row_relative_path(&context, Path::new(path)), Some("src/file.rs".into()));
+        assert_eq!(
+            row_relative_path(&context, Path::new(path)),
+            Some("src/file.rs".into())
+        );
     }
     context.root = PathBuf::from(r"C:\work");
     assert!(row_relative_path(&context, Path::new(r"D:\work\src\file.rs")).is_none());
-    context.backend = FileBackendIdentity::Remote { connection_id: "ssh".into(), connection_fingerprint: 1 };
+    context.backend = FileBackendIdentity::Remote {
+        connection_id: "ssh".into(),
+        connection_fingerprint: 1,
+    };
     assert!(row_relative_path(&context, Path::new(r"C:\work\src\file.rs")).is_none());
 }
 
@@ -1050,15 +1196,18 @@ fn row_relative_paths_convert_only_actual_native_windows_drive_and_unc_separator
 fn local_parent_keeps_drive_and_unc_path_semantics() {
     for (root, path, expected) in [
         (r"C:\work", r"C:\work\src\main.rs", r"C:\work\src"),
-        (r"\\server\share", r"\\server\share\main.rs", r"\\server\share"),
+        (
+            r"\\server\share",
+            r"\\server\share\main.rs",
+            r"\\server\share",
+        ),
         (
             r"\\wsl.localhost\Ubuntu\home\u",
             r"\\wsl.localhost\Ubuntu\home\u\main.rs",
             r"\\wsl.localhost\Ubuntu\home\u",
         ),
     ] {
-        let mut target =
-            context_target(FileTreeContextEntry::Row(context_row(path, false)), false);
+        let mut target = context_target(FileTreeContextEntry::Row(context_row(path, false)), false);
         target.context.root = PathBuf::from(root);
         assert_eq!(target.directory(), Some(PathBuf::from(expected)));
     }
@@ -1189,7 +1338,10 @@ fn upload_preparation_keeps_the_captured_epoch_connection_and_file_parent() {
     let mut disconnected = target.clone();
     disconnected.connection_epoch = None;
     assert!(ops::prepare_upload_target(&disconnected, &connection).is_err());
-    for backend in [FileBackendIdentity::Local, FileBackendIdentity::BrokenRemote] {
+    for backend in [
+        FileBackendIdentity::Local,
+        FileBackendIdentity::BrokenRemote,
+    ] {
         let mut changed = target.clone();
         changed.context.backend = backend;
         assert!(ops::prepare_upload_target(&changed, &connection).is_err());
@@ -1270,7 +1422,8 @@ struct CreationFixture(PathBuf);
 
 impl CreationFixture {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("mini-term-file-tree-{}", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("mini-term-file-tree-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -1325,11 +1478,21 @@ fn creation_rejects_non_basename_input_before_filesystem_access() {
     let expected_errors = [mt_i18n::Locale::Zh, mt_i18n::Locale::En]
         .map(|locale| mt_i18n::t_in(locale, "fileTree", "operation.invalidName"));
     for name in [
-        "", ".", "..", "../escape", "sub/file", r"sub\file", "C:file", "nul\0name",
+        "",
+        ".",
+        "..",
+        "../escape",
+        "sub/file",
+        r"sub\file",
+        "C:file",
+        "nul\0name",
     ] {
         for is_dir in [false, true] {
             let error = ops::create_entry_at_target(&target, None, name, is_dir).unwrap_err();
-            assert!(expected_errors.contains(&error.as_str()), "{name:?}: {error}");
+            assert!(
+                expected_errors.contains(&error.as_str()),
+                "{name:?}: {error}"
+            );
         }
     }
 }
@@ -1371,7 +1534,9 @@ fn creation_preserves_symlink_parent_containment_without_following_the_clicked_f
             is_dir,
         )));
         for create_directory in [false, true] {
-            assert!(ops::create_entry_at_target(&target, None, "new-entry", create_directory).is_err());
+            assert!(
+                ops::create_entry_at_target(&target, None, "new-entry", create_directory).is_err()
+            );
             assert!(!outside.0.join("new-entry").exists());
         }
     }

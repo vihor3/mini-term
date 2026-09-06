@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::fmt;
 use std::marker::PhantomData;
 
-use serde::de::{self, MapAccess, Visitor};
 use serde::de::value::MapAccessDeserializer;
+use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
 use crate::account_error::classify_account_diagnostic;
@@ -93,7 +93,10 @@ impl KnownGitHubAccounts {
     }
 
     /// An unavailable selected row is still returned so its problem stays visible.
-    pub fn find(&self, identity: &GitHubAccountIdentity) -> Result<&KnownGitHubAccount, AccountError> {
+    pub fn find(
+        &self,
+        identity: &GitHubAccountIdentity,
+    ) -> Result<&KnownGitHubAccount, AccountError> {
         if self.host != identity.host() {
             return Err(AccountError::WrongHostOrAccount);
         }

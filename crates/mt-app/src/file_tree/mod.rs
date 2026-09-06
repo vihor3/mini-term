@@ -105,7 +105,8 @@ impl FileTreeSource {
         connection_epoch: Option<u64>,
     ) -> bool {
         context.is_some_and(|context| {
-            same_file_source(&self.context, context) && self.context.generation == context.generation
+            same_file_source(&self.context, context)
+                && self.context.generation == context.generation
         }) && self.worktree_id.as_ref() == worktree_id
             && self.connection_epoch == connection_epoch
             && !matches!(&self.context.backend, FileBackendIdentity::BrokenRemote)
@@ -117,10 +118,10 @@ impl FileTreeSource {
             tree.current_worktree.as_ref(),
             tree.source_epoch,
         ) && tree
-                .store
-                .read(cx)
-                .worktree_id_for_project(&self.context.project_id)
-                == self.worktree_id.as_ref()
+            .store
+            .read(cx)
+            .worktree_id_for_project(&self.context.project_id)
+            == self.worktree_id.as_ref()
             && file_context_connection_epoch(&self.context) == self.connection_epoch
     }
 }
@@ -204,9 +205,16 @@ impl FileTreeOperations {
         };
         let allowed = matches!(
             (*phase, next),
-            (FileTreeOperationPhase::Preflight, FileTreeOperationPhase::Choice)
-                | (FileTreeOperationPhase::Preflight, FileTreeOperationPhase::Running)
-                | (FileTreeOperationPhase::Choice, FileTreeOperationPhase::Running)
+            (
+                FileTreeOperationPhase::Preflight,
+                FileTreeOperationPhase::Choice
+            ) | (
+                FileTreeOperationPhase::Preflight,
+                FileTreeOperationPhase::Running
+            ) | (
+                FileTreeOperationPhase::Choice,
+                FileTreeOperationPhase::Running
+            )
         );
         if active != owner || !allowed {
             return false;
@@ -288,16 +296,20 @@ impl FileTreeContextTarget {
         worktree_id: Option<&WorktreeId>,
         connection_epoch: Option<u64>,
     ) -> bool {
-        self.source().matches(context, worktree_id, connection_epoch)
+        self.source()
+            .matches(context, worktree_id, connection_epoch)
     }
 
     fn is_current(&self, tree: &FileTree, cx: &App) -> bool {
         self.source().is_current(tree, cx)
-            && self.listing.as_ref().is_some_and(|(directory, request_id)| {
-                tree.entry_sources.get(directory).is_some_and(|owner| {
-                    owner.matches(&self.source(), *request_id)
+            && self
+                .listing
+                .as_ref()
+                .is_some_and(|(directory, request_id)| {
+                    tree.entry_sources
+                        .get(directory)
+                        .is_some_and(|owner| owner.matches(&self.source(), *request_id))
                 })
-            })
     }
 }
 
@@ -516,13 +528,20 @@ impl DirectoryRequestOwner {
         let mut source = self.source.clone();
         match (&source.context.backend, remote) {
             (FileBackendIdentity::Local, None) if current_epoch.is_none() => {}
-            (FileBackendIdentity::Remote { connection_id, connection_fingerprint }, Some(remote))
-                if connection_id == &remote.connection_id
-                    && *connection_fingerprint == remote.connection_fingerprint
-                    && source.context.root.to_str() == Some(remote.project_root.as_str())
-                    && directory.to_str() == Some(remote.directory.as_str())
-                    && current_epoch == Some(remote.connection_epoch)
-                    && source.connection_epoch.is_none_or(|epoch| epoch == remote.connection_epoch) =>
+            (
+                FileBackendIdentity::Remote {
+                    connection_id,
+                    connection_fingerprint,
+                },
+                Some(remote),
+            ) if connection_id == &remote.connection_id
+                && *connection_fingerprint == remote.connection_fingerprint
+                && source.context.root.to_str() == Some(remote.project_root.as_str())
+                && directory.to_str() == Some(remote.directory.as_str())
+                && current_epoch == Some(remote.connection_epoch)
+                && source
+                    .connection_epoch
+                    .is_none_or(|epoch| epoch == remote.connection_epoch) =>
             {
                 source.connection_epoch = Some(remote.connection_epoch);
             }
@@ -890,7 +909,8 @@ impl FileTree {
                         // 断链 = 是远程项目但连接查不到
                         is_remote && conn.is_none(),
                         Some(signature),
-                        conn.as_ref().and_then(|conn| crate::remote_ssh::current_connection_epoch(&conn.id)),
+                        conn.as_ref()
+                            .and_then(|conn| crate::remote_ssh::current_connection_epoch(&conn.id)),
                     )
                 }
                 None => (None, None, None, false, false, None, None),
@@ -903,7 +923,9 @@ impl FileTree {
             signature.as_deref(),
         ) && (self.source_epoch == epoch
             || (self.source_epoch.is_none()
-                && root.as_ref().is_some_and(|root| self.loading.contains(root))))
+                && root
+                    .as_ref()
+                    .is_some_and(|root| self.loading.contains(root))))
         {
             return;
         }
@@ -1030,7 +1052,11 @@ impl FileTree {
         })
     }
 
-    fn context_target(&self, entry: FileTreeContextEntry, cx: &App) -> Option<FileTreeContextTarget> {
+    fn context_target(
+        &self,
+        entry: FileTreeContextEntry,
+        cx: &App,
+    ) -> Option<FileTreeContextTarget> {
         let directory = match &entry {
             FileTreeContextEntry::Blank => self.project_root(cx)?,
             FileTreeContextEntry::Row(row) => row.listing_directory.clone(),
@@ -1079,7 +1105,8 @@ impl FileTree {
             .as_ref()
             .and_then(|id| self.scope_cache.get_mut(id))
         {
-            state.entry_sources
+            state
+                .entry_sources
                 .retain(|_, owner| !owner.source.same_stable_source(source));
         }
     }
@@ -1109,7 +1136,10 @@ impl FileTree {
         let Some(request_source) = self.current_source(cx) else {
             return;
         };
-        if matches!(&request_source.context.backend, FileBackendIdentity::BrokenRemote) {
+        if matches!(
+            &request_source.context.backend,
+            FileBackendIdentity::BrokenRemote
+        ) {
             return;
         }
         if self.path_is_suppressed(&dir) {
@@ -1174,10 +1204,14 @@ impl FileTree {
                 .spawn(async move {
                     let entries = match (&backend_source.context.backend, remote) {
                         (
-                            FileBackendIdentity::Remote { connection_id, connection_fingerprint },
+                            FileBackendIdentity::Remote {
+                                connection_id,
+                                connection_fingerprint,
+                            },
                             Some(conn),
                         ) if connection_id == &conn.id
-                            && *connection_fingerprint == crate::remote_ssh::connection_fingerprint(&conn) =>
+                            && *connection_fingerprint
+                                == crate::remote_ssh::connection_fingerprint(&conn) =>
                         {
                             let listing = crate::remote_ssh::list_directory_at_epoch(
                                 &conn,
@@ -1187,7 +1221,11 @@ impl FileTree {
                                 refresh_ignore,
                             )?;
                             return Ok((
-                                listing.entries.into_iter().map(|entry| (entry, Vec::new())).collect(),
+                                listing
+                                    .entries
+                                    .into_iter()
+                                    .map(|entry| (entry, Vec::new()))
+                                    .collect(),
                                 Some(listing.source),
                             ));
                         }
@@ -1209,7 +1247,10 @@ impl FileTree {
                     tree.source_signature.as_deref(),
                     request_id,
                     tree.dir_request_ids.get(&dir).copied(),
-                ) || tree.store.read(cx).worktree_id_for_project(&request_owner.source.context.project_id)
+                ) || tree
+                    .store
+                    .read(cx)
+                    .worktree_id_for_project(&request_owner.source.context.project_id)
                     != request_owner.source.worktree_id.as_ref()
                 {
                     return;
@@ -1239,7 +1280,8 @@ impl FileTree {
                             tree.entry_sources.remove(&dir);
                             tree.sync_project(cx);
                             if is_root && !tree.root_loading {
-                                tree.root_error = Some(t("fileTree", "operation.sourceUnavailable").to_string());
+                                tree.root_error =
+                                    Some(t("fileTree", "operation.sourceUnavailable").to_string());
                             }
                             cx.notify();
                             return;
@@ -1295,14 +1337,14 @@ impl FileTree {
                             tree.store
                                 .update(cx, |store, cx| store.ensure_dir_kinds(probe, cx));
                         }
-                        tree.entry_sources.insert(
-                            dir.clone(),
-                            DirectoryListingOwner { source, request_id },
-                        );
+                        tree.entry_sources
+                            .insert(dir.clone(), DirectoryListingOwner { source, request_id });
                         tree.entries.insert(dir, entries);
                     }
                     Err(err) => {
-                        if file_context_connection_epoch(&request_owner.source.context) != request_owner.source.connection_epoch {
+                        if file_context_connection_epoch(&request_owner.source.context)
+                            != request_owner.source.connection_epoch
+                        {
                             tree.sync_project(cx);
                             return;
                         }
@@ -1533,7 +1575,8 @@ impl FileTree {
             self.watcher.unwatch(&path);
         }
         self.entries.retain(|path, _| !path.starts_with(target));
-        self.entry_sources.retain(|path, _| !path.starts_with(target));
+        self.entry_sources
+            .retain(|path, _| !path.starts_with(target));
         self.loading.retain(|path| !path.starts_with(target));
         self.dir_request_ids
             .retain(|path, _| !path.starts_with(target));
@@ -1545,14 +1588,7 @@ impl FileTree {
     }
 
     /// 把树按展开状态拍平成可渲染的行。
-    fn rows(
-        &self,
-        project_id: &str,
-        dir: &Path,
-        depth: usize,
-        cx: &App,
-        out: &mut Vec<Row>,
-    ) {
+    fn rows(&self, project_id: &str, dir: &Path, depth: usize, cx: &App, out: &mut Vec<Row>) {
         let Some(entries) = self.entries.get(dir) else {
             return;
         };
@@ -1560,7 +1596,9 @@ impl FileTree {
         for entry in entries {
             let key = entry.path.to_string_lossy().to_string();
             let expanded = entry.is_dir && store.is_dir_expanded(project_id, &key);
-            let rel = self.entry_sources.get(dir)
+            let rel = self
+                .entry_sources
+                .get(dir)
                 .and_then(|owner| row_relative_path(&owner.source.context, &entry.path))
                 .unwrap_or_default();
             let git = match self.git_status.get(&rel) {
@@ -1607,10 +1645,17 @@ fn row_relative_path(context: &FileOperationContext, path: &Path) -> Option<Stri
     #[cfg(windows)]
     if matches!(&context.backend, FileBackendIdentity::Local)
         && context.root.is_absolute()
-        && matches!(context.root.components().next(), Some(std::path::Component::Prefix(_)))
+        && matches!(
+            context.root.components().next(),
+            Some(std::path::Component::Prefix(_))
+        )
     {
         let relative = path.strip_prefix(&context.root).ok()?.to_str()?;
-        return Some(if relative.is_empty() { ".".into() } else { relative.replace('\\', "/") });
+        return Some(if relative.is_empty() {
+            ".".into()
+        } else {
+            relative.replace('\\', "/")
+        });
     }
     // POSIX backslashes are filename data even on a Windows SSH client.
     // The legacy fs_ops relative helper normalizes them before stripping root.
@@ -1618,7 +1663,11 @@ fn row_relative_path(context: &FileOperationContext, path: &Path) -> Option<Stri
         return None;
     }
     let relative = crate::remote_ssh::posix_relative(root, path_text)?;
-    Some(if relative.is_empty() { ".".into() } else { relative })
+    Some(if relative.is_empty() {
+        ".".into()
+    } else {
+        relative
+    })
 }
 
 fn watcher_event_matches(
@@ -1971,8 +2020,16 @@ impl Render for FileTree {
                     store.is_dir_expanded(&project_id, path.to_string_lossy().as_ref())
                 };
                 if self.directory_is_current(&root, cx) {
-                    let is_current = |path: &Path| self.directory_is_current(path, cx) || self.failed_dirs.contains(path);
-                    missing_expanded_dirs(&self.entries, &root, &is_expanded, &is_current, &mut missing);
+                    let is_current = |path: &Path| {
+                        self.directory_is_current(path, cx) || self.failed_dirs.contains(path)
+                    };
+                    missing_expanded_dirs(
+                        &self.entries,
+                        &root,
+                        &is_expanded,
+                        &is_current,
+                        &mut missing,
+                    );
                 }
             }
             missing.retain(|dir| !self.path_is_suppressed(dir));
@@ -2109,13 +2166,8 @@ impl Render for FileTree {
                             return;
                         }
                         let store = this.store.clone();
-                        let entries = file_menu(
-                            &cx.entity(),
-                            &store,
-                            target,
-                            this.remote_conn(cx),
-                            false,
-                        );
+                        let entries =
+                            file_menu(&cx.entity(), &store, target, this.remote_conn(cx), false);
                         crate::menu::show(event.position, entries, window, cx);
                     }),
                 )
@@ -2160,26 +2212,32 @@ impl Render for FileTree {
                         .truncate()
                         .text_size(ui::font_px(9.75))
                         .text_color(ui::text_muted())
-                        .child(t("fileTree", if self.loading.is_empty() {
-                            "empty.refreshFailed"
-                        } else {
-                            "empty.loading"
-                        })),
+                        .child(t(
+                            "fileTree",
+                            if self.loading.is_empty() {
+                                "empty.refreshFailed"
+                            } else {
+                                "empty.loading"
+                            },
+                        )),
                 )
             })
             // 有旧内容时的刷新失败:一条细提示挂在列表**上方**,内容照旧留着
-            .when_some(self.root_error.clone().filter(|_| !has_stale_rows), |el, _err| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .truncate()
-                        .text_size(ui::font_px(9.75))
-                        .text_color(ui::text_muted())
-                        .child(t("fileTree", "empty.refreshFailed")),
-                )
-            })
+            .when_some(
+                self.root_error.clone().filter(|_| !has_stale_rows),
+                |el, _err| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .truncate()
+                            .text_size(ui::font_px(9.75))
+                            .text_color(ui::text_muted())
+                            .child(t("fileTree", "empty.refreshFailed")),
+                    )
+                },
+            )
             .when_some(operation_label, |el, label| {
                 el.child(
                     div()
@@ -2333,19 +2391,21 @@ impl FileTree {
             // `pointer-events:none` 穿透规则(要让鼠标穿过 xterm 的子 DOM 打到
             // drop-zone 上);gpui 侧终端是自绘 Element、drop 目标就是它的容器,
             // 那条穿透规则一行都不必移植。
-            .when(actionable, |el| el.on_drag(
-                crate::dnd::DragFilePath(drag_path),
-                move |_item, _offset, _window, cx| {
-                    crate::dnd::preview(
-                        drag_name.clone(),
-                        crate::dnd::PreviewIcon::File {
-                            name: drag_name.clone(),
-                            is_dir: drag_is_dir,
-                        },
-                        cx,
-                    )
-                },
-            ))
+            .when(actionable, |el| {
+                el.on_drag(
+                    crate::dnd::DragFilePath(drag_path),
+                    move |_item, _offset, _window, cx| {
+                        crate::dnd::preview(
+                            drag_name.clone(),
+                            crate::dnd::PreviewIcon::File {
+                                name: drag_name.clone(),
+                                is_dir: drag_is_dir,
+                            },
+                            cx,
+                        )
+                    },
+                )
+            })
             .when(remote, |el| {
                 let move_target = upload_target.clone();
                 let drop_target = upload_target.clone();

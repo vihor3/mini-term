@@ -96,13 +96,18 @@ impl AccountError {
             Self::RateLimited => "GitHub rate limit reached; try again later",
             Self::Offline => "GitHub could not be reached from the selected execution host",
             Self::NotFound => "The repository or work item was not found for the selected account",
-            Self::CommandFailed => "The GitHub account request failed on the selected execution host",
+            Self::CommandFailed => {
+                "The GitHub account request failed on the selected execution host"
+            }
         }
     }
 
     /// Still requires the same complete source, selected identity, and generation.
     pub fn retains_last_known(self) -> bool {
-        matches!(self, Self::RateLimited | Self::Offline | Self::CommandFailed)
+        matches!(
+            self,
+            Self::RateLimited | Self::Offline | Self::CommandFailed
+        )
     }
 }
 
@@ -184,7 +189,11 @@ pub(crate) fn classify_account_diagnostic(diagnostic: &str) -> Option<AccountErr
     ]) {
         return Some(AccountError::ClientMissing);
     }
-    if contains(&["unknown flag", "unknown shorthand flag", "unknown json field"]) {
+    if contains(&[
+        "unknown flag",
+        "unknown shorthand flag",
+        "unknown json field",
+    ]) {
         if contains(&["--user", "'u' in -u"]) {
             return Some(AccountError::UnsupportedNamedAccountLookup);
         }
@@ -262,7 +271,12 @@ pub(crate) fn classify_account_diagnostic(diagnostic: &str) -> Option<AccountErr
     ]) {
         return Some(AccountError::PermissionDenied);
     }
-    if contains(&["http 404", "status code 404", "could not resolve to", "not found"]) {
+    if contains(&[
+        "http 404",
+        "status code 404",
+        "could not resolve to",
+        "not found",
+    ]) {
         return Some(AccountError::NotFound);
     }
     if contains(&["not logged into", "gh auth login"]) {
