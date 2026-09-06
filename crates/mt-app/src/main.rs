@@ -102,6 +102,7 @@ mod search_modal;
 mod session_branch;
 mod session_panel;
 mod settings;
+mod shell_geometry;
 mod shell_ops;
 mod ssh_assoc;
 mod ssh_conn;
@@ -151,9 +152,10 @@ use crate::i18n::{t, tr};
 use crate::orca_sidebar::{OrcaProjectSidebar, OrcaSidebarEvent};
 use crate::project_list::ProjectList;
 use crate::session_panel::SessionPanel;
+use crate::shell_geometry::{ContextVisibility, ShellGeometry};
 use crate::store::{AgentTargetView, AppStore, DoneScope, PendingAlert};
 use crate::terminal_area::TerminalArea;
-use crate::title_bar::TitleBar;
+use crate::title_bar::{TitleBar, TitleBarEvent};
 use crate::tray::{Tray, TrayEvent};
 use crate::usage_panel::UsagePanel;
 use crate::workbench_area::WorkbenchArea;
@@ -270,8 +272,6 @@ impl DrawerPanel {
     }
 }
 
-const ORCA_CONTEXT_MIN_WIDTH: f64 = 300.0;
-const ORCA_CONTEXT_MAX_WIDTH: f64 = 420.0;
 const ORCA_AGENTS_MIN_WIDTH: f32 = 180.0;
 const ORCA_AGENTS_MAX_WIDTH: f32 = 480.0;
 const ORCA_AGENTS_MARGIN: f32 = 12.0;
@@ -496,6 +496,9 @@ struct Workspace {
     last_viewport: Size<Pixels>,
     /// Orca shell 的右侧常驻上下文路由。
     context_panel: ContextPanel,
+    context_visibility: ContextVisibility,
+    context_effective_visible: bool,
+    projects_overlay_open: bool,
     /// 全局实时 Agent 浮窗，不替换 workbench route。
     agents_open: bool,
     agents_focus: FocusHandle,
@@ -535,6 +538,7 @@ struct Workspace {
     _relay: Entity<mobile_relay::RelayBridge>,
     _tray_pump: Task<()>,
     _orca_sidebar_events: Subscription,
+    _titlebar_events: Subscription,
     _activation: Subscription,
     /// 窗口大小/位置的观察者 —— 拖动缩放期间每帧回调,由 store 那边的防抖收口。
     _window_bounds: Subscription,
@@ -591,6 +595,16 @@ impl Workspace {
                 OrcaSidebarEvent::OpenSettings => {
                     settings::open_settings(this.store.clone(), None, window, cx)
                 }
+            },
+        );
+        let titlebar_events = cx.subscribe_in(
+            &title_bar,
+            window,
+            |this: &mut Workspace, _, event: &TitleBarEvent, window, cx| match event {
+                TitleBarEvent::ToggleProjects => {
+                    this.on_toggle_middle(&ToggleMiddleColumn, window, cx)
+                }
+                TitleBarEvent::ToggleContext => this.toggle_context_sidebar(window, cx),
             },
         );
         session_panel.update(cx, |panel, cx| panel.set_visible(false, cx));
@@ -730,6 +744,9 @@ impl Workspace {
             middle_state,
             last_viewport: window.viewport_size(),
             context_panel: ContextPanel::Files,
+            context_visibility: ContextVisibility::default(),
+            context_effective_visible: false,
+            projects_overlay_open: false,
             agents_open: false,
             agents_focus: cx.focus_handle(),
             agents_focus_return: None,
@@ -749,6 +766,7 @@ impl Workspace {
             _relay: relay,
             _tray_pump: tray_pump,
             _orca_sidebar_events: orca_sidebar_events,
+            _titlebar_events: titlebar_events,
             _activation: activation,
             _window_bounds: window_bounds,
         };
@@ -938,23 +956,75 @@ impl Workspace {
     }
 
     fn set_context_panel(&mut self, panel: ContextPanel, cx: &mut Context<Self>) {
-        if self.context_panel == panel {
+        self.context_panel = panel;
+        self.context_visibility.show();
+        self.projects_overlay_open = false;
+        self.sync_context_visibility(true, cx);
+        cx.notify();
+    }
+
+    fn shell_geometry(&self, window: &Window, cx: &App) -> ShellGeometry {
+        let viewport_width = f32::from(window.viewport_size().width);
+        let is_mac = cfg!(target_os = "macos");
+        if !Self::orca_shell_enabled() {
+            return ShellGeometry::legacy(viewport_width, is_mac);
+        }
+        let config = self.store.read(cx).config();
+        ShellGeometry::resolve(
+            viewport_width,
+            is_mac,
+            config.middle_column_visible,
+            self.projects_overlay_open,
+            self.context_visibility,
+            self.drawer_drag
+                .map(|drag| drag.width)
+                .or(config.right_drawer_width),
+        )
+    }
+
+    fn toggle_context_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if yields_to_overlay(window, cx) {
             return;
         }
-        self.context_panel = panel;
+        let geometry = self.shell_geometry(window, cx);
+        self.context_visibility.toggle(geometry.context_dockable);
+        self.projects_overlay_open = false;
+        self.drawer_drag = None;
+        self.sync_context_visibility(
+            self.context_visibility.visible(geometry.context_dockable),
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn dismiss_sidebar_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let projects = self.projects_overlay_open;
+        self.projects_overlay_open = false;
+        self.context_visibility.overlay_open = false;
+        self.drawer_drag = None;
+        let geometry = self.shell_geometry(window, cx);
+        self.sync_context_visibility(geometry.context_width > 0.0, cx);
+        self.title_bar
+            .read(cx)
+            .focus_sidebar_toggle(projects, window);
+        cx.notify();
+    }
+
+    fn sync_context_visibility(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.context_effective_visible = visible;
+        let panel = self.context_panel;
         self.session_panel.update(cx, |view, cx| {
-            view.set_visible(panel == ContextPanel::Sessions, cx)
+            view.set_visible(visible && panel == ContextPanel::Sessions, cx)
         });
         self.git_panel.update(cx, |view, cx| {
-            view.set_visible(panel == ContextPanel::Git, cx)
+            view.set_visible(visible && panel == ContextPanel::Git, cx)
         });
         self.github_tasks_panel.update(cx, |view, cx| {
             view.set_visible(
-                panel == ContextPanel::Tasks && github_project_tasks_enabled(),
+                visible && panel == ContextPanel::Tasks && github_project_tasks_enabled(),
                 cx,
             )
         });
-        cx.notify();
     }
 
     fn toggle_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1090,6 +1160,14 @@ impl Workspace {
         } else if self.agents_open && event.keystroke.key == "escape" {
             cx.stop_propagation();
             self.close_agents(true, window, cx);
+        } else if event.keystroke.key == "escape" && overlay::allows(overlay::Yield::ToOverlay) {
+            let geometry = self.shell_geometry(window, cx);
+            if geometry.projects_overlay || geometry.context_overlay {
+                cx.stop_propagation();
+                self.dismiss_sidebar_overlays(window, cx);
+            } else {
+                cx.propagate();
+            }
         } else {
             cx.propagate();
         }
@@ -1183,6 +1261,7 @@ impl Workspace {
         div()
             .id("orca-context-sidebar")
             .relative()
+            .occlude()
             .w(px(width as f32))
             .h_full()
             .flex_none()
@@ -1504,33 +1583,86 @@ impl Workspace {
 
     fn render_orca_body(
         &mut self,
-        drawer_width: f64,
+        geometry: ShellGeometry,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let center = div().flex_1().min_w(px(0.0)).h_full().flex().child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .child(self.workbench_area.clone()),
+        let center = div()
+            .w(px(geometry.body_center_width))
+            .flex_none()
+            .min_w(px(0.0))
+            .h_full()
+            .flex()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(self.workbench_area.clone()),
+            );
+        self.orca_sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_shell_layout(
+                geometry.projects_width,
+                geometry.projects_expanded,
+                window,
+                cx,
+            );
+        });
+        let sidebar = cached_panel(
+            &self.orca_sidebar,
+            StyleRefinement::default()
+                .w(px(geometry.projects_width))
+                .h_full()
+                .flex_none(),
         );
-        let context = self.render_context_sidebar(drawer_width, cx);
+        let context = (geometry.context_width > 0.0)
+            .then(|| self.render_context_sidebar(geometry.context_width as f64, cx));
         let agents = self.render_agents_overlay(window, cx);
-        div()
+        let mut body = div()
             .flex_1()
+            .min_h(px(0.0))
             .overflow_hidden()
             .relative()
-            .flex()
-            .child(cached_panel(
-                &self.orca_sidebar,
-                StyleRefinement::default()
-                    .w(px(orca_sidebar::WIDTH))
+            .flex();
+        if geometry.projects_overlay {
+            body = body.child(
+                div()
+                    .w(px(geometry.left_width))
                     .h_full()
-                    .flex_none(),
-            ))
-            .child(center)
-            .child(context)
-            .children(agents)
+                    .flex_none()
+                    .bg(ui::bg_surface()),
+            );
+        } else {
+            body = body.child(sidebar.clone());
+        }
+        body = body.child(center);
+        if geometry.projects_overlay || geometry.context_overlay {
+            body = body.child(
+                div()
+                    .id("orca-sidebar-scrim")
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .bg(gpui::black().opacity(0.25))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.dismiss_sidebar_overlays(window, cx);
+                        }),
+                    ),
+            );
+        }
+        if geometry.projects_overlay {
+            body = body.child(div().absolute().left_0().top_0().h_full().child(sidebar));
+        }
+        if let Some(context) = context {
+            body = if geometry.context_overlay {
+                body.child(div().absolute().right_0().top_0().h_full().child(context))
+            } else {
+                body.child(context)
+            };
+        }
+        body.children(agents)
             .child(self.toast_layer.clone())
             .children(Root::render_notification_layer(window, cx))
             .into_any_element()
@@ -1614,6 +1746,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if yields_to_overlay(window, cx) {
+            return;
+        }
+        if Self::orca_shell_enabled() && self.shell_geometry(window, cx).projects_narrow {
+            self.projects_overlay_open = !self.projects_overlay_open;
+            self.context_visibility.overlay_open = false;
+            self.sync_context_visibility(false, cx);
+            cx.notify();
             return;
         }
         self.store
@@ -2117,6 +2256,15 @@ impl Render for Workspace {
         // 否则 gpui-component 会把还原进去的宽度按容器比例重算掉。
         self.reseed_resizables_on_viewport_change(window, cx);
 
+        let shell_geometry = self.shell_geometry(window, cx);
+        if shell_geometry.orca
+            && self.context_effective_visible != (shell_geometry.context_width > 0.0)
+        {
+            self.sync_context_visibility(shell_geometry.context_width > 0.0, cx);
+        }
+        self.title_bar
+            .update(cx, |bar, _| bar.set_shell_geometry(shell_geometry));
+
         let (columns, middle, middle_visible, drawer_width, unread, global_status, background) = {
             let store = self.store.read(cx);
             let config = store.config();
@@ -2182,7 +2330,6 @@ impl Render for Workspace {
         let store_for_middle = self.store.clone();
         // 拖拽期间宽度自持,松手才落盘(与原版 `RightDrawer` 的 `onResizeEnd` 同)
         let drawer_width = self.drawer_drag.map(|d| d.width).unwrap_or(drawer_width);
-        let orca_context_width = drawer_width.clamp(ORCA_CONTEXT_MIN_WIDTH, ORCA_CONTEXT_MAX_WIDTH);
 
         // 中间栏是**上下**结构:ProjectList 在上、FileTree 在下(`App.tsx:501-512`
         // 的 `<Allotment vertical>`,minSize 100/120、无上限,高度落 middleColumnSizes)
@@ -2669,7 +2816,7 @@ impl Render for Workspace {
         // `absolute` 于是不会盖到标题栏上。用量面板**不在这里**:它是 Modal
         // (原版 fixed inset-0,遮罩要盖住标题栏),挂根层与 Dialog 族同构。
         let body = if Self::orca_shell_enabled() {
-            self.render_orca_body(orca_context_width, window, cx)
+            self.render_orca_body(shell_geometry, window, cx)
         } else {
             div()
                 .flex_1()
@@ -2743,15 +2890,18 @@ impl Render for Workspace {
             // —— 等价于原版往 document 上挂 mousemove/mouseup
             .when(self.drawer_drag.is_some(), |el| {
                 el.on_mouse_move(cx.listener(
-                    |this: &mut Self, event: &gpui::MouseMoveEvent, _window, cx| {
+                    |this: &mut Self, event: &gpui::MouseMoveEvent, window, cx| {
+                        let geometry = this.shell_geometry(window, cx);
                         if let Some(drag) = this.drawer_drag.as_mut() {
                             let delta = f32::from(drag.start_x - event.position.x) as f64;
-                            let (min_width, max_width) = if Self::orca_shell_enabled() {
-                                (ORCA_CONTEXT_MIN_WIDTH, ORCA_CONTEXT_MAX_WIDTH)
+                            drag.width = if geometry.orca {
+                                geometry.resized_context_width(
+                                    f32::from(window.viewport_size().width),
+                                    drag.start_width + delta,
+                                )
                             } else {
-                                (240.0, 720.0)
+                                (drag.start_width + delta).clamp(240.0, 720.0)
                             };
-                            drag.width = (drag.start_width + delta).clamp(min_width, max_width);
                             cx.notify();
                         }
                     },

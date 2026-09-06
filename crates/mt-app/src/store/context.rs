@@ -264,11 +264,46 @@ fn runtime_display_title(
     fallback: &str,
     identity: &str,
 ) -> String {
+    preferred_runtime_title(custom_title, session_title, live_title)
+        .unwrap_or_else(|| runtime_fallback_title(fallback, identity))
+}
+
+fn preferred_runtime_title(
+    custom_title: Option<&str>,
+    session_title: Option<&str>,
+    live_title: Option<&str>,
+) -> Option<String> {
     custom_title
         .and_then(usable_runtime_title)
         .or_else(|| session_title.and_then(usable_runtime_title))
         .or_else(|| live_title.and_then(usable_runtime_title))
-        .unwrap_or_else(|| runtime_fallback_title(fallback, identity))
+}
+
+struct RuntimeTitleProjection<'a> {
+    custom_title: Option<&'a str>,
+    session_title: Option<&'a str>,
+    live_title: Option<&'a str>,
+    fallback: String,
+    identity: &'a str,
+}
+
+impl RuntimeTitleProjection<'_> {
+    fn diagnostic_label(&self) -> String {
+        runtime_display_title(
+            self.custom_title,
+            self.session_title,
+            self.live_title,
+            &self.fallback,
+            self.identity,
+        )
+    }
+
+    fn readable_label(&self) -> String {
+        preferred_runtime_title(self.custom_title, self.session_title, self.live_title)
+            .unwrap_or_else(|| {
+                usable_runtime_title(&self.fallback).unwrap_or_else(|| "Terminal".into())
+            })
+    }
 }
 
 fn live_runtime_title(provider: &AgentProvider, title: &str) -> Option<String> {
@@ -715,12 +750,12 @@ impl AppStore {
         }
     }
 
-    fn runtime_pane_label(
-        &self,
+    fn runtime_pane_title<'a>(
+        &'a self,
         project_id: &str,
-        pane: &PaneState,
-        run: Option<&AgentRuntimeState>,
-    ) -> String {
+        pane: &'a PaneState,
+        run: Option<&'a AgentRuntimeState>,
+    ) -> RuntimeTitleProjection<'a> {
         let source = self
             .project_execution_snapshot(project_id)
             .ok()
@@ -741,13 +776,23 @@ impl AppStore {
         let identity = run
             .map(|run| run.run_id.as_str())
             .unwrap_or(pane.terminal_session_id.as_str());
-        runtime_display_title(
-            pane.custom_title.as_deref(),
+        RuntimeTitleProjection {
+            custom_title: pane.custom_title.as_deref(),
             session_title,
             live_title,
-            &label,
+            fallback: label,
             identity,
-        )
+        }
+    }
+
+    fn runtime_pane_label(
+        &self,
+        project_id: &str,
+        pane: &PaneState,
+        run: Option<&AgentRuntimeState>,
+    ) -> String {
+        self.runtime_pane_title(project_id, pane, run)
+            .diagnostic_label()
     }
 
     pub fn terminal_runtime_label(&self, project_id: &str, pane: &PaneState) -> String {
@@ -755,6 +800,26 @@ impl AppStore {
         let run = route
             .and_then(|route| super::ai::single_live_agent_for_route(&self.agent_runtime, route));
         self.runtime_pane_label(project_id, pane, run)
+    }
+
+    /// Caption-only projection. Diagnostics and global navigation retain their identity suffixes.
+    pub fn terminal_tab_title(&self, target: &TerminalJumpTarget) -> Option<String> {
+        let binding = self.project_worktree_bindings.get(&target.project_id)?;
+        let state = self.project_states.get(&target.project_id)?;
+        let pane = resolve_terminal_pane(binding, state, target)?;
+        let run = self
+            .current_agent_route_for_pane(&target.project_id, pane)
+            .and_then(|route| super::ai::single_live_agent_for_route(&self.agent_runtime, route));
+        let mut title = self.runtime_pane_title(&target.project_id, pane, run);
+        if let Some(run) = run {
+            title.fallback = match run.provider.as_str() {
+                "codex" => "Codex".into(),
+                "claude" => "Claude".into(),
+                "opencode" => "OpenCode".into(),
+                _ => title.fallback,
+            };
+        }
+        Some(title.readable_label())
     }
 
     /// Canonical path from the stable binding. The configured path is only a
@@ -2013,6 +2078,79 @@ mod tests {
             RUNTIME_TITLE_LIMIT
         );
         assert!(!usable_runtime_title("a\u{1b}b").unwrap().contains('\u{1b}'));
+    }
+
+    #[test]
+    fn caption_titles_keep_owned_precedence_and_user_brackets() {
+        let mut title = RuntimeTitleProjection {
+            custom_title: Some("Deploy [staging] [1234abcd]"),
+            session_title: Some("Owned [session]"),
+            live_title: Some("Live [review]"),
+            fallback: "Codex".into(),
+            identity: "internal-session",
+        };
+        assert_eq!(title.readable_label(), "Deploy [staging] [1234abcd]");
+        assert_eq!(title.readable_label(), title.diagnostic_label());
+        title.custom_title = Some(" \n");
+        assert_eq!(title.readable_label(), "Owned [session]");
+        title.session_title = None;
+        assert_eq!(title.readable_label(), "Live [review]");
+        title.live_title = None;
+        assert_eq!(title.readable_label(), "Codex");
+        assert_ne!(title.readable_label(), title.diagnostic_label());
+    }
+
+    #[test]
+    fn caption_fallback_omits_generated_identity_but_diagnostics_keep_it() {
+        for fallback in [
+            "bash", "PowerShell", "186", "Codex", "ssh", "\u{7ec8}\u{7aef}",
+        ] {
+            let first = RuntimeTitleProjection {
+                custom_title: None,
+                session_title: None,
+                live_title: None,
+                fallback: fallback.into(),
+                identity: "11111111-0000-4000-8000-000000000000",
+            };
+            assert_eq!(first.readable_label(), fallback);
+            assert!(first.diagnostic_label().ends_with("[11111111]"));
+            let second = RuntimeTitleProjection {
+                identity: "22222222-0000-4000-8000-000000000000",
+                ..first
+            };
+            assert_eq!(second.readable_label(), fallback);
+            assert!(second.diagnostic_label().ends_with("[22222222]"));
+            assert!(!second.readable_label().contains("22222222"));
+        }
+    }
+
+    #[test]
+    fn caption_titles_do_not_adopt_stale_session_metadata() {
+        let run = title_run();
+        let source = title_source(&run);
+        let metadata = RuntimeSessionTitle {
+            owner: RuntimeTitleOwner::from_run(&run).unwrap(),
+            source: source.clone(),
+            title: "Owned task".into(),
+        };
+        let projection =
+            |candidate: &AgentRuntimeState, candidate_source: &ExecutionSourceSignature| {
+                RuntimeTitleProjection {
+                    custom_title: None,
+                    session_title: metadata.for_run(candidate, Some(candidate_source)),
+                    live_title: None,
+                    fallback: "Codex".into(),
+                    identity: "diagnostic-only",
+                }
+                .readable_label()
+            };
+        assert_eq!(projection(&run, &source), "Owned task");
+        let mut replacement = run.clone();
+        replacement.route.terminal_incarnation_id = TerminalIncarnationId::new();
+        assert_eq!(projection(&replacement, &source), "Codex");
+        let mut changed_source = source.clone();
+        changed_source.canonical_path = "/replacement".into();
+        assert_eq!(projection(&run, &changed_source), "Codex");
     }
 
     #[test]

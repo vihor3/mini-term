@@ -1,6 +1,31 @@
 # Navigation Validation
 
-## Exact Candidate
+## Approved Layout Follow-up
+
+The user approved the corrected `preview/index.html` and requested native
+implementation. Euclid implemented the five-file native change and Pasteur
+independently approved the source for Actions validation on 2026-09-07.
+
+- Shared `ShellGeometry` drives caption/body boundaries and live right width.
+  Caption height is 42px; tabs are 200px and consume available space before
+  window-drag fill. Native control/separator space is accounted for.
+- Sidebar toggles retain window-global tool selection and existing per-worktree
+  owners. Narrow overlays support dismissal and keep the caption rail compact.
+- Readable exact-target captions omit generated identity suffixes; runtime
+  diagnostics, manual brackets and route validation remain unchanged.
+- Eleven new regressions and revised tab-reveal coverage were authored. The
+  Windows workflow discovers and executes geometry, titlebar, sidebar-navigation
+  and store-context suites. No local build, test, formatter or app ran.
+- Main review found and implementation corrected narrow-overlay branding in the
+  caption rail, separator space at minimum control widths, and equal-flex
+  allocation unnecessarily truncating tabs beside a large drag region.
+- Nonblocking coverage gap: new title tests exercise the owned projection and
+  existing target-resolution tests, not the complete `terminal_tab_title()`
+  entry point with provider fallback mapping.
+- Exact-commit CI, packaging and native artifact acceptance are pending. The
+  historical candidates below do not validate this new native source.
+
+## Historical Candidate
 
 - Commit: `f7b8a7e74dc901203b1fd4606310a8ad78f3503f`.
 - Branch: `vihor3/mini-term`, `feat/remote-file-management`.

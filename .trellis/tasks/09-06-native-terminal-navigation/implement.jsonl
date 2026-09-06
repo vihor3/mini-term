@@ -1,4 +1,5 @@
 {"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"Actions-only tests and native acceptance provenance."}
+{"file":".trellis/spec/mt-app/backend/native-shell-layout-contract.md","reason":"Approved HTML-to-native geometry, sidebar toggles, native controls and separate readable tab titles."}
 {"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Flat visual tabs must retain internal route and PTY identity."}
 {"file":".trellis/spec/mt-layout/backend/worktree-layout-contract.md","reason":"Preserve saved terminals, shared-alias ownership, and recoverable legacy layouts."}
 {"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Global context tool choice, worktree data, and exact terminal activation."}

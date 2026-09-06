@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, App, AppContext, Bounds, ClickEvent, Context, Div, Entity, FocusHandle,
+    AnyElement, App, AppContext, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Render,
     ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Window,
     WindowControlArea, canvas, div, point, prelude::FluentBuilder, px,
@@ -15,24 +15,21 @@ use mt_identity::{PaneKey, WorktreeId};
 use mt_ui::icon_tooltip::IconTooltips;
 use mt_ui::icons::{AiVendor, BrandIcon, Geom, Ink, Shape, VectorIcon};
 use mt_ui::rgb8;
-use mt_ui::tooltip::Tooltip;
 
 use crate::dnd::{self, DragTerminalTab};
 use crate::i18n::t;
 use crate::menu;
 use crate::pane_actions;
 use crate::prompt::Confirm;
+use crate::shell_geometry::{CAPTION_DRAG_WIDTH, ShellGeometry, TOOL_WIDTH};
 use crate::store::{AppStore, TerminalJumpTarget, TerminalJumpView};
 use crate::terminal_area::{click_position, open_new_terminal_menu, tab_menu};
 use crate::ui;
 
-pub const HEIGHT: f32 = 44.0;
-
-/// macOS 交通灯占位:三颗灯 + 左右留白,内容从这条线之后开始。
-const MAC_TRAFFIC_LIGHT_WIDTH: f32 = 78.0;
+pub const HEIGHT: f32 = crate::shell_geometry::CAPTION_HEIGHT;
 
 /// 单颗窗口控制键的宽度(原版 `w-[46px]`)。
-const BUTTON_WIDTH: f32 = 46.0;
+const BUTTON_WIDTH: f32 = crate::shell_geometry::WINDOW_BUTTON_WIDTH;
 
 /// 关闭键 hover 的**Windows 系统红**。原版就是写死的 `#c42b1c` 字面量而不是
 /// CSS 变量 —— 它不属于配色主题,换主题包也不该变。
@@ -169,7 +166,7 @@ pub fn max_button_face(maximized: bool) -> (&'static [Shape], &'static str) {
     }
 }
 
-const TAB_WIDTH: f32 = 176.0;
+const TAB_WIDTH: f32 = crate::shell_geometry::TERMINAL_TAB_WIDTH;
 
 pub fn blink_phase(delta: f32) -> f32 {
     let triangle = 1.0 - (delta * 2.0 - 1.0).abs();
@@ -309,6 +306,12 @@ enum Control {
     Close,
 }
 
+#[derive(Clone, Copy)]
+pub enum TitleBarEvent {
+    ToggleProjects,
+    ToggleContext,
+}
+
 fn revealed_offset(current: f32, viewport: f32, index: usize, tab_width: f32) -> f32 {
     let left = index as f32 * tab_width;
     let right = left + tab_width;
@@ -321,12 +324,25 @@ fn revealed_offset(current: f32, viewport: f32, index: usize, tab_width: f32) ->
     }
 }
 
+fn terminal_tabs_width(center_width: f32, has_project: bool, count: usize) -> f32 {
+    let tools = if has_project { TOOL_WIDTH } else { 0.0 }
+        + if count > 0 { TOOL_WIDTH } else { 0.0 };
+    (center_width - tools - CAPTION_DRAG_WIDTH)
+        .max(0.0)
+        .min(count as f32 * TAB_WIDTH)
+}
+
 pub struct TitleBar {
     store: Entity<AppStore>,
     workbench: Entity<crate::workbench_area::WorkbenchArea>,
     navigation_tooltips: Entity<IconTooltips>,
     window_tooltips: Entity<IconTooltips>,
+    project_tooltips: Entity<IconTooltips>,
+    geometry: ShellGeometry,
+    projects_focus: FocusHandle,
+    context_focus: FocusHandle,
     tab_focus: HashMap<PaneKey, FocusHandle>,
+    close_focus: HashMap<PaneKey, FocusHandle>,
     add_focus: FocusHandle,
     overflow_focus: FocusHandle,
     scroll: ScrollHandle,
@@ -339,6 +355,8 @@ pub struct TitleBar {
     reveal_selected: bool,
     tab_drop: Option<(TerminalJumpTarget, bool)>,
 }
+
+impl EventEmitter<TitleBarEvent> for TitleBar {}
 
 impl TitleBar {
     pub fn new(
@@ -353,7 +371,12 @@ impl TitleBar {
             workbench,
             navigation_tooltips: cx.new(|_| IconTooltips::default()),
             window_tooltips: cx.new(|_| IconTooltips::default()),
+            project_tooltips: cx.new(|_| IconTooltips::default()),
+            geometry: ShellGeometry::legacy(0.0, cfg!(target_os = "macos")),
+            projects_focus: cx.focus_handle().tab_stop(true),
+            context_focus: cx.focus_handle().tab_stop(true),
             tab_focus: HashMap::new(),
+            close_focus: HashMap::new(),
             add_focus: cx.focus_handle().tab_stop(true),
             overflow_focus: cx.focus_handle().tab_stop(true),
             scroll: ScrollHandle::new(),
@@ -366,6 +389,100 @@ impl TitleBar {
             reveal_selected: true,
             tab_drop: None,
         }
+    }
+
+    pub fn set_shell_geometry(&mut self, geometry: ShellGeometry) {
+        self.geometry = geometry;
+    }
+
+    pub fn focus_sidebar_toggle(&self, projects: bool, window: &mut Window) {
+        window.focus(if projects {
+            &self.projects_focus
+        } else {
+            &self.context_focus
+        });
+    }
+
+    fn sidebar_button(
+        &self,
+        event: TitleBarEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let (id, focus, tooltips, open) = match event {
+            TitleBarEvent::ToggleProjects => (
+                "titlebar-toggle-projects",
+                &self.projects_focus,
+                &self.project_tooltips,
+                self.geometry.projects_expanded,
+            ),
+            TitleBarEvent::ToggleContext => (
+                "titlebar-toggle-context",
+                &self.context_focus,
+                &self.window_tooltips,
+                self.geometry.context_width > 0.0,
+            ),
+        };
+        let focus_click = focus.clone();
+        let button = div()
+            .id(id)
+            .w(px(TOOL_WIDTH))
+            .h(px(TOOL_WIDTH))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .track_focus(focus)
+            .tab_index(0)
+            .rounded(px(3.0))
+            .cursor_pointer()
+            .text_color(ui::text_muted())
+            .when(open, |el| el.text_color(ui::text_secondary()))
+            .focus(|el| el.bg(ui::accent_subtle()).text_color(ui::accent()))
+            .hover(|el| el.bg(ui::border_subtle()).text_color(ui::text_primary()))
+            .child(VectorIcon::new(crate::activity_bar::PANEL, px(16.0)))
+            .on_key_down(cx.listener(move |_, key: &KeyDownEvent, _window, cx| {
+                if matches!(key.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    cx.emit(event);
+                }
+            }))
+            .on_click(cx.listener(move |_, _, window, cx| {
+                cx.stop_propagation();
+                window.focus(&focus_click);
+                cx.emit(event);
+            }));
+        IconTooltips::button(
+            tooltips,
+            id,
+            t("settings", "shortcuts.toggleSidebar"),
+            button,
+            window,
+            cx,
+        )
+    }
+
+    fn tab_title(&self, target: &TerminalJumpTarget, cx: &App) -> String {
+        self.store
+            .read(cx)
+            .terminal_tab_title(target)
+            .unwrap_or_else(|| "Terminal".into())
+    }
+
+    fn tab_description(&self, target: &TerminalJumpTarget, title: &str, cx: &App) -> String {
+        let store = self.store.read(cx);
+        let host = store
+            .project_execution_snapshot(&target.project_id)
+            .map(|snapshot| snapshot.host_label)
+            .unwrap_or_default();
+        let path = store
+            .canonical_worktree_path_for_project(&target.project_id)
+            .unwrap_or("");
+        [title, host.as_str(), path]
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn control_button(
@@ -418,12 +535,12 @@ impl TitleBar {
             .map(|project| self.store.read(cx).terminal_tab_views(project))
             .unwrap_or_default()
             .into_iter()
-            .enumerate()
-            .map(|(index, view)| {
+            .map(|view| {
                 let store = self.store.clone();
                 let titlebar = titlebar.clone();
+                let title = self.tab_title(&view.target, cx);
                 menu::item(
-                    format!("{}. {}", index + 1, view.pane_label),
+                    title,
                     move |window, cx| {
                         if AppStore::activate_terminal_jump_target(&store, &view.target, window, cx)
                         {
@@ -446,7 +563,6 @@ impl TitleBar {
     fn render_tab(
         &mut self,
         view: &TerminalJumpView,
-        index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -454,6 +570,11 @@ impl TitleBar {
         let key = target.pane_key.clone();
         let focus = self
             .tab_focus
+            .entry(key.clone())
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
+        let close_focus = self
+            .close_focus
             .entry(key.clone())
             .or_insert_with(|| cx.focus_handle().tab_stop(true))
             .clone();
@@ -470,12 +591,16 @@ impl TitleBar {
         };
         let unread = self.store.read(cx).is_pane_unread_done(key.as_str());
         let active = view.active && self.workbench.read(cx).is_terminal_active(cx);
-        let label = view.pane_label.clone();
+        let label = self.tab_title(&target, cx);
+        let description = self.tab_description(&target, &label, cx);
         let target_click = target.clone();
         let target_key = target.clone();
         let target_menu = target.clone();
         let target_close = target.clone();
+        let target_close_key = target.clone();
         let label_menu = label.clone();
+        let label_drag = label.clone();
+        let label_text = label.clone();
         let drop_side = self
             .tab_drop
             .as_ref()
@@ -494,12 +619,26 @@ impl TitleBar {
                 .items_center()
                 .justify_center()
                 .rounded(px(3.0))
+                .track_focus(&close_focus)
+                .tab_index(0)
                 .cursor_pointer()
+                .focus(|el| el.bg(ui::accent_subtle()))
                 .hover(|el| el.bg(ui::border_subtle()))
                 .child(VectorIcon::new(ICON_CLOSE, px(10.0)).ink(ui::text_muted()))
                 .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
                     cx.stop_propagation()
                 })
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        pane_actions::close_terminal_target(
+                            this.store.clone(),
+                            target_close_key.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                }))
                 .on_click(cx.listener(move |this, _event, window, cx| {
                     cx.stop_propagation();
                     pane_actions::close_terminal_target(
@@ -542,6 +681,7 @@ impl TitleBar {
                 ui::text_muted()
             })
             .text_size(ui::font_px(13.0))
+            .focus(|el| el.bg(ui::accent_subtle()))
             .hover(|el| el.bg(ui::bg_overlay()))
             .on_mouse_down(MouseButton::Left, |_event, window, _cx| {
                 // Reordering preserves focus; a completed click activates its exact target.
@@ -586,9 +726,8 @@ impl TitleBar {
                     target: target.clone(),
                 },
                 {
-                    let label = view.pane_label.clone();
                     move |_item, _offset, _window, cx| {
-                        dnd::preview(label.clone(), dnd::PreviewIcon::Terminal, cx)
+                        dnd::preview(label_drag.clone(), dnd::PreviewIcon::Terminal, cx)
                     }
                 },
             )
@@ -636,14 +775,6 @@ impl TitleBar {
                     cx.notify();
                 }
             }))
-            .child(
-                div()
-                    .w(px(24.0))
-                    .flex_none()
-                    .truncate()
-                    .text_size(ui::font_px(10.0))
-                    .child((index + 1).to_string()),
-            )
             .when_some(vendor, |el, vendor| {
                 el.child(
                     BrandIcon::new(Some(vendor))
@@ -651,18 +782,25 @@ impl TitleBar {
                         .color(ui::text_muted()),
                 )
             })
-            .child(
+            .when(vendor.is_none(), |el| {
+                el.child(VectorIcon::new(ICON_LOGO, px(14.0)).ink(ui::text_muted()))
+            })
+            .child(IconTooltips::button(
+                &self.navigation_tooltips,
+                SharedString::from(format!("terminal-label-description-{key}")),
+                description,
                 div()
                     .id(SharedString::from(format!("terminal-label-{key}")))
                     .min_w(px(0.0))
                     .flex_1()
-                    .truncate()
-                    .child(view.pane_label.clone())
-                    .tooltip({
-                        let title = view.pane_label.clone();
-                        move |window, cx| Tooltip::new(title.clone()).build(window, cx)
-                    }),
-            )
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .child(div().min_w(px(0.0)).truncate().child(label_text)),
+                window,
+                cx,
+            ))
             .child(
                 div()
                     .w(px(5.0))
@@ -675,6 +813,15 @@ impl TitleBar {
                     }),
             )
             .child(close)
+            .child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(1.0))
+                    .bg(ui::border_subtle()),
+            )
             .when_some(drop_side, |el, after| {
                 el.child(
                     div()
@@ -732,6 +879,8 @@ impl Render for TitleBar {
         }
         self.tab_focus
             .retain(|key, _| self.last_order.contains(key));
+        self.close_focus
+            .retain(|key, _| self.last_order.contains(key));
         if !cx.has_active_drag() {
             self.tab_drop = None;
         }
@@ -770,13 +919,18 @@ impl Render for TitleBar {
                     }
                 },
             ));
-        for (index, view) in views.iter().enumerate() {
-            tabs = tabs.child(self.render_tab(view, index, window, cx));
+        for view in &views {
+            tabs = tabs.child(self.render_tab(view, window, cx));
         }
         let tabs = div()
             .id("titlebar-tabs-viewport")
             .relative()
-            .flex_1()
+            .flex_none()
+            .w(px(terminal_tabs_width(
+                self.geometry.titlebar_center_width,
+                scope.is_some(),
+                views.len(),
+            )))
             .min_w(px(0.0))
             .h_full()
             .overflow_hidden()
@@ -813,17 +967,19 @@ impl Render for TitleBar {
             );
         let mut navigation = div()
             .id("titlebar-terminal-navigation")
-            .flex_1()
+            .w(px(self.geometry.titlebar_center_width))
+            .flex_none()
             .min_w(px(0.0))
             .h_full()
             .flex()
             .items_center()
+            .overflow_hidden()
             .child(tabs);
         if scope.is_some() {
             let add = div()
                 .id("titlebar-new-terminal")
-                .w(px(32.0))
-                .h(px(32.0))
+                .w(px(TOOL_WIDTH))
+                .h(px(TOOL_WIDTH))
                 .track_focus(&self.add_focus)
                 .tab_index(0)
                 .flex_none()
@@ -833,9 +989,9 @@ impl Render for TitleBar {
                 .cursor_pointer()
                 .rounded(px(3.0))
                 .text_color(ui::text_muted())
-                .text_size(px(20.0))
+                .focus(|el| el.bg(ui::accent_subtle()))
                 .hover(|el| el.bg(ui::border_subtle()))
-                .child("+")
+                .child(VectorIcon::new(crate::orca_sidebar::PLUS_ICON, px(16.0)))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         cx.stop_propagation();
@@ -868,8 +1024,8 @@ impl Render for TitleBar {
         if !views.is_empty() {
             let overflow = div()
                 .id("titlebar-terminal-overflow")
-                .w(px(32.0))
-                .h(px(32.0))
+                .w(px(TOOL_WIDTH))
+                .h(px(TOOL_WIDTH))
                 .track_focus(&self.overflow_focus)
                 .tab_index(0)
                 .flex_none()
@@ -878,6 +1034,7 @@ impl Render for TitleBar {
                 .justify_center()
                 .cursor_pointer()
                 .rounded(px(3.0))
+                .focus(|el| el.bg(ui::accent_subtle()))
                 .hover(|el| el.bg(ui::border_subtle()))
                 .child(VectorIcon::new(ICON_CHEVRON_DOWN, px(12.0)).ink(ui::text_muted()))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -898,6 +1055,13 @@ impl Render for TitleBar {
                 cx,
             ));
         }
+        navigation = navigation.child(
+            div()
+                .flex_1()
+                .min_w(px(CAPTION_DRAG_WIDTH))
+                .h_full()
+                .window_control_area(WindowControlArea::Drag),
+        );
         let navigation = IconTooltips::group(&self.navigation_tooltips, navigation, window, cx);
         let (max_shapes, max_tip) = max_button_face(window.is_maximized());
         let click_fallback = cfg!(target_os = "linux");
@@ -928,8 +1092,96 @@ impl Render for TitleBar {
                         el.on_click(|_, window, cx| request_close_window(window, cx))
                     }),
             );
-        let controls = IconTooltips::group(&self.window_tooltips, controls, window, cx);
+        let mut tools = div()
+            .id("titlebar-tools")
+            .w(px(self.geometry.titlebar_right_width))
+            .h_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .when(self.geometry.orca, |el| {
+                el.border_l_1().border_color(ui::border_subtle())
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag),
+            );
+        if self.geometry.orca {
+            tools = tools.child(self.sidebar_button(TitleBarEvent::ToggleContext, window, cx));
+        }
+        let tools = IconTooltips::group(
+            &self.window_tooltips,
+            tools.when(!is_mac, |el| el.child(controls)),
+            window,
+            cx,
+        );
+        let mut left = div()
+            .id("titlebar-project-region")
+            .w(px(self.geometry.left_width))
+            .h_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .when(self.geometry.orca, |el| {
+                el.border_r_1().border_color(ui::border_subtle())
+            })
+            .when(is_mac, |el| {
+                el.child(
+                    div()
+                        .w(px(self.geometry.traffic_light_width))
+                        .h_full()
+                        .flex_none(),
+                )
+            });
+        let docked_projects = self.geometry.projects_expanded && !self.geometry.projects_narrow;
+        if docked_projects || !self.geometry.orca {
+            left = left.child(
+                div()
+                    .h_full()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .overflow_hidden()
+                    .window_control_area(WindowControlArea::Drag)
+                    .child(VectorIcon::new(ICON_LOGO, px(14.0)).ink(ui::text_muted()))
+                    .when(
+                        docked_projects || window.viewport_size().width > px(760.0),
+                        |el| {
+                            el.child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .text_size(ui::font_px(12.0))
+                                    .text_color(ui::text_secondary())
+                                    .child("Mini-Term"),
+                            )
+                        },
+                    ),
+            );
+        }
+        if self.geometry.orca {
+            let toggle = self.sidebar_button(TitleBarEvent::ToggleProjects, window, cx);
+            left = left.child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(docked_projects, |el| el.flex_none().w(px(47.0)))
+                    .child(toggle),
+            );
+        }
+        let left = IconTooltips::group(&self.project_tooltips, left, window, cx);
         div()
+            .id("native-titlebar")
+            .tab_group()
             .w_full()
             .h(px(HEIGHT))
             .flex_none()
@@ -938,37 +1190,24 @@ impl Render for TitleBar {
             .bg(ui::bg_surface())
             .border_b_1()
             .border_color(ui::border_subtle())
-            .when(is_mac, |el| {
-                el.child(div().w(px(MAC_TRAFFIC_LIGHT_WIDTH)).h_full().flex_none())
+            .on_key_down(|event: &KeyDownEvent, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key == "tab"
+                    && !modifiers.control
+                    && !modifiers.platform
+                    && !modifiers.alt
+                {
+                    cx.stop_propagation();
+                    if modifiers.shift {
+                        window.focus_prev();
+                    } else {
+                        window.focus_next();
+                    }
+                }
             })
-            .child(
-                div()
-                    .h_full()
-                    .px(px(12.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .window_control_area(WindowControlArea::Drag)
-                    .child(VectorIcon::new(ICON_LOGO, px(14.0)).ink(ui::text_muted()))
-                    .when(window.viewport_size().width > px(760.0), |el| {
-                        el.child(
-                            div()
-                                .text_size(ui::font_px(12.0))
-                                .text_color(ui::text_secondary())
-                                .child("Mini-Term"),
-                        )
-                    }),
-            )
+            .child(left)
             .child(navigation)
-            .child(
-                div()
-                    .w(px(28.0))
-                    .h_full()
-                    .flex_none()
-                    .window_control_area(WindowControlArea::Drag),
-            )
-            .when(!is_mac, |el| el.child(controls))
+            .child(tools)
     }
 }
 
@@ -978,11 +1217,44 @@ mod tests {
 
     #[test]
     fn selected_tabs_are_revealed_without_scrolling_visible_tabs() {
-        assert_eq!(revealed_offset(0.0, 352.0, 0, 176.0), 0.0);
-        assert_eq!(revealed_offset(0.0, 352.0, 3, 176.0), 352.0);
-        assert_eq!(revealed_offset(352.0, 352.0, 0, 176.0), 0.0);
-        assert_eq!(revealed_offset(100.0, 352.0, 1, 176.0), 100.0);
-        assert_eq!(revealed_offset(0.0, 90.0, 2, 176.0), 352.0);
+        assert_eq!(revealed_offset(0.0, 400.0, 0, TAB_WIDTH), 0.0);
+        assert_eq!(revealed_offset(0.0, 400.0, 3, TAB_WIDTH), 400.0);
+        assert_eq!(revealed_offset(400.0, 400.0, 0, TAB_WIDTH), 0.0);
+        assert_eq!(revealed_offset(100.0, 400.0, 1, TAB_WIDTH), 100.0);
+        assert_eq!(revealed_offset(0.0, 90.0, 2, TAB_WIDTH), 400.0);
+    }
+
+    #[test]
+    fn caption_tabs_fill_available_center_without_displacing_tools_or_drag_area() {
+        assert_eq!(terminal_tabs_width(696.0, true, 3), 600.0);
+        assert_eq!(
+            696.0 - terminal_tabs_width(696.0, true, 3) - 2.0 * TOOL_WIDTH,
+            32.0
+        );
+        assert_eq!(terminal_tabs_width(800.0, true, 1), 200.0);
+        assert_eq!(terminal_tabs_width(800.0, true, 10), 712.0);
+        assert_eq!(terminal_tabs_width(800.0, false, 0), 0.0);
+        for is_mac in [false, true] {
+            for viewport in [320.0, 640.0, 800.0, 1280.0, 2560.0] {
+                let geometry = ShellGeometry::resolve(
+                    viewport,
+                    is_mac,
+                    true,
+                    false,
+                    crate::shell_geometry::ContextVisibility::default(),
+                    Some(340.0),
+                );
+                let tabs = terminal_tabs_width(geometry.titlebar_center_width, true, 20);
+                assert!(
+                    tabs + 2.0 * TOOL_WIDTH + CAPTION_DRAG_WIDTH <= geometry.titlebar_center_width
+                );
+                let tools_start = geometry.left_width + geometry.titlebar_center_width;
+                assert!(geometry.left_width + tabs + 2.0 * TOOL_WIDTH <= tools_start);
+                if geometry.context_dockable {
+                    assert_eq!(tools_start, viewport - geometry.context_width);
+                }
+            }
+        }
     }
 
     /// 形状表的点必须全落在单位方框内 —— 越界会画到相邻按钮上。

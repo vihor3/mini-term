@@ -31,7 +31,7 @@ use crate::worktree_catalog::{
 use crate::worktree_visibility::{ProjectSettingsTarget, sidebar_visible};
 
 /// Fixed shell width used by `Workspace` and the Agents overlay anchor.
-pub const WIDTH: f32 = 300.0;
+pub const WIDTH: f32 = crate::shell_geometry::PROJECT_WIDTH;
 
 const NAV_ICON_SIZE: f32 = 15.0;
 const ROW_ICON_SIZE: f32 = 14.0;
@@ -63,7 +63,7 @@ const SEARCH_ICON: &[Shape] = &[
     ),
 ];
 
-const PLUS_ICON: &[Shape] = &[
+pub(crate) const PLUS_ICON: &[Shape] = &[
     Shape::line(
         Ink::Current,
         0.10,
@@ -355,6 +355,14 @@ const FOOTER_ACTIONS: [(&str, &str, &[Shape], OrcaSidebarEvent); 3] = [
     ),
 ];
 
+fn footer_height(expanded: bool) -> f32 {
+    if expanded {
+        48.0
+    } else {
+        17.0 + FOOTER_ACTIONS.len() as f32 * 32.0 + 8.0
+    }
+}
+
 pub struct OrcaProjectSidebar {
     store: Entity<AppStore>,
     catalog: Entity<WorktreeCatalog>,
@@ -363,6 +371,9 @@ pub struct OrcaProjectSidebar {
     project_controls: HashMap<String, ProjectRowControls>,
     header_tooltips: Entity<IconTooltips>,
     footer_tooltips: Entity<IconTooltips>,
+    footer_focus: [FocusHandle; 3],
+    shell_width: f32,
+    expanded: bool,
 }
 
 impl EventEmitter<OrcaSidebarEvent> for OrcaProjectSidebar {}
@@ -393,7 +404,38 @@ impl OrcaProjectSidebar {
             project_controls: HashMap::new(),
             header_tooltips: cx.new(|_| IconTooltips::default()),
             footer_tooltips: cx.new(|_| IconTooltips::default()),
+            footer_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            shell_width: WIDTH,
+            expanded: true,
         }
+    }
+
+    pub fn set_shell_layout(
+        &mut self,
+        width: f32,
+        expanded: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.shell_width == width && self.expanded == expanded {
+            return;
+        }
+        self.shell_width = width;
+        self.expanded = expanded;
+        IconTooltips::reset(&self.footer_tooltips, window, cx);
+        if !expanded {
+            IconTooltips::reset(&self.header_tooltips, window, cx);
+            let menu = menu::layer(cx);
+            if self
+                .project_controls
+                .keys()
+                .any(|id| menu.read(cx).is_anchored_to(&project_menu_anchor(id)))
+            {
+                menu::close(window, cx);
+            }
+            self.hovered_project = None;
+        }
+        cx.notify();
     }
 
     fn render_top_actions(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -1112,15 +1154,16 @@ impl OrcaProjectSidebar {
     ) -> gpui::Stateful<gpui::Div> {
         let mut footer = div()
             .id("orca-footer")
-            .h(px(48.0))
+            .h(px(footer_height(self.expanded)))
             .flex_none()
             .flex()
             .items_center()
             .gap(px(4.0))
-            .px(px(8.0))
+            .when(self.expanded, |el| el.px(px(8.0)))
+            .when(!self.expanded, |el| el.flex_col().py(px(8.0)))
             .border_t_1()
             .border_color(ui::border_subtle());
-        for (id, label, icon, action) in FOOTER_ACTIONS {
+        for (index, (id, label, icon, action)) in FOOTER_ACTIONS.into_iter().enumerate() {
             footer = footer.child(IconTooltips::button(
                 &self.footer_tooltips,
                 SharedString::from(format!("{id}-description")),
@@ -1133,6 +1176,13 @@ impl OrcaProjectSidebar {
                 )
                 .w(px(32.0))
                 .h(px(32.0))
+                .track_focus(&self.footer_focus[index])
+                .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        cx.emit(action);
+                    }
+                }))
                 .on_click(cx.listener(move |_this, _event, _window, cx| {
                     cx.emit(action);
                 })),
@@ -1239,8 +1289,9 @@ impl Render for OrcaProjectSidebar {
 
         div()
             .id("orca-project-sidebar")
+            .occlude()
             .tab_group()
-            .w(px(WIDTH))
+            .w(px(self.shell_width))
             .h_full()
             .flex_none()
             .flex()
@@ -1264,9 +1315,12 @@ impl Render for OrcaProjectSidebar {
                     }
                 }
             })
-            .child(self.render_top_actions(cx))
-            .child(self.render_projects_header(window, cx))
-            .child(rows)
+            .when(self.expanded, |el| {
+                el.child(self.render_top_actions(cx))
+                    .child(self.render_projects_header(window, cx))
+                    .child(rows)
+            })
+            .when(!self.expanded, |el| el.child(div().flex_1().min_h(px(0.0))))
             .child(self.render_footer(window, cx))
     }
 }
@@ -1318,6 +1372,14 @@ mod navigation_tests {
                 ("orca-mobile", OrcaSidebarEvent::OpenMobile),
             ],
         );
+    }
+
+    #[test]
+    fn collapsed_footer_reserves_all_three_controls() {
+        let inner_height = footer_height(false) - 17.0;
+        assert_eq!(inner_height, FOOTER_ACTIONS.len() as f32 * 32.0 + 2.0 * 4.0);
+        assert!(crate::shell_geometry::PROJECT_RAIL_WIDTH - 1.0 >= 32.0);
+        assert_eq!(footer_height(true), 48.0);
     }
 }
 

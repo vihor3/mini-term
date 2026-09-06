@@ -92,3 +92,50 @@ single-terminal clarification. The user approved the final parent plan on
 2026-09-06. PRD, compatibility research, design, execution plan and curated context
 are reviewed for this first implementation child. All compilation, tests, UI
 harnesses, format/lint and packaging remain GitHub Actions-only.
+
+## Visual Approval Follow-up
+
+The user rejected the packaged titlebar/sidebar proportions in the latest
+Orca comparison screenshots. On 2026-09-06 they explicitly requested an HTML
+preview before further application UI edits. Previous implementation approval
+does not authorize applying this new visual proposal to the native app yet.
+
+- Produce `preview/index.html` as a directly openable layout proposal. Keep
+  application sources, dependencies, build configuration and runtime state
+  unchanged until the user reviews and approves it.
+- Align the titlebar's left region with the project sidebar so terminal tabs
+  start at the terminal viewport, with a shared boundary when collapsed.
+- The next screenshot also rejects tabs extending over the right context
+  sidebar. In the revised preview, constrain terminal tabs and Add to the
+  center column. With the right sidebar docked, its left edge must continue
+  into the titlebar's separate tools/window-control region. With it hidden
+  or shown as a narrow-window overlay, reserve only the controls' width.
+- Propose quieter tab proportions and human-readable names without standalone
+  ordinal badges or internal session IDs. Exact dimensions remain a proposal.
+- Demonstrate existing agreed navigation and hover behavior with in-memory
+  sample data only; do not treat a browser mockup as native UI acceptance or
+  evidence of real terminal, remote Git, Tasks or Agent behavior.
+- Local source review is allowed; no local browser harness, build, test, lint
+  or other automated validation. Approval of the preview is still pending.
+
+### Native Implementation Approved
+
+The user subsequently approved the corrected preview: "The layout is now
+fine; adjust it accordingly and start directly." The HTML-before-native gate
+is satisfied for this layout only. Keep the preview as the visual reference.
+
+- Implement the shared left/center/right boundaries in the native titlebar and
+  workspace, including docked right-sidebar resize, collapse and restore.
+- Match the proposed compact 42px caption and 200px terminal tabs. Preserve
+  existing theme/type scaling, native window hit testing, keyboard access,
+  overflow/reorder and exact terminal close/activation behavior.
+- Use human-readable tab titles with existing title precedence, but omit
+  generated internal-ID suffixes and standalone ordinal badges. Do not strip
+  bracketed text from user titles or weaken runtime diagnostics/identity.
+- Implement the preview's sidebar toggles using existing ownership patterns.
+  Keep the chosen right tool window-global, and preserve all per-worktree data,
+  documents, live/dormant terminals and background Agent ownership.
+- This approval is not a new remote/runtime/WSL feature request, a theme rewrite
+  or permission to replace working panels with the preview's sample content.
+- Native source checks, geometry/title regressions, compilation and packaging
+  run only in GitHub Actions; HTML approval is not native artifact acceptance.

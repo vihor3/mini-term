@@ -1,4 +1,5 @@
 {"file":".trellis/spec/mt-app/backend/quality-guidelines.md","reason":"No local builds/UI harnesses/format checks; audit exact Actions results."}
+{"file":".trellis/spec/mt-app/backend/native-shell-layout-contract.md","reason":"Check shared native caption/body boundaries, preserved sidebar preferences and human versus diagnostic titles."}
 {"file":".trellis/spec/mt-app/backend/release-staging-contract.md","reason":"Actions-only validation and complete contextual formatting artifacts; never apply selected zero-context hunks as a source transformation."}
 {"file":".trellis/spec/mt-app/backend/workbench-identity-contract.md","reason":"Check no live terminal reparenting, route retagging, respawn, or stale focus."}
 {"file":".trellis/spec/mt-layout/backend/worktree-layout-contract.md","reason":"Audit legacy terminal completeness, alias saves, and migration compatibility."}

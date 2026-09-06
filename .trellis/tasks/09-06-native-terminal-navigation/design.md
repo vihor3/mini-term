@@ -111,3 +111,25 @@ titles and runtime pane labels without falsely promising new pane-title
 persistence. Test multi-panel legacy layouts and worktree aliases, not only the
 new simple layout. Exact geometry, focus, and tooltip timing require Actions
 fixtures plus matching native artifact acceptance.
+
+## Approved Preview Integration
+
+The corrected `preview/index.html` is now approved for native implementation.
+Resolve shell geometry once at the Workspace ownership boundary and pass the
+same left/docked-right widths to titlebar and body. Read live drag width and
+existing persisted preferences rather than copying a preview constant into a
+second independent layout. Retain a controls-only titlebar region when the
+right context sidebar is hidden or overlaid. Preserve macOS traffic-light
+space inside the left region, not as an extra offset before all columns.
+
+Scope the change to native `main`, `title_bar`, `orca_sidebar`, a small shared
+geometry helper if needed, and the store's tab-title projection. Toggle sidebar
+visibility without destroying or reparenting panel/terminal entities. Keep
+right-tool selection on Workspace and gate hidden panel work through existing
+visibility APIs. Keep window-drag hit regions distinct from every tab/tool.
+
+Readable tab labels reuse the existing exact-owned custom/session/live title
+precedence with a non-identity fallback. Keep diagnostic labels and route keys
+intact; never trim arbitrary brackets/hex text from a completed display string.
+Tests cover shared boundaries across viewport/drag/collapse modes, reachable
+overflow controls, and human titles versus generated diagnostic fallback.

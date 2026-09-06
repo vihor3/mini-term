@@ -297,6 +297,21 @@ jobs:
             -p mt-terminal-host \
             -p mt-ui
 
+      - name: Run native navigation regressions
+        shell: bash
+        run: |
+          for suite in shell_geometry::tests:: title_bar::tests:: orca_sidebar::navigation_tests:: store::context::tests::; do
+            listing=$(cargo test --locked --target x86_64-pc-windows-msvc \
+              -p mt-app --bin mini-term "$suite" -- --list)
+            printf '%s\n' "$listing"
+            if ! printf '%s\n' "$listing" | grep -q ': test$'; then
+              echo "No tests discovered for $suite" >&2
+              exit 1
+            fi
+            cargo test --locked --target x86_64-pc-windows-msvc \
+              -p mt-app --bin mini-term --no-fail-fast "$suite"
+          done
+
       - name: Run focused onboarding tests
         shell: bash
         run: |

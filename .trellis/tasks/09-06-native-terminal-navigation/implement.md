@@ -1,5 +1,19 @@
 # Terminal Navigation Execution Plan
 
+## Approved Layout Follow-up
+
+- [x] User reviewed and approved the corrected standalone HTML preview.
+- [x] Record the native change boundary and dispatch implementation/review.
+- [x] Share shell geometry between titlebar and body, wire sidebar toggles,
+  and preserve live right-sidebar resizing and per-worktree state.
+- [x] Apply compact tab geometry, readable titles and existing native controls.
+- [x] Independently review the source and add focused Actions regressions.
+- [ ] Commit only owned files and validate the exact commit in GitHub Actions.
+- [ ] Produce/download the matching Windows installer for native acceptance.
+
+Earlier completed implementation steps below remain historical evidence, not
+validation of this newly approved visual correction.
+
 First implementation child after final parent approval. Main activates this
 child and dispatches implementation/check separately; neither child role spawns
 other agents. Inherit every parent Actions-only and scoped-commit requirement.
