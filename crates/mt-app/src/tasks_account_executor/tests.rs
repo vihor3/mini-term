@@ -804,6 +804,8 @@ enum WslPreludeStage {
     CheckCasesDirectory,
     CapturedCwd,
     LiteralArgv,
+    SingleEmptyArgv,
+    MultipleEmptyArgv,
     MissingCwd,
     NonDirectoryCwd,
 }
@@ -1462,6 +1464,28 @@ impl WslFixture {
                 })
                 .unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
             }
+            let cardinality_cases: [(WslPreludeStage, &[&str], &[u8]); 2] = [
+                (WslPreludeStage::SingleEmptyArgv, &[""], b"1\0\0"),
+                (
+                    WslPreludeStage::MultipleEmptyArgv,
+                    &["", "", "middle", ""],
+                    b"4\0\0\0middle\0\0",
+                ),
+            ];
+            for (stage, data, expected) in cardinality_cases {
+                let command = CommandPlan::new(
+                    "/bin/sh",
+                    ["-c", r#"exec /usr/bin/printf '%s\0' "$#" "$@""#, "mini-term-argv"]
+                        .into_iter()
+                        .chain(data.iter().copied()),
+                );
+                let output = run(&captured.source, &command, stage, WslCwdProgram::Absolute);
+                assert!(
+                    output.exit_code == Some(0) && output.stdout == expected,
+                    "WSL empty argument cardinality was not preserved: {}",
+                    wsl_cwd_diagnostic(pre_project, WslCwdProgram::Absolute, stage, &output)
+                );
+            }
             let marker = if pre_project {
                 "preproject-dispatched"
             } else {
@@ -1632,6 +1656,8 @@ fn wsl_cwd_diagnostics_identify_route_program_and_stage_without_raw_output() {
             for stage in [
                 WslPreludeStage::CapturedCwd,
                 WslPreludeStage::LiteralArgv,
+                WslPreludeStage::SingleEmptyArgv,
+                WslPreludeStage::MultipleEmptyArgv,
                 WslPreludeStage::MissingCwd,
                 WslPreludeStage::NonDirectoryCwd,
             ] {

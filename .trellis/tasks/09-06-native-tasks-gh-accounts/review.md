@@ -3,9 +3,118 @@
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
 pointer still identifies the Git child. Source review and explicitly authorized
 Actions log inspection. No passing build, lint, type-check, formatting, test,
-transport, or native acceptance is claimed for the current literal-argv diagnostics.
+transport, or native acceptance is claimed for the current empty-argv correction.
 
-## WSL Literal-Argv Diagnostics: Source Released To Main
+## WSL Empty-Argv Correction: Source Released To Main
+
+The approved correction and focused regressions are authored and source-reviewed;
+ownership is released to Main with no implementation blocker. Scope is only
+`execution_host.rs`, `tasks_account_executor/process.rs`,
+`tasks_account_executor/tests.rs`, and this report. No new public API, SSH/PTY,
+Python envelope, credential/process policy, rootfs, CI or spec changes. No local
+execution/verification, Git writes or child agents. New verification is UNRUN,
+Actions-only; Main owns integration and the exact-SHA rerun.
+
+### Definitive Runner Evidence
+
+Read the authorized log for
+[15a1f25 run 34012325033, job 101430284051](https://github.com/vihor3/mini-term/actions/runs/34012325033/job/101430284051).
+Exactly one actual WSL test failed in 2.25 seconds. The original
+Project/Absolute baseline and only the Empty probe failed with exit -1,
+60-byte stdout classified `windows-invalid-parameter`, empty stderr, and no
+timeout/truncation. Ascii, AsciiNul, Hostile, Dash, DoubleDash, Assignment,
+Wildcard, Newline and WithoutEmpty all exited 0 with `output_matches=true`.
+Cleanup succeeded for owned `mt-tasks-34012325033-1`.
+
+This isolates direct empty-argument transport on that runner. It does not prove
+a deeper OS implementation cause or behavior across all WSL versions. Main
+reports `15a1f25` Linux and Windows jobs fully successful, including 17 Windows
+Tasks tests and all four discriminator regressions. Those results precede this
+production correction; the actual WSL gate remained failed.
+
+### Agreed Production Boundary
+
+Generic project and pre-project planning continue to share `plan_wsl_command`.
+It now uses the existing `posix_quote` for the captured physical cwd and
+`serialize_posix_argv(plan.display_argv())` for the original executable/args:
+
+```text
+wsl.exe --distribution <distro> --cd / --exec /bin/sh -c <one-nonempty-command>
+CDPATH= cd -P <quoted-captured-cwd> && exec <quoted-original-argv>
+```
+
+Every Windows launcher argument is nonempty; each empty Linux argument is
+represented by `''` inside the command string, not dropped or substituted.
+Absolute-cwd/NUL checks, exec-option rejection, failure-before-target, physical
+cwd, exact source identity, relative executable and external PATH lookup
+semantics remain. No manual PATH search, new Python dependency or fallback.
+The narrow module comment now correctly identifies WSL and SSH shell
+serialization boundaries rather than claiming SSH is the only one.
+
+Per Main's final refinement, the private Tasks builder does NOT call generic
+planning or execution and does NOT clone a `/` snapshot or add an outer captured
+cd. It reuses the same envelope encoder as unchanged `ssh_envelope_command`:
+
+```text
+wsl.exe --distribution <distro> --cd / --exec /bin/sh -c <one-nonempty-command>
+exec <serialize_posix_argv(envelope.display_argv())>
+```
+
+Python remains the sole Tasks cwd entry via existing `os.chdir(cwd)` before
+any account lookup. Missing cwd therefore retains `Account(CommandFailed)`;
+missing Python retains `HostHelperUnavailable` from the existing nonzero-exit
+handling. Private `wsl_command` now returns a typed planning error for invalid
+distro/program/NUL input. Its leading-dash distro guard agrees with existing
+`validate_context`. It carries no credential, only the nonsecret envelope argv.
+
+`run_wsl` still calls private sanitize/capture with the same control, stdin
+protocol, private byte pipes, deadline, cap and result decoder. No credential
+output passes through generic `execute_host_command`. Same-token proofs,
+child-only overrides, Windows suspended/no-window Job attachment, cancellation
+and cleanup paths are unchanged. The SSH implementation is untouched.
+
+### Exact Tests: Current Changes UNRUN
+
+New ordinary tests:
+
+- `execution_host::tests::wsl_plans_encode_empty_cardinality_without_empty_windows_arguments`
+- `tasks_account_executor::process::tests::wsl_launcher_encodes_empty_fields_and_rejects_invalid_envelopes`
+
+Updated generic project/pre-project, hostile argv, exec-option and marker plan
+expectations verify the quoted command instead of raw positional WSL arguments.
+Updated `wsl_launcher_preserves_private_envelope_argv_with_root_cwd` covers both
+selected-account and three-empty-field envelope shapes, unchanged captured cwd,
+the exec-only shell body and eight nonempty launcher arguments. The new tests
+check exact single/consecutive/trailing empty encoding and malformed inputs,
+not source substrings or a mock claim of actual transport success.
+
+The same exact ignored
+`tasks_account_executor::tests::tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host`
+now additionally checks Linux `$#` plus exact NUL-separated bytes for one empty
+argument and four arguments containing consecutive and trailing empties. Both
+project and pre-project APIs execute these checks in the existing hostile owned
+cwd, with static `SingleEmptyArgv` / `MultipleEmptyArgv` diagnostics. Checking the
+count avoids printf's missing-value/empty-value ambiguity. It uses only the
+existing `/bin/sh` and `/usr/bin/printf`; no rootfs/setup change is needed.
+
+All original full empty/hostile/newline cases, Absolute/PATH/Relative programs,
+invalid-cwd target sentinels, capability/discovery/selected-account checks,
+Rotate cwd marker, missing-cwd/helper error assertions and descendant/cancel
+cases remain. All failure-only diagnostics still reject the original failure
+regardless of alternative success; no skip, weakened assertion or fallback.
+Existing broad Windows and workspace filters cover the new units; no CI edit.
+
+### Remaining Gates
+
+Compile/type-check, lint, formatting, ordinary tests and the actual WSL fixture
+for this correction are UNRUN. The empty-argv boundary is now evidenced and
+corrected in source, but passing end-to-end execution requires fresh Actions.
+Native hardware/secure-store acceptance remains a separate requirement.
+
+## Earlier WSL Literal-Argv Diagnostics Handoff (Superseded)
+
+Historical status below predates `15a1f25`. The executed discriminator results
+and production correction above supersede its unresolved-cause status.
 
 The bounded test-only follow-up is authored and source-reviewed; ownership is
 released to Main. Current edits are only `tasks_account_executor/tests.rs` and

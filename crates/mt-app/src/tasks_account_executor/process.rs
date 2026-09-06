@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use mt_github::{AccountError, CommandOutput, CommandPlan, SelectedAccountRequestPlan};
 
-use crate::execution_host::{ExecutionBackend, ProcessTree, ProjectExecutionSnapshot};
+use crate::execution_host::{
+    ExecutionBackend, ProcessTree, ProjectExecutionSnapshot, serialize_posix_argv,
+};
 
 use super::{AccountExecutionControl, AccountExecutionError, CLEANUP_TIMEOUT};
 
@@ -286,19 +288,21 @@ fn public_data(
     })
 }
 
-fn wsl_command(distro: &str, envelope: &CommandPlan) -> Command {
+fn wsl_command(distro: &str, envelope: &CommandPlan) -> Result<Command, AccountExecutionError> {
+    if distro.is_empty()
+        || distro.starts_with('-')
+        || distro.contains('\0')
+        || envelope.program.is_empty()
+        || envelope.program.starts_with('-')
+    {
+        return Err(AccountExecutionError::InvalidContext);
+    }
+    let argv = serialize_posix_argv(envelope.display_argv())
+        .map_err(|_| AccountExecutionError::InvalidContext)?;
+    let script = format!("exec {argv}");
     let mut command = Command::new("wsl.exe");
-    command
-        .args([
-            "--distribution",
-            distro,
-            "--cd",
-            "/",
-            "--exec",
-            &envelope.program,
-        ])
-        .args(&envelope.args);
-    command
+    command.args(["--distribution", distro, "--cd", "/", "--exec", "/bin/sh", "-c", &script]);
+    Ok(command)
 }
 
 pub(super) fn run_wsl(
@@ -311,7 +315,7 @@ pub(super) fn run_wsl(
         return Err(AccountExecutionError::InvalidContext);
     };
     // The private envelope enters its captured cwd before any account lookup.
-    let mut command = wsl_command(distro, envelope);
+    let mut command = wsl_command(distro, envelope)?;
     sanitize(&mut command);
     let mut captured = capture(
         command,
@@ -590,45 +594,67 @@ mod tests {
     #[test]
     fn wsl_launcher_preserves_private_envelope_argv_with_root_cwd() {
         let path = "/mini-term-fixture/cases/space '\";$(printf injected)\nnext";
-        let envelope = CommandPlan::new(
-            "python3",
-            [
-                "-I",
-                "-c",
-                super::super::HOST_ENVELOPE,
-                path,
-                "3000",
-                "4096",
-                "github.com",
-                "Alice",
-                "alice",
-                r#"["api","user","--hostname","github.com"]"#,
-                "[]",
-            ],
-        );
-        let command = wsl_command("mt-tasks-12345-2", &envelope);
-        assert_eq!(command.get_program(), std::ffi::OsStr::new("wsl.exe"));
+        for (host, login, expected_login) in [("github.com", "Alice", "alice"), ("", "", "")] {
+            let envelope = CommandPlan::new(
+                "python3",
+                [
+                    "-I",
+                    "-c",
+                    super::super::HOST_ENVELOPE,
+                    path,
+                    "3000",
+                    "4096",
+                    host,
+                    login,
+                    expected_login,
+                    r#"["api","user","--hostname","github.com"]"#,
+                    "[]",
+                ],
+            );
+            let command = wsl_command("mt-tasks-12345-2", &envelope).unwrap();
+            assert_eq!(command.get_program(), std::ffi::OsStr::new("wsl.exe"));
+            let args = command.get_args().collect::<Vec<_>>();
+            assert_eq!(args.len(), 8);
+            assert!(args.iter().all(|arg| !arg.is_empty()));
+            assert_eq!(
+                args[..7],
+                ["--distribution", "mt-tasks-12345-2", "--cd", "/", "--exec", "/bin/sh", "-c"]
+                    .map(std::ffi::OsStr::new)
+            );
+            let expected = format!("exec {}", serialize_posix_argv(envelope.display_argv()).unwrap());
+            assert_eq!(args[7], std::ffi::OsStr::new(&expected));
+            assert!(command.get_current_dir().is_none());
+            assert_eq!(envelope.args[3], path);
+        }
+    }
+
+    #[test]
+    fn wsl_launcher_encodes_empty_fields_and_rejects_invalid_envelopes() {
+        let envelope = CommandPlan::new("python3", ["-I", "-c", "pass", "", "", "middle", ""]);
+        let command = wsl_command("mt-tasks-12345-2", &envelope).unwrap();
         let args = command.get_args().collect::<Vec<_>>();
+        assert_eq!(args.len(), 8);
+        assert!(args.iter().all(|arg| !arg.is_empty()));
         assert_eq!(
-            args[..6],
-            [
-                "--distribution",
-                "mt-tasks-12345-2",
-                "--cd",
-                "/",
-                "--exec",
-                "python3"
-            ]
-            .map(std::ffi::OsStr::new)
+            args[7],
+            std::ffi::OsStr::new("exec 'python3' '-I' '-c' 'pass' '' '' 'middle' ''")
         );
-        assert_eq!(
-            args[6..],
-            envelope
-                .args
-                .iter()
-                .map(std::ffi::OsStr::new)
-                .collect::<Vec<_>>()
-        );
-        assert!(command.get_current_dir().is_none());
+        for distro in ["", "-other", "bad\0distro"] {
+            assert!(matches!(
+                wsl_command(distro, &envelope),
+                Err(AccountExecutionError::InvalidContext)
+            ));
+        }
+        for plan in [
+            CommandPlan::new("", ["-I"]),
+            CommandPlan::new("-c", ["-I"]),
+            CommandPlan::new("python\0", ["-I"]),
+            CommandPlan::new("python3", ["bad\0arg"]),
+        ] {
+            assert!(matches!(
+                wsl_command("mt-tasks-12345-2", &plan),
+                Err(AccountExecutionError::InvalidContext)
+            ));
+        }
     }
 }

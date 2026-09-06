@@ -98,9 +98,10 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
   explicit distro, fixed `--cd /`, and `--exec`; SSH uses the existing authenticated
   pooled session. WSL or SSH failure never falls back to local commands or
   credentials.
-- Local and WSL preserve program and argv as separate values. SSH serialization
-  is allowed only through the tested POSIX single-quote encoder, then wrapped as
-  `cd <quoted-worktree> && exec <quoted-argv>`.
+- Native commands preserve separate program/argv. WSL and SSH retain structured
+  plans until the shell boundary, then use only the tested POSIX single-quote
+  encoder. Ordinary host commands enter the encoded captured directory before
+  exec; dedicated account envelopes keep their own private execution path.
 - Repository identity comes only from `git remote get-url origin` on that host.
   Project names, display paths, and client-side same-spelling folders are not
   repository evidence.
@@ -125,8 +126,12 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
   Missing host Python is `HostHelperUnavailable`, not a local fallback/install.
 - The private WSL envelope performs `os.chdir(captured_cwd)` before capability,
   discovery or credential lookup; the launcher root is not request authority.
-  Keep its private pipes, sanitation and cancellation protocol. Ordinary WSL
-  origin/Git commands use the shared positional-argv directory wrapper in
+  Keep its private pipes, sanitation and cancellation protocol. The WSL launcher
+  passes one nonempty `exec <serialized-envelope-argv>` command string to
+  `/bin/sh -c`, preserving empty capability/discovery fields inside Linux.
+  Keep Python's cwd entry as the sole entry: missing cwd remains
+  Account(CommandFailed), while absent Python is HostHelperUnavailable.
+  Ordinary WSL origin/Git commands use the encoded directory wrapper in
   [the Git host contract](./git-host-contract.md#scenario-wsl-captured-directory).
   A missing project directory must never dispatch an account request from `/`.
 - Remove inherited auth/debug/host/repo and shell-startup overrides; set only

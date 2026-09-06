@@ -357,7 +357,7 @@ it is not a public arbitrary-command or account-execution API.
   command, environment map, credential or alternate marker.
 - The helper must match current production planning. After the reviewed
   fixed-root correction, Captured/Root select the requested Linux directory
-  inside the positional wrapper, not different Windows-side `--cd` values.
+  inside the encoded directory wrapper, not different Windows-side `--cd` values.
   Every row launches with `--cd /`; source identity remains captured and the
   original baseline still uses the ordinary production command path.
 - Keep suspended creation, strict Job attachment, no-window, bounded output,

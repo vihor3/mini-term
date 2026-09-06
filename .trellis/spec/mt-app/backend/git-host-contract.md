@@ -259,22 +259,24 @@ and finalize only the still-current empty captured group.
 Noninteractive registered-project and pre-project WSL commands must enter the
 captured Linux directory without depending on Windows WSL launcher path mapping.
 The actual Actions marker matrix isolated that launch boundary; it did not
-prove a deeper operating-system cause. Interactive PTY launch is a separate
-contract and is not changed by this fix.
+prove a deeper operating-system cause. A subsequent actual argv matrix isolated
+empty Windows-launcher arguments on that runner: every nonempty comparison
+passed, while the original list and its Empty row failed. Interactive PTY launch
+is a separate contract and is not changed by this fix.
 
 ### 2. Signatures
 
 `plan_host_command` and `plan_pre_project_local_command` retain their public
 signatures and share private `plan_wsl_command(distro, cwd, &CommandPlan)`.
-The resulting structured argv is:
+The resulting Windows argv contains no empty values:
 
 ```text
-wsl.exe --distribution <distro> --cd / --exec /bin/sh -c <fixed-script>
-  mini-term-wsl <captured-cwd> <program> <args...>
+wsl.exe --distribution <distro> --cd / --exec /bin/sh -c <one-command-string>
 ```
 
-The script is exactly `CDPATH= cd -P "$1" && shift && exec "$@"`.
-Neither the path, program nor arguments are interpolated into shell source.
+Build that string only as `CDPATH= cd -P <quoted-cwd> && exec <quoted-argv>`.
+Use the existing `posix_quote(cwd)` and `serialize_posix_argv(plan.display_argv())`;
+never insert raw data or add a second handwritten quoting implementation.
 
 ### 3. Contracts
 
@@ -286,12 +288,17 @@ Neither the path, program nor arguments are interpolated into shell source.
 - `CDPATH=` and physical `cd -P` prevent inherited lookup/output or logical-PWD
   state from altering directory entry. Failed entry must stop before `exec`.
   Resolve PATH and relative executables only after successful captured `cd`.
+- Encode original empty values as POSIX empty arguments inside the single
+  nonempty command string. Preserve their positions and count, including
+  consecutive/leading/trailing empties; never drop or replace them with spaces.
 - Keep ordinary Null stdin, suspended/no-window creation, strict Job attachment,
   bounded capture, deadlines and process-tree cleanup. No user/default-distro,
   interop, automount, global environment or credential-policy change.
-- Tasks uses its private Python envelope directly from the same fixed launch
-  root. Its existing `os.chdir(cwd)` occurs before all account operations;
-  never route credential capture through this ordinary public-result runner.
+- Tasks privately builds only `exec <serialized-envelope-argv>` from the same
+  fixed launch root. Its existing Python `os.chdir(cwd)` remains the sole cwd
+  entry before all account operations. An outer shell cd would incorrectly
+  map a missing cwd to HostHelperUnavailable; retain Account(CommandFailed).
+  Never route credential capture through this ordinary public-result runner.
 
 ### 4. Validation & Error Matrix
 
@@ -301,12 +308,13 @@ Neither the path, program nor arguments are interpolated into shell source.
 | Program begins with an exec option prefix | Planning `Rejected`; require explicit path |
 | Missing/non-directory Linux cwd | Nonzero command result; target command never runs |
 | Literal quotes, whitespace, newline or metacharacters | Preserve exact argument bytes |
+| Original empty/consecutive/leading/trailing arguments | Nonempty launcher fields; exact Linux argv cardinality |
 | Relative executable | Resolve inside captured directory, not launcher root |
 | WSL unavailable or directory entry fails | No Windows/local/root-directory fallback |
 
 ### 5. Good / Base / Bad
 
-Good: pass a quoted-name worktree as a positional argument, enter it in Linux,
+Good: encode a quoted-name worktree with the existing serializer, enter it in Linux,
 then execute the original argv. Base: a deleted directory stays unavailable.
 Bad: replace the snapshot path with `/` or retry its Git write from another cwd.
 
@@ -314,6 +322,7 @@ Bad: replace the snapshot path with `/` or retry its Git write from another cwd.
 
 Actions planner tests assert registered/pre-project parity, unchanged source
 identity, invalid-context and exec-option rejection, and literal paths/argv.
+Assert a fixed nonempty Windows argument list and exact serialized empty values.
 The actual owned WSL fixture must prove exact `pwd -P`, absolute/PATH/relative
 executable behavior, byte-exact arguments and zero target dispatch for missing
 and non-directory cwd. Independently prove the private Tasks envelope's captured
@@ -324,4 +333,6 @@ existing account secrecy, cancellation, descendant cleanup and marker guards.
 
 Wrong: `--cd <project>` failure leads to executing the command from `/`.
 Correct: always launch at `/`, then require exact Linux directory entry before
-the original command, without changing captured request authority.
+the original command, without changing captured request authority. Encode empty
+arguments for the Linux shell instead of passing empty launcher fields or
+silently deleting values that the original command requires.

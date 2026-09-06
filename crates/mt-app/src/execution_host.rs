@@ -1,8 +1,8 @@
 //! Bounded command execution on a project's own execution host.
 //!
-//! Local and WSL commands retain structured argv through `Command`. SSH is the
-//! only boundary that serializes argv, using [`serialize_posix_argv`] before
-//! the existing authenticated pooled bounded-exec API.
+//! Local commands retain structured argv through `Command`. WSL and SSH use
+//! [`serialize_posix_argv`] at their POSIX shell boundaries. WSL carries one
+//! nonempty command string through the Windows launcher, including empty args.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -299,24 +299,14 @@ fn plan_wsl_command(
             "WSL executable must not be an exec option; use an explicit path",
         ));
     }
-    // Enter the captured directory in Linux; no path or argv is shell source.
-    let mut args = [
-        "--distribution",
-        distro,
-        "--cd",
-        "/",
-        "--exec",
-        "/bin/sh",
-        "-c",
-        r#"CDPATH= cd -P "$1" && shift && exec "$@""#,
-        "mini-term-wsl",
-        cwd,
-        &plan.program,
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect::<Vec<_>>();
-    args.extend(plan.args.clone());
+    // Encode empty Linux arguments inside the command, not as empty WSL arguments.
+    let cwd = posix_quote(cwd)?;
+    let argv = serialize_posix_argv(plan.display_argv())?;
+    let command = format!("CDPATH= cd -P {cwd} && exec {argv}");
+    let args = ["--distribution", distro, "--cd", "/", "--exec", "/bin/sh", "-c", &command]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     Ok(PlannedHostCommand::Process {
         program: "wsl.exe".into(),
         args,
@@ -1302,14 +1292,7 @@ mod tests {
                     "--exec",
                     "/bin/sh",
                     "-c",
-                    r#"CDPATH= cd -P "$1" && shift && exec "$@""#,
-                    "mini-term-wsl",
-                    "/home/u/repo",
-                    "gh",
-                    "issue",
-                    "list",
-                    "--repo",
-                    "host/o/r",
+                    "CDPATH= cd -P '/home/u/repo' && exec 'gh' 'issue' 'list' '--repo' 'host/o/r'",
                 ]
                 .into_iter()
                 .map(str::to_string)
@@ -1377,15 +1360,11 @@ mod tests {
                         "--exec",
                         "/bin/sh",
                         "-c",
-                        r#"CDPATH= cd -P "$1" && shift && exec "$@""#,
-                        "mini-term-wsl",
                         if cwd == TasksWslProbeCwd::Captured {
-                            "/mini-term-fixture"
+                            "CDPATH= cd -P '/mini-term-fixture' && exec '/bin/cat' '/mini-term-fixture/owner.json'"
                         } else {
-                            "/"
+                            "CDPATH= cd -P '/' && exec '/bin/cat' '/mini-term-fixture/owner.json'"
                         },
-                        "/bin/cat",
-                        "/mini-term-fixture/owner.json",
                     ]);
                     assert_eq!(
                         plan,
@@ -1508,12 +1487,7 @@ mod tests {
                     "--exec",
                     "/bin/sh",
                     "-c",
-                    r#"CDPATH= cd -P "$1" && shift && exec "$@""#,
-                    "mini-term-wsl",
-                    "/home/u/repo with spaces",
-                    "git",
-                    "status",
-                    "--short",
+                    "CDPATH= cd -P '/home/u/repo with spaces' && exec 'git' 'status' '--short'",
                 ]
                 .into_iter()
                 .map(str::to_string)
@@ -1541,7 +1515,7 @@ mod tests {
             "./relative '\";$(printf injected)",
             ["", "--", "-n", "NAME=value", "*", "a\nb", "'; exit 91; #"],
         );
-        let mut args = vec![
+        let args = [
             "--distribution",
             "Ubuntu",
             "--cd",
@@ -1549,15 +1523,14 @@ mod tests {
             "--exec",
             "/bin/sh",
             "-c",
-            r#"CDPATH= cd -P "$1" && shift && exec "$@""#,
-            "mini-term-wsl",
-            path,
-            &command.program,
+            concat!(
+                "CDPATH= cd -P '/srv/space '\\''\";$(printf injected) [literal]\nnext' && exec ",
+                "'./relative '\\''\";$(printf injected)' '' '--' '-n' 'NAME=value' '*' 'a\nb' ''\\''; exit 91; #'",
+            ),
         ]
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<_>>();
-        args.extend(command.args.clone());
         let expected = PlannedHostCommand::Process {
             program: "wsl.exe".into(),
             args,
@@ -1636,8 +1609,48 @@ mod tests {
             else {
                 panic!("expected WSL process plan")
             };
-            assert_eq!(args[10], program);
-            assert_eq!(args[11..], plan.args);
+            assert_eq!(args.len(), 8);
+            assert!(args.iter().all(|arg| !arg.is_empty()));
+            assert_eq!(
+                args[7],
+                format!("CDPATH= cd -P '/srv/repo' && exec '{program}' '-c' '--' 'NAME=value' ''")
+            );
+        }
+    }
+
+    #[test]
+    fn wsl_plans_encode_empty_cardinality_without_empty_windows_arguments() {
+        let source = snapshot(
+            ExecutionBackend::Wsl { distro: "Ubuntu".into() },
+            "/srv/repo",
+        );
+        let context = PreProjectLocalContext::Wsl {
+            distro: "Ubuntu".into(),
+            cwd: source.canonical_path.clone(),
+        };
+        let cases: [(&[&str], &str); 3] = [
+            (&[], "CDPATH= cd -P '/srv/repo' && exec '/usr/bin/printf'"),
+            (&[""], "CDPATH= cd -P '/srv/repo' && exec '/usr/bin/printf' ''"),
+            (
+                &["", "", "middle", ""],
+                "CDPATH= cd -P '/srv/repo' && exec '/usr/bin/printf' '' '' 'middle' ''",
+            ),
+        ];
+        for (arguments, expected) in cases {
+            let command = CommandPlan::new("/usr/bin/printf", arguments.iter().copied());
+            for plan in [
+                plan_host_command(&source, &command).unwrap(),
+                plan_pre_project_local_command(&context, &command).unwrap(),
+            ] {
+                let PlannedHostCommand::Process { program, args, cwd } = plan else {
+                    panic!("expected WSL process plan")
+                };
+                assert_eq!(program, "wsl.exe");
+                assert!(cwd.is_none());
+                assert_eq!(args.len(), 8);
+                assert_eq!(args[7], expected);
+                assert!(args.iter().all(|arg| !arg.is_empty()));
+            }
         }
     }
 

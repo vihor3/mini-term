@@ -949,3 +949,60 @@ patch and applied it completely to source/index, without local formatter or
 checks. Windows `101429759611` and actual WSL `101429887871` were still in
 compile/setup, not passing diagnostic evidence. The immediate format-only
 follow-up avoids waiting for their expensive test compilation before restarting.
+
+The complete single-file formatting correction is committed/pushed as
+`15a1f25b49a3bd85deeb4ec2cd86a03141eb543f`: CI `34012325033`, package
+`34012325025`. Superseded WSL `101429887871` had imported its owned fixture
+before cancellation in the test step; owned cleanup succeeded. It provides no
+passing diagnostic evidence. Current Linux `101430180962` has passed formatting
+and entered compilation; Windows `101430180948` is compiling, actual WSL
+`101430284051` imported its same-run fixture and entered the exact test step.
+All source owners are released and closed until a concrete new Actions result.
+
+Actual WSL `101430284051` at `15a1f25` executed exactly one test and FAILED
+in 2.25 seconds, now with decisive parameter evidence. The original Project/
+Absolute baseline and the Empty comparison alone return exit -1, stdout 60
+bytes classified windows-invalid-parameter, empty stderr and false matching.
+Ascii, AsciiNul, Hostile, Dash, DoubleDash, Assignment, Wildcard, Newline and
+WithoutEmpty all return zero with exact matching output. No row times out or
+truncates; owned cleanup succeeded. The failed baseline remains rejected and
+no account request ran. This isolates direct empty-argv transport on this
+runner, not an arbitrary deeper OS cause or a claim about every WSL version.
+
+Main resumed Noether for a bounded production correction using the existing
+tested POSIX quote/argv serializer. Generic project/pre-project WSL planning
+must send one nonempty shell command string through the fixed-root launcher,
+with encoded physical captured-cwd entry and encoded original argv; Linux must
+receive all original empty values. Keep source, absolute-cwd and exec-option
+guards, relative lookup, and fail-before-target on invalid cwd. Private Tasks
+must separately serialize only `exec <envelope argv>` from `/`, leaving its
+existing Python chdir as the sole cwd entry so missing cwd remains
+Account(CommandFailed), not HostHelperUnavailable. Do not clone/rewrite source
+to `/`, route credential output through the generic executor, add a public shell
+API, change process/credential policy or introduce a new Python dependency.
+Existing SSH envelope serialization in mod.rs is a reuse reference, not an
+editable SSH scope. All original actual cases/diagnostic baseline rules remain,
+with focused empty/multiple-empty regressions added. Execution stays Actions-only.
+
+At `15a1f25`, Linux `101430180962` and Windows `101430180948` are now
+entirely SUCCESS. Linux retained mt-ai 244, mt-app 1209 and all five individually
+executed authenticated SSH passes, followed by sidecars/whitespace. Windows
+passed onboarding 82/3, Files 49/14/5/1, execution-host 13, Tasks executor 17
+(one separate WSL test ignored), Tasks app/config/domain 24/2/31, Git 24/6/124
+and terminal-host library 31. All four new literal discriminator/diagnostic
+units explicitly passed. CI `34012325033` is FAILED solely on actual WSL.
+Package `34012325025`, job `101430166227`, is SUCCESS; artifact `9983144114`
+is `Mini-Term_1.2.2-ci.51_windows-x64`. This test-only successor preserves the
+last completed production baseline, not a passing empty-argument correction.
+
+Noether released the reviewed empty-argument correction. Generic WSL planning
+uses the existing POSIX cwd/argv encoders in one nonempty shell command string;
+the private Tasks builder encodes only its original envelope exec and retains
+Python's sole captured cwd entry and existing error distinctions. No new public
+API, dependency, SSH/PTY change, credential output path or process policy was
+introduced. Main reviewed the exact three-file diff and updated the relevant
+Git/Tasks/launch contracts. Two ordinary tests are new; existing planner/builder
+expectations are updated. Actual WSL now also checks `$#` plus NUL-separated
+values for one empty argument and consecutive/leading/trailing empty arguments,
+on both project/pre-project routes. All original cases and failure-only
+diagnostic rules remain. New verification is UNRUN until matching Actions.
