@@ -1378,7 +1378,7 @@ mod navigation_tests {
     fn collapsed_footer_reserves_all_three_controls() {
         let inner_height = footer_height(false) - 17.0;
         assert_eq!(inner_height, FOOTER_ACTIONS.len() as f32 * 32.0 + 2.0 * 4.0);
-        assert!(crate::shell_geometry::PROJECT_RAIL_WIDTH - 1.0 >= 32.0);
+        const { assert!(crate::shell_geometry::PROJECT_RAIL_WIDTH - 1.0 >= 32.0) };
         assert_eq!(footer_height(true), 48.0);
     }
 }
