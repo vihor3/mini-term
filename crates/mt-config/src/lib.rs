@@ -43,7 +43,8 @@ pub use config::{
     AiLauncher, AppConfig, ConfigStore, EditorConfig, HiddenWorktree, LoadedConfig,
     MobileRelayConfig, OldProjectGroup, ProjectConfig, ProjectEnvVar, ProjectGroup,
     ProjectTreeItem, SaveError, SavedAiSession, SavedLineageEdge, SavedPane, SavedProjectLayout,
-    SavedSplitNode, SavedTab, ShellConfig, SshConnection, WorktreeVisibilityBackend,
+    SavedSplitNode, SavedTab, ShellConfig, SshConnection, TasksAccountScope,
+    TasksAccountSelection, WorktreeVisibilityBackend,
     WorktreeVisibilityLocation, WorktreeVisibilitySource, default_remote_paste_dir, migrate_config,
     normalize_saved_layout, read_config_from,
 };

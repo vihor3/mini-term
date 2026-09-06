@@ -4,69 +4,77 @@
 
 use std::path::PathBuf;
 
-use gpui::{App, Entity, PathPromptOptions, SharedString, Window};
+use gpui::{App, Entity, SharedString, Window};
 
-use crate::file_ops::{
-    FileBackendIdentity, FileClipboardEntry, FileOperationContext, entry_target_directory,
-};
-use crate::fs_ops;
+use crate::file_ops::{FileBackendIdentity, FileClipboardEntry};
 use crate::i18n::{t, tr};
 use crate::prompt::{show_alert, show_file_conflict_choice, show_prompt};
 use crate::store::AppStore;
 
-use super::{FileTree, Row, same_file_source};
+use super::{
+    FileTree, FileTreeClipboard, FileTreeContextTarget, FileTreeOperationOwner,
+    FileTreeOperationPhase, remote_path_text,
+};
 
 /// 跑一件阻塞文件操作。状态和结果都绑定开始时的项目/连接/generation；切换项目后
 /// 旧结果不会刷新新树。同一 FileTree 同时只接受一件 mutation/transfer。
 fn begin_tree_preflight(
     tree: &Entity<FileTree>,
-    context: &FileOperationContext,
+    target: &FileTreeContextTarget,
     label: SharedString,
     window: &mut Window,
     cx: &mut App,
-) -> bool {
+) -> Option<FileTreeOperationOwner> {
+    reserve_tree_operation(tree, target, FileTreeOperationPhase::Preflight, label, window, cx)
+}
+
+fn reserve_tree_operation(
+    tree: &Entity<FileTree>,
+    target: &FileTreeContextTarget,
+    phase: FileTreeOperationPhase,
+    label: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<FileTreeOperationOwner> {
     let start_state = tree.update(cx, |tree, cx| {
-        if tree.operation_context(cx).as_ref() != Some(context) {
+        if !target.is_current(tree, cx) {
             return None;
         }
-        if tree.operation_busy {
-            return Some(false);
-        }
-        tree.operation_busy = true;
+        let Some(owner) = tree.operations.reserve(target, phase) else {
+            return Some(None);
+        };
         tree.operation_label = Some(label.to_string());
-        tree.active_operation_context = Some(context.clone());
         tree.active_operation_suppressed_path = None;
         cx.notify();
-        Some(true)
+        Some(Some(owner))
     });
     match start_state {
-        Some(true) => true,
-        Some(false) => {
+        Some(Some(owner)) => Some(owner),
+        Some(None) => {
             show_alert(
                 t("fileTree", "operation.busyTitle"),
                 t("fileTree", "operation.busyMessage"),
                 window,
                 cx,
             );
-            false
+            None
         }
-        None => false,
+        None => None,
     }
 }
 
 fn finish_tree_preflight(
     tree: &Entity<FileTree>,
-    context: &FileOperationContext,
+    owner: &FileTreeOperationOwner,
+    target: &FileTreeContextTarget,
     cx: &mut App,
 ) -> Option<bool> {
     tree.update(cx, |tree, cx| {
-        if tree.active_operation_context.as_ref() != Some(context) {
+        if !owner.matches_target(target) || !tree.operations.finish(owner, false) {
             return None;
         }
-        let context_matches = tree.operation_context(cx).as_ref() == Some(context);
-        tree.operation_busy = false;
+        let context_matches = target.is_current(tree, cx);
         tree.operation_label = None;
-        tree.active_operation_context = None;
         tree.active_operation_suppressed_path = None;
         cx.notify();
         Some(context_matches)
@@ -75,19 +83,22 @@ fn finish_tree_preflight(
 
 fn retain_tree_preflight_for_choice(
     tree: &Entity<FileTree>,
-    context: &FileOperationContext,
+    owner: &FileTreeOperationOwner,
+    target: &FileTreeContextTarget,
     cx: &mut App,
 ) -> bool {
     tree.update(cx, |tree, cx| {
-        if tree.active_operation_context.as_ref() != Some(context) {
+        if !owner.matches_target(target) {
             return false;
         }
-        if tree.operation_context(cx).as_ref() != Some(context) {
-            tree.operation_busy = false;
-            tree.operation_label = None;
-            tree.active_operation_context = None;
-            tree.active_operation_suppressed_path = None;
-            cx.notify();
+        if !target.is_current(tree, cx) {
+            if tree.operations.finish(owner, false) {
+                tree.operation_label = None;
+                cx.notify();
+            }
+            return false;
+        }
+        if !tree.operations.transition(owner, FileTreeOperationPhase::Choice) {
             return false;
         }
         tree.operation_label = Some(t("fileTree", "conflict.title").to_string());
@@ -99,7 +110,8 @@ fn retain_tree_preflight_for_choice(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_tree_op(
     tree: Entity<FileTree>,
-    context: FileOperationContext,
+    target: FileTreeContextTarget,
+    reservation: Option<FileTreeOperationOwner>,
     refresh_dir: Option<PathBuf>,
     expand: bool,
     detach_before: Option<PathBuf>,
@@ -109,36 +121,39 @@ pub(super) fn spawn_tree_op(
     cx: &mut App,
 ) -> bool {
     let suppressed_path = detach_before.clone();
-    let start_state = tree.update(cx, |tree, cx| {
-        if tree.operation_context(cx).as_ref() != Some(&context) {
-            return None;
+    let owner = match reservation {
+        Some(owner) => {
+            let started = tree.update(cx, |tree, cx| {
+                if !target.is_current(tree, cx) || !owner.matches_target(&target) {
+                    if tree.operations.finish(&owner, false) {
+                        tree.operation_label = None;
+                        cx.notify();
+                    }
+                    return false;
+                }
+                if !tree.operations.transition(&owner, FileTreeOperationPhase::Running) {
+                    return false;
+                }
+                tree.operation_label = Some(label.to_string());
+                true
+            });
+            if !started { return false; }
+            owner
         }
-        if tree.operation_busy {
-            return Some(false);
+        None => {
+            let Some(owner) = reserve_tree_operation(&tree, &target, FileTreeOperationPhase::Running, label, window, cx) else {
+                return false;
+            };
+            owner
         }
-        tree.operation_busy = true;
-        tree.operation_label = Some(label.to_string());
-        tree.active_operation_context = Some(context.clone());
+    };
+    tree.update(cx, |tree, cx| {
         tree.active_operation_suppressed_path = suppressed_path.clone();
         cx.notify();
-        Some(true)
     });
-    match start_state {
-        None => return false,
-        Some(false) => {
-            show_alert(
-                t("fileTree", "operation.busyTitle"),
-                t("fileTree", "operation.busyMessage"),
-                window,
-                cx,
-            );
-            return false;
-        }
-        Some(true) => {}
-    }
     if let Some(path) = detach_before {
         tree.update(cx, |tree, cx| {
-            if tree.operation_context(cx).as_ref() == Some(&context) {
+            if owner.source.is_current(tree, cx) {
                 tree.suppressed_subtrees.insert(path.clone());
                 tree.detach_subtree(&path);
                 cx.notify();
@@ -153,16 +168,11 @@ pub(super) fn spawn_tree_op(
             let _ = cx.update(|window, cx| match result {
                 Ok(summary) => {
                     let operation_owned = tree.update(cx, |tree, cx| {
-                        let current = tree.operation_context(cx);
-                        if tree.active_operation_context.as_ref() != Some(&context) {
+                        if !tree.operations.finish(&owner, true) {
                             return false;
                         }
-                        let same_source = current
-                            .as_ref()
-                            .is_some_and(|current| same_file_source(current, &context));
-                        tree.operation_busy = false;
+                        let same_source = owner.source.is_current(tree, cx);
                         tree.operation_label = None;
-                        tree.active_operation_context = None;
                         tree.active_operation_suppressed_path = None;
                         if let Some(path) = suppressed_path.as_ref() {
                             if same_source {
@@ -186,8 +196,11 @@ pub(super) fn spawn_tree_op(
                                 tree.reload_dir(refresh_dir, cx);
                             }
                         }
+                        if !same_source {
+                            tree.reconcile_operation_source(&owner.source, cx);
+                        }
                         cx.notify();
-                        true
+                        same_source
                     });
                     if operation_owned && let Some(summary) = summary {
                         show_alert(
@@ -201,16 +214,11 @@ pub(super) fn spawn_tree_op(
                 Err(err) => {
                     eprintln!("[files] 操作失败: {err}");
                     let operation_owned = tree.update(cx, |tree, cx| {
-                        if tree.active_operation_context.as_ref() != Some(&context) {
+                        if !tree.operations.finish(&owner, true) {
                             return false;
                         }
-                        let same_source = tree
-                            .operation_context(cx)
-                            .as_ref()
-                            .is_some_and(|current| same_file_source(current, &context));
-                        tree.operation_busy = false;
+                        let same_source = owner.source.is_current(tree, cx);
                         tree.operation_label = None;
-                        tree.active_operation_context = None;
                         tree.active_operation_suppressed_path = None;
                         if let Some(path) = suppressed_path.as_ref() {
                             if same_source {
@@ -221,8 +229,11 @@ pub(super) fn spawn_tree_op(
                         if same_source && let Some(failed_refresh_dir) = failed_refresh_dir {
                             tree.reload_dir(failed_refresh_dir, cx);
                         }
+                        if !same_source {
+                            tree.reconcile_operation_source(&owner.source, cx);
+                        }
                         cx.notify();
-                        true
+                        same_source
                     });
                     if operation_owned {
                         show_alert(
@@ -256,21 +267,27 @@ fn operation_summary(summary: &crate::remote_ssh::FileOperationSummary) -> Optio
 
 pub(super) fn copy_to_file_clipboard(
     tree: &Entity<FileTree>,
-    row: &Row,
-    expected_context: &FileOperationContext,
+    target: &FileTreeContextTarget,
     cx: &mut App,
 ) {
     tree.update(cx, |tree, cx| {
-        if tree.operation_context(cx).as_ref() != Some(expected_context) {
+        if !target.is_current(tree, cx) {
             return;
         }
-        tree.file_clipboard = Some(FileClipboardEntry {
-            project_id: expected_context.project_id.clone(),
-            root: expected_context.root.clone(),
-            backend: expected_context.backend.clone(),
-            generation: expected_context.generation,
-            source: row.path.clone(),
-            is_dir: row.is_dir,
+        let Some(row) = target.row() else {
+            return;
+        };
+        let context = &target.context;
+        tree.file_clipboard = Some(FileTreeClipboard {
+            entry: FileClipboardEntry {
+                project_id: context.project_id.clone(),
+                root: context.root.clone(),
+                backend: context.backend.clone(),
+                generation: context.generation,
+                source: row.path.clone(),
+                is_dir: row.is_dir,
+            },
+            owner: target.clone(),
         });
         cx.notify();
     });
@@ -278,20 +295,19 @@ pub(super) fn copy_to_file_clipboard(
 
 pub(super) fn paste_file_clipboard(
     tree: Entity<FileTree>,
-    expected_context: FileOperationContext,
-    target_dir: PathBuf,
+    target: FileTreeContextTarget,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let prepared = (tree.read(cx).operation_context(cx).as_ref() == Some(&expected_context))
+    let prepared = target
+        .is_current(tree.read(cx), cx)
         .then(|| {
             let clipboard = tree.read(cx).file_clipboard.clone()?;
-            clipboard
-                .can_paste_into(&expected_context)
-                .then_some((expected_context, clipboard))
+            (clipboard.owner.is_current(tree.read(cx), cx) && clipboard.can_paste_into(&target))
+                .then_some((target.context.clone(), clipboard.entry, target.directory()?))
         })
         .flatten();
-    let Some((context, clipboard)) = prepared else {
+    let Some((context, clipboard, target_dir)) = prepared else {
         show_alert(
             t("fileTree", "clipboard.unavailableTitle"),
             t("fileTree", "clipboard.unavailableMessage"),
@@ -309,19 +325,18 @@ pub(super) fn paste_file_clipboard(
         );
         return;
     }
-    let source_name = clipboard.source.file_name().map(|name| name.to_os_string());
-    let Some(source_name) = source_name else {
-        return;
-    };
-
     match &context.backend {
         FileBackendIdentity::Local => {
+            let Some(source_name) = clipboard.source.file_name() else {
+                return;
+            };
             let root = context.root.clone();
             let source = clipboard.source.clone();
             let destination = target_dir.join(source_name);
             spawn_tree_op(
                 tree,
-                context,
+                target,
+                None,
                 Some(target_dir),
                 true,
                 None,
@@ -344,19 +359,27 @@ pub(super) fn paste_file_clipboard(
             let Some(conn) = tree.read(cx).remote_conn(cx) else {
                 return;
             };
-            let root = context.root.to_string_lossy().into_owned();
-            let source = clipboard.source.to_string_lossy().into_owned();
-            let target = target_dir.to_string_lossy().into_owned();
+            let root = context.root.clone();
+            let source = clipboard.source.clone();
+            let operation_dir = target_dir.clone();
+            let operation_target = target.clone();
             spawn_tree_op(
                 tree,
-                context,
+                target,
+                None,
                 Some(target_dir),
                 true,
                 None,
                 t("fileTree", "operation.copying").into(),
                 move || {
-                    crate::remote_ssh::copy_entry_keep_both(&conn, &root, &source, &target)
-                        .map(|(_, summary)| operation_summary(&summary))
+                    crate::remote_ssh::copy_entry_keep_both_at_epoch(
+                        &conn,
+                        operation_target.remote_epoch(&conn)?,
+                        remote_path_text(&root)?,
+                        remote_path_text(&source)?,
+                        remote_path_text(&operation_dir)?,
+                    )
+                    .map(|(_, summary)| operation_summary(&summary))
                 },
                 window,
                 cx,
@@ -369,16 +392,17 @@ pub(super) fn paste_file_clipboard(
 pub(super) fn open_entry_in_terminal(
     tree: Entity<FileTree>,
     store: Entity<AppStore>,
-    context: FileOperationContext,
-    path: PathBuf,
-    is_dir: bool,
+    target: FileTreeContextTarget,
     window: &mut Window,
     cx: &mut App,
 ) {
-    if tree.read(cx).operation_context(cx).as_ref() != Some(&context) {
+    if !target.is_current(tree.read(cx), cx) {
         return;
     }
-    let cwd_path = entry_target_directory(&path, is_dir, &context.root);
+    let Some(cwd_path) = target.directory() else {
+        return;
+    };
+    let context = target.context;
     let cwd = (cwd_path != context.root).then(|| cwd_path.to_string_lossy().into_owned());
     let opened = store.update(cx, |store, cx| {
         if store.active_project_id.as_deref() != Some(context.project_id.as_str()) {
@@ -396,37 +420,70 @@ pub(super) fn open_entry_in_terminal(
 #[allow(clippy::too_many_arguments)]
 fn run_upload(
     tree: Entity<FileTree>,
-    context: FileOperationContext,
+    target: FileTreeContextTarget,
+    owner: FileTreeOperationOwner,
     conn: mt_config::SshConnection,
-    target_dir: PathBuf,
     local_paths: Vec<PathBuf>,
     strategy: crate::remote_ssh::FileConflictStrategy,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let root = context.root.to_string_lossy().into_owned();
-    let target = target_dir.to_string_lossy().into_owned();
+    if !target.is_current(tree.read(cx), cx) {
+        finish_tree_preflight(&tree, &owner, &target, cx);
+        return;
+    }
+    let (expected_epoch, target_dir) = match prepare_upload_target(&target, &conn) {
+        Ok(destination) => destination,
+        Err(error) => {
+            if finish_tree_preflight(&tree, &owner, &target, cx) == Some(true) {
+                show_alert(t("fileTree", "operation.failedTitle"), error, window, cx);
+            }
+            return;
+        }
+    };
+    let root = target.context.root.clone();
+    let operation_dir = target_dir.clone();
     let detach_before = target_dir.clone();
     spawn_tree_op(
         tree,
-        context,
+        target,
+        Some(owner),
         Some(target_dir),
         true,
         Some(detach_before),
         t("fileTree", "operation.uploading").into(),
         move || {
-            crate::remote_ssh::upload_paths(&conn, &root, &target, &local_paths, strategy)
-                .map(|summary| operation_summary(&summary))
+            crate::remote_ssh::upload_paths_at_epoch(
+                &conn,
+                expected_epoch,
+                remote_path_text(&root)?,
+                remote_path_text(&operation_dir)?,
+                &local_paths,
+                strategy,
+            )
+            .map(|summary| operation_summary(&summary))
         },
         window,
         cx,
     );
 }
 
+pub(super) fn prepare_upload_target(
+    target: &FileTreeContextTarget,
+    conn: &mt_config::SshConnection,
+) -> Result<(u64, PathBuf), String> {
+    let epoch = target.remote_epoch(conn)?;
+    let directory = target
+        .directory()
+        .ok_or_else(|| t("fileTree", "operation.invalidTarget").to_string())?;
+    remote_path_text(&target.context.root)?;
+    remote_path_text(&directory)?;
+    Ok((epoch, directory))
+}
+
 pub(super) fn start_upload(
     tree: Entity<FileTree>,
-    context: FileOperationContext,
-    target_dir: PathBuf,
+    target: FileTreeContextTarget,
     local_paths: Vec<PathBuf>,
     window: &mut Window,
     cx: &mut App,
@@ -434,154 +491,106 @@ pub(super) fn start_upload(
     if local_paths.is_empty() {
         return;
     }
-    if tree.read(cx).operation_context(cx).as_ref() != Some(&context) {
+    if !target.is_current(tree.read(cx), cx) {
         return;
     }
+    let context = target.context.clone();
     let FileBackendIdentity::Remote { .. } = &context.backend else {
         return;
     };
     let Some(conn) = tree.read(cx).remote_conn(cx) else {
         return;
     };
-    if !begin_tree_preflight(
+    let (expected_epoch, target_dir) = match prepare_upload_target(&target, &conn) {
+        Ok(destination) => destination,
+        Err(error) => {
+            show_alert(t("fileTree", "operation.failedTitle"), error, window, cx);
+            return;
+        }
+    };
+    let Some(owner) = begin_tree_preflight(
         &tree,
-        &context,
+        &target,
         t("fileTree", "operation.checkingConflicts").into(),
         window,
         cx,
-    ) {
+    ) else {
         return;
-    }
-    let root = context.root.to_string_lossy().into_owned();
-    let target = target_dir.to_string_lossy().into_owned();
+    };
+    let root = context.root.clone();
+    let scan_target = target_dir;
     let scan_paths = local_paths.clone();
     let task = cx.background_executor().spawn(async move {
-        crate::remote_ssh::upload_conflicts(&conn, &root, &target, &scan_paths)
-            .map(|conflicts| (conn, conflicts))
+        crate::remote_ssh::upload_conflicts_at_epoch(
+            &conn,
+            expected_epoch,
+            remote_path_text(&root)?,
+            remote_path_text(&scan_target)?,
+            &scan_paths,
+        )
+        .map(|conflicts| (conn, conflicts))
     });
     window
         .spawn(cx, async move |cx| {
             let result = task.await;
-            let _ = cx.update(|window, cx| match result {
-                Ok((conn, conflicts)) if conflicts.is_empty() => {
-                    if finish_tree_preflight(&tree, &context, cx) != Some(true) {
-                        return;
-                    }
-                    run_upload(
-                        tree.clone(),
-                        context.clone(),
-                        conn,
-                        target_dir.clone(),
-                        local_paths.clone(),
-                        crate::remote_ssh::FileConflictStrategy::KeepBoth,
-                        window,
-                        cx,
-                    );
+            let _ = cx.update(|window, cx| {
+                if !target.is_current(tree.read(cx), cx) {
+                    finish_tree_preflight(&tree, &owner, &target, cx);
+                    return;
                 }
-                Ok((conn, conflicts)) => {
-                    if !retain_tree_preflight_for_choice(&tree, &context, cx) {
-                        return;
-                    }
-                    let choice_tree = tree.clone();
-                    let choice_context = context.clone();
-                    let cancel_tree = tree.clone();
-                    let cancel_context = context.clone();
-                    show_file_conflict_choice(
-                        conflicts,
-                        move |strategy, window, cx| {
-                            if finish_tree_preflight(&choice_tree, &choice_context, cx)
-                                != Some(true)
-                            {
-                                return;
-                            }
-                            run_upload(
-                                choice_tree.clone(),
-                                choice_context.clone(),
-                                conn.clone(),
-                                target_dir.clone(),
-                                local_paths.clone(),
-                                strategy,
-                                window,
-                                cx,
-                            );
-                        },
-                        move |_window, cx| {
-                            finish_tree_preflight(&cancel_tree, &cancel_context, cx);
-                        },
-                        window,
-                        cx,
-                    );
-                }
-                Err(error) => {
-                    if finish_tree_preflight(&tree, &context, cx).is_some() {
-                        show_alert(
-                            t("fileTree", "operation.failedTitle"),
-                            tr!("fileTree", "operation.failedMessage", error = error),
+                match result {
+                    Ok((conn, conflicts)) if conflicts.is_empty() => {
+                        run_upload(
+                            tree.clone(),
+                            target.clone(),
+                            owner.clone(),
+                            conn,
+                            local_paths.clone(),
+                            crate::remote_ssh::FileConflictStrategy::KeepBoth,
                             window,
                             cx,
                         );
                     }
-                }
-            });
-        })
-        .detach();
-}
-
-pub(super) fn choose_upload_paths(
-    tree: Entity<FileTree>,
-    context: FileOperationContext,
-    target_dir: PathBuf,
-    directories: bool,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let prompt = cx.prompt_for_paths(PathPromptOptions {
-        files: !directories,
-        directories,
-        multiple: !directories,
-        prompt: Some(
-            t(
-                "fileTree",
-                if directories {
-                    "upload.chooseFolderTitle"
-                } else {
-                    "upload.chooseFilesTitle"
-                },
-            )
-            .into(),
-        ),
-    });
-    window
-        .spawn(cx, async move |cx| {
-            let selected = match prompt.await {
-                Ok(Ok(Some(paths))) => paths,
-                Ok(Ok(None)) => return,
-                Ok(Err(error)) => {
-                    let detail = error.to_string();
-                    let _ = cx.update(|window, cx| {
-                        if tree.read(cx).operation_context(cx).as_ref() != Some(&context) {
+                    Ok((conn, conflicts)) => {
+                        if !retain_tree_preflight_for_choice(&tree, &owner, &target, cx) {
                             return;
                         }
-                        show_alert(t("fileTree", "operation.failedTitle"), detail, window, cx);
-                    });
-                    return;
-                }
-                Err(error) => {
-                    let detail = error.to_string();
-                    let _ = cx.update(|window, cx| {
-                        if tree.read(cx).operation_context(cx).as_ref() != Some(&context) {
-                            return;
+                        let choice_tree = tree.clone();
+                        let cancel_tree = tree.clone();
+                        let cancel_owner = owner.clone();
+                        let cancel_target = target.clone();
+                        show_file_conflict_choice(
+                            conflicts,
+                            move |strategy, window, cx| {
+                                run_upload(
+                                    choice_tree.clone(),
+                                    target.clone(),
+                                    owner.clone(),
+                                    conn.clone(),
+                                    local_paths.clone(),
+                                    strategy,
+                                    window,
+                                    cx,
+                                );
+                            },
+                            move |_window, cx| {
+                                finish_tree_preflight(&cancel_tree, &cancel_owner, &cancel_target, cx);
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        if finish_tree_preflight(&tree, &owner, &target, cx) == Some(true) {
+                            show_alert(
+                                t("fileTree", "operation.failedTitle"),
+                                tr!("fileTree", "operation.failedMessage", error = error),
+                                window,
+                                cx,
+                            );
                         }
-                        show_alert(t("fileTree", "operation.failedTitle"), detail, window, cx);
-                    });
-                    return;
+                    }
                 }
-            };
-            let _ = cx.update(|window, cx| {
-                if tree.read(cx).operation_context(cx).as_ref() != Some(&context) {
-                    return;
-                }
-                start_upload(tree, context, target_dir, selected, window, cx)
             });
         })
         .detach();
@@ -590,7 +599,8 @@ pub(super) fn choose_upload_paths(
 #[allow(clippy::too_many_arguments)]
 fn run_download(
     tree: Entity<FileTree>,
-    context: FileOperationContext,
+    target: FileTreeContextTarget,
+    owner: FileTreeOperationOwner,
     conn: mt_config::SshConnection,
     remote_paths: Vec<PathBuf>,
     download_dir: PathBuf,
@@ -598,18 +608,34 @@ fn run_download(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let root = context.root.to_string_lossy().into_owned();
+    if !target.is_current(tree.read(cx), cx) {
+        finish_tree_preflight(&tree, &owner, &target, cx);
+        return;
+    }
+    let expected_epoch = match target.remote_epoch(&conn) {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            if finish_tree_preflight(&tree, &owner, &target, cx) == Some(true) {
+                show_alert(t("fileTree", "operation.failedTitle"), error, window, cx);
+            }
+            return;
+        }
+    };
+    let root = target.context.root.clone();
     spawn_tree_op(
         tree,
-        context,
+        target,
+        Some(owner),
         None,
         false,
         None,
         t("fileTree", "operation.downloading").into(),
         move || {
-            crate::remote_ssh::download_entries(
+            for path in &remote_paths { remote_path_text(path)?; }
+            crate::remote_ssh::download_entries_at_epoch(
                 &conn,
-                &root,
+                expected_epoch,
+                remote_path_text(&root)?,
                 &remote_paths,
                 &download_dir,
                 strategy,
@@ -632,15 +658,15 @@ fn run_download(
 
 pub(super) fn start_download(
     tree: Entity<FileTree>,
-    context: FileOperationContext,
+    target: FileTreeContextTarget,
     remote_paths: Vec<PathBuf>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    if tree.read(cx).operation_context(cx).as_ref() != Some(&context) {
+    if !target.is_current(tree.read(cx), cx) {
         return;
     }
-    let FileBackendIdentity::Remote { .. } = &context.backend else {
+    let FileBackendIdentity::Remote { .. } = &target.context.backend else {
         return;
     };
     let Some(conn) = tree.read(cx).remote_conn(cx) else {
@@ -659,31 +685,29 @@ pub(super) fn start_download(
             return;
         }
     };
-    if !begin_tree_preflight(
+    let Some(owner) = begin_tree_preflight(
         &tree,
-        &context,
+        &target,
         t("fileTree", "operation.checkingConflicts").into(),
         window,
         cx,
-    ) {
+    ) else {
         return;
-    }
+    };
     let scan_dir = download_dir.clone();
     let scan_paths = remote_paths.clone();
     let task = cx
         .background_executor()
-        .spawn(async move { crate::remote_ssh::download_conflicts(&scan_dir, &scan_paths) });
+        .spawn(async move { crate::remote_ssh::download_conflicts_for_files(&scan_dir, &scan_paths) });
     window
         .spawn(cx, async move |cx| {
             let result = task.await;
             let _ = cx.update(|window, cx| match result {
                 Ok(conflicts) if conflicts.is_empty() => {
-                    if finish_tree_preflight(&tree, &context, cx) != Some(true) {
-                        return;
-                    }
                     run_download(
                         tree,
-                        context,
+                        target,
+                        owner,
                         conn,
                         remote_paths,
                         download_dir,
@@ -693,24 +717,20 @@ pub(super) fn start_download(
                     );
                 }
                 Ok(conflicts) => {
-                    if !retain_tree_preflight_for_choice(&tree, &context, cx) {
+                    if !retain_tree_preflight_for_choice(&tree, &owner, &target, cx) {
                         return;
                     }
                     let choice_tree = tree.clone();
-                    let choice_context = context.clone();
                     let cancel_tree = tree.clone();
-                    let cancel_context = context.clone();
+                    let cancel_owner = owner.clone();
+                    let cancel_target = target.clone();
                     show_file_conflict_choice(
                         conflicts,
                         move |strategy, window, cx| {
-                            if finish_tree_preflight(&choice_tree, &choice_context, cx)
-                                != Some(true)
-                            {
-                                return;
-                            }
                             run_download(
                                 choice_tree.clone(),
-                                choice_context.clone(),
+                                target.clone(),
+                                owner.clone(),
                                 conn.clone(),
                                 remote_paths.clone(),
                                 download_dir.clone(),
@@ -720,14 +740,14 @@ pub(super) fn start_download(
                             );
                         },
                         move |_window, cx| {
-                            finish_tree_preflight(&cancel_tree, &cancel_context, cx);
+                            finish_tree_preflight(&cancel_tree, &cancel_owner, &cancel_target, cx);
                         },
                         window,
                         cx,
                     );
                 }
                 Err(error) => {
-                    if finish_tree_preflight(&tree, &context, cx).is_some() {
+                    if finish_tree_preflight(&tree, &owner, &target, cx) == Some(true) {
                         show_alert(
                             t("fileTree", "operation.failedTitle"),
                             tr!("fileTree", "operation.failedMessage", error = error),
@@ -744,13 +764,18 @@ pub(super) fn start_download(
 /// 「新建文件 / 新建文件夹」:问名字 → 建 → 展开父目录并重列。
 pub(super) fn new_entry_prompt(
     tree: Entity<FileTree>,
-    context: FileOperationContext,
+    target: FileTreeContextTarget,
     connection: Option<mt_config::SshConnection>,
-    dir: PathBuf,
     is_dir: bool,
     window: &mut Window,
     cx: &mut App,
 ) {
+    if !target.is_current(tree.read(cx), cx) {
+        return;
+    }
+    let Some(dir) = target.directory() else {
+        return;
+    };
     let (title, message) = if is_dir {
         (
             t("fileTree", "prompt.newFolderTitle"),
@@ -767,43 +792,25 @@ pub(super) fn new_entry_prompt(
         message,
         "",
         move |value, window, cx| {
+            if !target.is_current(tree.read(cx), cx) {
+                return;
+            }
             let name = value.trim().to_string();
             if name.is_empty() {
                 return;
             }
-            let root = context.root.clone();
-            let context = context.clone();
+            let operation_target = target.clone();
             let connection = connection.clone();
-            let operation_dir = dir.clone();
             spawn_tree_op(
                 tree.clone(),
-                context,
+                target.clone(),
+                None,
                 Some(dir.clone()),
                 true,
                 None,
                 t("fileTree", "operation.creating").into(),
-                move || match connection {
-                    Some(conn) => crate::remote_ssh::create_entry(
-                        &conn,
-                        &root.to_string_lossy(),
-                        &operation_dir.to_string_lossy(),
-                        &name,
-                        is_dir,
-                    )
-                    .map(|_| None),
-                    None => {
-                        let target = PathBuf::from(fs_ops::child_path(
-                            &operation_dir.to_string_lossy(),
-                            &name,
-                        ));
-                        if is_dir {
-                            mt_project::fs::create_directory(&root, &target)
-                        } else {
-                            mt_project::fs::create_file(&root, &target)
-                        }
-                        .map(|_| None)
-                        .map_err(|e| format!("{e:#}"))
-                    }
+                move || {
+                    create_entry_at_target(&operation_target, connection.as_ref(), &name, is_dir)
                 },
                 window,
                 cx,
@@ -812,4 +819,51 @@ pub(super) fn new_entry_prompt(
         window,
         cx,
     );
+}
+
+pub(super) fn create_entry_at_target(
+    target: &FileTreeContextTarget,
+    connection: Option<&mt_config::SshConnection>,
+    name: &str,
+    is_dir: bool,
+) -> Result<Option<String>, String> {
+    if name.is_empty() || matches!(name, "." | "..") || name.contains(['/', '\\', ':', '\0']) {
+        return Err(t("fileTree", "operation.invalidName").to_string());
+    }
+    let dir = target
+        .directory()
+        .ok_or_else(|| t("fileTree", "operation.invalidTarget").to_string())?;
+    let context = &target.context;
+    match (&context.backend, connection) {
+        (FileBackendIdentity::Local, None) => {
+            let path = dir.join(name);
+            if is_dir {
+                mt_project::fs::create_directory(&context.root, &path)
+            } else {
+                mt_project::fs::create_file(&context.root, &path)
+            }
+            .map(|_| None)
+            .map_err(|error| format!("{error:#}"))
+        }
+        (
+            FileBackendIdentity::Remote {
+                connection_id,
+                connection_fingerprint,
+            },
+            Some(connection),
+        ) if connection.id == *connection_id
+            && crate::remote_ssh::connection_fingerprint(connection) == *connection_fingerprint =>
+        {
+            crate::remote_ssh::create_entry_at_epoch(
+                connection,
+                target.remote_epoch(connection)?,
+                remote_path_text(&context.root)?,
+                remote_path_text(&dir)?,
+                name,
+                is_dir,
+            )
+            .map(|_| None)
+        }
+        _ => Err(t("fileTree", "operation.sourceUnavailable").to_string()),
+    }
 }

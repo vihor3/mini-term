@@ -4,6 +4,8 @@ use std::sync::atomic::Ordering;
 use mt_config::SshConnection;
 use mt_ssh::{CachedSession, SftpHandle, SftpNodeKind, run_bounded_exec_on_session};
 
+use super::transfer::FileSessionPin;
+
 use super::{
     LOCAL_TRANSFER_SEQUENCE, REMOTE_DELETE_EXEC_TIMEOUT, REMOTE_DELETE_OUTPUT_CAP,
     REMOTE_DELETE_PROBE_TIMEOUT, REMOTE_DELETE_SERVER_TIMEOUT_SECS, RemoteSshState,
@@ -189,6 +191,7 @@ async fn remove_remote_tree_safely(
     sftp: &SftpHandle,
     canonical_root: &str,
     target: &str,
+    pin: Option<&FileSessionPin<'_>>,
 ) -> Result<usize, String> {
     enum RemoveWork {
         Visit(String),
@@ -198,6 +201,7 @@ async fn remove_remote_tree_safely(
     let mut stack = vec![RemoveWork::Visit(target.to_string())];
     let mut removed = 0usize;
     while let Some(work) = stack.pop() {
+        check_delete_pin(pin).await?;
         match work {
             RemoveWork::Visit(path) => {
                 let path =
@@ -221,6 +225,7 @@ async fn remove_remote_tree_safely(
                         stack.push(RemoveWork::Visit(join_posix(&path, &entry.name)));
                     }
                 } else {
+                    check_delete_pin(pin).await?;
                     sftp.remove_file(&path)
                         .await
                         .map_err(|e| format!("删除远程条目失败: {}", e.message()))?;
@@ -235,10 +240,12 @@ async fn remove_remote_tree_safely(
                 };
                 if kind == SftpNodeKind::Directory {
                     validate_remote_delete_directory_identity(sftp, canonical_root, &path).await?;
+                    check_delete_pin(pin).await?;
                     sftp.remove_dir(&path)
                         .await
                         .map_err(|e| format!("删除远程目录失败: {}", e.message()))?;
                 } else {
+                    check_delete_pin(pin).await?;
                     sftp.remove_file(&path)
                         .await
                         .map_err(|e| format!("删除远程条目失败: {}", e.message()))?;
@@ -275,7 +282,9 @@ async fn remove_remote_leaf_via_isolation(
     sftp: &SftpHandle,
     canonical_root: &str,
     target: &str,
+    pin: Option<&FileSessionPin<'_>>,
 ) -> Result<usize, String> {
+    check_delete_pin(pin).await?;
     let target = validate_remote_delete_leaf_against_root(sftp, canonical_root, target).await?;
     let isolation = loop {
         let candidate = sftp.temporary_sibling_path(&target, "delete-isolation");
@@ -283,6 +292,7 @@ async fn remove_remote_leaf_via_isolation(
             break candidate;
         }
     };
+    check_delete_pin(pin).await?;
     sftp.rename(&target, &isolation)
         .await
         .map_err(|error| format!("隔离远程待删除条目失败: {}", error.message()))?;
@@ -298,13 +308,19 @@ async fn remove_remote_leaf_via_isolation(
             }
         }
         Some(_) => {
-            if let Err(error) = sftp.remove_file(&isolated).await {
+            let remove = async {
+                check_delete_pin(pin).await?;
+                sftp.remove_file(&isolated)
+                    .await
+                    .map_err(|error| error.message().to_string())
+            }
+            .await;
+            if let Err(error) = remove {
                 let restore = restore_isolated_remote_entry(sftp, &isolated, &target).await;
                 return match restore {
-                    Ok(()) => Err(format!("删除远程条目失败: {}", error.message())),
+                    Ok(()) => Err(format!("删除远程条目失败: {error}")),
                     Err(restore_error) => Err(format!(
-                        "删除远程条目失败: {}; {restore_error}",
-                        error.message()
+                        "删除远程条目失败: {error}; {restore_error}"
                     )),
                 };
             }
@@ -318,7 +334,9 @@ async fn remove_remote_directory_via_isolation(
     sftp: &SftpHandle,
     canonical_root: &str,
     target: &str,
+    pin: Option<&FileSessionPin<'_>>,
 ) -> Result<usize, String> {
+    check_delete_pin(pin).await?;
     let target = validate_remote_delete_directory_identity(sftp, canonical_root, target).await?;
     let isolation = loop {
         let candidate = sftp.temporary_sibling_path(&target, "delete-isolation");
@@ -326,6 +344,7 @@ async fn remove_remote_directory_via_isolation(
             break candidate;
         }
     };
+    check_delete_pin(pin).await?;
     sftp.rename(&target, &isolation)
         .await
         .map_err(|error| format!("隔离远程待删除目录失败: {}", error.message()))?;
@@ -342,7 +361,7 @@ async fn remove_remote_directory_via_isolation(
         };
     }
 
-    match remove_remote_tree_safely(sftp, canonical_root, &isolation).await {
+    match remove_remote_tree_safely(sftp, canonical_root, &isolation, pin).await {
         Ok(removed) => Ok(removed),
         Err(error) => {
             let restore = restore_isolated_remote_entry(sftp, &isolation, &target).await;
@@ -359,17 +378,35 @@ async fn remove_remote_directory_via_fresh_session(
     conn: &SshConnection,
     project_root: &str,
     target: &str,
+    pin: Option<&FileSessionPin<'_>>,
 ) -> Result<usize, String> {
+    allow_delete_reacquire(pin.is_some_and(FileSessionPin::is_pinned))?;
     let fresh_sftp = open_sftp(st, conn).await?;
     let result = async {
         let canonical_root = canonical_project_root(&fresh_sftp, project_root).await?;
-        remove_remote_directory_via_isolation(&fresh_sftp, &canonical_root, target).await
+        remove_remote_directory_via_isolation(&fresh_sftp, &canonical_root, target, None).await
     }
     .await;
     fresh_sftp.close().await;
     result
 }
 
+async fn check_delete_pin(pin: Option<&FileSessionPin<'_>>) -> Result<(), String> {
+    match pin {
+        Some(pin) => pin.check().await,
+        None => Ok(()),
+    }
+}
+
+fn allow_delete_reacquire(pinned: bool) -> Result<(), String> {
+    if pinned {
+        Err("The captured SSH session is unavailable; deletion was not replayed on another session. Inspect the original target before retrying.".into())
+    } else {
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn delete_remote_directory(
     st: &RemoteSshState,
     conn: &SshConnection,
@@ -378,10 +415,12 @@ async fn delete_remote_directory(
     sftp: &SftpHandle,
     canonical_root: &str,
     target: &str,
+    pin: Option<&FileSessionPin<'_>>,
 ) -> Result<usize, String> {
     // 只绑定并验证删除根目录。服务端 `rm` 自己完成递归；若先用 SFTP 扫描整棵树，
     // 大目录仍会因网络传输和目录往返退化为线性预处理，抵消快速路径的意义。
     let target = validate_remote_delete_directory_identity(sftp, canonical_root, target).await?;
+    check_delete_pin(pin).await?;
     let capability = run_bounded_exec_on_session(
         session,
         "command -v timeout >/dev/null 2>&1 && command -v rm >/dev/null 2>&1 && \
@@ -397,26 +436,33 @@ async fn delete_remote_directory(
                 && output.exit_code == Some(0) => {}
         Ok(output) if output.requires_session_retirement() => {
             evict_session_if_same(st, &st.pool(), &conn.id, session).await;
-            return remove_remote_directory_via_fresh_session(st, conn, project_root, &target)
+            return remove_remote_directory_via_fresh_session(st, conn, project_root, &target, pin)
                 .await;
         }
         Ok(_) => {
-            return remove_remote_directory_via_isolation(sftp, canonical_root, &target).await;
+            return remove_remote_directory_via_isolation(sftp, canonical_root, &target, pin).await;
         }
         Err(_) => {
             evict_session_if_same(st, &st.pool(), &conn.id, session).await;
-            return remove_remote_directory_via_fresh_session(st, conn, project_root, &target)
+            return remove_remote_directory_via_fresh_session(st, conn, project_root, &target, pin)
                 .await;
         }
     }
 
+    check_delete_pin(pin).await?;
     let (proof_path, proof_nonce) = match create_remote_delete_proof(sftp, &target).await {
         Ok(proof) => proof,
         Err(_) => {
-            return remove_remote_directory_via_isolation(sftp, canonical_root, &target).await;
+            return remove_remote_directory_via_isolation(sftp, canonical_root, &target, pin).await;
         }
     };
     let command = remote_delete_command(&target, &proof_path, &proof_nonce)?;
+    if let Err(error) = check_delete_pin(pin).await {
+        return match cleanup_remote_delete_proof(sftp, &proof_path).await {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(format!("{error}; {cleanup}")),
+        };
+    }
     let execution = run_bounded_exec_on_session(
         session,
         &command,
@@ -447,11 +493,11 @@ async fn delete_remote_directory(
     match execution {
         Ok(output) if output.safe_to_fallback() => {
             proof_cleanup?;
-            remove_remote_directory_via_isolation(sftp, canonical_root, &target).await
+            remove_remote_directory_via_isolation(sftp, canonical_root, &target, pin).await
         }
         Ok(output) if output.requires_session_retirement() && !output.state.may_have_started() => {
             proof_cleanup?;
-            remove_remote_directory_via_fresh_session(st, conn, project_root, &target).await
+            remove_remote_directory_via_fresh_session(st, conn, project_root, &target, pin).await
         }
         Ok(output) => {
             let cleanup = proof_cleanup
@@ -465,7 +511,7 @@ async fn delete_remote_directory(
         }
         Err(error) => {
             proof_cleanup?;
-            remove_remote_directory_via_fresh_session(st, conn, project_root, &target)
+            remove_remote_directory_via_fresh_session(st, conn, project_root, &target, pin)
                 .await
                 .map_err(|fallback_error| {
                     format!("服务端删除通道失败: {error}; SFTP 回退也失败: {fallback_error}")
@@ -479,15 +525,36 @@ async fn delete_remote_directory(
 /// 原子改名到随机隔离路径，再用一个复用 SFTP handle 后序删除。叶子 symlink 只删除
 /// 链接自身，路径式 fallback 的每一步仍会重新校验 canonical parent。
 pub fn delete_entry(conn: &SshConnection, project_root: &str, path: &str) -> Result<usize, String> {
+    delete_entry_with_epoch(conn, project_root, path, None)
+}
+
+pub fn delete_entry_at_epoch(
+    conn: &SshConnection,
+    expected_epoch: u64,
+    project_root: &str,
+    path: &str,
+) -> Result<usize, String> {
+    delete_entry_with_epoch(conn, project_root, path, Some(expected_epoch))
+}
+
+fn delete_entry_with_epoch(
+    conn: &SshConnection,
+    project_root: &str,
+    path: &str,
+    expected_epoch: Option<u64>,
+) -> Result<usize, String> {
     let st = state();
     st.block_on(async move {
         let (session, sftp) = open_sftp_with_session(st, conn).await?;
+        let pin = FileSessionPin::new(st, conn, expected_epoch, &session);
         let result = async {
+            pin.check().await?;
             let canonical_root = canonical_project_root(&sftp, project_root).await?;
             let target = validate_remote_leaf_against_root(&sftp, &canonical_root, path).await?;
             let kind = remote_kind_if_present(&sftp, &target)
                 .await?
                 .ok_or_else(|| format!("远程条目不存在: {target}"))?;
+            pin.check().await?;
             if kind == SftpNodeKind::Directory {
                 delete_remote_directory(
                     st,
@@ -497,14 +564,26 @@ pub fn delete_entry(conn: &SshConnection, project_root: &str, path: &str) -> Res
                     &sftp,
                     &canonical_root,
                     &target,
+                    Some(&pin),
                 )
                 .await
             } else {
-                remove_remote_leaf_via_isolation(&sftp, &canonical_root, &target).await
+                remove_remote_leaf_via_isolation(&sftp, &canonical_root, &target, Some(&pin)).await
             }
         }
         .await;
         sftp.close().await;
-        result
+        pin.finish(result).await
     })
+}
+
+#[cfg(test)]
+mod epoch_tests {
+    use super::*;
+
+    #[test]
+    fn pinned_delete_never_reacquires_even_for_a_proven_pre_dispatch_failure() {
+        assert!(allow_delete_reacquire(false).is_ok());
+        assert!(allow_delete_reacquire(true).is_err());
+    }
 }

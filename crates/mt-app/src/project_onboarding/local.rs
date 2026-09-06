@@ -7,8 +7,9 @@ use mt_github::{CommandExecutionErrorKind, CommandOutput, CommandPlan};
 use crate::execution_host::{PreProjectLocalContext, execute_pre_project_local_command};
 
 use super::model::{
-    GitRelationship, HostPathProbe, OnboardingError, OnboardingErrorKind, ProjectLocationKey,
-    TargetState,
+    DirectoryBrowseError, DirectoryBrowseErrorKind, DirectoryEntry, DirectoryListing,
+    DirectoryLocation, DirectorySource, GitRelationship, HostPathProbe, OnboardingError,
+    OnboardingErrorKind, ProjectLocationKey, TargetState,
 };
 use super::ops::{
     HostCommandDispatch, HostCommandOutcome, ProjectHostOps, bounded_lossy_diagnostic,
@@ -22,6 +23,277 @@ const GIT_ERROR_DETAIL_LIMIT: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct LocalProjectOps;
+
+/// One read-only directory listing. WSL uses its existing host-visible UNC I/O
+/// boundary; it never interprets the distribution's POSIX path on the client.
+pub(crate) fn browse_local_directory(
+    requested: &DirectoryLocation,
+) -> Result<DirectoryListing, DirectoryBrowseError> {
+    if matches!(&requested.source, DirectorySource::Ssh { .. })
+        || (!cfg!(windows) && matches!(&requested.source, DirectorySource::Wsl { .. }))
+    {
+        return Err(DirectoryBrowseError::new(
+            DirectoryBrowseErrorKind::Unavailable,
+            "The selected filesystem is not available through local I/O",
+        ));
+    }
+    let mut location = requested.clone();
+    if location.path == "~" || location.path.starts_with("~/") {
+        let home = local_browser_home(&location.source)?;
+        let suffix = location.path.strip_prefix("~/").unwrap_or("");
+        location.path = match &location.source {
+            DirectorySource::Local => Path::new(&home)
+                .join(suffix)
+                .to_string_lossy()
+                .into_owned(),
+            DirectorySource::Wsl { .. } => crate::remote_ssh::join_posix(&home, suffix),
+            DirectorySource::Ssh { .. } => unreachable!(),
+        };
+    }
+    let mut host_path = location.host_path()?;
+    if let DirectorySource::Wsl { distro } = &location.source
+        && location.path.split('/').any(|component| component == "..")
+    {
+        // Resolve links and parent components inside WSL before Win32 can
+        // normalize the UNC spelling using different filesystem semantics.
+        let output = execute_pre_project_local_command(
+            &PreProjectLocalContext::Wsl {
+                distro: distro.clone(),
+                cwd: location.path.clone(),
+            },
+            &CommandPlan::new("pwd", ["-P"]),
+            GIT_PROBE_TIMEOUT,
+            GIT_ERROR_DETAIL_LIMIT,
+        )
+        .map_err(|error| {
+            DirectoryBrowseError::new(DirectoryBrowseErrorKind::Unavailable, error.message)
+        })?;
+        location.path = wsl_browser_command_path(&output)?;
+        host_path = location.host_path()?;
+    }
+    if host_path.contains('\0') || !Path::new(&host_path).is_absolute() {
+        return Err(DirectoryBrowseError::new(
+            DirectoryBrowseErrorKind::InvalidPath,
+            "An absolute directory path is required",
+        ));
+    }
+    let canonical = fs::canonicalize(&host_path)
+        .map_err(DirectoryBrowseError::from_io)?;
+    // The shared Windows prefix helper is lossy. Reject unrepresentable
+    // canonical targets before that conversion, not after it.
+    browser_path_text(&canonical)?;
+    let canonical = mt_project::fs::strip_verbatim_prefix(canonical);
+    let location = browser_location_from_host_path(&location.source, &canonical)?;
+    if !fs::metadata(&canonical)
+        .map_err(DirectoryBrowseError::from_io)?
+        .is_dir()
+    {
+        return Err(DirectoryBrowseError::new(
+            DirectoryBrowseErrorKind::InvalidPath,
+            "The selected path is not a directory",
+        ));
+    }
+    let mut directories = Vec::new();
+    for (index, entry) in fs::read_dir(&canonical)
+        .map_err(DirectoryBrowseError::from_io)?
+        .enumerate()
+    {
+        crate::remote_ssh::validate_browser_entry_count(index + 1).map_err(|error| {
+            DirectoryBrowseError::new(DirectoryBrowseErrorKind::Unavailable, error.message)
+        })?;
+        let entry = entry.map_err(DirectoryBrowseError::from_io)?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if (cfg!(windows) || matches!(&location.source, DirectorySource::Wsl { .. }))
+            && validate_portable_basename(&name).is_err()
+        {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(DirectoryBrowseError::from_io)?;
+        if !file_type.is_dir()
+            && !(file_type.is_symlink()
+                && fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir()))
+        {
+            continue;
+        }
+        directories.push(DirectoryEntry {
+            name,
+            location: browser_location_from_host_path(&location.source, &entry.path())?,
+            is_symlink: file_type.is_symlink(),
+        });
+    }
+    directories.sort_by(|a, b| mt_project::fs::natural_cmp(&a.name, &b.name));
+    Ok(DirectoryListing {
+        location,
+        directories,
+    })
+}
+
+fn browser_path_text(path: &Path) -> Result<&str, DirectoryBrowseError> {
+    let text = path.to_str().ok_or_else(|| {
+        DirectoryBrowseError::new(
+            DirectoryBrowseErrorKind::InvalidPath,
+            "The directory path is not valid Unicode",
+        )
+    })?;
+    #[cfg(windows)]
+    for component in path.components() {
+        if let std::path::Component::Normal(name) = component
+            && name.to_str().is_none_or(|name| validate_portable_basename(name).is_err())
+        {
+            return Err(DirectoryBrowseError::new(
+                DirectoryBrowseErrorKind::InvalidPath,
+                "The directory requires a verbatim path that project registration cannot preserve",
+            ));
+        }
+    }
+    Ok(text)
+}
+
+fn browser_location_from_host_path(
+    source: &DirectorySource,
+    path: &Path,
+) -> Result<DirectoryLocation, DirectoryBrowseError> {
+    let path = browser_path_text(path)?;
+    let path = match source {
+        DirectorySource::Wsl { distro } => {
+            let wsl = mt_core::parse_wsl_unc(path)
+                .filter(|wsl| wsl.distro.eq_ignore_ascii_case(distro));
+            wsl.ok_or_else(|| {
+                DirectoryBrowseError::new(
+                    DirectoryBrowseErrorKind::Unavailable,
+                    "The directory no longer belongs to the selected WSL distribution",
+                )
+            })?
+            .unix_path
+        }
+        DirectorySource::Local if mt_core::parse_wsl_unc(path).is_none() => path.to_string(),
+        DirectorySource::Local | DirectorySource::Ssh { .. } => {
+            return Err(DirectoryBrowseError::new(
+                DirectoryBrowseErrorKind::Unavailable,
+                "The directory no longer belongs to the selected filesystem",
+            ));
+        }
+    };
+    let location = DirectoryLocation {
+        source: source.clone(),
+        path,
+    };
+    location.host_path()?;
+    Ok(location)
+}
+
+fn local_browser_home(source: &DirectorySource) -> Result<String, DirectoryBrowseError> {
+    match source {
+        DirectorySource::Local => dirs::home_dir()
+            .and_then(|path| path.into_os_string().into_string().ok())
+            .ok_or_else(|| {
+                DirectoryBrowseError::new(
+                    DirectoryBrowseErrorKind::Unavailable,
+                    "The local home directory is unavailable",
+                )
+            }),
+        DirectorySource::Wsl { distro } => {
+            DirectoryLocation { source: source.clone(), path: "/".into() }.host_path()?;
+            let output = execute_pre_project_local_command(
+                &PreProjectLocalContext::Wsl {
+                    distro: distro.clone(),
+                    cwd: "/".into(),
+                },
+                &CommandPlan::new("printenv", ["HOME"]),
+                GIT_PROBE_TIMEOUT,
+                GIT_ERROR_DETAIL_LIMIT,
+            )
+            .map_err(|error| {
+                DirectoryBrowseError::new(DirectoryBrowseErrorKind::Unavailable, error.message)
+            })?;
+            wsl_browser_command_path(&output)
+        }
+        DirectorySource::Ssh { .. } => Err(DirectoryBrowseError::new(
+            DirectoryBrowseErrorKind::Unavailable,
+            "SSH home directories require the authenticated host probe",
+        )),
+    }
+}
+
+fn wsl_browser_command_path(output: &CommandOutput) -> Result<String, DirectoryBrowseError> {
+    if output.timed_out
+        || output.stdout_truncated
+        || output.stderr_truncated
+        || output.exit_code != Some(0)
+    {
+        return Err(DirectoryBrowseError::new(
+            DirectoryBrowseErrorKind::Unavailable,
+            "The selected WSL directory is unavailable",
+        ));
+    }
+    parse_wsl_browser_path(&output.stdout)
+}
+
+fn parse_wsl_browser_path(stdout: &[u8]) -> Result<String, DirectoryBrowseError> {
+    let path = std::str::from_utf8(stdout).map_err(|_| {
+        DirectoryBrowseError::new(
+            DirectoryBrowseErrorKind::InvalidPath,
+            "The WSL directory is not valid Unicode",
+        )
+    })?;
+    // Remove only pwd/printenv's record terminator, not characters in the path.
+    let path = path.strip_suffix('\n').unwrap_or(path);
+    if path.chars().any(char::is_control) {
+        return Err(DirectoryBrowseError::new(
+            DirectoryBrowseErrorKind::InvalidPath,
+            "The WSL directory cannot be represented by a host-visible path",
+        ));
+    }
+    crate::execution_host::normalize_absolute_posix_path(path).map_err(|message| {
+        DirectoryBrowseError::new(DirectoryBrowseErrorKind::InvalidPath, message)
+    })
+}
+
+pub(crate) fn local_browser_places() -> Vec<(String, DirectoryLocation)> {
+    let mut places = Vec::new();
+    #[cfg(windows)]
+    {
+        // Read the drive bitmask, not every drive's contents. No new windows
+        // crate feature is needed for this kernel32 ABI, as with file identity.
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetLogicalDrives() -> u32;
+        }
+        let drives = unsafe { GetLogicalDrives() };
+        for index in 0..26u8 {
+            if drives & (1u32 << index) != 0 {
+                let path = format!("{}:\\", char::from(b'A' + index));
+                places.push((
+                    path.clone(),
+                    DirectoryLocation {
+                        source: DirectorySource::Local,
+                        path,
+                    },
+                ));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    places.push((
+        "/".into(),
+        DirectoryLocation {
+            source: DirectorySource::Local,
+            path: "/".into(),
+        },
+    ));
+    for distro in mt_project::wsl_distros::list_wsl_distros() {
+        places.push((
+            format!("WSL: {}", distro.name),
+            DirectoryLocation {
+                source: DirectorySource::Wsl { distro: distro.name },
+                path: "~".into(),
+            },
+        ));
+    }
+    places
+}
 
 impl LocalProjectOps {
     fn canonical_directory(path: &str) -> Result<PathBuf, OnboardingError> {
@@ -480,6 +752,132 @@ fn wsl_unc(distro: &str, path: &str) -> Result<String, OnboardingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_reads_one_level_including_hidden_directories_without_creating_git() {
+        let root = std::env::temp_dir().join(format!("mt-browser-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join(".hidden")).unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir(root.join("project2")).unwrap();
+        fs::create_dir(root.join("project10")).unwrap();
+        fs::create_dir(root.join("project2").join("nested")).unwrap();
+        fs::write(root.join("ordinary-file"), b"unchanged").unwrap();
+        let listing = browse_local_directory(&DirectoryLocation {
+            source: DirectorySource::Local,
+            path: root.to_str().unwrap().into(),
+        }).unwrap();
+        assert_eq!(listing.directories.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            [".git", ".hidden", "project2", "project10"]);
+        let empty = browse_local_directory(&listing.directories[1].location).unwrap();
+        assert!(empty.directories.is_empty());
+        assert!(!root.join(".hidden").join(".git").exists());
+        assert_eq!(fs::read(root.join("ordinary-file")).unwrap(), b"unchanged");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_includes_directory_symlinks_but_not_files_or_broken_links() {
+        let root = std::env::temp_dir().join(format!("mt-browser-links-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("directory")).unwrap();
+        fs::write(root.join("file"), b"keep").unwrap();
+        std::os::unix::fs::symlink(root.join("directory"), root.join("directory-link")).unwrap();
+        std::os::unix::fs::symlink(root.join("file"), root.join("file-link")).unwrap();
+        std::os::unix::fs::symlink(root.join("missing"), root.join("broken-link")).unwrap();
+        let listing = browse_local_directory(&DirectoryLocation {
+            source: DirectorySource::Local,
+            path: root.to_str().unwrap().into(),
+        }).unwrap();
+        assert_eq!(listing.directories.len(), 2);
+        assert!(listing.directories.iter().any(|entry| entry.name == "directory-link" && entry.is_symlink));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn browser_projects_wsl_identity_and_classifies_typed_local_errors() {
+        let source = DirectorySource::Wsl { distro: "Ubuntu".into() };
+        let location = browser_location_from_host_path(&source, Path::new(r"\\wsl.localhost\Ubuntu\home\User")).unwrap();
+        assert_eq!(location.path, "/home/User");
+        assert_eq!(location.source, source);
+        assert!(browser_location_from_host_path(&source, Path::new(r"\\wsl$\Debian\home\User")).is_err());
+        assert!(browser_location_from_host_path(&source, Path::new("/client/home")).is_err());
+        for (io_kind, expected) in [
+            (std::io::ErrorKind::PermissionDenied, DirectoryBrowseErrorKind::PermissionDenied),
+            (std::io::ErrorKind::NotFound, DirectoryBrowseErrorKind::InvalidPath),
+            (std::io::ErrorKind::NotADirectory, DirectoryBrowseErrorKind::InvalidPath),
+            (std::io::ErrorKind::TimedOut, DirectoryBrowseErrorKind::Unavailable),
+        ] {
+            assert_eq!(DirectoryBrowseError::from_io(std::io::Error::from(io_kind)).kind, expected);
+        }
+    }
+
+    #[test]
+    fn browser_wsl_home_removes_only_the_record_terminator_and_never_rewrites_path_data() {
+        assert_eq!(parse_wsl_browser_path(b"/home/User\n").unwrap(), "/home/User");
+        assert_eq!(parse_wsl_browser_path(b"/home/User").unwrap(), "/home/User");
+        assert_eq!(parse_wsl_browser_path(b"/home/with space \n").unwrap(), "/home/with space ");
+        for output in [b"/home/User\n\n".as_slice(), b"/home/User\r\n", b"/home/\xff\n", b"relative\n", b"/nul\0path\n"] {
+            assert_eq!(parse_wsl_browser_path(output).unwrap_err().kind, DirectoryBrowseErrorKind::InvalidPath);
+        }
+    }
+
+    #[test]
+    fn browser_wsl_command_requires_complete_successful_physical_path_output() {
+        let output = CommandOutput {
+            stdout: b"/physical/parent\n".to_vec(),
+            stderr: Vec::new(),
+            exit_code: Some(0),
+            timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        };
+        assert_eq!(wsl_browser_command_path(&output).unwrap(), "/physical/parent");
+        for index in 0..5 {
+            let mut failed = output.clone();
+            match index {
+                0 => failed.timed_out = true,
+                1 => failed.stdout_truncated = true,
+                2 => failed.stderr_truncated = true,
+                3 => failed.exit_code = Some(1),
+                _ => failed.exit_code = None,
+            }
+            assert_eq!(wsl_browser_command_path(&failed).unwrap_err().kind, DirectoryBrowseErrorKind::Unavailable);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_rejects_non_unicode_canonical_paths_before_lossy_prefix_conversion() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/bad-\xff".to_vec()));
+        assert_eq!(browser_path_text(&path).unwrap_err().kind, DirectoryBrowseErrorKind::InvalidPath);
+        assert!(browser_location_from_host_path(&DirectorySource::Local, &path).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_rejects_unpaired_surrogates_before_lossy_prefix_conversion() {
+        use std::os::windows::ffi::OsStringExt;
+        let mut units: Vec<u16> = r"\\?\C:\directory-".encode_utf16().collect();
+        units.push(0xD800);
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&units));
+        assert_eq!(browser_path_text(&path).unwrap_err().kind, DirectoryBrowseErrorKind::InvalidPath);
+        assert!(browser_location_from_host_path(&DirectorySource::Local, &path).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_rejects_verbatim_only_names_before_native_registration_reinterpretation() {
+        for path in [r"\\?\C:\ordinary\directory", r"\\?\UNC\server\share\ordinary", r"\\?\UNC\wsl$\Ubuntu\home\User"] {
+            assert_eq!(browser_path_text(Path::new(path)).unwrap(), path);
+        }
+        for path in [r"\\?\C:\directory.", r"\\?\C:\directory ", r"\\?\C:\CON", r"\\?\UNC\server\share\directory."] {
+            assert_eq!(browser_path_text(Path::new(path)).unwrap_err().kind, DirectoryBrowseErrorKind::InvalidPath);
+        }
+    }
+
     use crate::project_onboarding::model::OnboardingOperationResult;
     use crate::project_onboarding::ops::{
         add_existing_folder, clone_from_url, create_new_project, initialize_existing_folder,

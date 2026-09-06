@@ -71,7 +71,7 @@ jobs:
             build-essential clang cmake pkg-config \
             libfontconfig1-dev libfreetype6-dev \
             libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libx11-dev libxcb1-dev libasound2-dev
+            libx11-dev libxcb1-dev libasound2-dev openssh-server
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -178,6 +178,75 @@ jobs:
       - name: Cargo test
         run: cargo test --locked --workspace --all-targets --no-fail-fast
 
+      - name: Test authenticated loopback SSH workflows
+        shell: bash
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          umask 077
+          fixture=$(mktemp -d "$RUNNER_TEMP/mt-loopback-ssh.XXXXXXXX")
+          cleanup() {
+            status=$?
+            trap - EXIT INT TERM
+            set +e
+            if [ -f "$fixture/sshd.pid" ]; then
+              daemon=$(sudo cat "$fixture/sshd.pid")
+              case "$daemon" in
+                ''|*[!0-9]*) ;;
+                *) sudo kill "$daemon" 2>/dev/null || true ;;
+              esac
+            fi
+            rm -rf -- "$fixture"
+            if [ "$?" -ne 0 ]; then
+              exit 1
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          port=22222
+          user=$(id -un)
+          mkdir -p "$fixture/client-home/.ssh" "$fixture/remote-home" "$fixture/bin"
+          printf 'mini-term Actions loopback\n' > "$fixture/.fixture-only"
+          ssh-keygen -q -t ed25519 -N '' -f "$fixture/client-key"
+          ssh-keygen -q -t ed25519 -N '' -f "$fixture/host-key"
+          cp "$fixture/client-key.pub" "$fixture/authorized_keys"
+          printf '%s\n' \
+            'ListenAddress 127.0.0.1' "Port $port" \
+            "HostKey $fixture/host-key" "PidFile $fixture/sshd.pid" \
+            "AuthorizedKeysFile $fixture/authorized_keys" "AllowUsers $user" \
+            'PasswordAuthentication no' 'KbdInteractiveAuthentication no' \
+            'PubkeyAuthentication yes' 'UsePAM yes' 'StrictModes yes' \
+            'PermitUserRC no' 'PermitUserEnvironment no' 'DisableForwarding yes' \
+            "Subsystem sftp internal-sftp -d $fixture/remote-home" 'LoginGraceTime 15' \
+            "SetEnv HOME=$fixture/remote-home PATH=$fixture/bin:/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1" \
+            'SetEnv GH_TOKEN=inherited_fixture_secret GH_DEBUG=api DEBUG=1 GH_HOST=wrong.invalid GH_REPO=wrong/repo' \
+            > "$fixture/sshd_config"
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -t -f "$fixture/sshd_config"
+          sudo /usr/sbin/sshd -f "$fixture/sshd_config" -E "$fixture/sshd.log"
+          export MT_TEST_SSH_ROOT="$fixture" MT_TEST_SSH_PORT="$port"
+          export MT_TEST_SSH_USER="$user" MT_TEST_SSH_KEY="$fixture/client-key"
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export HOME="$fixture/client-home" GIT_CONFIG_NOSYSTEM=1
+          run_fixture() {
+            local test="$1" listing
+            listing=$(timeout 5m cargo test --locked -p mt-app --bin mini-term \
+              "$test" -- --list --ignored --exact)
+            if [ "$(printf '%s\n' "$listing" | sed -n '/: test$/p')" != "$test: test" ]; then
+              printf 'Expected exactly one ignored fixture: %s\n' "$test" >&2
+              return 1
+            fi
+            timeout 5m cargo test --locked -p mt-app --bin mini-term \
+              "$test" -- --ignored --exact --test-threads=1
+          }
+          run_fixture git_backend::tests::actions_fixtures::actual_loopback_ssh_git_backend_reads_writes_epoch_and_sftp_containment
+          run_fixture git_backend::tests::actions_fixtures::actual_loopback_ssh_dispatched_timeout_keeps_ownership_until_explicit_review
+          run_fixture remote_ssh::tasks_accounts::tasks_account_executor_ssh_sentinels_cleanup_and_epoch_pipeline
+          run_fixture remote_ssh::transfer::epoch_tests::actual_loopback_sftp_files_pins_mutations_and_containment
+          run_fixture remote_ssh::dirs::browser_tests::actual_loopback_sftp_browser_preserves_source_and_epoch
+
       - name: Sidecar test
         run: cargo test --manifest-path sidecars/Cargo.toml --locked --all-targets
 
@@ -247,9 +316,92 @@ jobs:
           cargo test --locked --target x86_64-pc-windows-msvc \
             -p mt-app --bin mini-term --no-fail-fast \
             remote_directory_picker
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-app --bin mini-term --no-fail-fast \
+            remote_ssh::transfer::epoch_tests
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-app --bin mini-term --no-fail-fast \
+            remote_ssh::delete::epoch_tests
+
+      - name: Run Tasks account isolation regressions
+        shell: bash
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-app --bin mini-term --no-fail-fast \
+            tasks_account_executor
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-app --bin mini-term --no-fail-fast \
+            github_tasks
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-config --no-fail-fast tasks_account_choices
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-github --lib --no-fail-fast
+
+      - name: Run Git host and panel regressions
+        shell: bash
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-project --lib --no-fail-fast git::cli
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-project --lib --no-fail-fast git::local
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-app --bin mini-term --no-fail-fast git_
 
       - name: Check sidecars
         run: cargo check --manifest-path sidecars/Cargo.toml --locked --target x86_64-pc-windows-msvc --all-targets
 
       - name: Run terminal host regressions
         run: cargo test --locked --target x86_64-pc-windows-msvc -p mt-terminal-host --all-targets --no-fail-fast
+
+  tasks-wsl-rootfs:
+    name: Prepare isolated Tasks WSL fixture
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare checksum-pinned synthetic gh rootfs
+        run: node .github/scripts/tasks_wsl_fixture.mjs prepare
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tasks-wsl-rootfs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mt-tasks-rootfs-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          compression-level: 3
+          retention-days: 1
+
+  tasks-wsl:
+    name: Tasks actual WSL transport
+    needs: tasks-wsl-rootfs
+    # This image explicitly provides WSL 1. Do not silently replace this gate
+    # with a POSIX-envelope test or a distro belonging to the runner image.
+    runs-on: windows-2022
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: . -> target
+      - uses: actions/download-artifact@v8
+        with:
+          name: tasks-wsl-rootfs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mt-tasks-rootfs-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Import only the same-run isolated WSL fixture
+        run: node .github/scripts/tasks_wsl_fixture.mjs import
+      - name: Discover and run the exact actual WSL transport test
+        timeout-minutes: 60
+        run: node .github/scripts/tasks_wsl_fixture.mjs test
+      - name: Remove only this run's disposable WSL distro
+        if: ${{ always() }}
+        timeout-minutes: 10
+        run: node .github/scripts/tasks_wsl_fixture.mjs cleanup

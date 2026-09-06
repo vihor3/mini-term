@@ -38,7 +38,7 @@ impl RemoteProjectContext {
         }
     }
 
-    fn validate(&self) -> Result<(), String> {
+    pub(super) fn validate(&self) -> Result<(), String> {
         if connection_fingerprint(&self.connection) != self.connection_fingerprint {
             return Err("SSH connection configuration changed before dispatch".into());
         }
@@ -575,7 +575,7 @@ async fn ensure_current(
     Ok(())
 }
 
-async fn ensure_operation_session(
+pub(super) async fn ensure_operation_session(
     st: &RemoteSshState,
     context: &RemoteProjectContext,
     session: &Arc<CachedSession>,

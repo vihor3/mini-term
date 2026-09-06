@@ -16,15 +16,16 @@
 | Child | State | Evidence |
 | --- | --- | --- |
 | native-terminal-navigation | CI/package passed / Native pending | Full CI33997336854 and package33997336860 passed for `f7b8a7e`; ci.36 artifact accepted, native interaction remains open |
-| native-agent-ownership-status | Reviewing | App source complete under Bohr's combined check; lower correlation/silence follow-ups underway |
-| native-file-browser | Reviewing | Onboarding source-complete; FileTree review extends exact epoch/provenance through retained operations |
-| native-remote-git | Implementing | Domain independently reviewed, 35 tests authored; host adapter implementing; Git UI not dispatched |
-| native-tasks-gh-accounts | Implementing | Domain source-complete, 20 tests authored; dedicated executor and separate Tasks app/config integration underway |
+| native-agent-ownership-status | Reviewing | Source-owned weak detection episodes and accepted supersession are being integrated across runtime and app projections |
+| native-file-browser | Reviewing | FileTree P1 fixes source-complete; Pauli now independently checks R11 onboarding/browser |
+| native-remote-git | Implementing | CLI Actions found one history-body parity failure; backend follow-up and Kepler's full Git UI integration underway |
+| native-tasks-gh-accounts | Reviewing | Domain/executor/app/config source-complete; Noether owns combined independent check; Actions remain open |
 
 ## Current Dispatch
 
 Main active task: `.trellis/tasks/09-06-native-remote-git`.
-Navigation remains open pending Actions and native acceptance, not archived.
+Navigation remains open pending native acceptance, not archived; its exact
+candidate's Actions CI and packaging are complete.
 Agent implementation remains in progress under the explicit owners below.
 The default serialized delivery order is relaxed only for explicitly disjoint
 source slices. Shared store/main/execution-host ownership and integrated review
@@ -55,6 +56,10 @@ Rawls completed and is closed. Combined app reviewer Bohr
 `01a073cb-f945-7173-a9d6-ebcdfe8b97fc` owns that app slice and `app-review.md`.
 Main additionally authorized Agent freshness rendering only in `main.rs` and
 `jump_palette.rs`; module registration lines remain with their separate owners.
+Bohr also owns the narrow `branch_family.rs` history-source capture and `ai.rs`
+source event/test consumers needed by the new episode contract. History jumps
+must distinguish absent, exact, ambiguous, and mismatched owners; ambiguity
+cannot select the first run or silently resume into another terminal.
 Bohr found a pre-title in-flight inventory incorrectly usable as a post-title
 foreground sample and is adding a request-scheduling-time fence. Lower fixes
 and the remaining monitor silence inference are coordinated with Leibniz.
@@ -383,3 +388,229 @@ link was shared with the user; native acceptance still requires observations.
 After both runs finished, main pushed `71af516e938003a678d8f532b79bb51f43aa6c60`.
 CI `33998592134` and package `33998592120` now validate the reviewed CLI domain
 candidate, not the uncommitted Git app adapter or other feature slices.
+
+CLI candidate `71af516` stopped at Actions formatting; its runs were superseded
+after main applied the complete three-file U3 artifact and pushed `57d8196`.
+CI `33998882225` and package `33998882220` own that candidate. Linux formatting,
+i18n, locked graphs and compilation pass; remaining gates are pending at this
+checkpoint. No local formatter or fixture executed.
+
+Lower Agent and app reviewers are implementing the approved lifecycle follow-up:
+real input mints an opaque weak-detection episode; status/session events and
+scheduled inventories carry it. Accepted stronger exact-route evidence records
+sticky fallback supersession, not an identity merge or invented process exit.
+All app liveness/title/close/count projections must exclude superseded audit
+rows. Event receipt time, fresh polling and a new SSH epoch cannot revive an old
+episode; a genuine later source episode can create a new fallback identity.
+
+Main authored an Actions-only disposable loopback SSH step, with early cleanup,
+isolated client/server homes, keys below RUNNER_TEMP, synthetic gh environment,
+and explicit ignored Git/Tasks transport tests. Turing owns the shared read-only
+fixture configuration helper in remote_ssh/git_ops.rs; Files and Tasks consume
+it without creating a second setup framework. The setup and new fixtures remain
+UNRUN and unstaged with their source. Nothing connects to the user's devices.
+
+Copernicus completed its executor source handoff (10 authored tests, including
+native Windows process ownership and an ignored authenticated SSH fixture) and
+released its files. Domain/executor independent review and Actions are still
+open. WSL/SSH require Python 3.8+; native Windows does not. Main is releasing the
+slot for Git UI integration; Tasks app/config ownership remains with Herschel.
+
+Kepler `01a073fa-ed3f-7f42-909f-3748951f8f1b` now owns the five Git UI modules
+(`git_panel`, `git_changes`, `git_history`, `git_diff`, `git_worktree`) and their
+private children/tests. External legacy callers require coordinated updates,
+not unannounced signature changes. Backend/domain/store/Files/Tasks/navigation
+are outside its write set. It records an early `ui-handoff.md` and consumes the
+actual backend API. All reachable worktree actions remain part of this delivery.
+
+CLI CI `33998882225` Linux job `101394109884` passed formatting, compilation
+and Clippy, then found one failing actual-history parity test: CLI body retains
+`root body\n`, while existing libgit2 yields `root body`. mt-project reports
+169 passed / 1 failed. Main authorized Turing's narrow CLI parser/test correction;
+do not weaken the parity assertion. Windows and package jobs are still running.
+
+Herschel completed the Tasks app/config source handoff (17 app and two config
+tests authored, UNRUN) and is closed. Noether
+`01a07400-eef7-7f23-a583-3d13a4121f25` now owns combined independent Tasks
+domain/executor/app/config review and bounded fixes, including the actual SSH
+fixture, with no shared execution-host/store/Git/navigation ownership. Its
+report is `native-tasks-gh-accounts/review.md`; main owns specs and CI.
+
+Pauli's FileTree follow-up is source-complete: producing listing provenance,
+retained mutation/download pins and independent busy/presentation ownership.
+Main added the exact ignored SFTP test and Windows delete/config filters to
+draft CI. Pauli now continues independent R11 review of Raman's picker and
+onboarding slice, preserving Files APIs and the browser interface now consumed
+by Git UI. Report: `native-file-browser/onboarding-review.md`. Native geometry,
+mid-dispatch transport interruptions and all exact-SHA Actions gates remain
+separate from source review.
+
+Turing's backend/new-local-helper source handoff is complete and its slot is
+closed. Resumed McClintock `01a073bc-d8ba-77c2-9822-07fc11343632` first checks
+the separately stageable two-file CLI body repair, then independently checks
+the new host adapter/local helper and loopback fixture. Git UI remains Kepler's
+disjoint write set. Reports: `cli-parity-review.md` and `backend-review.md`.
+
+CI `33998882225` is completed FAILURE: Windows job `101394109787` passed;
+Linux's sole reported failure is the history-body parity assertion. Package
+`33998882220` completed SUCCESS, but that installer is not a passing full gate
+or evidence for any uncommitted slice. The accepted navigation-only artifact
+remains the previously shared f7b8a7e candidate.
+
+Main revised the draft loopback sshd to `UsePAM yes`, keeping password and
+keyboard-interactive authentication disabled. This avoids the portable OpenSSH
+non-PAM locked-account gate without unlocking/mutating a runner account;
+[auth.c](https://github.com/openssh/openssh-portable/blob/V_8_9_P1/auth.c#L127)
+contains that condition. Explicit isolated HOME/PATH `SetEnv` is applied after
+PAM environment import in
+[session.c](https://github.com/openssh/openssh-portable/blob/V_8_9_P1/session.c#L1084).
+The draft is still UNRUN; an authenticated fixture pass must confirm setup.
+
+Main committed/pushed the independently reviewed two-file CLI body repair plus
+its source contract/report as `68b6a60238f98290f68e20d478d8c5a1ccd965c9`.
+CI `34000677142` and package `34000677088` own that narrow candidate. All new
+Agent/Files/Tasks/host-adapter/Git-UI work stays unstaged. No hooks or validation
+commands ran locally.
+
+Kepler's Git UI ownership is now narrowed to panel/changes/history/diff and
+their private helpers/tests. Mill `01a0740e-0933-7001-bf04-0eb98b6da1d2` took
+over the already partially edited `git_worktree.rs` without resetting it, and
+owns a new `store/git_worktree_cleanup.rs`, its module/export lines, narrow
+project-location matcher reuse, and close-request accessor visibility. It
+preserves Agent fields/test initializers and flat navigation behavior. Existing
+`open_repository(GitRepository, on_changed, window, cx)` is retained; the new
+opaque cleanup guard cannot treat a terminal-close focus-handoff bool as success.
+It must prove exact captured target absence and empty unchanged alias inventories
+before Git/config finalization. See `worktree-handoff.md`.
+
+Leibniz's lower source review is complete and its slot is closed. Bohr's final
+app pass found an additional real race: an old accepted empty inventory could
+unconditionally clear a later published OR pending input detection episode.
+Main authorized Bohr's narrow tracker conditional-clear API/locking and its app
+consumer/tests, followed by independent lower review. Compare-and-clear must be
+atomic against input/echo promotion, not a check followed by plain clear.
+Main also clarified that genuinely later different-provider episode B is not
+the same-episode fallback alias A: older Hook evidence cannot supersede B merely
+because it remains retained. B stays Unknown until owned semantic/proof evidence;
+same-provider identity ambiguity is still rejected rather than guessed.
+
+Draft Windows CI additionally runs account-domain/config tests and Git CLI,
+native-libgit2 and app Git regression filters. All new steps and transport
+fixtures remain UNRUN until the corresponding integrated source is committed.
+
+CLI follow-up `68b6a60` stopped at one Actions formatting hunk in the new
+history fixture. Main inspected/applied the complete U3 diagnostic artifact,
+then committed/pushed `2c8d1f1408f04b204c0b87d00208edb384a20b0f`.
+CI `34000949862` passed Linux formatting/i18n/check/Clippy and Windows compile
+at the latest poll; tests and package `34000949832` are still in progress.
+No local formatting or test execution occurred. These runs cover the narrow
+CLI candidate, not the still-uncommitted feature integration.
+
+Bohr's app source handoff is complete and its slot is closed. Resumed Leibniz
+`01a0739f-6b07-71b1-a29d-99eb0bb1f750` independently reviews only the new
+conditional tracker-clear locking/API, its inventory consumer and matching
+regressions. The already completed runtime matching/probe policy is not being
+redesigned. Source completion is not an Actions/native acceptance claim.
+
+McClintock completed the Git backend review and released those source files.
+The new read-only `GitBackend::repository_for_file` selects the nearest actual
+repository for a literal project-relative file, including nested/deleted-file
+cases, without a remote-to-local fallback. Kepler consumes the API. Pauli owns
+the separate FileTree caller correction that preserves POSIX backslashes.
+Pauli is also authorized to make `probe_connection` obtain authenticated Home
+directly from its current SFTP session, bypassing the connection-ID-only legacy
+home cache without changing unrelated cache consumers. The exact authenticated
+browser fixture has been added to draft CI, still UNRUN.
+
+Noether continues the approved explicit foreground Tasks cache revalidation and
+narrow WorkItem activation hooks. Main authored an isolated actual-WSL CI gate:
+a checksum-pinned Canonical rootfs plus same-run synthetic gh ELF artifact,
+Windows 2022 import into a unique run/attempt-owned WSL 1 distro, exact fixture
+discovery/execution and per-distro cleanup. The marker contract is the CURRENT
+Tasks review.md schema/kind/run/repository/sha object, not an earlier draft.
+Noether owns the wrapper and actual Windows test; main owns CI integration.
+McClintock now checks only that CI setup and shared loopback source, recording
+`native-tasks-gh-accounts/ci-review.md`. No real credential, user distro, SSH
+device or local validation command is used.
+
+CLI candidate `2c8d1f1` is now CI and package SUCCESS: `34000949862` Linux
+`101399624211` and Windows `101399624267`, plus package `34000949832`.
+Linux mt-project reports 172 passes/zero failures, with the original merge-
+history DTO parity and both body-whitespace regressions explicitly passing.
+Artifact `9979775690` is `Mini-Term_1.2.2-ci.40_windows-x64`. Scope is recorded
+in the Git child's `validation.md`; it does not cover any uncommitted slice.
+
+Pauli released completed R11/FileTree follow-up source. Kepler released all
+four Git UI modules and closed; Mill released Worktree Management plus exact
+store cleanup and closed. Pauli now owns independent four-Git-UI check;
+resumed Bohr owns only independent Worktree/store check. Reports are `ui-review.md`
+and `worktree-review.md`. The remote guard stays until reviewed routing is
+confirmed. Files APIs/source and completed backend/local helpers are released.
+
+The Agent conditional-clear review found a second producer boundary: delayed
+last-Hook SessionEnd still unconditionally cleared a later unhooked detection.
+Main read the actual handler and authorized Leibniz's bounded captured Hook-
+session/episode lifecycle fix and production-handler regressions. Repeated
+older Hook events must not borrow the new input episode or overwrite its weak
+detection either. Wire payload/route/port and runtime matching policy remain
+unchanged. Agent commit is held for this concrete source blocker and subsequent
+independent producer review; no passing Agent gate is claimed.
+
+Noether released the completed Tasks cache/activation/WSL follow-up and closed.
+Its report now records 24 app and 12 cross-platform executor authored functions
+(not passes), plus 20 domain and two config cases. McClintock released reviewed
+CI setup and closed: exact ignored discovery, isolated SFTP initial cwd,
+same-run WSL provenance, ELF header and bounded only-owned cleanup. No new
+fixture has run yet. Main updated the Tasks foreground-access contract.
+
+Main's direct producer read also found nonlast Hook ends never publish an exact
+rich exit, while the app only has unique-Hook fallback. Leibniz's same bounded
+producer change now also owns the minimal INTERNAL Hook session identity event
+and app bridge/ingestion tests needed to retire the exact captured Hook. Keep
+external serialization/HTTP/route protocol unchanged, leave runtime matching
+policy intact and require actual producer-to-registry lifecycle regressions.
+
+Git source reviewers found concrete follow-ups: Pauli fences Changes row/menu
+requests and separates diff close-instance ownership from read invalidation;
+Bohr retains removal confirmation/source before each subsequent terminal close
+and requires matched destructive bindings to own the actual target location.
+Both continue in their disjoint scopes; remote enablement waits for release.
+
+Pauli released the completed four-Git-UI review (seven additional authored
+regressions, all UNRUN). Main accepts the current literal-English Git
+diagnostic/review/draft style for this bounded slice, as already accepted for
+Tasks; existing translations remain, and no broad localization refactor or new
+Git keys is added. The combined Files/onboarding delta remains 16 keys.
+
+Pauli found `GitBackend::connect` read the anchor on a replacement epoch before
+the UI could reject it. Resumed McClintock owns only the before-anchor captured-
+epoch check and narrow tests; explicit write-reconciliation reconnect remains
+separate. Bohr has received Pauli's private two-lifetime dialog-close pattern,
+without a shared API change. Worktree source review and Agent producer work
+still block their source gates; no feature-integrated candidate is pushed yet.
+
+Main prepared `/tmp/mini-term-agent-shared-index.patch` only for later selective
+staging: it contains the four Agent hunks in main.rs/store/mod.rs/projects.rs.
+After staging a reviewed non-Agent candidate's full shared files, reverse that
+patch in the INDEX ONLY to keep unfinished Agent hunks out, then inspect the
+cached diff. The INDEX-ONLY reverse patch has now been applied successfully;
+61 reviewed non-Agent code/CI files are staged, with only the non-Agent module,
+export and location-helper hunks in those shared files. Working source is
+unchanged. Do not re-add those shared files wholesale, revert working files or
+include the original unrelated dirty paths.
+
+Bohr's final Worktree action matrix is source-complete and released, including
+captured removal source/lifetime, trusted destructive target binding, separately
+captured skipped saved_layout, registration aliases/drafts and modal disposal.
+McClintock released the before-anchor epoch fix. Pauli then removed only the
+obsolete private remote predicate and render guard; every reachable Git action
+now uses the released host-aware path. Main is staging owned non-Agent specs,
+reports and plans with that candidate. New integrated Actions/native gates are
+still UNRUN, not implied by the earlier CLI success.
+
+Leibniz released the two Agent producer fixes and exact internal Hook status/
+exit bridge. Resumed Bohr independently reviews only this producer/bridge
+follow-up, leaving staged Worktree and other non-Agent files alone. One concrete
+remaining issue is explicit same-ID resume being rejected by the rich runtime's
+ended-run guard; a minimal lifecycle-start API decision is requested before any
+runtime change. Agent code remains unstaged until that source gate completes.

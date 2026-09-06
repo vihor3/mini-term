@@ -11,22 +11,29 @@ implementation/Actions plans, not authorized live Git commands on user projects.
   every reachable Git child/dialog call before removing the remote guard.
 - [x] Add transport-free plans/parsers and narrowly expose reusable DTO/diff
   functions; preserve explicit Local/WSL/SSH dispatch and literal path semantics.
-- [ ] Implement bounded read and epoch-pinned mutation adapters with explicit
+- [x] Implement bounded read and epoch-pinned mutation adapters with explicit
   uncertain outcomes and a source-owned conflicting-write coordinator.
-- [ ] Route repository/ref/status/history/diff loads with full request authority,
+- [x] Route repository/ref/status/history/diff loads with full request authority,
   truthful loading/stale/error state, and independent worktree caches.
-- [ ] Route stage/unstage/discard/commit/pull/push; preserve confirmations,
+- [x] Route stage/unstage/discard/commit/pull/push; preserve confirmations,
   host Git configuration, drafts, and partial/late-effect reconciliation.
-- [ ] Route every Worktree Management action through host-aware inventory,
+- [x] Route every Worktree Management action through host-aware inventory,
   destination browsing, registration, and exact destructive target validation.
-- [ ] Enable the remote panel only after all reachable operations are host-aware;
+- [x] Enable the remote panel only after all reachable operations are host-aware;
   request main's Trellis check and update affected specs after evidence agrees.
+- [ ] Obtain integrated exact-SHA Actions and matching native acceptance.
 
-The domain slice is source-complete and independently reviewed, including
-directory-status metadata and 35 authored tests. None have executed yet.
-The host adapter is implementing; UI/actions/dialog integration and every
-Actions/native acceptance gate remain open. See the two domain handoffs and
-`backend-handoff.md`; checked source steps are not a passing feature gate.
+The domain and host adapters are source-complete and independently reviewed,
+including the nearest-file resolver and SSH-alias shared-write lease correction.
+The domain correction at `2c8d1f1` passed CI `34000949862` and package
+`34000949832`, including 172 mt-project tests. That narrow result does not
+validate this newly staged integration. Pauli completed the independent four-UI
+review and authorized remote enablement; Bohr completed Worktree Management and
+exact guarded terminal/configuration cleanup review. McClintock completed the
+before-anchor captured-epoch correction. All source slices are released and
+the obsolete remote-only render guard is removed. Integrated Actions/native
+acceptance remains open. See `backend-review.md`, `ui-review.md`,
+`worktree-review.md` and `validation.md`; checked source steps are not a pass.
 
 ## Actions-Only Cases
 

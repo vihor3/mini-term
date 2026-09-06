@@ -49,6 +49,117 @@ pub enum HostSignature {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DirectorySource {
+    Local,
+    Wsl {
+        distro: String,
+    },
+    Ssh {
+        connection_id: String,
+        connection_fingerprint: u64,
+        connection_epoch: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DirectoryLocation {
+    pub source: DirectorySource,
+    /// Native paths for Local; POSIX paths for WSL and SSH. A pending home
+    /// navigation uses `~`; successful listings always return absolute paths.
+    pub path: String,
+}
+
+impl DirectoryLocation {
+    pub fn host_path(&self) -> Result<String, DirectoryBrowseError> {
+        match &self.source {
+            DirectorySource::Wsl { distro } => wsl_browser_host_path(distro, &self.path),
+            DirectorySource::Local | DirectorySource::Ssh { .. } => Ok(self.path.clone()),
+        }
+    }
+}
+
+fn wsl_browser_host_path(distro: &str, path: &str) -> Result<String, DirectoryBrowseError> {
+    let invalid = || {
+        DirectoryBrowseError::new(
+            DirectoryBrowseErrorKind::InvalidPath,
+            "The WSL directory cannot be represented faithfully by a host-visible UNC path",
+        )
+    };
+    if !path.starts_with('/') || super::ops::validate_portable_basename(distro).is_err() {
+        return Err(invalid());
+    }
+    let mut depth = 0usize;
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => continue,
+            ".." => depth = depth.checked_sub(1).ok_or_else(invalid)?,
+            name => {
+                super::ops::validate_portable_basename(name).map_err(|_| invalid())?;
+                depth += 1;
+            }
+        }
+        components.push(component);
+    }
+    let root = crate::execution_host::wsl_host_visible_path(distro, "/")
+        .map_err(|_| invalid())?;
+    // Never join unchecked POSIX text with a native Path: drive/UNC prefixes
+    // and literal POSIX backslashes can redirect native I/O to another source.
+    Ok(if components.is_empty() {
+        root
+    } else {
+        format!("{root}\\{}", components.join("\\"))
+    })
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DirectoryEntry {
+    pub name: String,
+    pub location: DirectoryLocation,
+    pub is_symlink: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DirectoryListing {
+    pub location: DirectoryLocation,
+    pub directories: Vec<DirectoryEntry>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DirectoryBrowseErrorKind {
+    InvalidPath,
+    PermissionDenied,
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DirectoryBrowseError {
+    pub kind: DirectoryBrowseErrorKind,
+    pub detail: String,
+}
+
+impl DirectoryBrowseError {
+    pub fn new(kind: DirectoryBrowseErrorKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into().chars().take(1024).collect(),
+        }
+    }
+
+    pub fn from_io(error: std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        let kind = match error.kind() {
+            ErrorKind::PermissionDenied => DirectoryBrowseErrorKind::PermissionDenied,
+            ErrorKind::NotFound | ErrorKind::NotADirectory | ErrorKind::InvalidInput => {
+                DirectoryBrowseErrorKind::InvalidPath
+            }
+            _ => DirectoryBrowseErrorKind::Unavailable,
+        };
+        Self::new(kind, error.to_string())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostStatus {
     Ready { observed_epoch: Option<u64> },
     Connecting,
@@ -543,6 +654,34 @@ pub fn checked_next(value: u64) -> Result<u64, OnboardingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_wsl_unc_mapping_rejects_native_redirection_and_unrepresentable_names() {
+        let location = |path: &str| DirectoryLocation {
+            source: DirectorySource::Wsl { distro: "Ubuntu".into() },
+            path: path.into(),
+        };
+        assert_eq!(location("/home/User/.config").host_path().unwrap(), r"\\wsl.localhost\Ubuntu\home\User\.config");
+        assert_eq!(location("/home/../etc").host_path().unwrap(), r"\\wsl.localhost\Ubuntu\home\..\etc");
+        assert_eq!(location("/").host_path().unwrap(), r"\\wsl.localhost\Ubuntu");
+        for path in [
+            r"/C:\client\folder", r"/\\server\share", r"/\\?\C:\client", r"/a\b",
+            "/colon:name", "/CON", "/file.", "/file ", "/nul\0name", "/../other",
+            "/home/../../other", "relative", "",
+        ] {
+            assert_eq!(location(path).host_path().unwrap_err().kind, DirectoryBrowseErrorKind::InvalidPath, "{path:?}");
+        }
+        for distro in ["", "..", r"Ubuntu\other", "Ubuntu/other", "C:", "Ubuntu."] {
+            assert!(wsl_browser_host_path(distro, "/home").is_err(), "{distro:?}");
+        }
+        let ssh = DirectoryLocation {
+            source: DirectorySource::Ssh {
+                connection_id: "remote".into(), connection_fingerprint: 1, connection_epoch: 2,
+            },
+            path: r"/C:\client\folder".into(),
+        };
+        assert_eq!(ssh.host_path().unwrap(), ssh.path);
+    }
 
     fn ssh(id: &str, fingerprint: u64) -> ProjectHostSelection {
         ProjectHostSelection::Ssh {

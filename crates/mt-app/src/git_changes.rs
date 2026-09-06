@@ -31,11 +31,14 @@ use gpui::{
     IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use mt_identity::WorktreeId;
 use mt_project::git::{ChangeFileStatus, GitStatus};
+use mt_project::git::cli::RepositoryAuthority;
 
 use crate::git_panel::{GitScope, swap_worktree_scope};
+use crate::git_panel::host_ui;
+use crate::git_backend::{GitRead, GitReadValue, GitRepository, GitWrite, PreparedGitWrite};
 use crate::i18n::{t, tr};
 use crate::menu;
 use crate::prompt::Confirm;
@@ -53,8 +56,9 @@ gpui::actions!(
 
 /// 「更改」区往上冒的事件。原版是 `onCommitSuccess` 这个 prop。
 pub(crate) enum GitChangesEvent {
-    /// 提交成功 —— 容器要刷新对应仓库的历史与分支(分支头已前移)。
-    Committed(GitScope, String),
+    /// Known or possible effects require source-owned reconciliation, including errors.
+    Reconciled(GitScope, GitRepository),
+    StatusLoaded(GitScope, GitRepository, mt_project::git::cli::HeadState),
 }
 
 /// 三个分组。`area` 既决定取哪一个 status,也进 `ElementId` 前缀。
@@ -213,6 +217,7 @@ fn flatten_tree(
 
 struct GitChangesScopeState {
     repo_path: String,
+    repo_authority: Option<RepositoryAuthority>,
     changes: Vec<ChangeFileStatus>,
     collapsed_dirs: HashSet<String>,
     commit_draft: String,
@@ -224,6 +229,7 @@ impl GitChangesScopeState {
     fn empty() -> Self {
         Self {
             repo_path: String::new(),
+            repo_authority: None,
             changes: Vec::new(),
             collapsed_dirs: HashSet::new(),
             commit_draft: String::new(),
@@ -238,10 +244,33 @@ struct GitChangesOwner {
     scope: GitScope,
     repo_generation: u64,
     repo_path: String,
+    authority: Option<RepositoryAuthority>,
 }
 
 fn git_changes_owner_matches(request: &GitChangesOwner, current: &GitChangesOwner) -> bool {
     request == current
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GitChangesActionOwner {
+    owner: GitChangesOwner,
+    status_request: u64,
+}
+
+fn changes_action_matches(captured: &GitChangesActionOwner, current: &GitChangesActionOwner, status_current: bool) -> bool {
+    status_current && captured == current
+}
+
+fn commit_draft_should_clear(succeeded: bool, revision: u64, current_revision: u64, message: &str, draft: &str) -> bool {
+    succeeded && revision == current_revision && draft.trim() == message
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct RetainedDraft {
+    scope: GitScope,
+    repo_path: String,
+    authority: Option<RepositoryAuthority>,
+    message: String,
 }
 
 fn mark_cached_git_changes_refresh(
@@ -267,11 +296,24 @@ pub struct GitChanges {
     /// 空串 = 无仓库。此时 `load` 直接 return(既不 loading 也不报错,
     /// 停在「暂无变更」——`GitChanges.tsx:115`)。
     repo_path: String,
+    repository: Option<GitRepository>,
+    repo_authority: Option<RepositoryAuthority>,
+    cache_sources: HashMap<WorktreeId, GitScope>,
+    retained_drafts: Vec<RetainedDraft>,
+    load_error: Option<String>,
+    operation_error: Option<String>,
+    status_current: bool,
+    untracked_directories: Vec<String>,
+    write_request: u64,
+    draft_revision: u64,
+    pending_clear_revision: Option<u64>,
+    _draft_subscription: gpui::Subscription,
     scope: GitScope,
     scope_cache: HashMap<WorktreeId, GitChangesScopeState>,
     repo_generation: u64,
     changes: Vec<ChangeFileStatus>,
     loading: bool,
+    refresh_again: bool,
     commit_input: Entity<InputState>,
     pending_commit_draft: Option<String>,
     committing: bool,
@@ -295,14 +337,30 @@ impl GitChanges {
                 .rows(3)
                 .placeholder(t("panels", "commitPlaceholder"))
         });
+        let draft_subscription = cx.subscribe(&commit_input, |this: &mut Self, _, event, _| {
+            if matches!(event, InputEvent::Change) { this.draft_revision = this.draft_revision.wrapping_add(1); }
+        });
         Self {
             store,
             repo_path: String::new(),
+            repository: None,
+            repo_authority: None,
+            cache_sources: HashMap::new(),
+            retained_drafts: Vec::new(),
+            load_error: None,
+            operation_error: None,
+            status_current: false,
+            untracked_directories: Vec::new(),
+            write_request: 0,
+            draft_revision: 0,
+            pending_clear_revision: None,
+            _draft_subscription: draft_subscription,
             scope: GitScope::unbound(),
             scope_cache: HashMap::new(),
             repo_generation: 0,
             changes: Vec::new(),
             loading: false,
+            refresh_again: false,
             commit_input,
             pending_commit_draft: None,
             committing: false,
@@ -314,11 +372,40 @@ impl GitChanges {
         }
     }
 
+    fn current_repository(&self, cx: &gpui::App) -> Option<GitRepository> {
+        self.repository.as_ref().filter(|repo| host_ui::active_repository(repo, &self.store, cx)).cloned()
+    }
+
+    fn can_write(&self, cx: &gpui::App) -> bool {
+        self.status_current && !self.loading && self.mutations_in_flight == 0
+            && self.current_repository(cx).is_some_and(|repo| repo.busy().is_none())
+    }
+
+    fn recoverable_draft(&self) -> Option<RetainedDraft> {
+        self.retained_drafts.iter().rev().find(|draft| {
+            draft.scope.same_draft_context(&self.scope)
+                && draft.repo_path == self.repo_path
+                && draft.authority.is_some() && draft.authority == self.repo_authority
+        }).cloned()
+    }
+
+    fn retain_draft(&mut self, scope: GitScope, state: &GitChangesScopeState) {
+        if !state.commit_draft.is_empty() {
+            self.retained_drafts.push(RetainedDraft {
+                scope,
+                repo_path: state.repo_path.clone(),
+                authority: state.repo_authority.clone(),
+                message: state.commit_draft.clone(),
+            });
+        }
+    }
+
     fn current_owner(&self) -> GitChangesOwner {
         GitChangesOwner {
             scope: self.scope.clone(),
             repo_generation: self.repo_generation,
             repo_path: self.repo_path.clone(),
+            authority: self.repo_authority.clone(),
         }
     }
 
@@ -326,21 +413,38 @@ impl GitChanges {
         git_changes_owner_matches(owner, &self.current_owner())
     }
 
+    fn action_owner(&self) -> GitChangesActionOwner {
+        GitChangesActionOwner { owner: self.current_owner(), status_request: self.request }
+    }
+
+    fn action_matches(&self, owner: &GitChangesActionOwner, cx: &gpui::App) -> bool {
+        changes_action_matches(owner, &self.action_owner(), self.status_current)
+            && owner.owner.scope.matches_active(&self.store, cx)
+    }
+
     fn reconcile_stale_mutation(&mut self, owner: &GitChangesOwner, cx: &mut Context<Self>) {
-        if self.scope.same_cache_identity(&owner.scope) && self.repo_path == owner.repo_path {
+        if self.scope.same_cache_identity(&owner.scope) && self.repo_path == owner.repo_path
+            && self.repo_authority == owner.authority {
             self.load(cx);
             return;
         }
-        mark_cached_git_changes_refresh(&mut self.scope_cache, &owner.scope, &owner.repo_path);
+        if owner.scope.cache_key().and_then(|key| self.cache_sources.get(key))
+            .is_some_and(|scope| scope.same_source(&owner.scope))
+            && owner.scope.cache_key().and_then(|key| self.scope_cache.get(key))
+                .is_some_and(|state| state.repo_authority == owner.authority) {
+            mark_cached_git_changes_refresh(&mut self.scope_cache, &owner.scope, &owner.repo_path);
+        }
     }
 
     fn take_scope_state(&mut self, cx: &mut Context<Self>) -> GitChangesScopeState {
-        let commit_draft = self
+        let mut commit_draft = self
             .pending_commit_draft
             .take()
             .unwrap_or_else(|| self.commit_input.read(cx).value().to_string());
+        if self.pending_clear_revision.take() == Some(self.draft_revision) { commit_draft.clear(); }
         GitChangesScopeState {
             repo_path: std::mem::take(&mut self.repo_path),
+            repo_authority: self.repo_authority.take(),
             changes: std::mem::take(&mut self.changes),
             collapsed_dirs: std::mem::take(&mut self.collapsed_dirs),
             commit_draft,
@@ -351,16 +455,20 @@ impl GitChanges {
 
     fn install_scope_state(&mut self, state: GitChangesScopeState) -> bool {
         self.repo_path = state.repo_path;
+        self.repo_authority = state.repo_authority;
         self.changes = state.changes;
         self.collapsed_dirs = state.collapsed_dirs;
         self.pending_commit_draft = Some(state.commit_draft);
         self.scroll = state.scroll;
+        self.pending_clear_revision = None;
         state.refresh_needed
     }
 
     /// 换 worktree / 仓库(容器调)。空串 = 无仓库。
-    pub(crate) fn set_repo(&mut self, scope: GitScope, repo_path: &str, cx: &mut Context<Self>) {
+    pub(crate) fn set_repository(&mut self, scope: GitScope, repo_path: &str, repository: Option<GitRepository>, cx: &mut Context<Self>) {
         let scope_changed = self.scope != scope;
+        let became_ready = self.repository.is_none() && repository.is_some();
+        self.repository = repository;
         let mut restored = true;
         let mut refresh_needed = false;
 
@@ -369,44 +477,71 @@ impl GitChanges {
             let current_key = self.scope.cache_key().cloned();
             let next_key = scope.cache_key().cloned();
             if current_key.is_some() || next_key.is_some() {
+                if let Some(key) = &current_key { self.cache_sources.insert(key.clone(), self.scope.clone()); }
                 let current_state = self.take_scope_state(cx);
-                let (state, was_cached) = swap_worktree_scope(
+                let (mut state, was_cached) = swap_worktree_scope(
                     &mut self.scope_cache,
                     current_key.as_ref(),
                     next_key.as_ref(),
                     current_state,
                     GitChangesScopeState::empty,
                 );
+                if !next_key.as_ref().and_then(|key| self.cache_sources.get(key))
+                    .is_some_and(|saved| saved.same_source(&scope)) {
+                    if let Some(saved) = next_key.as_ref().and_then(|key| self.cache_sources.get(key)).cloned() {
+                        self.retain_draft(saved, &state);
+                    }
+                    state = GitChangesScopeState::empty();
+                }
                 restored = was_cached;
                 refresh_needed = self.install_scope_state(state);
             } else {
                 self.scope_cache.clear();
+                self.cache_sources.clear();
+                if !self.scope.same_source(&scope) {
+                    let state = self.take_scope_state(cx);
+                    self.retain_draft(self.scope.clone(), &state);
+                    self.install_scope_state(GitChangesScopeState::empty());
+                }
             }
             self.scope = scope;
             self.repo_generation = self.repo_generation.wrapping_add(1);
             self.loading = false;
+            self.refresh_again = false;
             self.committing = false;
             self.mutations_in_flight = 0;
             self.debounce_until = None;
+            self.status_current = false;
+            self.untracked_directories.clear();
+            self.load_error = None;
+            self.operation_error = None;
+            self.write_request = self.write_request.wrapping_add(1);
         }
 
-        let repo_changed = self.repo_path != repo_path;
+        let authority = self.repository.as_ref().map(|repo| repo.authority().clone());
+        let authority_changed = authority.as_ref().zip(self.repo_authority.as_ref()).is_some_and(|(new, old)| new != old);
+        let repo_changed = self.repo_path != repo_path || authority_changed;
+        if authority.is_some() { self.repo_authority = authority; }
         if repo_changed {
             self.repo_path = repo_path.to_string();
             self.repo_generation = self.repo_generation.wrapping_add(1);
             self.request = self.request.wrapping_add(1);
             self.loading = false;
+            self.refresh_again = false;
             self.committing = false;
             self.mutations_in_flight = 0;
             self.debounce_until = None;
             self.changes.clear();
             self.collapsed_dirs.clear();
             self.scroll = ScrollHandle::new();
+            self.status_current = false;
+            self.untracked_directories.clear();
+            self.write_request = self.write_request.wrapping_add(1);
         }
 
         if self.repo_path.is_empty() {
             self.loading = false;
-        } else if repo_changed || (scope_changed && (!restored || refresh_needed)) {
+        } else if became_ready || repo_changed || (scope_changed && (!restored || refresh_needed)) {
             self.load(cx);
         }
 
@@ -432,30 +567,46 @@ impl GitChanges {
     }
 
     pub fn load(&mut self, cx: &mut Context<Self>) {
-        if self.repo_path.is_empty() {
-            return;
-        }
+        if self.loading { self.refresh_again = true; return; }
+        let Some(repository) = self.current_repository(cx) else { return; };
+        let request = match repository.request(GitRead::Status) {
+            Ok(request) => request,
+            Err(error) => { self.load_error = Some(error.to_string()); self.status_current = false; return; }
+        };
         self.loading = true;
-        self.request = self.request.wrapping_add(1);
+        self.status_current = false;
+        self.request = request.id();
         let req = self.request;
         let owner = self.current_owner();
-        let repo = std::path::PathBuf::from(&owner.repo_path);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { mt_project::git::get_changes_status(&repo) })
+                .spawn(async move { request.execute() })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
-                if this.request != req || !this.owner_matches(&owner) {
+                if this.request != req || !this.owner_matches(&owner) || !owner.scope.matches_active(&this.store, cx) {
                     return;
                 }
                 this.loading = false;
+                if std::mem::take(&mut this.refresh_again) {
+                    this.load(cx);
+                    return;
+                }
                 match result {
-                    Ok(list) => this.changes = list,
+                    Ok(result) => {
+                        let Some(current) = this.current_repository(cx) else { return; };
+                        if !result.is_current(&current, req) { return; }
+                        if let GitReadValue::Status(status) = result.value {
+                            cx.emit(GitChangesEvent::StatusLoaded(owner.scope.clone(), current, status.head));
+                            this.changes = status.changes;
+                            this.untracked_directories = status.untracked_directories;
+                            this.status_current = true;
+                            this.load_error = None;
+                        }
+                    }
                     Err(err) => {
-                        // 原版 `.catch(() => setChanges([]))` —— 失败即清空
-                        eprintln!("[git] 取变更失败: {err:#}");
-                        this.changes.clear();
+                        this.load_error = Some(err.to_string());
+                        this.status_current = false;
                     }
                 }
                 cx.notify();
@@ -481,87 +632,126 @@ impl GitChanges {
             .collect()
     }
 
-    /// 跑一件阻塞的 git 动作,完成后重取列表。失败静默(照原版)。
+    /// Workers retain their write lease through completion, even after the
+    /// panel changes source. UI ownership never substitutes for that lease.
     fn run_op(
         &mut self,
-        op: impl FnOnce(&std::path::Path) -> anyhow::Result<()> + Send + 'static,
+        op: GitWrite,
         cx: &mut Context<Self>,
     ) {
-        if self.repo_path.is_empty() {
-            return;
-        }
+        if !self.can_write(cx) { return; }
+        self.run_write(op, None, cx);
+    }
+
+    fn run_write(&mut self, op: GitWrite, prepared: Option<PreparedGitWrite>, cx: &mut Context<Self>) {
+        let Some(repository) = self.current_repository(cx) else { return; };
         let owner = self.current_owner();
-        let repo = std::path::PathBuf::from(&owner.repo_path);
-        self.mutations_in_flight += 1;
+        self.write_request = self.write_request.wrapping_add(1);
+        let write_request = self.write_request;
+        let draft_revision = self.draft_revision;
+        let message = match &op { GitWrite::Commit { message } => Some(message.clone()), _ => None };
+        self.committing = message.is_some();
+        self.mutations_in_flight = 1;
+        self.operation_error = None;
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { op(&repo) })
+                .spawn(async move {
+                    match prepared {
+                        Some(prepared) => Ok(prepared.execute()),
+                        None => repository.prepare_write(op).map(|prepared| prepared.execute()),
+                    }
+                })
                 .await;
-            if let Err(err) = result {
-                eprintln!("[git] 变更操作失败: {err:#}");
-            }
             let _ = this.update(cx, |this: &mut Self, cx| {
-                if !this.owner_matches(&owner) {
-                    this.reconcile_stale_mutation(&owner, cx);
+                if !this.owner_matches(&owner) || this.write_request != write_request || !owner.scope.matches_active(&this.store, cx) {
+                    if let Ok(outcome) = &result {
+                        this.reconcile_stale_mutation(&owner, cx);
+                        cx.emit(GitChangesEvent::Reconciled(owner.scope.clone(), outcome.repository().clone()));
+                    }
                     return;
                 }
-                this.mutations_in_flight = this.mutations_in_flight.saturating_sub(1);
+                this.mutations_in_flight = 0;
+                this.committing = false;
+                match result {
+                    Ok(outcome) => {
+                        let Some(current) = this.current_repository(cx) else { return; };
+                        if !outcome.is_current(&current, outcome.operation_id) { return; }
+                        this.operation_error = host_ui::outcome_error(&outcome);
+                        if message.as_deref().is_some_and(|message| commit_draft_should_clear(
+                            outcome.succeeded(), draft_revision, this.draft_revision, message, &this.commit_input.read(cx).value())) {
+                            this.pending_clear_revision = Some(draft_revision);
+                        }
+                        cx.emit(GitChangesEvent::Reconciled(owner.scope.clone(), outcome.repository().clone()));
+                    }
+                    Err(error) => this.operation_error = Some(error.to_string()),
+                }
                 this.load(cx);
+                cx.notify();
             });
         })
         .detach();
     }
 
     fn stage(&mut self, path: String, cx: &mut Context<Self>) {
-        self.run_op(move |repo| mt_project::git::git_stage(repo, &[path]), cx);
+        self.run_op(GitWrite::Stage { paths: vec![path] }, cx);
     }
 
     fn unstage(&mut self, path: String, cx: &mut Context<Self>) {
-        self.run_op(move |repo| mt_project::git::git_unstage(repo, &[path]), cx);
+        self.run_op(GitWrite::Unstage { paths: vec![path] }, cx);
     }
 
     fn stage_all(&mut self, cx: &mut Context<Self>) {
-        self.run_op(mt_project::git::git_stage_all, cx);
+        self.run_op(GitWrite::StageAll, cx);
     }
 
     fn unstage_all(&mut self, cx: &mut Context<Self>) {
-        self.run_op(mt_project::git::git_unstage_all, cx);
+        self.run_op(GitWrite::UnstageAll, cx);
     }
 
     fn discard(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        if paths.is_empty() {
-            return;
-        }
+        if paths.is_empty() || !self.can_write(cx) { return; }
+        let Some(repository) = self.current_repository(cx) else { return; };
         let count = paths.len();
-        let this = cx.entity();
         let owner = self.current_owner();
-        Confirm::new(
-            t("gitChanges", "discardTitle"),
-            tr!("gitChanges", "discardConfirm", count = count.to_string()),
-        )
-        .ok_text(t("gitChanges", "discardOk"))
-        .cancel_text(t("gitChanges", "discardCancel"))
-        .open(
-            move |_window, cx| {
-                let paths = paths.clone();
-                let owner = owner.clone();
-                this.update(cx, |this, cx| {
-                    if !this.owner_matches(&owner) {
-                        return;
-                    }
-                    this.run_op(
-                        move |repo| mt_project::git::git_discard_file(repo, &paths),
-                        cx,
-                    );
-                });
-            },
-            window,
-            cx,
-        );
+        self.write_request = self.write_request.wrapping_add(1);
+        let operation = self.write_request;
+        self.mutations_in_flight = 1;
+        self.operation_error = None;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let prepared = cx.background_executor().spawn(async move {
+                repository.prepare_write(GitWrite::Discard { paths })
+            }).await;
+            let _ = this.update_in(cx, |view, window, cx| {
+                if !view.owner_matches(&owner) || view.write_request != operation || !owner.scope.matches_active(&view.store, cx) { return; }
+                view.mutations_in_flight = 0;
+                let prepared = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(error) => { view.operation_error = Some(error.to_string()); cx.notify(); return; }
+                };
+                if view.current_repository(cx).is_none() { return; }
+                let selected = match prepared.operation() { GitWrite::Discard { paths } => paths.clone(), _ => return };
+                let slot = std::rc::Rc::new(std::cell::RefCell::new(Some(prepared)));
+                let entity = cx.entity();
+                Confirm::new(t("gitChanges", "discardTitle"), tr!("gitChanges", "discardConfirm", count = count.to_string()))
+                    .detail(selected)
+                    .ok_text(t("gitChanges", "discardOk"))
+                    .cancel_text(t("gitChanges", "discardCancel"))
+                    .open(move |_, cx| {
+                        entity.update(cx, |view, cx| {
+                            if !view.owner_matches(&owner) || view.write_request != operation || !view.can_write(cx) { return; }
+                            let Some(prepared) = slot.borrow_mut().take() else { return; };
+                            view.run_write(prepared.operation().clone(), Some(prepared), cx);
+                        });
+                    }, window, cx);
+                cx.notify();
+            });
+        }).detach();
     }
 
-    fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn commit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let message = self
             .pending_commit_draft
             .as_deref()
@@ -573,68 +763,32 @@ impl GitChanges {
             || self.group_indices(Area::Staged).is_empty()
             || self.committing
             || self.repo_path.is_empty()
+            || !self.can_write(cx)
         {
             return;
         }
-        self.committing = true;
-        cx.notify();
-        let owner = self.current_owner();
-        let repo = std::path::PathBuf::from(&owner.repo_path);
-        let input = self.commit_input.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            // git_commit 走 git CLI(60s 超时兜底 GPG/pre-commit hook 挂起)——
-            // 即便如此也不上主线程跑,hook 慢的仓库会把 UI 卡满整个超时窗口
-            let result = cx
-                .background_executor()
-                .spawn(async move { mt_project::git::git_commit(&repo, &message) })
-                .await;
-            let committed = result.is_ok();
-            let _ = this.update_in(cx, |this: &mut Self, window, cx| {
-                if !this.owner_matches(&owner) {
-                    this.reconcile_stale_mutation(&owner, cx);
-                    if committed {
-                        cx.emit(GitChangesEvent::Committed(
-                            owner.scope.clone(),
-                            owner.repo_path.clone(),
-                        ));
-                    }
-                    return;
-                }
-                this.committing = false;
-                match result {
-                    Ok(_) => {
-                        this.pending_commit_draft = None;
-                        input.update(cx, |state, cx| state.set_value("", window, cx));
-                        this.load(cx);
-                        cx.emit(GitChangesEvent::Committed(
-                            owner.scope.clone(),
-                            owner.repo_path.clone(),
-                        ));
-                    }
-                    Err(err) => eprintln!("[git] 提交失败: {err:#}"),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        self.run_op(GitWrite::Commit { message }, cx);
     }
 
     fn view_diff(
         &self,
-        owner: &GitChangesOwner,
+        owner: &GitChangesActionOwner,
         path: String,
         staged: bool,
         status_label: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.owner_matches(owner) {
+        if !self.action_matches(owner, cx) {
             return;
         }
-        git_diff::open_file_diff(
+        let Some(repository) = self.current_repository(cx) else { return; };
+        let old_path = self.changes.iter().find(|change| change.path == path).and_then(|change| change.old_path.clone());
+        git_diff::open_repository_file_diff(
             self.store.clone(),
-            self.repo_path.clone(),
+            repository,
             path,
+            old_path,
             staged,
             status_label,
             window,
@@ -642,16 +796,10 @@ impl GitChanges {
         );
     }
 
-    fn on_commit_action(
-        &mut self,
-        _: &GitCommitMessage,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.commit(window, cx);
-    }
-
     fn apply_pending_commit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_clear_revision.take() == Some(self.draft_revision) {
+            self.commit_input.update(cx, |state, cx| state.set_value("", window, cx));
+        }
         let Some(draft) = self.pending_commit_draft.take() else {
             return;
         };
@@ -685,6 +833,8 @@ impl Render for GitChanges {
         let unstaged = self.group_indices(Area::Unstaged);
         let untracked = self.group_indices(Area::Untracked);
         let empty = self.changes.is_empty();
+        let action_owner = self.action_owner();
+        let keyboard_owner = action_owner.clone();
 
         // ① 文件列表(原先上方还有一条 刷新/视图切换 工具栏:刷新并入仓库栏的
         // ↻,视图切换上移到「更改」标题栏右侧,整条撤掉)
@@ -697,9 +847,28 @@ impl Render for GitChanges {
             .px(px(4.0))
             .pt(px(4.0));
 
+        for error in [&self.load_error, &self.operation_error].into_iter().flatten() {
+            list = list.child(div().p(px(8.0)).text_size(ui::font_px(11.0)).text_color(ui::color_error()).child(error.clone()));
+        }
+        if !self.untracked_directories.is_empty() {
+            list = list.child(div().p(px(8.0)).text_size(ui::font_px(11.0))
+                .child(format!("Untracked directories: {}", self.untracked_directories.len()))
+                .child(ui::ghost_button("git-stage-directories", t("gitChanges", "stageAll"))
+                    .on_click({
+                        let owner = action_owner.clone();
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if this.action_matches(&owner, cx) { this.stage_all(cx); }
+                        })
+                    })));
+        }
+        if !self.status_current && !empty {
+            list = list.child(div().p(px(8.0)).text_size(ui::font_px(11.0)).text_color(ui::text_muted())
+                .child(if self.loading { "Refreshing status" } else { "Last known status" }));
+        }
+
         if self.loading && empty {
             list = list.child(placeholder_text(t("gitChanges", "loading")));
-        } else if empty {
+        } else if empty && self.load_error.is_none() && self.repository.is_some() && self.untracked_directories.is_empty() {
             list = list.child(placeholder_text(t("gitChanges", "empty")));
         } else {
             for (area, title, action_label) in [
@@ -739,17 +908,29 @@ impl Render for GitChanges {
         }
 
         // ② 提交区
-        let can_commit = staged_count > 0 && !self.committing;
+        let can_commit = staged_count > 0 && !self.committing && self.can_write(cx);
         let commit_label = if self.committing {
             t("gitChanges", "committing").to_string()
         } else {
             tr!("panels", "commit", count = staged_count.to_string())
         };
+        let recovery = self.recoverable_draft().filter(|_| self.commit_input.read(cx).value().is_empty());
+        let recovery_owner = self.current_owner();
         let commit_area = div()
             .flex_none()
             .border_t_1()
             .border_color(ui::border_subtle())
             .p(px(8.0))
+            .when_some(recovery, |el, draft| el.child(
+                ui::ghost_button("git-restore-draft", "Restore draft")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        if !this.owner_matches(&recovery_owner) || !recovery_owner.scope.matches_active(&this.store, cx)
+                            || !this.commit_input.read(cx).value().is_empty() || this.committing
+                            || this.recoverable_draft().as_ref() != Some(&draft) { return; }
+                        this.retained_drafts.retain(|saved| saved != &draft);
+                        this.pending_commit_draft = Some(draft.message.clone());
+                        cx.notify();
+                    }))))
             .child(Input::new(&self.commit_input))
             .child(
                 div()
@@ -773,7 +954,9 @@ impl Render for GitChanges {
                     })
                     .child(commit_label)
                     .on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.commit(window, cx)),
+                        cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            if this.action_matches(&action_owner, cx) { this.commit(window, cx); }
+                        }),
                     ),
             );
 
@@ -784,7 +967,9 @@ impl Render for GitChanges {
             // Ctrl+Enter / Cmd+Enter 直接提交(键位绑在 main.rs,谓词
             // `"GitChanges > Input"` —— 与项目切换器的方向键同一套路)
             .key_context("GitChanges")
-            .on_action(cx.listener(Self::on_commit_action))
+            .on_action(cx.listener(move |this, _: &GitCommitMessage, window, cx| {
+                if this.action_matches(&keyboard_owner, cx) { this.commit(window, cx); }
+            }))
             .child(list)
             .child(commit_area)
     }
@@ -800,7 +985,8 @@ impl GitChanges {
         tree_mode: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let action_owner = self.current_owner();
+        let action_owner = self.action_owner();
+        let can_write = self.can_write(cx);
         let header = div()
             .flex()
             .items_center()
@@ -823,11 +1009,12 @@ impl GitChanges {
                     )))
                     .text_size(ui::font_px(11.0))
                     .text_color(ui::text_muted())
-                    .cursor_pointer()
+                    .when(can_write, |el| el.cursor_pointer())
+                    .when(!can_write, |el| el.opacity(0.5))
                     .hover(|el| el.text_color(ui::text_primary()))
                     .child(action_label)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        if !this.owner_matches(&action_owner) {
+                        if !this.action_matches(&action_owner, cx) {
                             return;
                         }
                         // ⚠️ 未跟踪组的按钮虽写着「全部暂存」,走的也是 git_stage_all
@@ -877,7 +1064,7 @@ impl GitChanges {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = format!("{}:{}", area.key(), full_path);
-        let owner = self.current_owner();
+        let owner = self.action_owner();
         div()
             .id(SharedString::from(format!("git-dir-{key}")))
             .flex()
@@ -899,7 +1086,7 @@ impl GitChanges {
             )
             .child(div().truncate().child(name))
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                if !this.owner_matches(&owner) {
+                if !this.action_matches(&owner, cx) {
                     return;
                 }
                 if !this.collapsed_dirs.remove(&key) {
@@ -928,12 +1115,13 @@ impl GitChanges {
         let display = if depth > 0 { name } else { path.clone() };
         let is_staged = area == Area::Staged;
         let status_label = label.to_string();
-        let owner = self.current_owner();
+        let owner = self.action_owner();
         // 行 id 必须带区名前缀:同一文件可同时在 staged 与 unstaged 两组
         let row_id = SharedString::from(format!("git-file-{}-{}", area.key(), path));
         let menu_path = path.clone();
         let menu_owner = owner.clone();
         let menu_status_label = status_label.clone();
+        let can_write = self.can_write(cx);
 
         div()
             .id(row_id)
@@ -988,7 +1176,7 @@ impl GitChanges {
                     .text_color(ui::text_muted())
                     // 原版 `opacity-0 group-hover:opacity-100`
                     .opacity(0.0)
-                    .group_hover("git-file-row", |el| el.opacity(1.0))
+                    .group_hover("git-file-row", move |el| el.opacity(if can_write { 1.0 } else { 0.4 }))
                     .hover(|el| el.text_color(ui::text_primary()))
                     .child(if is_staged { "−" } else { "+" })
                     .on_click({
@@ -998,7 +1186,7 @@ impl GitChanges {
                             // 行内按钮:别把整行的「看 diff」也触发了
                             let _ = event;
                             cx.stop_propagation();
-                            if !this.owner_matches(&owner) {
+                            if !this.action_matches(&owner, cx) {
                                 return;
                             }
                             if is_staged {
@@ -1042,10 +1230,12 @@ impl GitChanges {
         area: Area,
         path: String,
         status_label: String,
-        owner: GitChangesOwner,
+        owner: GitChangesActionOwner,
         cx: &mut Context<Self>,
     ) -> Vec<menu::MenuEntry> {
+        if !self.action_matches(&owner, cx) { return Vec::new(); }
         let this = cx.entity();
+        let can_write = self.can_write(cx);
         let mut entries = vec![
             {
                 let this = this.clone();
@@ -1070,37 +1260,36 @@ impl GitChanges {
         entries.push(if area == Area::Staged {
             let (this, path) = (this.clone(), path.clone());
             let owner = owner.clone();
-            menu::item(t("panels", "unstage"), move |_window, cx| {
+            menu::MenuItem::new(t("panels", "unstage")).disabled(!can_write).on_click(move |_window, cx| {
                 this.update(cx, |this, cx| {
-                    if this.owner_matches(&owner) {
+                    if this.action_matches(&owner, cx) {
                         this.unstage(path.clone(), cx);
                     }
                 });
-            })
+            }).into()
         } else {
             let (this, path) = (this.clone(), path.clone());
             let owner = owner.clone();
-            menu::item(t("panels", "stage"), move |_window, cx| {
+            menu::MenuItem::new(t("panels", "stage")).disabled(!can_write).on_click(move |_window, cx| {
                 this.update(cx, |this, cx| {
-                    if this.owner_matches(&owner) {
+                    if this.action_matches(&owner, cx) {
                         this.stage(path.clone(), cx);
                     }
                 });
-            })
+            }).into()
         });
         if area != Area::Staged {
             entries.push(menu::separator());
-            entries.push(menu::item(
-                t("gitChanges", "contextDiscard"),
-                move |window, cx| {
+            entries.push(menu::MenuItem::new(t("gitChanges", "contextDiscard"))
+                .disabled(!can_write)
+                .on_click(move |window, cx| {
                     let path = path.clone();
                     this.update(cx, |this, cx| {
-                        if this.owner_matches(&owner) {
+                        if this.action_matches(&owner, cx) {
                             this.discard(vec![path], window, cx);
                         }
                     });
-                },
-            ));
+                }).into());
         }
         entries
     }
@@ -1109,6 +1298,68 @@ impl GitChanges {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_refresh_revokes_old_row_menus_without_reassigning_write_completion() {
+        let source = crate::git_panel::source_tests::ssh_snapshot(Some(7));
+        let captured = GitChangesActionOwner {
+            owner: GitChangesOwner {
+                scope: crate::git_panel::source_tests::scope(&source, 3),
+                repo_generation: 5,
+                repo_path: "/repo".into(),
+                authority: Some(RepositoryAuthority {
+                    worktree_root: "/repo".into(),
+                    git_dir: "/repo/.git".into(),
+                    common_dir: "/repo/.git".into(),
+                }),
+            },
+            status_request: 11,
+        };
+        assert!(changes_action_matches(&captured, &captured, true));
+        assert!(!changes_action_matches(&captured, &captured, false));
+        let refreshed = GitChangesActionOwner { status_request: 12, ..captured.clone() };
+        assert!(!changes_action_matches(&captured, &refreshed, true));
+        assert!(git_changes_owner_matches(&captured.owner, &refreshed.owner));
+        let mut returned = refreshed.clone();
+        returned.owner.scope = crate::git_panel::source_tests::scope(&source, 5);
+        assert!(!changes_action_matches(&refreshed, &returned, true));
+        let mut rebound = refreshed.clone();
+        rebound.owner.authority.as_mut().unwrap().common_dir = "/replacement/.git".into();
+        assert!(!changes_action_matches(&refreshed, &rebound, true));
+        assert!(!git_changes_owner_matches(&refreshed.owner, &rebound.owner));
+    }
+
+    #[test]
+    fn commit_completion_preserves_newer_edits_even_when_text_matches() {
+        assert!(commit_draft_should_clear(true, 7, 7, "message", " message\n"));
+        assert!(!commit_draft_should_clear(true, 7, 8, "message", "message"));
+        assert!(!commit_draft_should_clear(true, 7, 7, "message", "new draft"));
+    }
+
+    #[test]
+    fn failed_or_uncertain_commit_keeps_its_draft() {
+        assert!(!commit_draft_should_clear(false, 7, 7, "message", "message"));
+    }
+
+    #[test]
+    fn changes_owner_rejects_a_same_path_connection_replacement() {
+        let source = crate::git_panel::source_tests::ssh_snapshot(Some(7));
+        let current = GitChangesOwner {
+            scope: crate::git_panel::source_tests::scope(&source, 3),
+            repo_generation: 5,
+            repo_path: "/repo".into(),
+            authority: None,
+        };
+        let mut changed = source.clone();
+        if let crate::execution_host::ExecutionBackend::Ssh { connection_epoch, .. } = &mut changed.backend {
+            *connection_epoch = Some(8);
+        }
+        let stale = GitChangesOwner {
+            scope: crate::git_panel::source_tests::scope(&changed, 3),
+            ..current.clone()
+        };
+        assert!(!git_changes_owner_matches(&stale, &current));
+    }
 
     fn worktree_id(hex: char) -> WorktreeId {
         format!("worktree-v1:{}", hex.to_string().repeat(64))
@@ -1193,6 +1444,7 @@ mod tests {
             scope: GitScope::new(Some(worktree_a.clone()), 8, true),
             repo_generation: 13,
             repo_path: "/repo/shared".into(),
+            authority: None,
         };
         assert!(git_changes_owner_matches(&current, &current));
 

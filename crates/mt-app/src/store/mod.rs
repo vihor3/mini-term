@@ -62,6 +62,7 @@ mod context;
 mod identity;
 mod layout;
 mod panes;
+mod git_worktree_cleanup;
 mod prefs;
 mod projects;
 mod pure;
@@ -76,6 +77,7 @@ pub use context::{
     orca_worktree_context_enabled,
 };
 pub use projects::{ProjectLocationKey, ProjectPlacement, ProjectRegistrationOutcome};
+pub(crate) use git_worktree_cleanup::GitWorktreeRemovalGuard;
 
 // 纯函数与它们的类型原本就住在 store.rs 顶层;拆进 `pure` 后原样再导出,
 // `crate::store::Xxx` 这条对外路径一字不变(全仓其它文件零改动的前提)。

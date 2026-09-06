@@ -150,6 +150,8 @@ pub fn parse_work_item_detail(
     })
 }
 
+/// Legacy ambient-auth parser. Selected-account consumers must instead call
+/// verify_selected_account with the expected canonical identity.
 pub fn parse_account(output: &CommandOutput) -> Result<String, GitHubError> {
     let text = bounded_utf8(output, "GitHub account probe")?;
     let raw: RawAccount =

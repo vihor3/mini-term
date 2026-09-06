@@ -26,6 +26,9 @@ use serde::{Deserialize, Serialize};
 /// Transport-free Git command plans and machine-output parsers.
 pub mod cli;
 
+/// Strict bounded native reads for source-owned app adapters, without Git CLI.
+pub mod local;
+
 // ---------------------------------------------------------------------------
 // Data structures
 // ---------------------------------------------------------------------------

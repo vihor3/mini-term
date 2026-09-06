@@ -669,6 +669,18 @@ pub enum ProjectPlacement<'a> {
 }
 
 impl AppStore {
+    pub(crate) fn project_ids_for_location(&self, location: &ProjectLocationKey) -> Vec<String> {
+        let mut ids = self.config.projects.iter().filter(|project| {
+            project_matches_location(
+                project,
+                self.onboarding_canonical_path_for_project(project),
+                location,
+            )
+        }).map(|project| project.id.clone()).collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+
     pub fn register_or_activate_project(
         &mut self,
         location: ProjectLocationKey,
@@ -912,7 +924,7 @@ fn validate_registration_location(
     Ok(())
 }
 
-fn project_matches_location(
+pub(super) fn project_matches_location(
     project: &ProjectConfig,
     canonical_binding_path: Option<&str>,
     location: &ProjectLocationKey,

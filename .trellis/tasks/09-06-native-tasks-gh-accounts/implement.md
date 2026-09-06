@@ -6,19 +6,29 @@ command, account switch, or login is permitted during planning/research.
 
 ## Implementation Order
 
-- [ ] Read official-source research and the current Tasks/source/config contracts.
-- [ ] Add structured account enumeration and capability/error parsing in
+- [x] Read official-source research and the current Tasks/source/config contracts.
+- [x] Add structured account enumeration and capability/error parsing in
   `mt-github`, retaining domain/transport separation and bounded field allowlists.
-- [ ] Add a default-compatible selected-account identity setting with exact
+- [x] Add a default-compatible selected-account identity setting with exact
   project/host scope, without altering global `gh` configuration.
-- [ ] Implement the dedicated secret-safe Native/WSL/SSH request executor and
+- [x] Implement the dedicated secret-safe Native/WSL/SSH request executor and
   sanitized failure handling; keep secrets outside ordinary plans/results/logs.
-- [ ] Replace active-account pipeline validation with selected-account validation
+- [x] Replace active-account pipeline validation with selected-account validation
   and preserve source/epoch/cache/request generation ownership.
-- [ ] Add the Tasks selector and missing/multiple/invalid-account states; retain
+- [x] Add the Tasks selector and missing/multiple/invalid-account states; retain
   inert manual login Copy/Retry and exact-host labeling.
-- [ ] Add Actions fixtures, obtain Trellis check, and update the affected contract
-  through main after behavior and validation evidence agree.
+- [x] Add native, actual SSH and actual WSL Actions fixtures and obtain the
+  combined Trellis source check, including foreground cache/activation fixes.
+- [ ] Obtain exact-SHA Actions and matching native artifact acceptance; update
+  evidence without treating source review as a passed execution gate.
+
+Checked items are source implementation/review, not passing validation.
+Noether's completed follow-up adds explicit foreground access ownership, narrow
+WorkItem activation hooks and regressions without a passive-notification fetch
+loop. Native/SSH assertions were strengthened; the actual disposable WSL test
+and launcher are source-complete. McClintock independently reviewed/fixed main's
+CI setup. All new execution/native gates remain UNRUN; see review.md and
+ci-review.md for contracts, exact test names and limits.
 
 ## Actions-Only Cases
 

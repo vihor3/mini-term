@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use mt_config::SshConnection;
-use mt_ssh::{SftpHandle, SftpNodeKind};
+use mt_ssh::{CachedSession, SftpHandle, SftpNodeKind};
 
 use super::{
     FileConflictStrategy, LOCAL_TRANSFER_SEQUENCE, PASTE_UPLOAD_REQUEST_TIMEOUT,
-    PASTE_UPLOAD_TOTAL_TIMEOUT, join_posix, keep_both_name, keep_both_remote_path, open_sftp,
+    PASTE_UPLOAD_TOTAL_TIMEOUT, join_posix, keep_both_name, keep_both_remote_path,
     open_sftp_with_session, paste_file_name, posix_relative, remote_home, resolve_paste_dir,
     split_posix_leaf, state, valid_remote_name, validate_remote_dir_under_root,
     validate_remote_leaf_under_root,
@@ -67,10 +68,32 @@ pub fn copy_entry_keep_both(
     source_path: &str,
     target_dir: &str,
 ) -> Result<(String, FileOperationSummary), String> {
+    copy_entry_keep_both_with_epoch(conn, project_root, source_path, target_dir, None)
+}
+
+pub fn copy_entry_keep_both_at_epoch(
+    conn: &SshConnection,
+    expected_epoch: u64,
+    project_root: &str,
+    source_path: &str,
+    target_dir: &str,
+) -> Result<(String, FileOperationSummary), String> {
+    copy_entry_keep_both_with_epoch(conn, project_root, source_path, target_dir, Some(expected_epoch))
+}
+
+fn copy_entry_keep_both_with_epoch(
+    conn: &SshConnection,
+    project_root: &str,
+    source_path: &str,
+    target_dir: &str,
+    expected_epoch: Option<u64>,
+) -> Result<(String, FileOperationSummary), String> {
     let st = state();
     st.block_on(async move {
-        let sftp = open_sftp(st, conn).await?;
+        let (session, sftp) = open_sftp_with_session(st, conn).await?;
+        let pin = FileSessionPin::new(st, conn, expected_epoch, &session);
         let result = async {
+            pin.check().await?;
             let source = validate_remote_leaf_under_root(&sftp, project_root, source_path).await?;
             let target_dir =
                 validate_remote_dir_under_root(&sftp, project_root, target_dir).await?;
@@ -86,6 +109,7 @@ pub fn copy_entry_keep_both(
                 return Err("不能把远程目录复制到自身或其子目录".into());
             }
             let mut summary = FileOperationSummary::default();
+            pin.check().await?;
             match source_kind {
                 SftpNodeKind::Symlink | SftpNodeKind::Other => {
                     return Err("暂不复制远程符号链接或特殊文件".into());
@@ -105,11 +129,13 @@ pub fn copy_entry_keep_both(
                     let copy_result: Result<(), String> = async {
                         let mut stack = vec![(source, staging.clone())];
                         while let Some((source_dir, target_dir)) = stack.pop() {
+                            pin.check().await?;
                             let entries = sftp
                                 .read_dir(&source_dir)
                                 .await
                                 .map_err(|e| format!("读取远程源目录失败: {}", e.message()))?;
                             for entry in entries {
+                                pin.check().await?;
                                 if !valid_remote_name(&entry.name) {
                                     return Err(format!(
                                         "服务器返回了无效条目名: {:?}",
@@ -145,6 +171,7 @@ pub fn copy_entry_keep_both(
                                 }
                             }
                         }
+                        pin.check().await?;
                         Ok(())
                     }
                     .await;
@@ -165,7 +192,7 @@ pub fn copy_entry_keep_both(
         }
         .await;
         sftp.close().await;
-        result
+        pin.finish(result).await
     })
 }
 
@@ -452,12 +479,41 @@ pub fn upload_conflicts(
     target_dir: &str,
     local_paths: &[PathBuf],
 ) -> Result<Vec<String>, String> {
+    upload_conflicts_with_epoch(conn, project_root, target_dir, local_paths, None)
+}
+
+/// FileTree preflight must not adopt a session acquired after its drop target.
+pub fn upload_conflicts_at_epoch(
+    conn: &SshConnection,
+    expected_epoch: u64,
+    project_root: &str,
+    target_dir: &str,
+    local_paths: &[PathBuf],
+) -> Result<Vec<String>, String> {
+    upload_conflicts_with_epoch(
+        conn,
+        project_root,
+        target_dir,
+        local_paths,
+        Some(expected_epoch),
+    )
+}
+
+fn upload_conflicts_with_epoch(
+    conn: &SshConnection,
+    project_root: &str,
+    target_dir: &str,
+    local_paths: &[PathBuf],
+    expected_epoch: Option<u64>,
+) -> Result<Vec<String>, String> {
     let st = state();
     st.block_on(async move {
-        let sftp = open_sftp(st, conn).await?;
+        let (session, sftp) = open_sftp_with_session(st, conn).await?;
         let result = async {
+            ensure_upload_session(st, conn, expected_epoch, &session).await?;
             let target_dir =
                 validate_remote_dir_under_root(&sftp, project_root, target_dir).await?;
+            ensure_upload_session(st, conn, expected_epoch, &session).await?;
             let existing: HashSet<String> = sftp
                 .read_dir(&target_dir)
                 .await
@@ -469,8 +525,86 @@ pub fn upload_conflicts(
         }
         .await;
         sftp.close().await;
-        result
+        finish_upload_result(
+            result,
+            ensure_upload_session(st, conn, expected_epoch, &session).await,
+        )
     })
+}
+
+fn upload_epoch_matches(expected: u64, acquired: u64, current: Option<u64>, pooled: bool) -> bool {
+    expected == acquired && current == Some(expected) && pooled
+}
+
+/// Normal Files work stays on one acquired SFTP session. Cleanup continues on
+/// that same handle; it never acquires a replacement to replay a possible write.
+pub(super) struct FileSessionPin<'a> {
+    st: &'a super::RemoteSshState,
+    conn: &'a SshConnection,
+    expected_epoch: Option<u64>,
+    session: &'a Arc<CachedSession>,
+}
+
+impl<'a> FileSessionPin<'a> {
+    pub(super) fn new(
+        st: &'a super::RemoteSshState,
+        conn: &'a SshConnection,
+        expected_epoch: Option<u64>,
+        session: &'a Arc<CachedSession>,
+    ) -> Self {
+        Self {
+            st,
+            conn,
+            expected_epoch,
+            session,
+        }
+    }
+
+    pub(super) fn is_pinned(&self) -> bool {
+        self.expected_epoch.is_some()
+    }
+
+    pub(super) async fn check(&self) -> Result<(), String> {
+        ensure_upload_session(self.st, self.conn, self.expected_epoch, self.session).await
+    }
+
+    pub(super) async fn finish<T>(&self, result: Result<T, String>) -> Result<T, String> {
+        finish_upload_result(result, self.check().await)
+    }
+}
+
+async fn ensure_upload_session(
+    st: &super::RemoteSshState,
+    conn: &SshConnection,
+    expected_epoch: Option<u64>,
+    session: &Arc<CachedSession>,
+) -> Result<(), String> {
+    // The legacy entry points deliberately retain their existing acquisition policy.
+    let Some(expected_epoch) = expected_epoch else {
+        return Ok(());
+    };
+    let pooled = st.pool().is_current_session(&conn.id, session).await;
+    if upload_epoch_matches(
+        expected_epoch,
+        session.connection_epoch().get(),
+        st.current_connection_epoch(&conn.id),
+        pooled,
+    ) {
+        Ok(())
+    } else {
+        Err("SSH file operation source changed; any dispatched mutation may be partial. Inspect the destination before retrying.".into())
+    }
+}
+
+fn finish_upload_result<T>(
+    result: Result<T, String>,
+    authority: Result<(), String>,
+) -> Result<T, String> {
+    match (result, authority) {
+        (result, Ok(())) => result,
+        (Ok(_), Err(error)) => Err(error),
+        (Err(original), Err(error)) => Err(format!("{original}; {error}")),
+    }
 }
 
 async fn upload_path_tree(
@@ -480,6 +614,7 @@ async fn upload_path_tree(
     strategy: FileConflictStrategy,
     summary: &mut FileOperationSummary,
     remote_cache: &mut RemoteDirectoryCache,
+    pin: &FileSessionPin<'_>,
 ) -> Result<(), String> {
     enum UploadWork {
         Visit {
@@ -505,6 +640,11 @@ async fn upload_path_tree(
     let mut staged_directories = HashSet::new();
     let mut result: Result<(), String> = async {
         while let Some(work) = stack.pop() {
+            if let Err(error) = pin.check().await {
+                // Keep a pending commit's snapshot available to staged cleanup.
+                stack.push(work);
+                return Err(error);
+            }
             let (local, desired_remote, inside_staging, staging_replaces_existing) = match work {
                 UploadWork::Visit {
                     local,
@@ -595,6 +735,7 @@ async fn upload_path_tree(
                 (existing, _) => (desired_remote, existing),
             };
 
+            pin.check().await?;
             match kind {
                 SftpNodeKind::Directory => {
                     let mut completes_immediately = true;
@@ -735,15 +876,51 @@ pub fn upload_paths(
     local_paths: &[PathBuf],
     strategy: FileConflictStrategy,
 ) -> Result<FileOperationSummary, String> {
+    upload_paths_with_epoch(conn, project_root, target_dir, local_paths, strategy, None)
+}
+
+/// Use only the drop's authenticated epoch, including after conflict selection.
+/// Once path work starts it is never retried on a replacement session.
+pub fn upload_paths_at_epoch(
+    conn: &SshConnection,
+    expected_epoch: u64,
+    project_root: &str,
+    target_dir: &str,
+    local_paths: &[PathBuf],
+    strategy: FileConflictStrategy,
+) -> Result<FileOperationSummary, String> {
+    upload_paths_with_epoch(
+        conn,
+        project_root,
+        target_dir,
+        local_paths,
+        strategy,
+        Some(expected_epoch),
+    )
+}
+
+fn upload_paths_with_epoch(
+    conn: &SshConnection,
+    project_root: &str,
+    target_dir: &str,
+    local_paths: &[PathBuf],
+    strategy: FileConflictStrategy,
+    expected_epoch: Option<u64>,
+) -> Result<FileOperationSummary, String> {
     let st = state();
     st.block_on(async move {
-        let sftp = open_sftp(st, conn).await?;
+        let (session, sftp) = open_sftp_with_session(st, conn).await?;
+        let pin = FileSessionPin::new(st, conn, expected_epoch, &session);
         let result = async {
+            ensure_upload_session(st, conn, expected_epoch, &session).await?;
             let target_dir =
                 validate_remote_dir_under_root(&sftp, project_root, target_dir).await?;
             let mut summary = FileOperationSummary::default();
             let mut remote_cache = RemoteDirectoryCache::new();
             for local in local_paths {
+                if let Err(error) = ensure_upload_session(st, conn, expected_epoch, &session).await {
+                    return finish_upload_summary(Ok(summary), Err(error));
+                }
                 let Some(name) = local.file_name().and_then(|name| name.to_str()) else {
                     summary.skipped += 1;
                     summary.warnings.push(format!(
@@ -766,6 +943,7 @@ pub fn upload_paths(
                     strategy,
                     &mut summary,
                     &mut remote_cache,
+                    &pin,
                 )
                 .await
                 {
@@ -778,8 +956,29 @@ pub fn upload_paths(
         }
         .await;
         sftp.close().await;
-        result
+        finish_upload_summary(
+            result,
+            ensure_upload_session(st, conn, expected_epoch, &session).await,
+        )
     })
+}
+
+fn finish_upload_summary(
+    result: Result<FileOperationSummary, String>,
+    authority: Result<(), String>,
+) -> Result<FileOperationSummary, String> {
+    let result = match result {
+        Ok(summary) if authority.is_err() => Err(format!(
+            "Transfer before source change: completed {}, skipped {}, failed {}, bytes {}; {}",
+            summary.completed,
+            summary.skipped,
+            summary.failed,
+            summary.bytes,
+            summary.warnings.join("; "),
+        )),
+        result => result,
+    };
+    finish_upload_result(result, authority)
 }
 
 pub(super) fn ensure_local_download_target(
@@ -821,12 +1020,36 @@ pub fn download_conflicts(
     download_dir: &Path,
     remote_paths: &[PathBuf],
 ) -> Result<Vec<String>, String> {
+    download_conflicts_with_policy(download_dir, remote_paths, false)
+}
+
+/// FileTree paths contain POSIX text even on Windows. This is a local-only
+/// preflight; the caller retains its source and operation ID through the choice.
+pub fn download_conflicts_for_files(
+    download_dir: &Path,
+    remote_paths: &[PathBuf],
+) -> Result<Vec<String>, String> {
+    download_conflicts_with_policy(download_dir, remote_paths, true)
+}
+
+fn remote_download_name(path: &Path, strict_posix: bool) -> Result<&str, String> {
+    if strict_posix {
+        let path = path.to_str().ok_or_else(|| "Remote file path is not valid text".to_string())?;
+        return split_posix_leaf(path).map(|(_, name)| name);
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("远程下载目标名称无效: {}", path.display()))
+}
+
+fn download_conflicts_with_policy(
+    download_dir: &Path,
+    remote_paths: &[PathBuf],
+    strict_posix: bool,
+) -> Result<Vec<String>, String> {
     let mut conflicts = Vec::new();
     for path in remote_paths {
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| format!("远程下载目标名称无效: {}", path.display()))?;
+        let name = remote_download_name(path, strict_posix)?;
         let target = checked_local_download_child(download_dir, download_dir, name)?;
         if std::fs::symlink_metadata(target).is_ok() {
             conflicts.push(name.to_string());
@@ -842,6 +1065,7 @@ async fn download_remote_tree(
     local_root: PathBuf,
     strategy: FileConflictStrategy,
     summary: &mut FileOperationSummary,
+    pin: &FileSessionPin<'_>,
 ) -> Result<(), String> {
     ensure_local_download_target(download_root, &local_root)?;
     enum DownloadWork {
@@ -871,6 +1095,10 @@ async fn download_remote_tree(
     let mut staging_containers = HashSet::new();
     let mut result: Result<(), String> = async {
         while let Some(work) = stack.pop() {
+            if let Err(error) = pin.check().await {
+                stack.push(work);
+                return Err(error);
+            }
             let (remote, desired_local, known_kind, inside_staging, staging_replaces_existing) =
                 match work {
                     DownloadWork::Visit {
@@ -972,6 +1200,7 @@ async fn download_remote_tree(
             };
             ensure_local_download_target(download_root, &local)?;
 
+            pin.check().await?;
             match kind {
                 SftpNodeKind::Directory => {
                     let mut completes_immediately = true;
@@ -1101,6 +1330,23 @@ pub fn download_entries(
     download_dir: &Path,
     strategy: FileConflictStrategy,
 ) -> Result<FileOperationSummary, String> {
+    download_entries_with_epoch(conn, project_root, remote_paths, download_dir, strategy, None)
+}
+
+pub fn download_entries_at_epoch(
+    conn: &SshConnection,
+    expected_epoch: u64,
+    project_root: &str,
+    remote_paths: &[PathBuf],
+    download_dir: &Path,
+    strategy: FileConflictStrategy,
+) -> Result<FileOperationSummary, String> {
+    download_entries_with_epoch(
+        conn, project_root, remote_paths, download_dir, strategy, Some(expected_epoch),
+    )
+}
+
+fn prepare_download_root(download_dir: &Path) -> Result<PathBuf, String> {
     if !download_dir.is_absolute() {
         return Err(format!(
             "下载目录必须是绝对路径: {}",
@@ -1111,20 +1357,49 @@ pub fn download_entries(
         .map_err(|e| format!("无法创建下载目录 {}: {e}", download_dir.display()))?;
     mt_config::AppConfig::validate_download_dir(download_dir)
         .map_err(|e| format!("下载目录不可用: {e:#}"))?;
-    let download_root = std::fs::canonicalize(download_dir)
-        .map_err(|e| format!("无法解析下载目录 {}: {e}", download_dir.display()))?;
+    std::fs::canonicalize(download_dir)
+        .map_err(|e| format!("无法解析下载目录 {}: {e}", download_dir.display()))
+}
+
+fn download_entries_with_epoch(
+    conn: &SshConnection,
+    project_root: &str,
+    remote_paths: &[PathBuf],
+    download_dir: &Path,
+    strategy: FileConflictStrategy,
+    expected_epoch: Option<u64>,
+) -> Result<FileOperationSummary, String> {
+    let legacy_root = if expected_epoch.is_none() {
+        Some(prepare_download_root(download_dir)?)
+    } else {
+        for path in remote_paths {
+            remote_download_name(path, true)?;
+        }
+        None
+    };
     let st = state();
     st.block_on(async move {
-        let sftp = open_sftp(st, conn).await?;
+        let (session, sftp) = open_sftp_with_session(st, conn).await?;
+        let pin = FileSessionPin::new(st, conn, expected_epoch, &session);
         let result = async {
+            pin.check().await?;
+            let download_root = match legacy_root {
+                Some(root) => root,
+                None => prepare_download_root(download_dir)?,
+            };
             let mut summary = FileOperationSummary::default();
             for remote_path in remote_paths {
-                let remote = validate_remote_leaf_under_root(
-                    &sftp,
-                    project_root,
-                    &remote_path.to_string_lossy(),
-                )
-                .await?;
+                if let Err(error) = pin.check().await {
+                    return finish_upload_summary(Ok(summary), Err(error));
+                }
+                let remote_text = match expected_epoch {
+                    Some(_) => std::borrow::Cow::Borrowed(remote_path.to_str().ok_or_else(|| {
+                        "Remote file path is not valid text".to_string()
+                    })?),
+                    None => remote_path.to_string_lossy(),
+                };
+                let remote =
+                    validate_remote_leaf_under_root(&sftp, project_root, &remote_text).await?;
                 let (_, name) = split_posix_leaf(&remote)?;
                 let local_root =
                     checked_local_download_child(&download_root, &download_root, name)?;
@@ -1135,6 +1410,7 @@ pub fn download_entries(
                     local_root,
                     strategy,
                     &mut summary,
+                    &pin,
                 )
                 .await
                 {
@@ -1146,7 +1422,7 @@ pub fn download_entries(
         }
         .await;
         sftp.close().await;
-        result
+        finish_upload_summary(result, pin.check().await)
     })
 }
 
@@ -1219,4 +1495,240 @@ pub fn upload_paste(
         sftp.close().await;
         result
     })
+}
+
+#[cfg(test)]
+mod epoch_tests {
+    use super::*;
+
+    #[test]
+    fn upload_pin_rejects_reconnect_disconnect_and_pool_replacement() {
+        assert!(upload_epoch_matches(11, 11, Some(11), true));
+        assert!(!upload_epoch_matches(11, 12, Some(12), true));
+        assert!(!upload_epoch_matches(11, 11, Some(12), true));
+        assert!(!upload_epoch_matches(11, 11, None, true));
+        assert!(!upload_epoch_matches(11, 11, Some(11), false));
+        assert!(!upload_epoch_matches(11, 12, Some(11), true));
+        assert!(!upload_epoch_matches(11, 11, Some(13), true));
+    }
+
+    #[test]
+    fn files_download_preflight_uses_posix_leaf_not_windows_path_components() {
+        assert_eq!(remote_download_name(Path::new("/work/src/file.txt"), true).unwrap(), "file.txt");
+        assert_eq!(remote_download_name(Path::new(r"/work/src\part/file.txt"), true).unwrap(), "file.txt");
+        for path in [r"/work/name\with\slashes", "/work/name:stream", "/", "relative"] {
+            assert!(remote_download_name(Path::new(path), true).is_err(), "{path}");
+        }
+        assert_eq!(remote_download_name(Path::new("legacy.txt"), false).unwrap(), "legacy.txt");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn files_download_preflight_rejects_non_unicode_paths_without_io() {
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStringExt;
+            PathBuf::from(std::ffi::OsString::from_vec(b"/work/name-\xff".to_vec()))
+        };
+        #[cfg(windows)]
+        let path = {
+            use std::os::windows::ffi::OsStringExt;
+            let mut text: Vec<u16> = "/work/name-".encode_utf16().collect();
+            text.push(0xd800);
+            PathBuf::from(std::ffi::OsString::from_wide(&text))
+        };
+        assert!(remote_download_name(&path, true).is_err());
+    }
+
+    #[test]
+    fn upload_completion_preserves_operation_and_cleanup_failures() {
+        let failure = "write failed; staging cleanup failed".to_string();
+        assert_eq!(
+            finish_upload_result::<()>(Err(failure.clone()), Ok(())),
+            Err(failure.clone()),
+        );
+        assert_eq!(
+            finish_upload_result::<()>(Err(failure), Err("source changed".into())),
+            Err("write failed; staging cleanup failed; source changed".into()),
+        );
+        assert_eq!(
+            finish_upload_result(Ok(vec!["conflict"]), Err("source changed".into())),
+            Err("source changed".into()),
+        );
+        assert_eq!(
+            finish_upload_result(Ok(vec!["conflict"]), Ok(())),
+            Ok(vec!["conflict"]),
+        );
+    }
+
+    #[test]
+    fn changed_upload_source_keeps_partial_counts_and_cleanup_warnings() {
+        let summary = FileOperationSummary {
+            completed: 2,
+            skipped: 3,
+            failed: 1,
+            bytes: 17,
+            warnings: vec!["staging cleanup failed".into()],
+        };
+        let unchanged = finish_upload_summary(Ok(summary.clone()), Ok(())).unwrap();
+        assert_eq!(unchanged.completed, 2);
+        assert_eq!(unchanged.skipped, 3);
+        assert_eq!(unchanged.failed, 1);
+        assert_eq!(unchanged.bytes, 17);
+        assert_eq!(unchanged.warnings, summary.warnings);
+        let error = finish_upload_summary(Ok(summary), Err("source changed".into())).unwrap_err();
+        assert!(error.contains("completed 2, skipped 3, failed 1, bytes 17"));
+        assert!(error.contains("staging cleanup failed"));
+        assert!(error.contains("source changed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires the Actions disposable loopback sshd fixture and isolated HOME"]
+    fn actual_loopback_sftp_files_pins_mutations_and_containment() {
+        use crate::remote_ssh::{
+            create_entry_at_epoch, delete_entry_at_epoch, list_directory_at_epoch,
+            rename_entry_at_epoch,
+        };
+
+        let (connection, fixture_root) = crate::remote_ssh::loopback_ssh_fixture().unwrap();
+        let scratch = fixture_root.join(format!("files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&scratch).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(scratch.clone());
+        let root = scratch.join("remote");
+        let inputs = scratch.join("inputs");
+        let downloads = scratch.join("downloads");
+        let outside = scratch.join("outside");
+        for directory in [&root, &inputs, &downloads, &outside] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let root_text = root.to_str().unwrap();
+        let seed = root.join("seed.txt");
+        let upload = inputs.join("seed.txt");
+        std::fs::write(&seed, b"original remote bytes").unwrap();
+        std::fs::write(&upload, b"uploaded bytes").unwrap();
+        std::fs::create_dir(root.join("bundle")).unwrap();
+        std::fs::write(root.join("bundle/child.txt"), b"directory bytes").unwrap();
+        std::fs::create_dir(inputs.join("upload-bundle")).unwrap();
+        std::fs::write(inputs.join("upload-bundle/child.txt"), b"staged bytes").unwrap();
+        std::fs::write(outside.join("keep.txt"), b"outside sentinel").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+        let listing = list_directory_at_epoch(&connection, None, root_text, root_text, true).unwrap();
+        let epoch = listing.source.connection_epoch;
+        assert_eq!(listing.source.connection_id, connection.id);
+        assert_eq!(listing.source.connection_fingerprint, crate::remote_ssh::connection_fingerprint(&connection));
+        assert_eq!(listing.source.project_root, root_text);
+        assert_eq!(listing.source.directory, root_text);
+        assert!(listing.entries.iter().any(|entry| entry.name == "seed.txt"));
+
+        let created = create_entry_at_epoch(&connection, epoch, root_text, root_text, "created.txt", false).unwrap();
+        assert!(std::fs::read(&created).unwrap().is_empty());
+        let renamed = rename_entry_at_epoch(&connection, epoch, root_text, &created, "renamed.txt").unwrap();
+        assert!(!Path::new(&created).exists());
+        assert!(Path::new(&renamed).is_file());
+        let created_dir = create_entry_at_epoch(&connection, epoch, root_text, root_text, "created-dir", true).unwrap();
+        assert!(Path::new(&created_dir).is_dir());
+
+        let (copied, _) = copy_entry_keep_both_at_epoch(
+            &connection, epoch, root_text, seed.to_str().unwrap(), root_text,
+        ).unwrap();
+        assert_eq!(std::fs::read(copied).unwrap(), b"original remote bytes");
+        let (copied_dir, _) = copy_entry_keep_both_at_epoch(
+            &connection, epoch, root_text, root.join("bundle").to_str().unwrap(), root_text,
+        ).unwrap();
+        assert_eq!(std::fs::read(Path::new(&copied_dir).join("child.txt")).unwrap(), b"directory bytes");
+
+        assert_eq!(upload_conflicts_at_epoch(
+            &connection, epoch, root_text, root_text, std::slice::from_ref(&upload),
+        ).unwrap(), vec!["seed.txt"]);
+        let skipped = upload_paths_at_epoch(
+            &connection, epoch, root_text, root_text, std::slice::from_ref(&upload), FileConflictStrategy::Skip,
+        ).unwrap();
+        assert_eq!(skipped.skipped, 1);
+        assert_eq!(std::fs::read(&seed).unwrap(), b"original remote bytes");
+        let kept = upload_paths_at_epoch(
+            &connection, epoch, root_text, root_text, std::slice::from_ref(&upload), FileConflictStrategy::KeepBoth,
+        ).unwrap();
+        assert_eq!(kept.completed, 1);
+        assert_eq!(std::fs::read(&seed).unwrap(), b"original remote bytes");
+        let uploaded = upload_paths_at_epoch(
+            &connection, epoch, root_text, root_text, &[upload.clone(), inputs.join("upload-bundle")], FileConflictStrategy::Overwrite,
+        ).unwrap();
+        assert_eq!(uploaded.failed, 0);
+        assert_eq!(std::fs::read(&seed).unwrap(), b"uploaded bytes");
+        assert_eq!(std::fs::read(root.join("upload-bundle/child.txt")).unwrap(), b"staged bytes");
+
+        let remote_paths = [seed.clone(), root.join("bundle")];
+        let downloaded = download_entries_at_epoch(
+            &connection, epoch, root_text, &remote_paths, &downloads, FileConflictStrategy::KeepBoth,
+        ).unwrap();
+        assert_eq!(downloaded.failed, 0);
+        assert_eq!(std::fs::read(downloads.join("seed.txt")).unwrap(), b"uploaded bytes");
+        assert_eq!(std::fs::read(downloads.join("bundle/child.txt")).unwrap(), b"directory bytes");
+        assert_eq!(download_conflicts_for_files(&downloads, &remote_paths).unwrap(), vec!["seed.txt", "bundle"]);
+        delete_entry_at_epoch(&connection, epoch, root_text, &renamed).unwrap();
+        delete_entry_at_epoch(&connection, epoch, root_text, &copied_dir).unwrap();
+        assert!(!Path::new(&renamed).exists());
+        assert!(!Path::new(&copied_dir).exists());
+        assert!(create_entry_at_epoch(
+            &connection, epoch, root_text, root.join("escape").to_str().unwrap(), "outside.txt", false,
+        ).is_err());
+        assert!(list_directory_at_epoch(
+            &connection, Some(epoch), root.join("escape").to_str().unwrap(), root_text, false,
+        ).is_err());
+        assert!(delete_entry_at_epoch(&connection, epoch, root_text, root_text).is_err());
+        assert!(!outside.join("outside.txt").exists());
+        delete_entry_at_epoch(
+            &connection, epoch, root_text, root.join("escape").to_str().unwrap(),
+        ).unwrap();
+        assert!(std::fs::symlink_metadata(root.join("escape")).is_err());
+        assert_eq!(std::fs::read(outside.join("keep.txt")).unwrap(), b"outside sentinel");
+
+        // Use the real pool to retire A and acquire B, retaining A's pin.
+        let st = state();
+        let replacement_epoch = st.block_on(async {
+            let (session, sftp) = open_sftp_with_session(st, &connection).await?;
+            let pin = FileSessionPin::new(st, &connection, Some(epoch), &session);
+            pin.check().await?;
+            sftp.close().await;
+            assert!(crate::remote_ssh::evict_session_if_same(st, &st.pool(), &connection.id, &session).await);
+            let (replacement, replacement_sftp) = open_sftp_with_session(st, &connection).await?;
+            assert!(pin.check().await.is_err());
+            let acquired_pin = FileSessionPin::new(st, &connection, Some(epoch), &replacement);
+            assert!(acquired_pin.check().await.is_err());
+            let replacement_epoch = replacement.connection_epoch().get();
+            replacement_sftp.close().await;
+            Ok(replacement_epoch)
+        }).unwrap();
+        assert_ne!(epoch, replacement_epoch);
+        let entry_count = std::fs::read_dir(&root).unwrap().count();
+        std::fs::write(&upload, b"must not replace captured source").unwrap();
+        assert!(list_directory_at_epoch(&connection, Some(epoch), root_text, root_text, false).is_err());
+        assert!(create_entry_at_epoch(&connection, epoch, root_text, root_text, "forbidden.txt", false).is_err());
+        assert!(rename_entry_at_epoch(&connection, epoch, root_text, seed.to_str().unwrap(), "forbidden.txt").is_err());
+        assert!(delete_entry_at_epoch(&connection, epoch, root_text, seed.to_str().unwrap()).is_err());
+        assert!(copy_entry_keep_both_at_epoch(&connection, epoch, root_text, seed.to_str().unwrap(), root_text).is_err());
+        assert!(upload_conflicts_at_epoch(&connection, epoch, root_text, root_text, std::slice::from_ref(&upload)).is_err());
+        assert!(upload_paths_at_epoch(
+            &connection, epoch, root_text, root_text, &[upload], FileConflictStrategy::Overwrite,
+        ).is_err());
+        let denied_download = scratch.join("denied-download");
+        assert!(download_entries_at_epoch(
+            &connection, epoch, root_text, std::slice::from_ref(&seed), &denied_download, FileConflictStrategy::Overwrite,
+        ).is_err());
+        assert!(!denied_download.exists());
+        assert_eq!(std::fs::read(&seed).unwrap(), b"uploaded bytes");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), entry_count);
+        let current = list_directory_at_epoch(
+            &connection, Some(replacement_epoch), root_text, root_text, false,
+        ).unwrap();
+        assert_eq!(current.source.connection_epoch, replacement_epoch);
+    }
 }

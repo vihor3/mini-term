@@ -5,15 +5,25 @@ Agent integration for serialized shared sidebar/workbench files.
 
 ## Implementation Order
 
-- [ ] Read onboarding, worktree-context, file-workbench, and remote I/O contracts.
-- [ ] Extend directory picker state/navigation and Local/WSL/SSH listing adapters
+- [x] Read onboarding, worktree-context, file-workbench, and remote I/O contracts.
+- [x] Extend directory picker state/navigation and Local/WSL/SSH listing adapters
   with exact modal/request/host ownership and directory-only selection validation.
-- [ ] Implement the full browser dialog with breadcrumbs, path/filter input,
+- [x] Implement the full browser dialog with breadcrumbs, path/filter input,
   home/up, bounded directory scrolling, cancellation, and clear failure states.
-- [ ] Correct FileTree height/wheel/scrollbar routing without changing scope caches.
-- [ ] Centralize row/blank creation targets, preserve applicable item actions,
+- [x] Correct FileTree height/wheel/scrollbar routing without changing scope caches.
+- [x] Centralize row/blank creation targets, preserve applicable item actions,
   remove upload/header actions, and retain safe external-path drop handling.
-- [ ] Add regressions and have main dispatch Trellis check before integration.
+- [x] Add regressions and have main dispatch Trellis check before integration.
+- [x] Complete R11 review fixes and the literal row-relative path follow-up.
+- [ ] Obtain exact-SHA Actions/native acceptance.
+
+Checked items indicate source implementation, not passing verification. Both
+slices have authored tests. FileTree's independent review fixed producing listing
+provenance, every retained mutation/download pin and busy/presentation ownership.
+R11 independent review completed captured Select/Cancel/form ownership,
+Windows UNC/WSL mapping validation and current-session authenticated Home.
+FileTree row-relative paths preserve literal POSIX backslashes. All Actions/native
+gates remain open; handoffs record exact files and known transport limitations.
 
 ## Actions-Only Cases
 

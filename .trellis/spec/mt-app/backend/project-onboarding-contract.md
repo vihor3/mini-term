@@ -325,3 +325,126 @@ let outcome = store.register_or_activate_project_with_placement(
 )?;
 reactivate_active_page(&outcome.project_id, &outcome.worktree_id, window, cx);
 ```
+
+## Scenario: Host-Aware Directory Browser
+
+### 1. Scope / Trigger
+
+Use the shared `remote_directory_picker` for every onboarding folder selection,
+including native Local, Windows drive/UNC, WSL and authenticated SSH paths.
+Browsing is a read-only precursor to the existing registration authority.
+
+### 2. Signatures
+
+```rust
+struct DirectoryPickerOptions {
+    host: ProjectHostSelection,
+    initial_path: String,
+    canonical_home: Option<String>,
+    expected_connection_epoch: Option<u64>,
+}
+
+remote_directory_picker::open(
+    options,
+    is_current: impl Fn(&App) -> bool + 'static,
+    on_select: impl Fn(String, &mut Window, &mut App) + 'static,
+    on_cancel: impl Fn(&mut Window, &mut App) + 'static,
+    window,
+    cx,
+);
+
+remote_ssh::browse_directory(&RemoteProjectContext, absolute_path)
+    -> Result<RemoteDirectoryListing, RemoteDirectoryBrowseError>;
+```
+
+`DirectoryLocation` pairs a native/WSL/SSH `DirectorySource` with its host path.
+SSH source includes connection ID, fingerprint and authenticated epoch. Returned
+`RemoteDirectoryListing` carries canonical path, directories, producing epoch
+and fingerprint; it is not an unqualified entries vector.
+
+### 3. Contracts
+
+- Retain separate current location, successful listing/selection, filter input
+  and monotonically checked request identity. Typing filters loaded rows;
+  explicit submission navigates. Home/up/breadcrumb/location changes issue a
+  new owned request and clear the old selection until successful completion.
+- Both listing publication and Select require the live modal, parent-form owner,
+  latest request, exact source and current SSH epoch. Back, cancel, new request,
+  page/mode/host change or starting an operation invalidates old callbacks.
+  Counter overflow permanently exhausts that modal instance.
+- Select captures `DirectorySelection` at render, including its request and
+  selected location; it cannot reread a successor selection at delayed click.
+  Go/row/location callbacks likewise retain the rendered request. Cancel/close
+  is idempotent and cannot close a later picker instance with the same kind.
+  Onboarding folder buttons capture parent form context before request allocation.
+- Local uses native filesystem rules; WSL keeps case-sensitive POSIX locations
+  and converts to its owning distribution's host-visible UNC only at the
+  selection/native-I/O boundary. Drive/UNC roots cannot be normalized as SSH.
+  WSL home lookup uses the structured execution-host command API. SSH uses only
+  the home returned by its authenticated host probe, never the client home.
+- WSL mapping validates the distro and each POSIX component before native I/O;
+  do not Path::join unchecked text onto a Windows UNC root. Prefix injection,
+  literal backslash/colon and components the existing registration boundary
+  cannot faithfully preserve are rejected, not reinterpreted. Explicit parent
+  traversal resolves through structured `pwd -P` on that captured distribution
+  before Win32 normalization. Preserve strict Unicode and record terminators.
+- `probe_connection` obtains SSH Home using `canonicalize(".")` on its actual
+  acquired session with pre/post session guards. It does not read or populate
+  the legacy connection-ID-only `home_cache`, which can contain an older
+  authenticated session's path. SFTP initial cwd is not inferred from SetEnv HOME.
+- The SSH browser validates the captured context before I/O and after completion
+  using the same acquired session. Reconnect cannot lend a new epoch to an old
+  listing. No retry may silently replace its source.
+- List one level, including hidden folders and browsable directory symlinks;
+  natural-sort results without applying project ignore rules. SSH listing has
+  a 30-second deadline and 20,000-entry acceptance limit. Existing SFTP readdir
+  materializes entries before this guard, so it is not a streaming memory cap.
+- Keep one bounded list scroller, nonshrinking rows and a reserved scrollbar
+  gutter. Paths and host remain inspectable, with shared icon tooltip timing.
+- Select returns the host-visible path to `apply_picker_selection`; the original
+  directory-only probe, operation ownership and central registration still run.
+  Browsing itself never initializes Git, mutates files or persists projects.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Local PermissionDenied | Dedicated permission state |
+| Proven missing/non-directory/invalid path | InvalidPath |
+| Opaque SFTP error | Unavailable with bounded detail; no localized-text inference |
+| Empty successful folder | Selectable current location, empty list |
+| Pending/failed/superseded listing | No stale Select authority |
+| Delayed Select/Cancel after picker replacement | Cannot select or close the new instance |
+| New SSH epoch or endpoint fingerprint | Reject old result/selection |
+| Poisoned connection-ID Home cache | Probe the current authenticated session directly |
+| WSL prefix injection/unrepresentable POSIX name | Reject before native path inspection |
+| Local/WSL/SSH source mismatch | Fail closed; never fall back to another filesystem |
+| Entry limit exceeded or deadline elapsed | Unavailable, not a partial authoritative listing |
+
+### 5. Good / Base / Bad
+
+- Good: the selected SSH directory is re-probed on the original form/host before
+  registration, even though its browser listing was successful.
+- Base: selecting an ordinary non-Git folder works without Git installed.
+- Bad: stamp a late directory result with the current epoch or register directly
+  from the browser callback.
+
+### 6. Tests Required
+
+Actions exercises request replacement/ABA, parent-form invalidation, returned
+source/epoch, overflow, hidden/empty/symlink directories, filtering versus path
+submission, native drives/UNC and WSL conversion. Windows focused browser and
+onboarding tests execute, not only compile. Exact Actions artifacts still need
+native last-row wheel/thumb, long-path/high-DPI, keyboard, cancellation and SSH
+reconnect acceptance. Authored fixtures and source review are not those results.
+The actual authenticated browser fixture independently reads SFTP initial cwd,
+poisons the legacy home cache, replaces the pooled session, and rejects stale
+epochs. Geometry-helper coverage at 400px and above is not proof for shorter
+viewports, native nested-dialog offsets, IME or actual scrollbar interaction.
+
+### 7. Wrong vs Correct
+
+Wrong: use a connection-only listing, then attach the current epoch at selection.
+
+Correct: preserve the producing epoch/fingerprint through the listing, validate
+the exact modal/form/request/source, then delegate to authoritative onboarding.

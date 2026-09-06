@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Entity, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, PathPromptOptions, SharedString, StatefulInteractiveElement,
+    IntoElement, ParentElement, SharedString, StatefulInteractiveElement,
     Styled, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -116,6 +116,22 @@ struct FormContextOwner {
     host_signature: HostSignature,
 }
 
+impl FormContextOwner {
+    fn capture(flow: &OnboardingState) -> Self {
+        Self {
+            form_instance_id: flow.form_instance_id,
+            host_generation: flow.host_generation,
+            page: flow.page,
+            create_mode: flow.create_mode,
+            host_signature: flow.host.signature(),
+        }
+    }
+
+    fn matches(&self, flow: &OnboardingState) -> bool {
+        !flow.closed && *self == Self::capture(flow)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PendingRegistration {
     context: FormContextOwner,
@@ -135,8 +151,30 @@ struct PickerOwner {
     expected_connection_epoch: Option<u64>,
 }
 
+impl PickerOwner {
+    fn matches(&self, flow: &OnboardingState, active: Option<u64>) -> bool {
+        !flow.is_terminally_failed()
+            && self.context.matches(flow)
+            && picker_request_is_current(active, self.request_id, flow.phase.is_busy())
+            && match &self.context.host_signature {
+                HostSignature::Local => self.expected_connection_epoch.is_none(),
+                HostSignature::Ssh { .. } => {
+                    self.expected_connection_epoch.is_some()
+                        && flow.host_status.observed_epoch() == self.expected_connection_epoch
+                }
+            }
+    }
+}
+
 fn picker_request_is_current(active: Option<u64>, request_id: u64, busy: bool) -> bool {
     active == Some(request_id) && !busy
+}
+
+fn picker_open_is_current(context: &FormContextOwner, flow: &OnboardingState) -> bool {
+    context.matches(flow)
+        && !flow.phase.is_busy()
+        && !flow.is_terminally_failed()
+        && matches!(&flow.host_status, HostStatus::Ready { .. })
 }
 
 fn ssh_failure_epoch_is_current(expected: Option<u64>, current: Option<u64>) -> bool {
@@ -222,6 +260,7 @@ struct ProjectOnboardingView {
     pending_registration: Option<PendingRegistration>,
     next_picker_request_id: u64,
     active_picker_request_id: Option<u64>,
+    canonical_host_home: Option<(u64, String)>,
     _subscriptions: Vec<Subscription>,
     _host_task: Option<Task<()>>,
 }
@@ -260,6 +299,7 @@ impl ProjectOnboardingView {
                 &input,
                 |this: &mut Self, _input, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
+                        this.active_picker_request_id = None;
                         this.pending_registration = None;
                         cx.notify();
                     }
@@ -270,6 +310,7 @@ impl ProjectOnboardingView {
             &existing_path,
             |this: &mut Self, _input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
+                    this.active_picker_request_id = None;
                     this.pending_registration = None;
                     if !this.applying_existing_path {
                         this.existing_probe = ExistingProbeState::Unselected;
@@ -297,28 +338,18 @@ impl ProjectOnboardingView {
             pending_registration: None,
             next_picker_request_id: 0,
             active_picker_request_id: None,
+            canonical_host_home: None,
             _subscriptions: subscriptions,
             _host_task: None,
         }
     }
 
     fn context_owner(&self) -> FormContextOwner {
-        FormContextOwner {
-            form_instance_id: self.flow.form_instance_id,
-            host_generation: self.flow.host_generation,
-            page: self.flow.page,
-            create_mode: self.flow.create_mode,
-            host_signature: self.flow.host.signature(),
-        }
+        FormContextOwner::capture(&self.flow)
     }
 
     fn context_matches(&self, owner: &FormContextOwner) -> bool {
-        !self.flow.closed
-            && self.flow.form_instance_id == owner.form_instance_id
-            && self.flow.host_generation == owner.host_generation
-            && self.flow.page == owner.page
-            && self.flow.create_mode == owner.create_mode
-            && self.flow.host.signature() == owner.host_signature
+        owner.matches(&self.flow)
     }
 
     fn pending_registration_path(&self) -> Option<&str> {
@@ -328,19 +359,30 @@ impl ProjectOnboardingView {
     }
 
     fn picker_context_matches(&self, owner: &PickerOwner) -> bool {
-        self.context_matches(&owner.context)
-            && picker_request_is_current(
-                self.active_picker_request_id,
-                owner.request_id,
-                self.flow.phase.is_busy(),
-            )
-            && match &owner.context.host_signature {
-                HostSignature::Local => owner.expected_connection_epoch.is_none(),
-                HostSignature::Ssh { .. } => {
-                    owner.expected_connection_epoch.is_some()
-                        && self.flow.host_status.observed_epoch() == owner.expected_connection_epoch
-                }
-            }
+        owner.matches(&self.flow, self.active_picker_request_id)
+    }
+
+    fn picker_authority_matches(&self, owner: &PickerOwner, cx: &App) -> bool {
+        if !self.picker_context_matches(owner) {
+            return false;
+        }
+        match &owner.context.host_signature {
+            HostSignature::Local => true,
+            HostSignature::Ssh {
+                connection_id,
+                connection_fingerprint,
+            } => ssh_operation_authority_is_current(
+                *connection_fingerprint,
+                self.store
+                    .read(cx)
+                    .ssh_connections()
+                    .iter()
+                    .find(|connection| connection.id == *connection_id)
+                    .map(crate::remote_ssh::connection_fingerprint),
+                owner.expected_connection_epoch,
+                crate::remote_ssh::current_connection_epoch(connection_id),
+            ),
+        }
     }
 
     fn operation_context_matches(&self, owner: &OperationOwner) -> bool {
@@ -403,12 +445,21 @@ fn allocate_form_instance_id() -> Option<u64> {
 }
 
 fn close_modal(state: &Entity<ProjectOnboardingView>, window: &mut Window, cx: &mut App) {
-    state.update(cx, |view, cx| {
+    if !crate::overlay::is_top(crate::overlay::key(kind::ADD_PROJECT)) {
+        return;
+    }
+    let closed = state.update(cx, |view, cx| {
+        if view.flow.closed {
+            return false;
+        }
         view.active_picker_request_id = None;
         let _ = view.flow.close();
         cx.notify();
+        true
     });
-    close_guarded(kind::ADD_PROJECT, window, cx);
+    if closed {
+        close_guarded(kind::ADD_PROJECT, window, cx);
+    }
 }
 
 fn navigate_to(
@@ -498,6 +549,7 @@ fn select_host(
             cx.notify();
             return (false, None, None, None);
         }
+        view.canonical_host_home = None;
         view.existing_probe = ExistingProbeState::Unselected;
         cx.notify();
         (
@@ -539,6 +591,8 @@ fn connect_selected_host(state: &Entity<ProjectOnboardingView>, window: &mut Win
             ProjectHostSelection::Ssh { connection, .. } => connection.clone(),
             _ => return None,
         };
+        view.active_picker_request_id = None;
+        view.canonical_host_home = None;
         view.flow.set_host_status(HostStatus::Connecting);
         let owner = HostProbeOwner {
             form_instance_id: view.flow.form_instance_id,
@@ -617,6 +671,7 @@ fn complete_host_probe(
             {
                 let epoch = probe.connection_epoch;
                 let home = probe.canonical_home;
+                view.canonical_host_home = Some((epoch, home.clone()));
                 view.flow.set_host_status(HostStatus::Ready {
                     observed_epoch: Some(epoch),
                 });
@@ -768,11 +823,15 @@ fn open_host_menu(
 fn open_directory_picker(
     state: &Entity<ProjectOnboardingView>,
     target: PickerTarget,
+    context: &FormContextOwner,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some((owner, host, initial_path)) = state.update(cx, |view, cx| {
-        if view.flow.phase.is_busy() || view.flow.is_terminally_failed() {
+    if crate::prompt::is_open(kind::REMOTE_DIRECTORY_PICKER) {
+        return;
+    }
+    let Some((owner, host, initial_path, canonical_home)) = state.update(cx, |view, cx| {
+        if !picker_open_is_current(context, &view.flow) {
             return None;
         }
         let request_id = match checked_next(view.next_picker_request_id) {
@@ -800,72 +859,64 @@ fn open_directory_picker(
             },
             view.flow.host.clone(),
             initial_path,
+            view.canonical_host_home
+                .as_ref()
+                .filter(|(epoch, _)| view.flow.host_status.observed_epoch() == Some(*epoch))
+                .map(|(_, home)| home.clone()),
         ))
     }) else {
         return;
     };
-    match host {
-        ProjectHostSelection::Local => {
-            let prompt = match target {
-                PickerTarget::AddExisting | PickerTarget::InitializeExisting => {
-                    t("projectOnboarding", "home.addExisting")
-                }
-                PickerTarget::CloneParent => t("projectOnboarding", "clone.parentLabel"),
-                PickerTarget::CreateParent => t("projectOnboarding", "create.parentLabel"),
-            };
-            let paths = cx.prompt_for_paths(PathPromptOptions {
-                files: false,
-                directories: true,
-                multiple: false,
-                prompt: Some(prompt.into()),
-            });
-            let picker_state = state.clone();
-            window
-                .spawn(cx, async move |cx| {
-                    let Ok(Ok(Some(paths))) = paths.await else {
-                        return;
-                    };
-                    let Some(path) = paths.into_iter().next() else {
-                        return;
-                    };
-                    let selected = path.to_string_lossy().to_string();
-                    let _ = cx.update(|window, cx| {
-                        apply_picker_selection(&picker_state, &owner, target, selected, window, cx);
-                    });
-                })
-                .detach();
-        }
-        ProjectHostSelection::Ssh {
-            connection,
-            connection_fingerprint,
-        } => {
-            if ensure_picker_remote_authority(
-                state,
-                &owner,
-                &connection,
-                connection_fingerprint,
-                cx,
-            )
-            .is_err()
-            {
-                return;
-            }
-            let picker_state = state.clone();
-            crate::remote_directory_picker::open(
-                connection,
-                if initial_path.trim().is_empty() {
-                    "~".to_string()
-                } else {
-                    initial_path
-                },
-                move |selected, window, cx| {
-                    apply_picker_selection(&picker_state, &owner, target, selected, window, cx);
-                },
-                window,
-                cx,
-            );
-        }
+    if matches!(&host, ProjectHostSelection::Ssh { .. }) && canonical_home.is_none() {
+        connect_selected_host(state, window, cx);
+        return;
     }
+    if let ProjectHostSelection::Ssh {
+        connection,
+        connection_fingerprint,
+    } = &host
+        && ensure_picker_remote_authority(state, &owner, connection, *connection_fingerprint, cx)
+            .is_err()
+    {
+        return;
+    }
+    let guard_state = state.clone();
+    let guard_owner = owner.clone();
+    let cancel_state = state.clone();
+    let cancel_owner = owner.clone();
+    let picker_state = state.clone();
+    crate::remote_directory_picker::open(
+        crate::remote_directory_picker::DirectoryPickerOptions {
+            host,
+            initial_path,
+            canonical_home,
+            expected_connection_epoch: owner.expected_connection_epoch,
+        },
+        move |cx| guard_state.read(cx).picker_authority_matches(&guard_owner, cx),
+        move |selected, window, cx| {
+            apply_picker_selection(&picker_state, &owner, target, selected, window, cx);
+        },
+        move |_window, cx| {
+            cancel_state.update(cx, |view, cx| {
+                if view.context_matches(&cancel_owner.context)
+                    && view.active_picker_request_id == Some(cancel_owner.request_id)
+                {
+                    if matches!(&cancel_owner.context.host_signature, HostSignature::Ssh { .. })
+                        && !view.picker_authority_matches(&cancel_owner, cx)
+                    {
+                        view.canonical_host_home = None;
+                        view.flow.set_host_status(HostStatus::Error(
+                            t("projectOnboarding", "error.disconnected").to_string(),
+                        ));
+                    }
+                    view.active_picker_request_id = None;
+                    cx.notify();
+                }
+            });
+        },
+        window,
+        cx,
+    );
 }
 
 fn ensure_picker_remote_authority(
@@ -1646,6 +1697,7 @@ fn render_home(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> AnyElemen
     };
     let enabled = ready && !blocked;
     let add_state = state.clone();
+    let browse_context = state.read(cx).context_owner();
     let clone_state = state.clone();
     let create_state = state.clone();
 
@@ -1692,7 +1744,7 @@ fn render_home(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> AnyElemen
                             cx,
                         );
                     } else {
-                        open_directory_picker(&add_state, PickerTarget::AddExisting, window, cx);
+                        open_directory_picker(&add_state, PickerTarget::AddExisting, &browse_context, window, cx);
                     }
                 }
             }),
@@ -1864,6 +1916,7 @@ fn render_clone_page(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> Any
                 && !effective_name.is_empty()
                 && name_error.is_none()));
     let browse_state = state.clone();
+    let browse_context = state.read(cx).context_owner();
     let submit_state = state.clone();
     let suggested_input = name_input.clone();
 
@@ -1885,7 +1938,7 @@ fn render_clone_page(state: &Entity<ProjectOnboardingView>, cx: &mut App) -> Any
             &parent_input,
             blocked,
             move |window, cx| {
-                open_directory_picker(&browse_state, PickerTarget::CloneParent, window, cx);
+                open_directory_picker(&browse_state, PickerTarget::CloneParent, &browse_context, window, cx);
             },
         ))
         .child(render_input_field(
@@ -2046,6 +2099,7 @@ fn render_new_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut App) -
         && (retrying_registration
             || (!parent.is_empty() && !name.is_empty() && name_error.is_none()));
     let browse_state = state.clone();
+    let browse_context = state.read(cx).context_owner();
     let submit_state = state.clone();
     div()
         .w_full()
@@ -2064,7 +2118,7 @@ fn render_new_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut App) -
             &parent_input,
             blocked,
             move |window, cx| {
-                open_directory_picker(&browse_state, PickerTarget::CreateParent, window, cx);
+                open_directory_picker(&browse_state, PickerTarget::CreateParent, &browse_context, window, cx);
             },
         ))
         .child(render_target_preview(
@@ -2213,6 +2267,7 @@ fn render_existing_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut A
         }
     };
     let browse_state = state.clone();
+    let browse_context = state.read(cx).context_owner();
     let submit_state = state.clone();
     div()
         .w_full()
@@ -2225,7 +2280,7 @@ fn render_existing_folder_form(state: &Entity<ProjectOnboardingView>, cx: &mut A
             &input,
             blocked,
             move |window, cx| {
-                open_directory_picker(&browse_state, PickerTarget::InitializeExisting, window, cx);
+                open_directory_picker(&browse_state, PickerTarget::InitializeExisting, &browse_context, window, cx);
             },
         ))
         .when_some(relationship, |el, relationship| el.child(relationship))
@@ -2605,8 +2660,9 @@ fn localized_error(error: &OnboardingError) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateMode, FormContextOwner, HostSignature, OnboardingPage, PendingOperation,
-        PendingRegistration, operation_with_registration_retry, picker_request_is_current,
+        CreateMode, FormContextOwner, HostSignature, HostStatus, OnboardingPage, OnboardingState,
+        PendingOperation, PendingRegistration, PickerOwner, ProjectHostSelection,
+        operation_with_registration_retry, picker_request_is_current,
         ssh_failure_epoch_is_current, ssh_host_probe_epoch_is_current,
         ssh_operation_authority_is_current,
     };
@@ -2666,6 +2722,100 @@ mod tests {
         assert!(!picker_request_is_current(Some(8), 7, false));
         assert!(!picker_request_is_current(None, 7, false));
         assert!(!picker_request_is_current(Some(7), 7, true));
+    }
+
+    #[test]
+    fn browser_open_button_retains_its_form_context_before_allocating_a_request() {
+        let mut flow = OnboardingState::new(1, ProjectHostSelection::Local);
+        flow.navigate(OnboardingPage::Create).unwrap();
+        let context = FormContextOwner::capture(&flow);
+        assert!(picker_open_is_current(&context, &flow));
+        let mut busy = flow.clone();
+        busy.begin_validation().unwrap().unwrap();
+        assert!(!picker_open_is_current(&context, &busy));
+        let mut page = flow.clone();
+        page.navigate(OnboardingPage::Home).unwrap();
+        page.navigate(OnboardingPage::Create).unwrap();
+        assert!(!picker_open_is_current(&context, &page));
+        let mut mode = flow.clone();
+        mode.switch_create_mode(CreateMode::InitializeExisting).unwrap();
+        mode.switch_create_mode(CreateMode::NewFolder).unwrap();
+        assert!(!picker_open_is_current(&context, &mode));
+        let mut disconnected = flow.clone();
+        disconnected.set_host_status(HostStatus::Connecting);
+        assert!(!picker_open_is_current(&context, &disconnected));
+        flow.close().unwrap();
+        assert!(!picker_open_is_current(&context, &flow));
+        let mut reopened = OnboardingState::new(2, ProjectHostSelection::Local);
+        reopened.navigate(OnboardingPage::Create).unwrap();
+        assert!(!picker_open_is_current(&context, &reopened));
+    }
+
+    fn picker_owner(flow: &OnboardingState) -> PickerOwner {
+        PickerOwner {
+            context: FormContextOwner::capture(flow),
+            request_id: 9,
+            expected_connection_epoch: flow.host_status.observed_epoch(),
+        }
+    }
+
+    #[test]
+    fn browser_owner_rejects_back_mode_change_operation_cancel_and_modal_reopen() {
+        let mut flow = OnboardingState::new(1, ProjectHostSelection::Local);
+        flow.navigate(OnboardingPage::Create).unwrap();
+        let owner = picker_owner(&flow);
+        assert!(owner.matches(&flow, Some(9)));
+        assert!(!owner.matches(&flow, None));
+        assert!(!owner.matches(&flow, Some(10)));
+
+        let mut running = flow.clone();
+        running.begin_validation().unwrap().unwrap();
+        assert!(!owner.matches(&running, Some(9)));
+        let mut back = flow.clone();
+        back.navigate(OnboardingPage::Home).unwrap();
+        back.navigate(OnboardingPage::Create).unwrap();
+        assert!(!owner.matches(&back, Some(9)));
+        let mut mode = flow.clone();
+        mode.switch_create_mode(CreateMode::InitializeExisting).unwrap();
+        mode.switch_create_mode(CreateMode::NewFolder).unwrap();
+        assert!(!owner.matches(&mode, Some(9)));
+        flow.close().unwrap();
+        assert!(!owner.matches(&flow, Some(9)));
+        let mut reopened = OnboardingState::new(2, ProjectHostSelection::Local);
+        reopened.navigate(OnboardingPage::Create).unwrap();
+        assert!(!owner.matches(&reopened, Some(9)));
+    }
+
+    #[test]
+    fn browser_owner_rejects_host_round_trips_and_changed_authenticated_epochs() {
+        let mut flow = OnboardingState::new(1, ProjectHostSelection::Local);
+        let local_owner = picker_owner(&flow);
+        let connection = mt_config::SshConnection {
+            id: "remote".into(),
+            name: "Remote".into(),
+            host: "example.invalid".into(),
+            port: 22,
+            user: "user".into(),
+            password: None,
+            identity_file: None,
+            group: None,
+        };
+        let fingerprint = crate::remote_ssh::connection_fingerprint(&connection);
+        flow.switch_host(ProjectHostSelection::Ssh {
+            connection,
+            connection_fingerprint: fingerprint,
+        }).unwrap();
+        flow.set_host_status(HostStatus::Ready { observed_epoch: Some(7) });
+        let remote_owner = picker_owner(&flow);
+        assert!(remote_owner.matches(&flow, Some(9)));
+        assert!(!local_owner.matches(&flow, Some(9)));
+        flow.set_host_status(HostStatus::Ready { observed_epoch: Some(8) });
+        assert!(!remote_owner.matches(&flow, Some(9)));
+        flow.set_host_status(HostStatus::NotConnected);
+        assert!(!remote_owner.matches(&flow, Some(9)));
+        flow.switch_host(ProjectHostSelection::Local).unwrap();
+        assert!(!remote_owner.matches(&flow, Some(9)));
+        assert!(!local_owner.matches(&flow, Some(9)));
     }
 
     #[test]

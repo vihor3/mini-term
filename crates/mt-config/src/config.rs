@@ -68,6 +68,9 @@ pub struct OldProjectGroup {
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub projects: Vec<ProjectConfig>,
+    /// Tasks-only identities. Credentials and connection epochs are never preferences.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks_account_selections: Vec<TasksAccountSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_tree: Option<Vec<ProjectTreeItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -586,6 +589,24 @@ pub enum WorktreeVisibilityBackend {
     },
 }
 
+/// Sibling worktrees share a choice; other projects, hosts and GitHub hosts do not.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TasksAccountScope {
+    pub root_project_id: String,
+    pub execution_host_id: ExecutionHostId,
+    pub backend: WorktreeVisibilityBackend,
+    pub github_host: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TasksAccountSelection {
+    pub scope: TasksAccountScope,
+    /// Normalized identity only; resolve the exact lookup spelling by enumeration.
+    pub login: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeVisibilitySource {
@@ -808,6 +829,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             projects: vec![],
+            tasks_account_selections: vec![],
             project_tree: None,
             project_groups: None,
             project_ordering: None,
@@ -1407,6 +1429,61 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.available_shells.len(), config.available_shells.len());
+    }
+
+    #[test]
+    fn tasks_account_choices_are_optional_and_identity_only() {
+        let mut config = AppConfig::default();
+        let absent = serde_json::to_value(&config).unwrap();
+        assert!(absent.get("tasksAccountSelections").is_none());
+        let legacy: AppConfig = serde_json::from_value(absent).unwrap();
+        assert!(legacy.tasks_account_selections.is_empty());
+
+        let host = ExecutionHostId::derive("fixture-host", &mt_identity::HostInstallId::new());
+        config.tasks_account_selections.push(TasksAccountSelection {
+            scope: TasksAccountScope {
+                root_project_id: "root".into(),
+                execution_host_id: host,
+                backend: WorktreeVisibilityBackend::Ssh {
+                    connection_id: "ssh".into(), host: "example.test".into(),
+                    port: 22, user: "developer".into(),
+                },
+                github_host: "github.com".into(),
+            },
+            login: "alice".into(),
+        });
+        let value = serde_json::to_value(&config).unwrap();
+        let entries = value["tasksAccountSelections"].as_array().unwrap();
+        assert_eq!(entries[0].as_object().unwrap().len(), 2);
+        assert_eq!(entries[0]["scope"].as_object().unwrap().len(), 4);
+        assert_eq!(entries[0]["scope"]["backend"].as_object().unwrap().len(), 5);
+        assert_eq!(entries[0]["login"], "alice");
+        let restored: AppConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.tasks_account_selections, config.tasks_account_selections);
+        assert_eq!(restored.default_shell, config.default_shell);
+    }
+
+    #[test]
+    fn tasks_account_choices_survive_config_store_reload() {
+        let root = unique_test_root("tasks-account-reload");
+        let path = root.join("config.json");
+        let store = ConfigStore::at(&path);
+        let mut loaded = store.load().unwrap();
+        let host = ExecutionHostId::derive("fixture-host", &mt_identity::HostInstallId::new());
+        for (project, login) in [("project-a", "alice"), ("project-b", "bob")] {
+            loaded.config.tasks_account_selections.push(TasksAccountSelection {
+                scope: TasksAccountScope {
+                    root_project_id: project.into(), execution_host_id: host.clone(),
+                    backend: WorktreeVisibilityBackend::Local, github_host: "github.com".into(),
+                },
+                login: login.into(),
+            });
+        }
+        store.save(loaded.token, &loaded.config).unwrap();
+        drop(store);
+        let reopened = ConfigStore::at(path).load().unwrap();
+        assert_eq!(reopened.config.tasks_account_selections, loaded.config.tasks_account_selections);
+        assert_eq!(reopened.config.projects.len(), loaded.config.projects.len());
     }
 
     #[test]

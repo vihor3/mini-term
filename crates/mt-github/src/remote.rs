@@ -111,7 +111,7 @@ pub fn parse_remote_url(input: &str) -> Result<GitHubRepoIdentity, RemoteParseEr
     GitHubRepoIdentity::new(host, owner, repo)
 }
 
-fn normalize_host(value: &str) -> Result<String, RemoteParseError> {
+pub(crate) fn normalize_host(value: &str) -> Result<String, RemoteParseError> {
     let value = value.trim().trim_end_matches('.').to_ascii_lowercase();
     if value.is_empty()
         || value.len() > 253

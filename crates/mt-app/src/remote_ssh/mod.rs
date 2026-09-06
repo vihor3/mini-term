@@ -63,17 +63,21 @@ use mt_ssh::{
 mod delete;
 mod dirs;
 mod files;
+mod git_ops;
 mod paths;
 mod project_ops;
 mod sessions;
+mod tasks_accounts;
 mod transfer;
 
 pub use delete::*;
 pub use dirs::*;
 pub use files::*;
+pub use git_ops::*;
 pub use paths::*;
 pub use project_ops::*;
 pub use sessions::*;
+pub(crate) use tasks_accounts::run_tasks_account_envelope;
 pub use transfer::*;
 
 /// SFTP 协议层每请求超时(readdir / stat / 单个 read 包)。

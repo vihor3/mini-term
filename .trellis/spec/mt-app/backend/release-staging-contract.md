@@ -217,3 +217,112 @@ Wrong: upload independent changed-line `-U0` hunks and apply with relaxed contex
 Correct: use changed lines to select violations/files, upload complete per-file
 `-U3` patches, apply them without relaxing context, then validate the resulting
 commit through Actions.
+
+## Scenario: Actual Execution-Host Fixtures
+
+### 1. Scope / Trigger
+
+Use the CI-owned loopback SSH and disposable WSL fixtures when validating host
+transport, account secrecy, cancellation and exact-source filesystem behavior.
+Pure parsers, synthetic adapters and Linux Python-envelope tests do not prove
+an actual Windows-to-WSL or authenticated SSH pipeline.
+
+### 2. Signatures
+
+```text
+node .github/scripts/tasks_wsl_fixture.mjs prepare|import|test|cleanup
+
+MT_TEST_SSH_ROOT, MT_TEST_SSH_PORT, MT_TEST_SSH_USER, MT_TEST_SSH_KEY
+MT_TEST_WSL_DISTRO=mt-tasks-<GITHUB_RUN_ID>-<GITHUB_RUN_ATTEMPT>
+MT_TEST_WSL_MARKER=/mini-term-fixture/owner.json
+MT_TEST_WSL_GH_SHA256=<same-run Linux synthetic gh ELF SHA-256>
+```
+
+WSL guest owner JSON contains exactly numeric `schema: 1`,
+`kind: "mini-term-tasks-wsl"`, and string `run_id`, `run_attempt`, `repository`,
+`sha`. The artifact manifest changes kind to `mini-term-tasks-wsl-artifact` and
+adds `source_rootfs_url`, `source_rootfs_sha256`, `rootfs_sha256`, `gh_sha256`.
+Credentials are not fields of either object.
+
+### 3. Contracts
+
+- All setup, compilation, import, transport commands, fixtures, cleanup and
+  verification execute only in GitHub Actions. Never inspect real device gh
+  credentials or use a user's existing distro/SSH session as a fixture.
+- Linux prepares a Canonical amd64 Ubuntu 22.04 rootfs with a source-controlled
+  SHA-256 pin. Verify the download before extraction; a changed upstream file
+  fails pending explicit review, never automatic pin replacement. Compile the
+  checked-in std-only `gh_fixture.rs` on Linux and install that ELF plus the
+  checked-in WSL Python launcher. Guest Python remains `/usr/bin/python3`.
+- Upload rootfs and manifest as a same-run, short-retention artifact. Windows
+  validates run/attempt/repository/commit, source pin and downloaded hash before
+  import. Guest tests also check bounded marker output, exact gh/Python lookup
+  and ELF hash before invoking any account API.
+- Use a unique run/attempt-owned distro on the Windows 2022 WSL 1 runner.
+  Refuse a pre-existing name or import ownership state. Persist fixture import
+  ownership before dispatch so interrupted imports still have guarded cleanup.
+  Never set a default distro/version or issue global `wsl --shutdown`.
+- Imported guest automount and Windows interop/PATH append are disabled.
+  Synthetic cases and HOME live below `/mini-term-fixture`; account fixtures
+  explicitly seed conflicting synthetic auth/debug variables so sanitation is
+  tested. No real gh binary/configuration or token store is imported.
+- The Windows transport test must be discovered exactly once, then explicitly
+  run with `--ignored --exact --test-threads=1`; zero matches cannot pass.
+  Timeouts fail the gate. An `always()` step cleans only the recorded exact
+  owned distro, including partial import or an already stopped guest. Missing
+  WSL capability is a failure, not fallback to Linux-envelope evidence.
+- SSH setup uses only 127.0.0.1 and an unprivileged port, disposable keys and
+  homes below RUNNER_TEMP, a marker and an early cleanup trap. Public-key-only
+  sshd may use PAM to avoid the portable non-PAM locked-account gate; password,
+  keyboard authentication, forwarding and user rc/environment files remain off.
+  Do not unlock accounts or modify real SSH configuration.
+- The shared test-only `loopback_ssh_fixture` validates Actions inputs and
+  containment; it does not create servers. Actual Git, Tasks and Files tests
+  consume that single setup. Keep transport failures distinct from authoritative
+  absence, and verify execution counts for exact ignored fixture filters.
+- Runner logs/artifact manifests are execution evidence for their exact product
+  SHA. These fixtures do not establish native UI geometry, every mid-dispatch
+  fault, a user's installed CLI capability or secure-store accessibility.
+
+Source references for setup, not runtime proof:
+[Canonical checksum](https://cloud-images.ubuntu.com/wsl/jammy/current/SHA256SUMS),
+[Windows 2022 WSL feature](https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md),
+[Microsoft import/cleanup commands](https://learn.microsoft.com/en-us/windows/wsl/basic-commands),
+[same-run artifact download](https://github.com/actions/download-artifact).
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Wrong run, commit, marker, rootfs or ELF checksum | Fail before account requests |
+| Existing distro or foreign cleanup state | Refuse import/destruction |
+| WSL capability absent or exact test missing | Fail explicitly, no silent skip |
+| Test cancellation/timeout or partial import | Preserve failure and run owned cleanup |
+| Another distro exists/runs | Leave it untouched |
+| SSH key/root/home escapes RUNNER_TEMP fixture | Refuse fixture configuration |
+| Fake transport passes | Do not claim authenticated SSH/actual WSL coverage |
+
+### 5. Good / Base / Bad
+
+- Good: same-run manifest and guest provenance match, synthetic account requests
+  run through production `wsl.exe`, and the owned distro alone is unregistered.
+- Base: a missing WSL component fails setup without touching another distro.
+- Bad: run a Linux shell envelope and mark Windows cancellation coverage passed,
+  or use the runner's default distro because import is inconvenient.
+
+### 6. Tests Required
+
+Assert selected-account list/detail identity, both stdout/stderr secrecy,
+same-captured credential after lookup rotation, lookup/data cancellation and
+timeout, real descendant readiness/retirement, missing helper/malformed reply,
+SSH epoch replacement, and no global account change. Fixture setup itself must
+execute in the exact-SHA workflow and complete guarded cleanup. Native Windows
+process ownership, pure account/config tests and ordinary Linux tests remain
+separate gates, not replacements for actual transport execution.
+
+### 7. Wrong vs Correct
+
+Wrong: accept any available WSL distro and infer a test ran from Cargo exit zero.
+
+Correct: validate same-run ownership and fixture bytes, import a unique guest,
+require exact test discovery and execution, then clean only that recorded guest.

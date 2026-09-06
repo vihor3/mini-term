@@ -1,6 +1,6 @@
 # GitHub Project Tasks Contract
 
-## Scenario: Read-only Issues and Pull Requests on the project execution host
+## Scenario: Account-scoped Issues and Pull Requests on the execution host
 
 ### 1. Scope / Trigger
 
@@ -24,8 +24,9 @@ pub struct CommandPlan {
 }
 
 pub fn discover_remote_plan() -> CommandPlan;
-pub fn version_plan() -> CommandPlan;
-pub fn auth_status_plan(host: &str) -> CommandPlan;
+pub fn known_accounts_plan(host: &str) -> Result<CommandPlan, AccountError>;
+pub fn parse_known_accounts(host: &str, output: &CommandOutput)
+    -> Result<KnownGitHubAccounts, AccountError>;
 pub fn account_plan(host: &str) -> CommandPlan;
 pub fn list_plan(repo: &GitHubRepoIdentity, kind: WorkItemKind) -> CommandPlan;
 pub fn detail_plan(
@@ -56,6 +57,16 @@ pub fn execute_host_command(
     output_cap: usize,
 ) -> Result<HostCommandResult, CommandExecutionError>;
 
+pub struct AccountHostResult<T> {
+    pub result: Result<T, AccountExecutionError>,
+    pub observed_connection_epoch: Option<u64>,
+}
+pub fn discover_accounts(snapshot: &ProjectExecutionSnapshot, host: &str,
+    control: &AccountExecutionControl) -> AccountHostResult<KnownGitHubAccounts>;
+pub fn execute_selected_account(snapshot: &ProjectExecutionSnapshot,
+    plan: &SelectedAccountRequestPlan, control: &AccountExecutionControl)
+    -> AccountHostResult<CommandOutput>;
+
 pub fn open_github_work_item(
     service: Entity<GitHubTaskService>,
     request: OpenGitHubWorkItem,
@@ -63,6 +74,16 @@ pub fn open_github_work_item(
     cx: &mut App,
 );
 ```
+
+`AccountExecutionControl::new` takes a 100ms..120s timeout, an explicit
+`AccountCancellation`, and the captured optional connection epoch. Capability
+probes use the same control and result envelope. Private credential bytes never
+inhabit a `CommandPlan`, general command result, or configuration field.
+
+`AppConfig::tasks_account_selections` defaults to an empty vector. Each entry
+contains a normalized login and `TasksAccountScope`: root project, execution
+host ID, stable Local/WSL/SSH backend identity, and normalized GitHub hostname.
+Credentials, credential fingerprints, and transient SSH epochs are not persisted.
 
 Rollback environment:
 
@@ -83,26 +104,68 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
 - Repository identity comes only from `git remote get-url origin` on that host.
   Project names, display paths, and client-side same-spelling folders are not
   repository evidence.
-- The ordered pipeline is bounded: discover remote, probe `gh`, check auth for
-  the normalized host, probe the active account as JSON, then list or view with
-  explicit JSON fields. Before publishing, re-discover `origin` and re-probe the
-  account. Cached list and detail requests perform the same context probe both
-  before and after the data command. No command uses `--web`, prints a token, or
-  runs login.
+- Origin discovery alone uses ordinary host command execution. Every `gh`
+  stage uses the dedicated account executor: capability probes, structured
+  host-specific enumeration, named-account identity, and list/detail requests.
+  Enumeration uses neither `--active` nor `--show-token`; allowlist parsed
+  identity/state fields and keep broken peers visible. Never return raw auth
+  status or credential diagnostics through a general result.
+- The Tasks toolbar owns account selection. A sole successful known account
+  can initialize an absent selection; multiple known accounts require explicit
+  choice. A stored-but-missing, invalid, or broken choice never falls back to
+  another account. Sibling worktrees share the root project's account scope,
+  but other projects/backends/GitHub hosts do not. Global `gh` active-account
+  changes are informational only and never rewrite Tasks state. Tasks never
+  invokes `gh auth switch`, login, or a config write; Git credentials are separate.
+- Native lookup captures `gh auth token --hostname <host> --user <exact-login>`
+  in bounded private non-Debug buffers and passes it only to the child's auth
+  environment. WSL/SSH execute lookup, identity proofs and data commands wholly
+  inside a Python 3.8+ isolated stdlib envelope on that host. The token never
+  returns over SSH or enters shell/client argv, a temporary script, or a file.
+  Missing host Python is `HostHelperUnavailable`, not a local fallback/install.
+- Remove inherited auth/debug/host/repo and shell-startup overrides; set only
+  the applicable request auth variable (`GH_TOKEN` for github.com and its
+  supported ghe.com subdomains, `GH_ENTERPRISE_TOKEN` for other GHES hosts).
+  Preserve exact login spelling for credential lookup, normalized identity for
+  comparisons. Before/after data identity proofs use the SAME captured credential.
+  Public output rejects an exact credential echo, and credential errors reduce
+  to static categories without raw stdout/stderr.
+- The ordered pipeline revalidates origin and selected identity around data
+  access, including cached list/detail requests. It passes the observed epoch
+  to every subsequent account stage and preserves epochs on errors. Cancellation
+  invalidates publication and stops later stages; native process groups/Windows
+  Jobs and the host envelope own child cleanup. A failed cleanup acknowledgement
+  is explicit, not reported as success or safe rollback. The bounded ordinary
+  origin read has before/after cancellation checks, not physical cancellation.
+- Foreground access is explicit, not a consequence of rendering or a service
+  notification. Showing Tasks, activating its worktree/mode and opening or
+  reactivating a WorkItem allocate owned accesses and revalidate origin and the
+  selected account. Until that access proves current, cached content is stale
+  and inert. Passive notifications must not cause an unbounded refetch loop.
+- `GitHubWorkItemViewer::on_activated(&mut self, &mut Context<Self>)` starts a
+  bounded detail access without replacing the tab/viewer or resetting scroll.
+  The viewer retains its returned request receipt; another access or delayed
+  response cannot reactivate its cache. New viewers access in the constructor.
+  Tasks list row/menu callbacks additionally retain `list_access_id`; merely
+  showing a known-identity list does not cancel independent detail accesses.
+  Actual source/account/auth changes still invalidate both.
 - Discovery/source identity includes execution host, root project/source,
   backend, exact `WorktreeId`, and exact canonical worktree path. Sibling
   worktrees therefore cannot reuse one another's unverified `origin` result.
 - Only after each exact source independently discovers the same normalized
-  repository and account may list/detail data and in-flight work share a
+  repository and account may completed list/detail data share a
   `RepositoryCacheKey` scoped by execution host/root/backend plus repository,
   lowercase account, and auth generation. Mode, filter, selection, scroll, and
   workbench preview/permanent state remain keyed by `WorktreeId`.
+  A new read can cancel/restart an older loading slot; there is no promised
+  shared-fetch waiter subsystem. Independent source proof precedes cache reuse.
 - Every completion validates request ID, auth generation, repository cache key,
   current source signature, re-discovered repository, re-probed account, and
   observed SSH connection epoch before publishing. The first observed SSH epoch
   may replace a captured pre-connect epoch; any later epoch change inside the
   same pipeline rejects the result. A changed host, distro, connection
-  fingerprint, root project, remote, account, or Retry makes old work inert.
+  fingerprint, root project, remote, selected account, or Retry makes old work
+  inert. An unrelated global active-account change is not an invalidation event.
 - Offline, rate-limit, and generic transient failures may retain last-known rows
   only for the same complete cache identity. Auth, repository, account, malformed
   response, and not-found errors do not borrow another identity's data. Rows from
@@ -131,8 +194,15 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
 | Local `gh` executable missing | `ClientMissing`; no fallback |
 | WSL/SSH returns an explicit shell command-not-found diagnostic for any `gh` stage | `ClientMissing`; no local probe |
 | Origin is absent, local, malformed, or unsupported | `NoGitHubRemote` |
-| Host has no active `gh` authentication | Show exact host label and manual login command |
-| Active token lacks a read scope | `ScopeRequired`; Retry available |
+| No known account on the host | Show exact host label and manual login Copy/Retry |
+| Multiple known accounts and no stored choice | Show Tasks selector; no data request |
+| Chosen account missing, revoked, or inaccessible | Retain choice and distinct error; no active/sole-peer fallback |
+| Required JSON/named-user capability missing | Explicit unsupported capability; no alternate auth strategy |
+| Selected token lacks a read scope | `ScopeRequired`; Retry available |
+| Global gh active account changes | Leave Tasks choice and request ownership unchanged |
+| Tasks choice changes | Invalidate only that exact account scope; never change global gh |
+| WSL/SSH lacks Python 3.8+ | `HostHelperUnavailable`; native Windows remains Python-free |
+| Credential lookup/token echo/cleanup fails | Static sanitized error, no token or raw diagnostics returned |
 | API rate limit or network failure | Preserve same-identity last-known rows when present |
 | JSON is truncated, invalid UTF-8, malformed, or has an unknown state | Reject as `MalformedResponse` |
 | First SSH stage reconnects before execution | Adopt its observed epoch for the request source |
@@ -147,11 +217,14 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
 
 ### 5. Good / Base / Bad Cases
 
-- Good: Main and linked worktrees reuse one Issue fetch, but return to different
-  Issue/PR modes, filters, selected rows, scroll positions, and detail previews.
+- Good: Main and linked worktrees independently prove their source before using
+  the same completed repository/account cache, while returning to different
+  modes, filters, selected rows, scroll positions and detail previews.
 - Good: The first SSH command reconnects and establishes a newer epoch, then all
   later stages stay on it. If a later stage reports another epoch, the result is
   rejected even when project ID and path text are unchanged.
+- Good: Project A chooses Alice and project B chooses Bob on one device. Both
+  issue requests keep their choice while the device's global active user changes.
 - Base: A local repository with authenticated `gh` displays an empty Issue list
   without affecting the terminal, Files, Git, or Sessions.
 - Bad: Run local `gh` after WSL or SSH execution fails. That leaks the client's
@@ -167,6 +240,17 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
   local, control-character, port, and shell-hostile inputs.
 - Structured plan tests assert explicit repository/host, JSON fields, no token,
   no `--web`, and exact manual-login text.
+- Account tests assert official host-map framing, mixed valid/broken accounts,
+  duplicate/schema/count/output bounds, exact lookup spelling, independent
+  selection/default persistence, and both directions of no auth synchronization.
+- Production executor fixtures use a synthetic gh binary and sentinel token:
+  assert private native pipes, Windows suspended-child/Job ownership, inherited
+  environment removal, same-credential proofs, bounded cancellation/timeout,
+  descendant retirement and no secret in argv/results/config/diagnostics.
+- Linux authenticated loopback SSH uses the shared runner-only fixture, isolated
+  HOME/keys and a proven synthetic gh path. Explicit ignored tests inspect actual
+  channel stdout/stderr and epoch replacement. Ordinary workspace tests do not
+  execute this gate. POSIX envelope tests are not actual WSL transport evidence.
 - Error tests distinguish client missing, auth, wrong account/host, scope, rate,
   offline, not found, malformed, and generic failure, including WSL/SSH
   command-not-found diagnostics.
@@ -213,3 +297,6 @@ let repository = parse_remote_url(std::str::from_utf8(&remote.output.stdout)?)?;
 
 The execution host discovers its own normalized repository identity, and every
 later completion is fenced by that immutable source and repository context.
+Selected data then uses `execute_selected_account`, never the ordinary command
+runner or `gh auth switch`. Source-backed contracts and authored tests do not
+establish a passing Actions/native gate; record those separately for the exact SHA.

@@ -48,6 +48,13 @@ use crate::menu::{self, MenuItem};
 use crate::store::{AppStore, orca_worktree_context_enabled};
 use crate::ui;
 
+pub(crate) mod host_ui;
+#[cfg(test)]
+pub(crate) mod source_tests;
+
+use crate::execution_host::{ExecutionSourceSignature, ProjectExecutionSnapshot};
+use crate::git_backend::{GitBackend, GitLifetime, GitRead, GitReadValue, GitRepository, GitWrite, GitWritePhase, UncertainReview};
+
 /// 两块折叠区的会话级视图状态。**有意不落盘**。
 #[derive(Clone, Copy)]
 struct SectionUi {
@@ -83,6 +90,8 @@ pub(crate) struct GitScope {
     worktree_id: Option<WorktreeId>,
     generation: u64,
     cache_enabled: bool,
+    source: Option<ExecutionSourceSignature>,
+    project_id: Option<String>,
 }
 
 impl GitScope {
@@ -95,11 +104,19 @@ impl GitScope {
             worktree_id,
             generation,
             cache_enabled,
+            source: None,
+            project_id: None,
         }
     }
 
     pub(crate) fn unbound() -> Self {
         Self::new(None, 0, false)
+    }
+
+    pub(crate) fn with_source(mut self, project_id: String, source: ExecutionSourceSignature) -> Self {
+        self.project_id = Some(project_id);
+        self.source = Some(source);
+        self
     }
 
     pub(crate) fn cache_key(&self) -> Option<&WorktreeId> {
@@ -115,6 +132,28 @@ impl GitScope {
             && other.cache_enabled
             && self.worktree_id.is_some()
             && self.worktree_id == other.worktree_id
+            && self.source == other.source
+            && self.project_id == other.project_id
+    }
+
+    pub(crate) fn same_source(&self, other: &Self) -> bool {
+        self.source == other.source && self.project_id == other.project_id
+    }
+
+    /// User-authored draft recovery only, never read or mutation authority.
+    pub(crate) fn same_draft_context(&self, other: &Self) -> bool {
+        self.worktree_id.is_some() && self.worktree_id == other.worktree_id
+            && self.project_id == other.project_id
+            && self.source.as_ref().zip(other.source.as_ref()).is_some_and(|(left, right)| {
+                left.with_connection_epoch(None) == right.with_connection_epoch(None)
+            })
+    }
+
+    pub(crate) fn matches_active(&self, store: &Entity<AppStore>, cx: &App) -> bool {
+        host_ui::active_snapshot(store, cx).is_ok_and(|current| {
+            self.project_id.as_deref() == Some(current.project_id.as_str())
+                && self.source.as_ref() == Some(&current.source_signature())
+        })
     }
 }
 
@@ -143,6 +182,7 @@ fn git_scope_request_matches(
     request_generation == current_generation && request_worktree == current_worktree
 }
 
+#[cfg(test)]
 fn git_panel_scope_changed(
     cache_enabled: bool,
     current_worktree: Option<&WorktreeId>,
@@ -166,6 +206,28 @@ enum SyncState {
     Error(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GitSyncOwner {
+    scope: GitScope,
+    repo_path: String,
+    authority: Option<mt_project::git::cli::RepositoryAuthority>,
+    request: u64,
+}
+
+fn sync_owner_matches(captured: &GitSyncOwner, current: &GitSyncOwner) -> bool {
+    captured == current
+}
+
+fn reconciliation_resets_history(captured: &GitScope, current: &GitScope, captured_repo: &str, current_repo: &str) -> bool {
+    captured == current && captured_repo == current_repo
+}
+
+fn repository_selection_disposed(selected: &str, retained: bool,
+    previous: Option<&mt_project::git::cli::RepositoryAuthority>,
+    next: Option<&mt_project::git::cli::RepositoryAuthority>) -> bool {
+    (!retained && !selected.is_empty()) || previous.zip(next).is_some_and(|(previous, next)| previous != next)
+}
+
 fn suspend_sync_state(state: Option<SyncState>) -> (Option<SyncState>, bool) {
     if matches!(state.as_ref(), Some(SyncState::Loading)) {
         (None, true)
@@ -177,6 +239,29 @@ fn suspend_sync_state(state: Option<SyncState>) -> (Option<SyncState>, bool) {
 fn clear_sync_state(state: &mut Option<SyncState>) {
     if !matches!(state.as_ref(), Some(SyncState::Loading)) {
         *state = None;
+    }
+}
+
+fn head_label(head: &mt_project::git::cli::HeadState) -> Option<String> {
+    head.branch.as_ref().map(|branch| branch.short_name().to_string())
+        .or_else(|| head.oid.as_ref().map(|oid| format!("({})", &oid.as_str()[..7])))
+}
+
+fn same_common_repository(left: &GitRepository, right: &GitRepository) -> bool {
+    left.authority().common_dir == right.authority().common_dir
+        && left.backend().snapshot().execution_host_id == right.backend().snapshot().execution_host_id
+        && left.backend().snapshot().source_signature().backend == right.backend().snapshot().source_signature().backend
+}
+
+fn repository_terminal_cwd(backend: &crate::execution_host::ExecutionBackend, path: &str) -> Result<String, String> {
+    match backend {
+        crate::execution_host::ExecutionBackend::Wsl { distro } => {
+            crate::project_onboarding::DirectoryLocation {
+                source: crate::project_onboarding::DirectorySource::Wsl { distro: distro.clone() },
+                path: path.to_string(),
+            }.host_path().map_err(|error| error.detail)
+        }
+        _ => Ok(path.to_string()),
     }
 }
 
@@ -194,6 +279,15 @@ pub struct GitPanel {
     changes: Entity<GitChanges>,
     history: Entity<GitHistoryContent>,
     repos: Vec<GitRepoInfo>,
+    repositories: Vec<GitRepository>,
+    backend: Option<GitBackend>,
+    source: Option<ProjectExecutionSnapshot>,
+    lifetime: GitLifetime,
+    source_cache: HashMap<WorktreeId, (String, ExecutionSourceSignature)>,
+    error: Option<String>,
+    repos_loading: bool,
+    sync_request: u64,
+    observed_busy: Option<(u64, GitWritePhase)>,
     selected_repo: String,
     branches: Vec<BranchInfo>,
     branches_loading: bool,
@@ -232,8 +326,17 @@ impl GitPanel {
                 match event {
                     // 提交成功:历史整体重来 + 重载分支(分支头已前移)。即使
                     // A→B→A 让原 generation 失效，也按稳定 worktree 身份对账。
-                    GitChangesEvent::Committed(scope, repo_path) => {
-                        this.handle_commit_completion(scope, repo_path, cx);
+                    GitChangesEvent::Reconciled(scope, repository) => {
+                        this.handle_reconciliation(scope, repository, cx);
+                    }
+                    GitChangesEvent::StatusLoaded(scope, repository, head) => {
+                        if this.scope_matches(scope) && scope.matches_active(&this.store, cx)
+                            && this.selected_repository(cx).is_some_and(|current| current.authority() == repository.authority()) {
+                            if let Some(info) = this.repos.iter_mut().find(|info| info.path.to_string_lossy() == repository.authority().worktree_root) {
+                                info.current_branch = head_label(head);
+                                cx.notify();
+                            }
+                        }
                     }
                 }
             }),
@@ -248,27 +351,7 @@ impl GitPanel {
             },
         ));
         subs.push(cx.observe(&store, |this: &mut Self, _, cx| {
-            let (worktree_id, path) = {
-                let store = this.store.read(cx);
-                let project = store.active_project();
-                (
-                    store.active_worktree_id().cloned(),
-                    project.map(|project| {
-                        store
-                            .canonical_worktree_path_for_project(&project.id)
-                            .unwrap_or(&project.path)
-                            .to_string()
-                    }),
-                )
-            };
-            if git_panel_scope_changed(
-                orca_worktree_context_enabled(),
-                this.current_worktree.as_ref(),
-                worktree_id.as_ref(),
-                this.project_path.as_deref(),
-                path.as_deref(),
-            ) {
-                this.switch_scope(worktree_id, path, cx);
+            if this.sync_source(cx) {
                 if this.visible {
                     this.on_project_changed(cx);
                 } else {
@@ -284,6 +367,15 @@ impl GitPanel {
             changes,
             history,
             repos: Vec::new(),
+            repositories: Vec::new(),
+            backend: None,
+            source: None,
+            lifetime: GitLifetime::new(),
+            source_cache: HashMap::new(),
+            error: None,
+            repos_loading: false,
+            sync_request: 0,
+            observed_busy: None,
             selected_repo: String::new(),
             branches: Vec::new(),
             branches_loading: false,
@@ -314,34 +406,15 @@ impl GitPanel {
         self.visible = visible;
         git_watch::set_enabled(visible);
         if visible {
-            let (worktree_id, path) = {
-                let store = self.store.read(cx);
-                let project = store.active_project();
-                (
-                    store.active_worktree_id().cloned(),
-                    project.map(|project| {
-                        store
-                            .canonical_worktree_path_for_project(&project.id)
-                            .unwrap_or(&project.path)
-                            .to_string()
-                    }),
-                )
-            };
-            if git_panel_scope_changed(
-                orca_worktree_context_enabled(),
-                self.current_worktree.as_ref(),
-                worktree_id.as_ref(),
-                self.project_path.as_deref(),
-                path.as_deref(),
-            ) {
-                self.switch_scope(worktree_id, path, cx);
-            }
+            self.sync_source(cx);
             if self.stale {
                 self.on_project_changed(cx);
             }
             self.start_tick(cx);
         } else {
             self._tick = None;
+            self.invalidate_requests(cx);
+            self.stale = true;
         }
         cx.notify();
     }
@@ -356,12 +429,31 @@ impl GitPanel {
                     .await;
                 let alive = this
                     .update(cx, |this: &mut Self, cx| {
+                        // SSH epoch changes do not necessarily notify AppStore.
+                        if this.sync_source(cx) {
+                            this.on_project_changed(cx);
+                        }
                         if git_watch::drain_hit() {
                             this.changes.update(cx, |c, _| c.note_pty_hit());
                             this.history.update(cx, |h, _| h.note_pty_hit());
                         }
                         this.changes.update(cx, |c, cx| c.tick(cx));
                         this.history.update(cx, |h, cx| h.tick(cx));
+                        let busy = this.selected_repository(cx).and_then(|repo| repo.busy())
+                            .map(|busy| (busy.operation_id, busy.phase));
+                        if busy != this.observed_busy {
+                            let finished = this.observed_busy.is_some() && busy.is_none();
+                            this.observed_busy = busy;
+                            this.changes.update(cx, |changes, cx| {
+                                if finished { changes.load(cx); }
+                                cx.notify();
+                            });
+                            if finished {
+                                this.history.update(cx, |history, cx| history.refresh(cx));
+                                this.load_branches(cx);
+                            }
+                            cx.notify();
+                        }
                     })
                     .is_ok();
                 if !alive {
@@ -377,6 +469,9 @@ impl GitPanel {
         };
         let (pull_state, pull_refresh_needed) = suspend_sync_state(self.pull_state.take());
         let (push_state, push_refresh_needed) = suspend_sync_state(self.push_state.take());
+        if let Some(source) = &self.source {
+            self.source_cache.insert(worktree_id.clone(), (source.project_id.clone(), source.source_signature()));
+        }
         self.scope_cache.insert(
             worktree_id,
             GitScopeState {
@@ -393,7 +488,11 @@ impl GitPanel {
     }
 
     fn restore_scope(&mut self, worktree_id: Option<&WorktreeId>) -> bool {
-        let state = worktree_id.and_then(|worktree_id| self.scope_cache.remove(worktree_id));
+        let state = worktree_id.and_then(|worktree_id| {
+            let state = self.scope_cache.remove(worktree_id);
+            let expected = self.source.as_ref().map(|source| (source.project_id.clone(), source.source_signature()));
+            (self.source_cache.remove(worktree_id) == expected).then_some(state).flatten()
+        });
         if let Some(state) = state {
             self.repos = state.repos;
             self.selected_repo = state.selected_repo;
@@ -415,32 +514,38 @@ impl GitPanel {
         }
     }
 
-    fn switch_scope(
-        &mut self,
-        worktree_id: Option<WorktreeId>,
-        path: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let refresh_needed = if orca_worktree_context_enabled() {
+    fn switch_scope(&mut self, source: Option<ProjectExecutionSnapshot>, cx: &mut Context<Self>) {
+        if orca_worktree_context_enabled() {
             self.save_scope();
-            self.restore_scope(worktree_id.as_ref())
         } else {
             self.scope_cache.clear();
-            self.restore_scope(None);
-            false
-        };
+            self.source_cache.clear();
+        }
+        let worktree_id = source.as_ref().map(|source| source.worktree_id.clone());
+        self.source = source;
+        self.restore_scope(worktree_id.as_ref());
+        self.current_worktree = worktree_id;
+        self.project_path = self.source.as_ref().map(|source| source.canonical_path.clone());
+        self.invalidate_requests(cx);
+        self.drag = None;
+        self.stale = true;
+    }
+
+    fn invalidate_requests(&mut self, cx: &mut Context<Self>) {
+        self.lifetime.invalidate();
+        self.lifetime = GitLifetime::new();
+        self.backend = None;
+        self.repositories.clear();
         self.scope_generation = self.scope_generation.wrapping_add(1);
         self.repo_request = self.repo_request.wrapping_add(1);
         self.branch_request = self.branch_request.wrapping_add(1);
+        self.sync_request = self.sync_request.wrapping_add(1);
+        self.observed_busy = None;
         self.branches_loading = false;
-        self.current_worktree = worktree_id;
-        self.project_path = path;
-        self.drag = None;
+        self.repos_loading = false;
+        self.pull_state = suspend_sync_state(self.pull_state.take()).0;
+        self.push_state = suspend_sync_state(self.push_state.take()).0;
         self.push_repo_down(cx);
-        if refresh_needed {
-            self.changes.update(cx, |changes, cx| changes.load(cx));
-            self.history.update(cx, |history, cx| history.reload(cx));
-        }
         if self.pull_state.is_some() {
             self.schedule_sync_clear(true, cx);
         }
@@ -449,34 +554,48 @@ impl GitPanel {
         }
     }
 
-    fn is_remote_project(&self, cx: &App) -> bool {
-        self.store
-            .read(cx)
-            .active_project()
-            .is_some_and(|p| p.ssh_connection_id.is_some())
+    fn sync_source(&mut self, cx: &mut Context<Self>) -> bool {
+        let result = host_ui::active_snapshot(&self.store, cx);
+        let next = result.as_ref().ok().cloned();
+        let identity = |source: &ProjectExecutionSnapshot| (source.project_id.clone(), source.source_signature());
+        if self.source.as_ref().map(identity) == next.as_ref().map(identity) {
+            if let Err(error) = result { self.error = Some(error); }
+            return false;
+        }
+        self.switch_scope(next, cx);
+        self.error = result.err();
+        true
     }
 
     fn child_scope(&self) -> GitScope {
-        GitScope::new(
+        let scope = GitScope::new(
             self.current_worktree.clone(),
             self.scope_generation,
             orca_worktree_context_enabled(),
-        )
+        );
+        match &self.source {
+            Some(source) => scope.with_source(source.project_id.clone(), source.source_signature()),
+            None => scope,
+        }
     }
 
     fn scope_matches(&self, scope: &GitScope) -> bool {
         self.child_scope() == *scope
     }
 
-    fn active_scope_matches_repo(&self, scope: &GitScope, repo_path: &str) -> bool {
+    fn active_scope_matches_repo(&self, scope: &GitScope, repository: &GitRepository) -> bool {
         let current = self.child_scope();
-        (current == *scope || current.same_cache_identity(scope)) && self.selected_repo == repo_path
+        (current == *scope || current.same_cache_identity(scope))
+            && self.repositories.iter().any(|repo| repo.authority().worktree_root == self.selected_repo
+                && repo.authority() == repository.authority())
     }
 
     fn mark_scope_refresh_needed(&mut self, scope: &GitScope, repo_path: &str) -> bool {
         let Some(worktree_id) = scope.cache_key() else {
             return false;
         };
+        if self.source_cache.get(worktree_id).map(|(project, source)| (Some(project), Some(source)))
+            != Some((scope.project_id.as_ref(), scope.source.as_ref())) { return false; }
         let Some(state) = self.scope_cache.get_mut(worktree_id) else {
             return false;
         };
@@ -487,33 +606,26 @@ impl GitPanel {
         true
     }
 
-    fn handle_commit_completion(
+    fn handle_reconciliation(
         &mut self,
         scope: &GitScope,
-        repo_path: &str,
+        repository: &GitRepository,
         cx: &mut Context<Self>,
     ) {
-        if self.active_scope_matches_repo(scope, repo_path) {
-            self.history.update(cx, |history, cx| history.reload(cx));
-            self.load_branches(cx);
-        } else {
+        let repo_path = &repository.authority().worktree_root;
+        if !self.visible {
+            self.stale = true;
             self.mark_scope_refresh_needed(scope, repo_path);
+            return;
         }
-    }
-
-    fn reconcile_stale_sync(
-        &mut self,
-        scope: &GitScope,
-        repo_path: &str,
-        pull: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if self.active_scope_matches_repo(scope, repo_path) {
+        let shared = self.selected_repository(cx).is_some_and(|current| same_common_repository(&current, repository));
+        if shared || self.active_scope_matches_repo(scope, repository) {
+            let reset = reconciliation_resets_history(scope, &self.child_scope(), repo_path, &self.selected_repo);
             self.changes.update(cx, |changes, cx| changes.load(cx));
-            if pull {
-                self.history.update(cx, |history, cx| history.reload(cx));
-            }
-            self.refresh_repo_meta(cx);
+            self.history.update(cx, |history, cx| {
+                if reset { history.reload(cx); } else { history.refresh(cx); }
+            });
+            self.load_branches(cx);
         } else {
             self.mark_scope_refresh_needed(scope, repo_path);
         }
@@ -524,25 +636,38 @@ impl GitPanel {
         self.stale = false;
         self.push_repo_down(cx);
         self.load_repos(cx);
+        cx.notify();
     }
 
-    /// 发现仓库(**重**:首次扫盘深度 5)。远程项目直接 return。
+    /// Discovery and connection readiness are blocking host operations.
     fn load_repos(&mut self, cx: &mut Context<Self>) {
-        if self.is_remote_project(cx) {
-            return;
-        }
-        let Some(path) = self.project_path.clone() else {
-            return;
-        };
+        if self.repos_loading { return; }
+        let Some(source) = self.source.clone() else { return; };
+        let backend = self.backend.clone();
+        let lifetime = self.lifetime.clone();
+        let captured_source = source.clone();
+        self.repos_loading = true;
         self.repo_request = self.repo_request.wrapping_add(1);
         let req = self.repo_request;
         let generation = self.scope_generation;
         let worktree_id = self.current_worktree.clone();
-        let task_path = std::path::PathBuf::from(&path);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { mt_project::git::discover_git_repos(&task_path) })
+                .spawn(async move {
+                    let backend = match backend {
+                        Some(backend) => backend,
+                        None => GitBackend::connect(source.clone(), lifetime)?,
+                    };
+                    if !host_ui::read_source_matches(&source, backend.snapshot()) {
+                        return Err(crate::git_backend::GitError {
+                            kind: crate::git_backend::GitErrorKind::Stale,
+                            message: "Git source epoch changed; refresh the repository".into(),
+                        });
+                    }
+                    let repos = backend.discover()?;
+                    Ok::<_, crate::git_backend::GitError>((backend, repos))
+                })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
                 if !git_scope_request_matches(
@@ -554,12 +679,31 @@ impl GitPanel {
                 {
                     return;
                 }
+                if !host_ui::active_snapshot(&this.store, cx)
+                    .is_ok_and(|current| host_ui::read_source_matches(&captured_source, &current)) {
+                    if this.sync_source(cx) { this.on_project_changed(cx); }
+                    return;
+                }
+                this.repos_loading = false;
                 match result {
-                    Ok(repos) => {
+                    Ok((backend, repositories)) => {
+                        let Ok(current) = host_ui::active_snapshot(&this.store, cx) else { return; };
+                        if !backend.matches_snapshot(&current) || !host_ui::read_source_matches(&captured_source, backend.snapshot()) {
+                            this.sync_source(cx);
+                            this.stale = true;
+                            this.error = Some("Git source changed; refresh the repository".into());
+                            cx.notify();
+                            return;
+                        }
+                        this.source = Some(backend.snapshot().clone());
+                        let repos: Vec<_> = repositories.iter().map(|repo| repo.info().clone()).collect();
                         // 选中仓库保持原值(若仍在列表里),否则取第一个
                         let keep = repos
                             .iter()
                             .any(|r| r.path.to_string_lossy() == this.selected_repo);
+                        let selection_disposed = repository_selection_disposed(&this.selected_repo, keep,
+                            this.repositories.iter().find(|repo| repo.authority().worktree_root == this.selected_repo).map(|repo| repo.authority()),
+                            repositories.iter().find(|repo| repo.authority().worktree_root == this.selected_repo).map(|repo| repo.authority()));
                         if !keep {
                             this.selected_repo = repos
                                 .first()
@@ -567,14 +711,27 @@ impl GitPanel {
                                 .unwrap_or_default();
                         }
                         this.repos = repos;
+                        this.repositories = repositories;
+                        this.backend = Some(backend);
+                        this.error = None;
+                        if selection_disposed {
+                            this.branches.clear();
+                            this.view_branch = None;
+                            this.invalidate_requests(cx);
+                            this.load_repos(cx);
+                            cx.notify();
+                            return;
+                        }
                     }
                     Err(err) => {
-                        eprintln!("[git] 发现仓库失败: {err:#}");
-                        this.repos.clear();
+                        this.error = Some(err.to_string());
+                        this.invalidate_requests(cx);
                     }
                 }
                 this.push_repo_down(cx);
                 this.load_branches(cx);
+                if this.pull_state.is_some() { this.schedule_sync_clear(true, cx); }
+                if this.push_state.is_some() { this.schedule_sync_clear(false, cx); }
                 cx.notify();
             });
         })
@@ -582,21 +739,22 @@ impl GitPanel {
     }
 
     fn load_branches(&mut self, cx: &mut Context<Self>) {
+        if self.branches_loading { return; }
         let repo = self.selected_repo.clone();
-        if repo.is_empty() {
-            self.branches.clear();
-            return;
-        }
+        let Some(repository) = self.selected_repository(cx) else { return; };
+        let request = match repository.request(GitRead::Branches) {
+            Ok(request) => request,
+            Err(error) => { self.error = Some(error.to_string()); return; }
+        };
         self.branches_loading = true;
-        self.branch_request = self.branch_request.wrapping_add(1);
+        self.branch_request = request.id();
         let req = self.branch_request;
         let generation = self.scope_generation;
         let worktree_id = self.current_worktree.clone();
-        let task_repo = std::path::PathBuf::from(&repo);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { mt_project::git::get_repo_branches(&task_repo) })
+                .spawn(async move { request.execute() })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
                 // 迟到响应丢弃:换仓库后的旧响应不许覆盖
@@ -607,13 +765,18 @@ impl GitPanel {
                     this.current_worktree.as_ref(),
                 ) || this.branch_request != req
                     || this.selected_repo != repo
+                    || !this.child_scope().matches_active(&this.store, cx)
                 {
                     return;
                 }
                 this.branches_loading = false;
                 match result {
-                    Ok(list) => this.branches = list,
-                    Err(err) => eprintln!("[git] 取分支失败: {err:#}"),
+                    Ok(result) => {
+                        let Some(current) = this.selected_repository(cx) else { return; };
+                        if !result.is_current(&current, req) { return; }
+                        if let GitReadValue::Branches(list) = result.value { this.branches = list; }
+                    }
+                    Err(err) => this.error = Some(err.to_string()),
                 }
                 this.push_repo_down(cx);
                 cx.notify();
@@ -634,10 +797,11 @@ impl GitPanel {
         let repo = self.selected_repo.clone();
         let branches = self.branches.clone();
         let view_branch = self.view_branch.clone();
+        let repository = self.selected_repository(cx);
         self.changes
-            .update(cx, |c, cx| c.set_repo(scope.clone(), &repo, cx));
+            .update(cx, |c, cx| c.set_repository(scope.clone(), &repo, repository.clone(), cx));
         self.history.update(cx, |h, cx| {
-            h.sync(scope, &repo, &branches, view_branch.as_deref(), cx)
+            h.sync_repository(scope, &repo, repository, &branches, view_branch.as_deref(), cx)
         });
     }
 
@@ -651,9 +815,16 @@ impl GitPanel {
         self.view_branch = None;
         self.pull_state = None;
         self.push_state = None;
-        self.push_repo_down(cx);
-        self.load_branches(cx);
+        self.invalidate_requests(cx);
+        self.load_repos(cx);
         cx.notify();
+    }
+
+    fn selected_repository(&self, cx: &App) -> Option<GitRepository> {
+        self.repositories.iter().find(|repository| {
+            repository.authority().worktree_root == self.selected_repo
+                && host_ui::active_repository(repository, &self.store, cx)
+        }).cloned()
     }
 
     fn selected_repo_info(&self) -> Option<&GitRepoInfo> {
@@ -671,21 +842,26 @@ impl GitPanel {
 
     // ── pull / push ────────────────────────────────────────
 
+    fn sync_owner(&self) -> GitSyncOwner {
+        GitSyncOwner {
+            scope: self.child_scope(),
+            repo_path: self.selected_repo.clone(),
+            authority: self.repositories.iter().find(|repo| repo.authority().worktree_root == self.selected_repo)
+                .map(|repo| repo.authority().clone()),
+            request: self.sync_request,
+        }
+    }
+
     fn schedule_sync_clear(&mut self, pull: bool, cx: &mut Context<Self>) {
-        let generation = self.scope_generation;
-        let worktree_id = self.current_worktree.clone();
-        let repo_path = self.selected_repo.clone();
+        let state = if pull { &self.pull_state } else { &self.push_state };
+        if matches!(state, None | Some(SyncState::Loading)) { return; }
+        let owner = self.sync_owner();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(1500))
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
-                if !git_scope_request_matches(
-                    generation,
-                    this.scope_generation,
-                    worktree_id.as_ref(),
-                    this.current_worktree.as_ref(),
-                ) || this.selected_repo != repo_path
+                if !sync_owner_matches(&owner, &this.sync_owner()) || !owner.scope.matches_active(&this.store, cx)
                 {
                     return;
                 }
@@ -701,12 +877,16 @@ impl GitPanel {
     }
 
     fn run_sync(&mut self, pull: bool, cx: &mut Context<Self>) {
-        if self.selected_repo.is_empty()
+        let Some(repository) = self.selected_repository(cx) else { return; };
+        if repository.busy().is_some()
             || self.pull_state == Some(SyncState::Loading)
             || self.push_state == Some(SyncState::Loading)
         {
             return;
         }
+        self.sync_request = self.sync_request.wrapping_add(1);
+        let owner = self.sync_owner();
+        self.error = None;
         if pull {
             self.pull_state = Some(SyncState::Loading);
             self.push_state = None;
@@ -715,79 +895,93 @@ impl GitPanel {
             self.pull_state = None;
         }
         cx.notify();
-        let repo_path = self.selected_repo.clone();
-        let repo = std::path::PathBuf::from(&repo_path);
-        let generation = self.scope_generation;
-        let worktree_id = self.current_worktree.clone();
         let scope = self.child_scope();
         cx.spawn(async move |this, cx| {
-            // ⚠️ pull / push 是 30s 阻塞 CLI,必须后台执行器
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    if pull {
-                        mt_project::git::git_pull(&repo)
-                    } else {
-                        mt_project::git::git_push(&repo)
-                    }
+                    repository.prepare_write(if pull { GitWrite::Pull } else { GitWrite::Push })
+                        .map(|prepared| prepared.execute())
                 })
                 .await;
-            let ok = result.is_ok();
             let _ = this.update(cx, |this: &mut Self, cx| {
-                if !git_scope_request_matches(
-                    generation,
-                    this.scope_generation,
-                    worktree_id.as_ref(),
-                    this.current_worktree.as_ref(),
-                ) || this.selected_repo != repo_path
+                if !sync_owner_matches(&owner, &this.sync_owner())
+                    || !scope.matches_active(&this.store, cx)
                 {
-                    if ok {
-                        this.reconcile_stale_sync(&scope, &repo_path, pull, cx);
+                    if let Ok(outcome) = &result {
+                        this.handle_reconciliation(&scope, outcome.repository(), cx);
                     }
                     return;
                 }
                 let state = match result {
-                    Ok(_) => SyncState::Success,
-                    Err(err) => SyncState::Error(format!("{err:#}")),
+                    Ok(outcome) => {
+                        if let Some(current) = this.selected_repository(cx) {
+                            if !outcome.is_current(&current, outcome.operation_id) { return; }
+                        } else { return; }
+                        match host_ui::outcome_error(&outcome) {
+                            Some(error) => { this.error = Some(error.clone()); SyncState::Error(error) }
+                            None => SyncState::Success,
+                        }
+                    }
+                    Err(err) => { this.error = Some(err.to_string()); SyncState::Error(err.to_string()) },
                 };
                 if pull {
                     this.pull_state = Some(state);
                 } else {
                     this.push_state = Some(state);
                 }
-                if ok {
-                    this.load_branches(cx);
-                    // pull 成功还要刷历史;push 只重载分支
-                    if pull {
-                        this.history.update(cx, |h, cx| h.reload(cx));
-                    }
-                }
-                cx.notify();
-            });
-            // 无论成败 1500ms 后清回 None(`GitHistory.tsx:276`)
-            cx.background_executor()
-                .timer(Duration::from_millis(1500))
-                .await;
-            let _ = this.update(cx, |this: &mut Self, cx| {
-                if !git_scope_request_matches(
-                    generation,
-                    this.scope_generation,
-                    worktree_id.as_ref(),
-                    this.current_worktree.as_ref(),
-                ) || this.selected_repo != repo_path
-                {
-                    return;
-                }
-                if pull {
-                    clear_sync_state(&mut this.pull_state);
-                } else {
-                    clear_sync_state(&mut this.push_state);
-                }
+                // Pull/commit hooks can have effects even on nonzero exit.
+                this.changes.update(cx, |changes, cx| changes.load(cx));
+                this.history.update(cx, |history, cx| history.reload(cx));
+                this.load_branches(cx);
+                this.schedule_sync_clear(pull, cx);
                 cx.notify();
             });
         })
         .detach();
     }
+
+    fn review_uncertain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repository) = self.selected_repository(cx) else { return; };
+        let Some(busy) = repository.busy().filter(|busy| busy.phase == GitWritePhase::Uncertain) else { return; };
+        let scope = self.child_scope();
+        let entity = cx.entity();
+        crate::prompt::Confirm::new("Review uncertain Git operation",
+            "Confirm that the original Git operation has stopped. This only reconciles its result; it does not retry or roll back the operation.")
+            .detail(vec![busy.project_id.clone(), busy.repository.worktree_root.clone(), format!("Operation {}", busy.operation_id)])
+            .ok_text("Confirm stopped and review")
+            .open(move |_, cx| {
+                entity.update(cx, |view, cx| {
+                    if !view.scope_matches(&scope) || !host_ui::active_repository(&repository, &view.store, cx)
+                        || repository.busy().is_none_or(|current| current.operation_id != busy.operation_id || current.phase != GitWritePhase::Uncertain) { return; }
+                    let repository = repository.clone();
+                    let scope = scope.clone();
+                    let path = repository.authority().worktree_root.clone();
+                    view.sync_request = view.sync_request.wrapping_add(1);
+                    let request = view.sync_request;
+                    cx.spawn(async move |view, cx| {
+                        let result = cx.background_executor().spawn(async move {
+                            repository.review_uncertain(busy.operation_id, UncertainReview::UserConfirmedOriginalOperationStopped)
+                        }).await;
+                        let _ = view.update(cx, |view: &mut Self, cx| {
+                            if !view.scope_matches(&scope) || view.sync_request != request || !scope.matches_active(&view.store, cx) {
+                                view.mark_scope_refresh_needed(&scope, &path);
+                                return;
+                            }
+                            view.error = result.err().map(|error| error.to_string());
+                            view.changes.update(cx, |changes, cx| changes.load(cx));
+                            view.history.update(cx, |history, cx| history.reload(cx));
+                            view.refresh_repo_meta(cx);
+                            cx.notify();
+                        });
+                    }).detach();
+                });
+            }, window, cx);
+    }
+}
+
+impl Drop for GitPanel {
+    fn drop(&mut self) { self.lifetime.invalidate(); }
 }
 
 // ─── 渲染 ─────────────────────────────────────────────────────
@@ -819,15 +1013,6 @@ impl Render for GitPanel {
                 .size_full()
                 .child(centered_hint(t("gitHistory", "selectProject")));
         }
-        if self.is_remote_project(cx) {
-            // git 命令跑在本地,对远程路径无意义(远程 Git 二期)
-            return div()
-                .size_full()
-                .border_t_1()
-                .border_color(ui::border_subtle())
-                .child(centered_hint(t("gitHistory", "remoteNotSupported")));
-        }
-
         let section = self.section_ui;
         let both_open = section.changes_open && section.history_open;
         let changes_grow = if section.changes_open {
@@ -860,6 +1045,30 @@ impl Render for GitPanel {
 
         if !self.repos.is_empty() {
             root = root.child(self.render_repo_bar(cx));
+        }
+
+        if let Some(error) = &self.error {
+            root = root.child(div().id("git-error").max_h(px(96.0)).overflow_y_scroll().flex_none().p(px(8.0)).text_size(ui::font_px(11.0))
+                .text_color(ui::color_error()).child(error.clone())
+                .child(ui::ghost_button("git-retry", "Retry")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.refresh_repo_meta(cx)))));
+        } else if self.repos_loading && self.repos.is_empty() {
+            root = root.child(div().flex_none().p(px(8.0)).text_size(ui::font_px(11.0)).text_color(ui::text_muted())
+                .child(t("gitHistoryContent", "loading")));
+        }
+        if let Some(busy) = self.selected_repository(cx).and_then(|repo| repo.busy()) {
+            let label = if busy.phase == GitWritePhase::Uncertain { "Git outcome uncertain" } else { "Git operation in progress" };
+            let owner = self.sync_owner();
+            let operation = busy.operation_id;
+            root = root.child(div().flex_none().p(px(8.0)).text_size(ui::font_px(11.0)).child(label)
+                .when(busy.phase == GitWritePhase::Uncertain, |el| el.child(
+                    ui::ghost_button("git-review-uncertain", "Review")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            if sync_owner_matches(&owner, &this.sync_owner())
+                                && this.selected_repository(cx).and_then(|repo| repo.busy()).is_some_and(|busy| busy.operation_id == operation) {
+                                this.review_uncertain(window, cx);
+                            }
+                        })))));
         }
 
         root = root
@@ -1027,6 +1236,11 @@ impl GitPanel {
 
     /// 仓库栏(`GitHistory.tsx:353-499`)。
     fn render_repo_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let scope = self.child_scope();
+        let repo_menu_scope = scope.clone();
+        let context_scope = scope.clone();
+        let repo_request = self.repo_request;
+        let branch_request = self.branch_request;
         let info = self.selected_repo_info();
         let repo_name = info.map(|r| r.name.clone()).unwrap_or_default();
         let is_worktree = info.is_some_and(|r| r.is_worktree);
@@ -1077,14 +1291,18 @@ impl GitPanel {
                             .child("⎇"),
                     )
                 })
-                .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if !this.scope_matches(&repo_menu_scope) || !repo_menu_scope.matches_active(&this.store, cx)
+                        || this.repo_request != repo_request { return; }
                     let entries = this.repo_menu(cx);
                     menu::show(event.position(), entries, window, cx);
                 }))
                 .on_mouse_down(
                     MouseButton::Right,
-                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                         cx.stop_propagation();
+                        if !this.scope_matches(&context_scope) || !context_scope.matches_active(&this.store, cx)
+                            || this.repo_request != repo_request { return; }
                         let entries = this.repo_context_menu(cx);
                         menu::show(event.position, entries, window, cx);
                     }),
@@ -1117,7 +1335,9 @@ impl GitPanel {
                     .text_size(ui::font_px(13.0))
                     .child(div().max_w(px(140.0)).truncate().child(branch))
                     .child(div().text_size(ui::font_px(11.0)).opacity(0.7).child("▾"))
-                    .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        if !this.scope_matches(&scope) || !scope.matches_active(&this.store, cx)
+                            || this.branch_request != branch_request { return; }
                         // 分支列表为空时懒加载一次(`GitHistory.tsx:422`)
                         if this.branches.is_empty() {
                             this.load_branches(cx);
@@ -1164,13 +1384,15 @@ impl GitPanel {
 
     /// `GitActionButton`(`GitHistory.tsx:21-67`)。
     fn render_sync_button(&self, pull: bool, cx: &mut Context<Self>) -> AnyElement {
+        let owner = self.sync_owner();
         let state = if pull {
             &self.pull_state
         } else {
             &self.push_state
         };
         let busy = self.pull_state == Some(SyncState::Loading)
-            || self.push_state == Some(SyncState::Loading);
+            || self.push_state == Some(SyncState::Loading)
+            || self.selected_repository(cx).is_none_or(|repo| repo.busy().is_some());
         let (glyph, color) = match state {
             Some(SyncState::Loading) => ("↻", ui::text_muted()),
             Some(SyncState::Success) => ("✓", ui::color_success()),
@@ -1201,7 +1423,11 @@ impl GitPanel {
             })
             .child(glyph)
             .tooltip(move |window, cx| mt_ui::tooltip::Tooltip::new(tip.clone()).build(window, cx))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| this.run_sync(pull, cx)))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                if sync_owner_matches(&owner, &this.sync_owner()) && owner.scope.matches_active(&this.store, cx) {
+                    this.run_sync(pull, cx);
+                }
+            }))
             .into_any_element()
     }
 
@@ -1250,6 +1476,7 @@ impl GitPanel {
     fn repo_menu(&self, cx: &mut Context<Self>) -> Vec<menu::MenuEntry> {
         let this = cx.entity();
         let scope = self.child_scope();
+        let request = self.repo_request;
         self.repos
             .iter()
             .map(|repo| {
@@ -1260,7 +1487,7 @@ impl GitPanel {
                 } else {
                     format!("　{}", repo.name)
                 };
-                let mut item = MenuItem::new(label);
+                let mut item = MenuItem::new(label).disabled(self.repos_loading || self.backend.is_none());
                 if let Some(branch) = &repo.current_branch {
                     item = item.shortcut(if repo.is_worktree {
                         format!("⎇ {branch}")
@@ -1273,7 +1500,8 @@ impl GitPanel {
                 item.on_click(move |_window, cx| {
                     let path = path.clone();
                     this.update(cx, |this, cx| {
-                        if this.scope_matches(&scope) {
+                        if this.scope_matches(&scope) && scope.matches_active(&this.store, cx)
+                            && this.repo_request == request && !this.repos_loading && this.backend.is_some() {
                             this.select_repo(path, cx);
                         }
                     });
@@ -1298,6 +1526,7 @@ impl GitPanel {
         }
         let this = cx.entity();
         let scope = self.child_scope();
+        let request = self.branch_request;
         let current = self.current_branch().map(str::to_string);
         self.branches
             .iter()
@@ -1308,7 +1537,7 @@ impl GitPanel {
                 // 菜单基件的行是纯文本,换成字形区分)
                 let dot = if branch.is_remote { "○" } else { "●" };
                 let label = format!("{}{dot} {name}", if selected { "✓ " } else { "　" });
-                let mut item = MenuItem::new(label);
+                let mut item = MenuItem::new(label).disabled(self.branches_loading || self.selected_repository(cx).is_none());
                 if Some(&name) == current.as_ref() {
                     item = item.shortcut("HEAD");
                 }
@@ -1317,7 +1546,8 @@ impl GitPanel {
                 item.on_click(move |_window, cx| {
                     let name = name.clone();
                     this.update(cx, |this, cx| {
-                        if !this.scope_matches(&scope) {
+                        if !this.scope_matches(&scope) || !scope.matches_active(&this.store, cx)
+                            || this.branch_request != request || this.branches_loading || this.selected_repository(cx).is_none() {
                             return;
                         }
                         this.view_branch = Some(name);
@@ -1332,15 +1562,17 @@ impl GitPanel {
 
     /// 仓库栏右键菜单(`GitHistory.tsx:300-329`)。
     fn repo_context_menu(&self, cx: &mut Context<Self>) -> Vec<menu::MenuEntry> {
+        let Some(repository) = self.selected_repository(cx) else { return Vec::new(); };
         let Some(repo) = self.selected_repo_info().cloned() else {
             return Vec::new();
         };
         let store = self.store.clone();
-        let project_id = self.store.read(cx).active_project_id.clone();
-        let project_path = self.project_path.clone().unwrap_or_default();
+        let project_id = repository.backend().snapshot().project_id.clone();
+        let project_path = repository.backend().snapshot().canonical_path.clone();
         let repo_path = repo.path.to_string_lossy().to_string();
         // 项目根仓库不带 cwd 覆盖(默认就是项目根);尾部分隔符归一化后比较
-        let same_as_root = trim_trailing_sep(&repo_path) == trim_trailing_sep(&project_path);
+        let same_as_root = repo_path == project_path;
+        let cwd = repository_terminal_cwd(&repository.backend().snapshot().backend, &repo_path);
         let title = if repo.is_worktree {
             format!(
                 "⎇ {}",
@@ -1351,28 +1583,29 @@ impl GitPanel {
         };
         let this = cx.entity();
         let scope = self.child_scope();
+        let request = self.repo_request;
         let terminal_entity = this.clone();
         let terminal_scope = scope.clone();
-        let repo_for_worktree = repo_path.clone();
+        let terminal_repository = repository.clone();
+        let worktree_store = store.clone();
 
         vec![
             menu::item(
                 t("gitHistoryContent", "openInTerminal"),
                 move |window, cx| {
-                    if !terminal_entity.read(cx).scope_matches(&terminal_scope) {
+                    if !terminal_entity.read(cx).scope_matches(&terminal_scope)
+                        || terminal_entity.read(cx).repo_request != request
+                        || !host_ui::active_repository(&terminal_repository, &store, cx) {
                         return;
                     }
-                    let Some(project_id) = project_id.clone() else {
-                        return;
+                    let cwd = match &cwd {
+                        Ok(cwd) => cwd,
+                        Err(error) => { crate::prompt::show_alert("Git", error.clone(), window, cx); return; }
                     };
-                    let (cwd, title) = if same_as_root {
-                        (None, None)
-                    } else {
-                        (Some(repo_path.clone()), Some(title.clone()))
-                    };
+                    let title = (!same_as_root).then(|| title.clone());
                     let opened = store.update(cx, |store, cx| {
                         let pane =
-                            store.new_terminal_with_cwd(&project_id, None, None, cwd, window, cx);
+                            store.new_terminal_with_cwd(&project_id, None, None, Some(cwd.clone()), window, cx);
                         if let (Some(pane), Some(title)) = (pane.as_ref(), title) {
                             store.rename_pane(&project_id, pane, &title, cx);
                         }
@@ -1387,19 +1620,19 @@ impl GitPanel {
             menu::item(
                 t("gitHistoryContent", "manageWorktrees"),
                 move |window, cx| {
-                    if !this.read(cx).scope_matches(&scope) {
+                    if !this.read(cx).scope_matches(&scope) || this.read(cx).repo_request != request
+                        || !host_ui::active_repository(&repository, &worktree_store, cx) {
                         return;
                     }
                     let this = this.clone();
                     let scope = scope.clone();
-                    crate::git_worktree::open(
-                        // 单仓库模式:discover_repos = false
-                        repo_for_worktree.clone(),
-                        false,
-                        None,
+                    let changed_repository = repository.clone();
+                    crate::git_worktree::open_repository(
+                        repository.clone(),
                         move |cx| {
                             crate::worktree_catalog::force_refresh_global(cx);
                             this.update(cx, |this, cx| {
+                                this.handle_reconciliation(&scope, &changed_repository, cx);
                                 if this.scope_matches(&scope) {
                                     this.load_repos(cx);
                                 }

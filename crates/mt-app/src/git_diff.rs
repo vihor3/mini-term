@@ -50,7 +50,11 @@ use mt_project::git::{CommitFileInfo, DiffHunk, DiffLine, GitDiffResult};
 use mt_ui::tooltip::Tooltip;
 
 use crate::i18n::{t, tr};
-use crate::prompt::{kind, open_guarded};
+use crate::prompt::{kind, open_guarded_with_close};
+use crate::execution_host::{self, ExecutionBackend, ProjectExecutionSnapshot};
+use crate::git_backend::{GitBackend, GitLifetime, GitRead, GitReadValue, GitRepository};
+use crate::git_panel::host_ui;
+use mt_project::git::cli::{ObjectId, RepositoryAuthority};
 use crate::store::AppStore;
 use crate::ui;
 
@@ -546,8 +550,26 @@ fn empty_cell(line_height: f32) -> AnyElement {
 
 // ─── 弹窗内的状态实体 ─────────────────────────────────────────
 
-/// 两个弹窗共用的 diff 内容状态。
+/// Source invalidation stops reads without disabling the dialog's close control.
+#[derive(Clone, Default)]
+struct DiffLifetime {
+    view: GitLifetime,
+    read: GitLifetime,
+}
+
+impl DiffLifetime {
+    fn close(&self) {
+        self.view.invalidate();
+        self.read.invalidate();
+    }
+
+    fn invalidate_source(&self) { self.read.invalidate(); }
+}
+
 struct DiffState {
+    lifetime: DiffLifetime,
+    repository: Option<GitRepository>,
+    _source_watch: Option<gpui::Subscription>,
     loading: bool,
     error: Option<String>,
     result: Option<GitDiffResult>,
@@ -571,6 +593,9 @@ struct DiffState {
 impl DiffState {
     fn new(font_size: f32, cx: &mut App) -> Self {
         Self {
+            lifetime: DiffLifetime::default(),
+            repository: None,
+            _source_watch: None,
             loading: true,
             error: None,
             result: None,
@@ -672,6 +697,155 @@ impl DiffState {
             }
         }
     }
+}
+
+impl Drop for DiffState {
+    fn drop(&mut self) { self.lifetime.close(); }
+}
+
+#[derive(Clone)]
+struct DiffSource {
+    store: Entity<AppStore>,
+    snapshot: ProjectExecutionSnapshot,
+    path: String,
+    expected: Option<RepositoryAuthority>,
+    project_relative_file: bool,
+}
+
+fn legacy_root_matches(snapshot: &ProjectExecutionSnapshot, configured_path: &str, root: &str) -> bool {
+    match &snapshot.backend {
+        ExecutionBackend::Local => {
+            let key = execution_host::normalize_host_visible_project_path(root).ok();
+            key.is_some() && [snapshot.canonical_path.as_str(), configured_path].into_iter().any(|path| {
+                execution_host::normalize_host_visible_project_path(path).ok() == key
+            })
+        }
+        ExecutionBackend::Wsl { .. } => {
+            let path = if root.starts_with('/') && !root.starts_with("//") {
+                execution_host::normalize_absolute_posix_path(root).ok()
+            } else {
+                execution_host::configured_execution_path(&snapshot.backend, root).ok()
+            };
+            path.is_some() && [Some(snapshot.canonical_path.clone()),
+                execution_host::configured_execution_path(&snapshot.backend, configured_path).ok()].contains(&path)
+        }
+        ExecutionBackend::Ssh { .. } => {
+            let path = execution_host::normalize_absolute_posix_path(root).ok();
+            path.is_some() && [snapshot.canonical_path.as_str(), configured_path].into_iter().any(|candidate| {
+                execution_host::normalize_absolute_posix_path(candidate).ok() == path
+            })
+        }
+    }
+}
+
+fn diff_state(source: &DiffSource, cx: &mut App) -> Entity<DiffState> {
+    let size = source.store.read(cx).config().terminal_font_size as f32;
+    cx.new(|cx| {
+        let mut state = DiffState::new(size, cx);
+        let source = source.clone();
+        state._source_watch = Some(cx.observe(&source.store.clone(), move |state: &mut DiffState, _, cx| {
+            state.check_source(&source, cx);
+        }));
+        state
+    })
+}
+
+impl DiffState {
+    fn check_source(&mut self, source: &DiffSource, cx: &mut Context<Self>) -> bool {
+        if !self.lifetime.read.is_valid() { return false; }
+        let valid = source.store.read(cx).project_execution_snapshot(&source.snapshot.project_id)
+            .is_ok_and(|current| {
+                if let Some(repo) = &self.repository { repo.matches_snapshot(&current) }
+                else { host_ui::read_source_matches(&source.snapshot, &current) }
+            });
+        if !valid {
+            self.lifetime.invalidate_source();
+            self.apply(Err(anyhow::anyhow!("Git source changed; reopen this diff")));
+            cx.notify();
+        }
+        valid
+    }
+}
+
+fn load_owned_diff(state: &Entity<DiffState>, source: DiffSource, operation: GitRead, cx: &mut App) {
+    let Some((request, lifetime, repository)) = state.update(cx, |state, cx| {
+        if !state.check_source(&source, cx) { return None; }
+        let Some(request) = state.request.checked_add(1) else {
+            state.lifetime.invalidate_source();
+            state.apply(Err(anyhow::anyhow!("Diff request limit reached; reopen this diff")));
+            cx.notify();
+            return None;
+        };
+        state.request = request;
+        state.loading = true;
+        state.error = None;
+        state.result = None;
+        state.flat = Flat::default();
+        state.jump = None;
+        state.synced_y = px(0.0);
+        cx.notify();
+        Some((state.request, state.lifetime.read.clone(), state.repository.clone()))
+    }) else { return; };
+    let state = state.clone();
+    cx.spawn(async move |cx| {
+        let snapshot = source.snapshot.clone();
+        let selected_path = source.path.clone();
+        let expected = source.expected.clone();
+        let project_relative_file = source.project_relative_file;
+        let result = cx.background_executor().spawn(async move {
+            let mut operation = operation;
+            let repository = match repository {
+                Some(repository) => repository,
+                None if project_relative_file => {
+                    let backend = GitBackend::connect(snapshot.clone(), lifetime).map_err(|error| error.to_string())?;
+                    if !host_ui::read_source_matches(&snapshot, backend.snapshot()) {
+                        return Err("Git source epoch changed; reopen this diff".to_string());
+                    }
+                    let GitRead::WorkingDiff { path, old_path, .. } = &mut operation else {
+                        return Err("Invalid project-relative Git diff request".to_string());
+                    };
+                    let (repository, relative) = backend.repository_for_file(path).map_err(|error| error.to_string())?;
+                    *path = relative;
+                    if let GitReadValue::Status(status) = repository.request(GitRead::Status)
+                        .and_then(|request| request.execute()).map_err(|error| error.to_string())?.value {
+                        *old_path = status.changes.iter().find(|change| change.path == *path).and_then(|change| change.old_path.clone());
+                    }
+                    repository
+                }
+                None => host_ui::resolve_repository(snapshot.clone(), &selected_path, lifetime)?,
+            };
+            if expected.as_ref().is_some_and(|authority| authority != repository.authority()) {
+                return Err("Git repository authority changed".to_string());
+            }
+            if !host_ui::read_source_matches(&snapshot, repository.backend().snapshot()) {
+                return Err("Git source epoch changed; reopen this diff".to_string());
+            }
+            repository.request(operation).and_then(|request| request.execute()).map_err(|error| error.to_string())
+        }).await;
+        let _ = state.update(cx, |state, cx| {
+            if !diff_request_is_current(&state.lifetime, state.request, request) { return; }
+            if !state.check_source(&source, cx) { return; }
+            match result {
+                Ok(result) => {
+                    let repository = state.repository.as_ref().unwrap_or_else(|| result.repository());
+                    if !host_ui::repository_current(repository, &source.store, cx) || !result.is_current(repository, result.id()) {
+                        state.lifetime.invalidate_source();
+                        state.apply(Err(anyhow::anyhow!("Git source changed; reopen this diff")));
+                        cx.notify();
+                        return;
+                    }
+                    state.repository = Some(result.repository().clone());
+                    if let GitReadValue::Diff(diff) = result.value { state.apply(Ok(diff)); }
+                }
+                Err(error) => state.apply(Err(anyhow::anyhow!(error))),
+            }
+            cx.notify();
+        });
+    }).detach();
+}
+
+fn diff_request_is_current(lifetime: &DiffLifetime, current: u64, request: u64) -> bool {
+    lifetime.view.is_valid() && lifetime.read.is_valid() && current == request
 }
 
 impl Render for DiffState {
@@ -978,6 +1152,7 @@ fn view_toggle(
     cx: &mut App,
 ) -> AnyElement {
     let (side_label, inline_label) = (labels.side, labels.inline);
+    let lifetime = state.read(cx).lifetime.clone();
     let jumps = jump_group(state, id_prefix, &labels, cx);
     let current = state.read(cx).view;
     let mut seg = div()
@@ -1038,7 +1213,10 @@ fn view_toggle(
                 .hover(|el| el.text_color(ui::color_error()))
                 .child("✕")
                 .on_click(move |_: &ClickEvent, window, cx| {
-                    crate::prompt::close_guarded(close_kind, window, cx);
+                    if lifetime.view.is_valid() && crate::overlay::is_top(crate::overlay::key(close_kind)) {
+                        lifetime.close();
+                        crate::prompt::close_guarded(close_kind, window, cx);
+                    }
                 }),
         )
         .into_any_element()
@@ -1056,42 +1234,45 @@ pub fn open_file_diff(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if repo_path.is_empty() {
+    let snapshot = match host_ui::active_snapshot(&store, cx) {
+        Ok(snapshot) => snapshot,
+        Err(error) => { crate::prompt::show_alert("Git", error, window, cx); return; }
+    };
+    let root_matches = store.read(cx).project(&snapshot.project_id)
+        .is_some_and(|project| legacy_root_matches(&snapshot, &project.path, &repo_path));
+    if !root_matches {
+        crate::prompt::show_alert("Git", "The diff source no longer matches this project", window, cx);
         return;
     }
-    let font_size = store.read(cx).config().terminal_font_size as f32;
-    let state = cx.new(|cx| DiffState::new(font_size, cx));
+    open_host_file_diff(DiffSource { store, snapshot, path: repo_path, expected: None, project_relative_file: true }, file_path, None, staged, status_label, window, cx);
+}
 
-    // 取数:`(repo, path, staged)` 三元组一次到位(原版漏了 staged,见模块注释)
-    {
-        let (repo, path) = (repo_path.clone(), file_path.clone());
-        let state = state.clone();
-        cx.spawn(async move |cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    mt_project::git::get_git_diff(
-                        std::path::Path::new(&repo),
-                        &path,
-                        Some(staged),
-                    )
-                })
-                .await;
-            let _ = state.update(cx, |s: &mut DiffState, cx| {
-                s.apply(result);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_repository_file_diff(
+    store: Entity<AppStore>, repository: GitRepository, file_path: String, old_path: Option<String>,
+    staged: bool, status_label: String, window: &mut Window, cx: &mut App,
+) {
+    if !host_ui::repository_current(&repository, &store, cx) { return; }
+    let source = DiffSource { store, snapshot: repository.backend().snapshot().clone(),
+        path: repository.authority().worktree_root.clone(), expected: Some(repository.authority().clone()), project_relative_file: false };
+    open_host_file_diff(source, file_path, old_path, staged, status_label, window, cx);
+}
+
+fn open_host_file_diff(source: DiffSource, file_path: String, old_path: Option<String>, staged: bool,
+    status_label: String, window: &mut Window, cx: &mut App) {
+    if source.path.is_empty() || crate::prompt::is_open(kind::GIT_DIFF) { return; }
+    let state = diff_state(&source, cx);
+    let lifetime = state.read(cx).lifetime.clone();
+    load_owned_diff(&state, source.clone(), GitRead::WorkingDiff { path: file_path.clone(), old_path, staged }, cx);
 
     let file_name = file_path
-        .rsplit(['/', '\\'])
+        .rsplit('/')
         .next()
         .unwrap_or(&file_path)
         .to_string();
 
-    open_guarded(kind::GIT_DIFF, window, cx, move |dialog, window, cx| {
+    open_guarded_with_close(kind::GIT_DIFF, window, cx, move |dialog, window, cx| {
+        state.update(cx, |state, cx| { state.check_source(&source, cx); });
         let viewport = window.viewport_size();
         let body = render_body(
             &state,
@@ -1182,7 +1363,7 @@ pub fn open_file_diff(
                             .child(body),
                     ),
             )
-    });
+    }, move |_, _| lifetime.close());
 }
 
 // ─── CommitDiffModal(某次 commit 的多文件) ──────────────────
@@ -1220,15 +1401,33 @@ pub fn open_commit_diff(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let font_size = store.read(cx).config().terminal_font_size as f32;
-    let state = cx.new(|cx| DiffState::new(font_size, cx));
+    let snapshot = match host_ui::active_snapshot(&store, cx) {
+        Ok(snapshot) => snapshot,
+        Err(error) => { crate::prompt::show_alert("Git", error, window, cx); return; }
+    };
+    open_host_commit_diff(DiffSource { store, snapshot, path: repo_path, expected: None, project_relative_file: false }, commit_hash, commit_message, files, window, cx);
+}
+
+pub(crate) fn open_repository_commit_diff(store: Entity<AppStore>, repository: GitRepository,
+    commit_hash: String, commit_message: String, files: Vec<CommitFileInfo>, window: &mut Window, cx: &mut App) {
+    if !host_ui::repository_current(&repository, &store, cx) { return; }
+    let source = DiffSource { store, snapshot: repository.backend().snapshot().clone(),
+        path: repository.authority().worktree_root.clone(), expected: Some(repository.authority().clone()), project_relative_file: false };
+    open_host_commit_diff(source, commit_hash, commit_message, files, window, cx);
+}
+
+fn open_host_commit_diff(source: DiffSource, commit_hash: String, commit_message: String,
+    files: Vec<CommitFileInfo>, window: &mut Window, cx: &mut App) {
+    if crate::prompt::is_open(kind::GIT_COMMIT_DIFF) { return; }
+    let state = diff_state(&source, cx);
+    let lifetime = state.read(cx).lifetime.clone();
     let first = files.first().map(|f| f.path.clone()).unwrap_or_default();
     let pick = cx.new(|_| CommitPick {
         selected: first.clone(),
     });
 
     if !first.is_empty() {
-        load_commit_file(&state, &repo_path, &commit_hash, &files, &first, cx);
+        load_commit_file(&state, &source, &commit_hash, &files, &first, cx);
     } else {
         state.update(cx, |s, _| {
             s.loading = false;
@@ -1237,11 +1436,12 @@ pub fn open_commit_diff(
 
     let short_hash: String = commit_hash.chars().take(7).collect();
 
-    open_guarded(
+    open_guarded_with_close(
         kind::GIT_COMMIT_DIFF,
         window,
         cx,
         move |dialog, window, cx| {
+            state.update(cx, |state, cx| { state.check_source(&source, cx); });
             let viewport = window.viewport_size();
             let selected = pick.read(cx).selected.clone();
 
@@ -1262,7 +1462,7 @@ pub fn open_commit_diff(
                     .to_string();
                 let (pick, state) = (pick.clone(), state.clone());
                 let (repo, hash, files_for_click, path) = (
-                    repo_path.clone(),
+                    source.clone(),
                     commit_hash.clone(),
                     files.clone(),
                     file.path.clone(),
@@ -1293,7 +1493,8 @@ pub fn open_commit_diff(
                         )
                         .child(div().truncate().child(name))
                         .on_click(move |_: &ClickEvent, _window, cx| {
-                            if pick.read(cx).selected == path {
+                            if !state.update(cx, |state, cx| state.check_source(&repo, cx))
+                                || pick.read(cx).selected == path {
                                 return;
                             }
                             pick.update(cx, |p, cx| {
@@ -1354,7 +1555,7 @@ pub fn open_commit_diff(
                 );
 
             // 右栏
-            let body = if files.is_empty() {
+            let body = if files.is_empty() && state.read(cx).error.is_none() {
                 centered(t("commitDiff", "noChanges"), ui::text_muted())
             } else {
                 render_body(
@@ -1422,6 +1623,7 @@ pub fn open_commit_diff(
                     .child(right),
             )
         },
+        move |_, _| lifetime.close(),
     );
 }
 
@@ -1431,7 +1633,7 @@ pub fn open_commit_diff(
 /// 旧内容,diff 会显示成「整文件新增」。
 fn load_commit_file(
     state: &Entity<DiffState>,
-    repo_path: &str,
+    source: &DiffSource,
     commit_hash: &str,
     files: &[CommitFileInfo],
     path: &str,
@@ -1441,52 +1643,71 @@ fn load_commit_file(
         .iter()
         .find(|f| f.path == path)
         .and_then(|f| f.old_path.clone());
-    let req = state.update(cx, |s, cx| {
-        s.loading = true;
-        s.error = None;
-        s.result = None;
-        s.flat = Flat::default();
-        // 换文件 = 换一份 diff:跳转计数与两栏同步基准都要归零,否则新文件
-        // 一进来就显示「3/12」,而两栏还停在上一份的偏移上
-        s.jump = None;
-        s.synced_y = px(0.0);
-        s.request += 1;
-        cx.notify();
-        s.request
-    });
-
-    let (repo, hash, path) = (
-        repo_path.to_string(),
-        commit_hash.to_string(),
-        path.to_string(),
-    );
-    let state = state.clone();
-    cx.spawn(async move |cx| {
-        let result = cx
-            .background_executor()
-            .spawn(async move {
-                mt_project::git::get_commit_file_diff(
-                    std::path::Path::new(&repo),
-                    &hash,
-                    &path,
-                    old_path.as_deref(),
-                )
-            })
-            .await;
-        let _ = state.update(cx, |s: &mut DiffState, cx| {
-            if s.request != req {
-                return;
-            }
-            s.apply(result);
-            cx.notify();
-        });
-    })
-    .detach();
+    let commit = match ObjectId::parse(commit_hash) {
+        Ok(commit) => commit,
+        Err(error) => { state.update(cx, |state, cx| { state.apply(Err(error)); cx.notify(); }); return; }
+    };
+    load_owned_diff(state, source.clone(), GitRead::CommitDiff { commit, path: path.to_string(), old_path }, cx);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_requests_reject_closed_dialog_and_superseded_file() {
+        let old = DiffLifetime::default();
+        assert!(diff_request_is_current(&old, 1, 1));
+        assert!(!diff_request_is_current(&old, 2, 1));
+        old.close();
+        assert!(!diff_request_is_current(&old, 1, 1));
+        let reopened = DiffLifetime::default();
+        assert!(diff_request_is_current(&reopened, 1, 1));
+        assert!(!diff_request_is_current(&old, 1, 1));
+    }
+
+    #[test]
+    fn stale_diff_source_remains_closable_without_closing_a_successor() {
+        let old = DiffLifetime::default();
+        let queued_close = old.clone();
+        old.invalidate_source();
+        assert!(!diff_request_is_current(&old, 7, 7));
+        assert!(queued_close.view.is_valid());
+        queued_close.close();
+        let reopened = DiffLifetime::default();
+        assert!(!queued_close.view.is_valid());
+        queued_close.close();
+        assert!(diff_request_is_current(&reopened, 7, 7));
+    }
+
+    #[test]
+    fn diff_file_selection_a_b_a_keeps_only_the_latest_request() {
+        let lifetime = DiffLifetime::default();
+        assert!(!diff_request_is_current(&lifetime, 3, 1));
+        assert!(!diff_request_is_current(&lifetime, 3, 2));
+        assert!(diff_request_is_current(&lifetime, 3, 3));
+    }
+
+    #[test]
+    fn legacy_filetree_diff_root_keeps_remote_case_and_literal_backslash() {
+        let mut source = crate::git_panel::source_tests::ssh_snapshot(Some(7));
+        source.canonical_path = "/Repo\\name:literal".into();
+        assert!(legacy_root_matches(&source, "/alias", "/Repo\\name:literal"));
+        assert!(legacy_root_matches(&source, "/alias", "/alias"));
+        assert!(!legacy_root_matches(&source, "/alias", "/repo\\name:literal"));
+        assert!(!legacy_root_matches(&source, "/alias", "/Repo/name:literal"));
+        assert!(!legacy_root_matches(&source, "/alias", "/another-project"));
+    }
+
+    #[test]
+    fn legacy_wsl_diff_root_rejects_another_distribution() {
+        let source = crate::git_panel::source_tests::snapshot(ExecutionBackend::Wsl { distro: "Ubuntu".into() });
+        let configured = r"\\wsl$\Ubuntu\repo";
+        assert!(legacy_root_matches(&source, configured, r"\\wsl.localhost\Ubuntu\repo"));
+        assert!(legacy_root_matches(&source, configured, "/repo"));
+        assert!(!legacy_root_matches(&source, configured, r"\\wsl$\Debian\repo"));
+        assert!(!legacy_root_matches(&source, configured, "/Repo"));
+    }
 
     fn line(kind: &str, old: Option<u32>, new: Option<u32>) -> DiffLine {
         DiffLine {

@@ -468,14 +468,14 @@ fn command_error(
 }
 
 #[cfg(unix)]
-struct ProcessTree {
+pub(crate) struct ProcessTree {
     process_group_id: Option<i32>,
     attached: bool,
 }
 
 #[cfg(unix)]
 impl ProcessTree {
-    fn configure(command: &mut Command) -> Result<Self, CommandExecutionError> {
+    pub(crate) fn configure(command: &mut Command) -> Result<Self, CommandExecutionError> {
         use std::os::unix::process::CommandExt as _;
 
         command.process_group(0);
@@ -485,7 +485,7 @@ impl ProcessTree {
         })
     }
 
-    fn attach(&mut self, child: &Child) -> Result<(), CommandExecutionError> {
+    pub(crate) fn attach(&mut self, child: &Child) -> Result<(), CommandExecutionError> {
         self.process_group_id = Some(i32::try_from(child.id()).map_err(|_| {
             command_error(
                 CommandExecutionErrorKind::Io,
@@ -496,7 +496,7 @@ impl ProcessTree {
         Ok(())
     }
 
-    fn terminate(&mut self) -> Result<(), CommandExecutionError> {
+    pub(crate) fn terminate(&mut self) -> Result<(), CommandExecutionError> {
         if !self.attached {
             return Err(command_error(
                 CommandExecutionErrorKind::Io,
@@ -532,7 +532,7 @@ impl Drop for ProcessTree {
 }
 
 #[cfg(windows)]
-struct ProcessTree {
+pub(crate) struct ProcessTree {
     job: windows::core::Owned<windows::Win32::Foundation::HANDLE>,
     attached: bool,
     terminated: bool,
@@ -540,7 +540,7 @@ struct ProcessTree {
 
 #[cfg(windows)]
 impl ProcessTree {
-    fn configure(command: &mut Command) -> Result<Self, CommandExecutionError> {
+    pub(crate) fn configure(command: &mut Command) -> Result<Self, CommandExecutionError> {
         use std::os::windows::process::CommandExt as _;
         use windows::Win32::System::JobObjects::{
             CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -589,7 +589,7 @@ impl ProcessTree {
         })
     }
 
-    fn attach(&mut self, child: &Child) -> Result<(), CommandExecutionError> {
+    pub(crate) fn attach(&mut self, child: &Child) -> Result<(), CommandExecutionError> {
         use std::os::windows::io::AsRawHandle as _;
         use windows::Win32::Foundation::HANDLE;
         use windows::Win32::System::JobObjects::AssignProcessToJobObject;
@@ -618,7 +618,7 @@ impl ProcessTree {
         Ok(())
     }
 
-    fn terminate(&mut self) -> Result<(), CommandExecutionError> {
+    pub(crate) fn terminate(&mut self) -> Result<(), CommandExecutionError> {
         use windows::Win32::System::JobObjects::TerminateJobObject;
 
         if !self.attached {

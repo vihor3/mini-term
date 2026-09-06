@@ -85,8 +85,9 @@ use mt_i18n::{
 /// 842 → 903：统一项目引导新增 `projectOnboarding` 命名空间（61 条）。
 /// 903 → 938：全局 Quick Open 扩展 `projectSwitcher` 文案，净增 35 条。
 /// 938 -> 952: project worktree visibility adds 14 `worktree.settings` messages.
+/// 952 -> 968: folder browser adds 13 messages; file targets add 3 errors.
 const EXPECTED_NAMESPACES: usize = 33;
-const EXPECTED_ENTRIES_PER_LANG: usize = 952;
+const EXPECTED_ENTRIES_PER_LANG: usize = 968;
 
 /// TS 侧 `locales/index.ts` 收编的全部命名空间，手抄一份放这里做交叉验证 ——
 /// 只信生成器的话，「某个 ns 文件整体没被读到」这种错会一起漏过去。
