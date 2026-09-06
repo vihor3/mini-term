@@ -905,7 +905,11 @@ pub(crate) fn tasks_wsl_retirement_trace<T>(
 
 #[cfg(all(test, windows))]
 fn observe_tasks_wsl_retirement(
-    before: Option<(u128, TasksWslActiveProcesses, Option<TasksWslRootsObservation>)>,
+    before: Option<(
+        u128,
+        TasksWslActiveProcesses,
+        Option<TasksWslRootsObservation>,
+    )>,
     succeeded: bool,
 ) {
     let Some((before_us, active_processes, roots)) = before else {
@@ -1038,7 +1042,11 @@ impl ProcessTree {
     #[cfg(test)]
     fn tasks_wsl_retirement_before(
         &self,
-    ) -> Option<(u128, TasksWslActiveProcesses, Option<TasksWslRootsObservation>)> {
+    ) -> Option<(
+        u128,
+        TasksWslActiveProcesses,
+        Option<TasksWslRootsObservation>,
+    )> {
         use windows::Win32::System::JobObjects::{
             JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
             QueryInformationJobObject,
@@ -1670,8 +1678,14 @@ mod tests {
                 assert!(matches!(
                     tasks_wsl_roots_before(*readiness.tree.job),
                     Some(TasksWslRootsObservation::Roots {
-                        private: TasksWslRootState { liveness: TasksWslRootLiveness::Alive, .. },
-                        readiness: TasksWslRootState { liveness: TasksWslRootLiveness::Exited, .. },
+                        private: TasksWslRootState {
+                            liveness: TasksWslRootLiveness::Alive,
+                            ..
+                        },
+                        readiness: TasksWslRootState {
+                            liveness: TasksWslRootLiveness::Exited,
+                            ..
+                        },
                     })
                 ));
             });
@@ -1679,15 +1693,23 @@ mod tests {
         .join()
         .unwrap_or_else(|_| panic!("root observer peer fixture failed"));
         assert!(
-            cleanup_spawned_process(&mut private.tree, &mut private.child, None).error.is_none(),
+            cleanup_spawned_process(&mut private.tree, &mut private.child, None)
+                .error
+                .is_none(),
             "private root fixture cleanup failed"
         );
         tasks_wsl_root_scope(&roots, TasksWslRootRole::Readiness, || {
             assert!(matches!(
                 tasks_wsl_roots_before(*private.tree.job),
                 Some(TasksWslRootsObservation::Roots {
-                    private: TasksWslRootState { liveness: TasksWslRootLiveness::Exited, .. },
-                    readiness: TasksWslRootState { liveness: TasksWslRootLiveness::Exited, .. },
+                    private: TasksWslRootState {
+                        liveness: TasksWslRootLiveness::Exited,
+                        ..
+                    },
+                    readiness: TasksWslRootState {
+                        liveness: TasksWslRootLiveness::Exited,
+                        ..
+                    },
                 })
             ));
         });
@@ -1698,7 +1720,11 @@ mod tests {
                 liveness: TasksWslRootLiveness::QueryFailed,
             }
         );
-        let handles = roots.0.handles.try_lock().unwrap_or_else(|_| panic!("root registry busy"));
+        let handles = roots
+            .0
+            .handles
+            .try_lock()
+            .unwrap_or_else(|_| panic!("root registry busy"));
         assert_eq!(handles.iter().flatten().count(), 2);
         // A missed registration invalidates the old reference without waiting.
         tasks_wsl_root_scope(&roots, TasksWslRootRole::Private, || {
@@ -1728,16 +1754,27 @@ mod tests {
     #[cfg(windows)]
     impl TasksWslRootFixture {
         fn new(roots: &TasksWslRoots, role: TasksWslRootRole) -> Self {
-            assert!(std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"), "Actions-only fixture");
+            assert!(
+                std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true"),
+                "Actions-only fixture"
+            );
             let mut command = Command::new("cmd.exe");
             // The exact root blocks on its private stdin until normal guard cleanup.
-            command.args(["/d", "/c", "set /p MT_TEST_ROOT_INPUT="])
-                .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+            command
+                .args(["/d", "/c", "set /p MT_TEST_ROOT_INPUT="])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
             let tree = ProcessTree::configure(&mut command)
                 .unwrap_or_else(|_| panic!("root fixture guard setup failed"));
-            let child = command.spawn().unwrap_or_else(|_| panic!("root fixture spawn failed"));
+            let child = command
+                .spawn()
+                .unwrap_or_else(|_| panic!("root fixture spawn failed"));
             let mut fixture = Self { tree, child };
-            assert!(fixture.tree.attach(&fixture.child).is_ok(), "root fixture attachment failed");
+            assert!(
+                fixture.tree.attach(&fixture.child).is_ok(),
+                "root fixture attachment failed"
+            );
             tasks_wsl_root_scope(roots, role, || register_tasks_wsl_root(&fixture.child));
             fixture
         }
@@ -1760,25 +1797,44 @@ mod tests {
         });
         let result = tasks_wsl_root_scope(&roots, TasksWslRootRole::Readiness, || {
             assert_eq!(tasks_wsl_roots_before(Default::default()), absent);
-            let handles = roots.0.handles.try_lock().unwrap_or_else(|_| panic!("root registry busy"));
-            assert_eq!(tasks_wsl_roots_before(Default::default()), Some(TasksWslRootsObservation::Busy));
+            let handles = roots
+                .0
+                .handles
+                .try_lock()
+                .unwrap_or_else(|_| panic!("root registry busy"));
+            assert_eq!(
+                tasks_wsl_roots_before(Default::default()),
+                Some(TasksWslRootsObservation::Busy)
+            );
             drop(handles);
             std::thread::spawn(|| {
                 assert!(tasks_wsl_roots_before(Default::default()).is_none());
-            }).join().unwrap_or_else(|_| panic!("root scope isolation failed"));
+            })
+            .join()
+            .unwrap_or_else(|_| panic!("root scope isolation failed"));
             Err::<(), _>(23)
         });
         assert_eq!(result, Err(23));
         assert!(tasks_wsl_roots_before(Default::default()).is_none());
-        assert!(std::panic::catch_unwind(|| {
-            tasks_wsl_root_scope(&roots, TasksWslRootRole::Readiness, || {
-                let _held = roots.0.handles.try_lock().unwrap_or_else(|_| panic!("root registry busy"));
-                panic!("synthetic root scope failure");
-            });
-        }).is_err());
+        assert!(
+            std::panic::catch_unwind(|| {
+                tasks_wsl_root_scope(&roots, TasksWslRootRole::Readiness, || {
+                    let _held = roots
+                        .0
+                        .handles
+                        .try_lock()
+                        .unwrap_or_else(|_| panic!("root registry busy"));
+                    panic!("synthetic root scope failure");
+                });
+            })
+            .is_err()
+        );
         assert!(tasks_wsl_roots_before(Default::default()).is_none());
         tasks_wsl_root_scope(&roots, TasksWslRootRole::Readiness, || {
-            assert_eq!(tasks_wsl_roots_before(Default::default()), Some(TasksWslRootsObservation::QueryFailed));
+            assert_eq!(
+                tasks_wsl_roots_before(Default::default()),
+                Some(TasksWslRootsObservation::QueryFailed)
+            );
         });
         let independent = TasksWslRoots::default();
         tasks_wsl_root_scope(&independent, TasksWslRootRole::Readiness, || {
@@ -1786,7 +1842,10 @@ mod tests {
         });
         let weak = std::sync::Arc::downgrade(&independent.0);
         drop(independent);
-        assert!(weak.upgrade().is_none(), "root scope retained case ownership");
+        assert!(
+            weak.upgrade().is_none(),
+            "root scope retained case ownership"
+        );
     }
 
     #[cfg(windows)]
@@ -1815,7 +1874,10 @@ mod tests {
             TASKS_WSL_RETIREMENT.with(|slot| {
                 slot.borrow_mut().as_mut().unwrap().1.calls = u32::MAX;
             });
-            observe_tasks_wsl_retirement(Some((0, TasksWslActiveProcesses::QueryFailed, None)), false);
+            observe_tasks_wsl_retirement(
+                Some((0, TasksWslActiveProcesses::QueryFailed, None)),
+                false,
+            );
         });
         assert_eq!(trace.calls, u32::MAX);
         assert_eq!(
@@ -1845,7 +1907,10 @@ mod tests {
         );
         let ((), trace) = tasks_wsl_retirement_trace(Instant::now(), || {
             std::thread::spawn(|| {
-                observe_tasks_wsl_retirement(Some((0, TasksWslActiveProcesses::Count(1), None)), true);
+                observe_tasks_wsl_retirement(
+                    Some((0, TasksWslActiveProcesses::Count(1), None)),
+                    true,
+                );
             })
             .join()
             .unwrap();

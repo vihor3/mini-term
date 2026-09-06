@@ -990,7 +990,11 @@ mod tests {
         assert_eq!(&ids[..2000], &(0..=1999).collect::<Vec<_>>());
         assert_eq!(&ids[2000..3005], &(10000..=11004).collect::<Vec<_>>());
         assert_eq!(&ids[3005..], WINDOWS_SYSTEM_HRESULTS);
-        assert!(WINDOWS_TRANSPORT_ERROR_CODES.iter().all(|code| ids.contains(code)));
+        assert!(
+            WINDOWS_TRANSPORT_ERROR_CODES
+                .iter()
+                .all(|code| ids.contains(code))
+        );
         assert!(ids.contains(&windows::Win32::Foundation::ERROR_NO_SYSTEM_RESOURCES.0));
     }
 

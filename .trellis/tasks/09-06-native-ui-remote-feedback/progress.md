@@ -1337,3 +1337,19 @@ are being integrated for their first Actions push. All new/updated test executio
 and formatting remain UNRUN locally and pending exact-SHA Actions evidence.
 The c92e54a/ci.57 link was offered only for native UI pre-acceptance; no user
 observations or full WSL pass have been received, and tasks remain open.
+
+The parser and diagnostic commits were pushed to the working fork as
+45c813f658f834de9bb3c625818e14cb03bd69ab. CI34021304351 and Windows
+Package34021304195 started for that exact head. No local hooks/checks were run.
+Current outcomes are pending, including the newly authored three diagnostic
+functions, two parser functions and updated guarded synthetic acknowledgement.
+
+At45c813f, Linux101454289237 failed the changed-line format gate with22hunks;
+the generated-i18n step then ran without a patch. Full Actions artifact9985587239
+was downloaded/read and mechanically applied in entirety from
+`/home/leo/.cache/mini-term/artifacts/45c813f-integration/rustfmt/full-rustfmt.patch`.
+It touches only execution_host.rs, process.rs and tests.rs. Main is preparing a
+format-only source successor; no local formatter/check ran. Rootfs101454289183
+passed; Windows101454289075 and actualWSL101454407533 remain in progress.
+The successor push must wait until actual WSL import has completed rather than
+superseding a runner during import. No new test pass is claimed at this point.
