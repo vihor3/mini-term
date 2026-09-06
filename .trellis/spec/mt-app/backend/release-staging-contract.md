@@ -246,12 +246,22 @@ adds `source_rootfs_url`, `source_rootfs_sha256`, `rootfs_sha256`, `gh_sha256`.
 Credentials are not fields of either object.
 
 Windows import ownership state is `{ owner, distro, installPath, version }`,
-with numeric `version: 1 | 2`. The read-only `WslGetDistributionConfiguration`
-probe emits only `{ hresult: integer, version: integer }`; require `hresult: 0`
-and the requested generation. Load `wslapi.dll` from System32 and free every
-returned environment string and the pointer array with `CoTaskMemFree`, without
-decoding or emitting any of them. Probe execution is bounded to 60 seconds and
-8192 output bytes. For WSL2, the exact guest's `/usr/bin/uname -r` must be a
+with numeric `version: 1 | 2` representing the requested WSL generation. Read
+the current user's `Software\Microsoft\Windows\CurrentVersion\Lxss` registration
+through read-only .NET RegistryKey APIs, require exactly one ordinal-exact
+`DistributionName` matching the owned distro, and read only that registration's
+DWORD `Flags`. Dispose opened keys in `finally`. Preserve the signed Int32
+registry representation's bits as UInt32 and emit only `{ flags: uint32 }`;
+reject extra fields, nonintegers and values outside `0..4294967295`.
+Derive the actual generation as `(flags & 0x8) !== 0 ? 2 : 1`, matching Microsoft's
+`LXSS_DISTRO_FLAGS_VM_MODE` implementation. Never use registry `Version` or the
+`distributionVersion` returned by `WslGetDistributionConfiguration`: those are
+the distro/filesystem format and may be 2 even for WSL1. The initial managed API
+probe also returned `E_ACCESSDENIED` on both hosted images; do not work around
+that by treating query failure as a successful version check or changing COM
+security globally. Do not read or emit registered environment values.
+Probe execution remains bounded to 60 seconds and 8192 output bytes, with fixed
+numeric JSON and strict validation. For WSL2, the exact guest's `/usr/bin/uname -r` must be a
 single 1-128 character ASCII kernel release ending in `-microsoft-standard-WSL2`
 (case-insensitive), within a 1024-byte capture. This pins the hosted stock-kernel
 test environment; it is not a production restriction on custom WSL kernels.
@@ -281,9 +291,9 @@ test environment; it is not a production restriction on custom WSL kernels.
   Never set a default distro/version or issue global `wsl --shutdown`.
 - Before account execution, require the exact imported distro's configured WSL
   generation to match the requested one and, for WSL2, require guest-kernel
-  evidence from that same distro. Use a structured Windows API, not localized
+  evidence from that same distro. Use structured read-only registry APIs, not localized
   `wsl --list --verbose` table parsing. Do not output returned environment values.
-  A missing capability, API failure, generation mismatch or non-WSL2 kernel
+  A missing capability, registry failure, generation mismatch or non-WSL2 kernel
   fails the job; it cannot silently choose WSL1 or the runner's default guest.
   Repeat attestation during import and after discovery/build, just before exact
   test execution; test mode
@@ -316,7 +326,9 @@ Source references for setup, not runtime proof:
 [Canonical checksum](https://cloud-images.ubuntu.com/wsl/jammy/current/SHA256SUMS),
 [Windows 2022 WSL feature](https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md),
 [Windows 2025 WSL features](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md),
-[distribution configuration API](https://learn.microsoft.com/en-us/windows/win32/api/wslapi/nf-wslapi-wslgetdistributionconfiguration),
+[Microsoft's exact-name registry lookup](https://learn.microsoft.com/en-us/windows/wsl/disk-space#how-to-locate-the-vhdx-file-and-disk-path-for-your-linux-distribution),
+[WSL flags and format-version constants](https://github.com/microsoft/WSL/blob/master/src/windows/service/inc/wslservice.idl),
+[actual-generation selection](https://github.com/microsoft/WSL/blob/master/src/windows/service/exe/LxssUserSession.cpp),
 [Microsoft import/cleanup commands](https://learn.microsoft.com/en-us/windows/wsl/basic-commands),
 [same-run artifact download](https://github.com/actions/download-artifact).
 Hosted image manifests describe installed components, not successful guest
@@ -331,6 +343,7 @@ report actual per-generation job evidence rather than assuming availability.
 | Existing distro or foreign cleanup state | Refuse import/destruction |
 | WSL capability absent or exact test missing | Fail explicitly, no silent skip |
 | Requested generation absent/invalid, wrong actual version or WSL2 kernel absent | Fail; no generation fallback |
+| Missing/duplicate exact registration, absent/non-DWORD Flags or unreadable registry | Fail; never infer generation from Version |
 | Test cancellation/timeout or partial import | Preserve failure and run owned cleanup |
 | Another distro exists/runs | Leave it untouched |
 | SSH key/root/home escapes RUNNER_TEMP fixture | Refuse fixture configuration |
@@ -343,7 +356,7 @@ report actual per-generation job evidence rather than assuming availability.
 - Base: a missing WSL component fails setup without touching another distro.
 - Bad: run a Linux shell envelope and mark Windows cancellation coverage passed,
   use the runner's default distro because import is inconvenient, or label a
-  passing WSL1 run as WSL2 based only on `wsl --version` package output.
+  passing WSL1 run as WSL2 based on package output or registry `Version: 2`.
 
 ### 6. Tests Required
 

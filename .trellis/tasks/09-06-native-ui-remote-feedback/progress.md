@@ -1804,3 +1804,38 @@ required in both rows. No new WSL2 execution evidence exists at this point.
 Setup references, not runtime evidence:
 [Windows 2025 image](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md),
 [hosted-runner virtualization limits](https://docs.github.com/en/actions/concepts/runners/github-hosted-runners).
+
+First CI-only candidate e82d77c4ba9f4e765d7a1e6c83af5e31f3a3a1f0 started
+CI34035781785. Same-run rootfs101493463963 passed. Both Windows rows completed
+the explicit import command, then the new managed WslGetDistributionConfiguration
+query returned E_ACCESSDENIED(-2147024891): WSL1job101493611077 at13:24:04Z,
+WSL2job101493611084 at13:24:53Z. Neither Rust test was discovered or executed.
+Both owned cleanups succeeded for mt-tasks-34035781785-1 on their separate VMs,
+at13:24:07Z and13:24:54Z. WSL2 public capability output reports package2.7.12.0
+and VirtualMachinePlatformState2; this is not guest-kernel or test proof. The
+ordinary Linux/Windows jobs are still running. No local verification occurred.
+
+Main's primary-source follow-up found a second attestation problem before the
+replacement was committed: distributionVersion/registryVersion denotes the
+distro/filesystem format, not WSL1-versus-WSL2. wslservice.idl95-110 distinguishes
+those constants and defines LXSS_DISTRO_FLAGS_VM_MODE=0x8. LxssUserSession.cpp1049
+and2620 derive actual generation from that flag, while1245 returns the format
+version through the original configuration API. DistributionRegistration.cpp239
+ensures global flag overrides cannot alter VM_MODE. Use the exact owned
+registration's read-only FlagsDWORD and the existing WSL2 kernel assertion.
+The managed COM initialization issue discussed in microsoft/WSL#5824 is a
+plausible explanation for E_ACCESSDENIED, not a proven runner-internal cause.
+Newton owns only this script replacement and handoff; Noether checks the
+focused change. No Rust tests, app logic, workflow matrix or guest config changes.
+
+Newton released the script-only replacement: read-only current-user RegistryKey
+access, exact owned-name matching, required DWORD Flags, signed Int32 bits
+preserved as UInt32, fixed `{flags}` JSON and the source-backed VM_MODE test.
+Keys close in finally and no registered environment or Version is read. Main
+read the exact diff and aligned the executable contract. Noether's focused final
+check is pending; this corrected candidate is still unrun.
+
+Noether's final Flags replacement check is now released with no remaining source
+finding. Main is committing and pushing this script/spec/report correction. Both
+first-run imports and owned cleanups are already complete, so superseding the
+remaining ordinary jobs cannot interrupt either guest import or cleanup.

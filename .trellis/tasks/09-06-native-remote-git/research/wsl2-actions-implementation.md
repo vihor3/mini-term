@@ -3,7 +3,9 @@
 Status: RELEASED / FROZEN for Noether's source check and Main's Actions run.
 No blocker remains in this source slice. No local script interpretation,
 compilation, tests, probes, formatting, lint, whitespace checks, Git operations
-or application launches ran. All automated verification remains UNRUN.
+or application launches ran. All automated verification of the registry Flags
+correction remains UNRUN. Main reports both prior rows failed the replaced API
+query and completed owned cleanup; their unchanged Rust tests did not run.
 
 ## Changed Files
 
@@ -11,6 +13,9 @@ or application launches ran. All automated verification remains UNRUN.
 - `.github/workflows/ci.yml`
 - This handoff. No Rust, fixture-suite, dependency, user configuration or other
   source edits; unrelated dirty paths were not reverted.
+
+The Flags correction changes only the script and this handoff. The released
+workflow matrix and public capability step are unchanged.
 
 ## Matrix And Ownership
 
@@ -25,35 +30,46 @@ in `{owner,distro,installPath,version}` before dispatch, and passes it explicitl
 to `wsl.exe --import ... --version`. Version/boot/owner failure cannot export the
 test environment or select another distro/version. Cleanup validates only the
 recorded owner/name/path and valid recorded version. It does not depend on the
-current requested version, API/kernel success or a readable guest marker, so
+current requested version, registry/kernel success or a readable guest marker, so
 partial imports and actual-version mismatches retain exact unregister cleanup.
 
 ## Exact Attestation
 
-The bounded PowerShell/C# query uses System32-only `wslapi.dll` with this API:
+The bounded PowerShell query uses read-only .NET RegistryKey APIs:
 
 ```text
-HRESULT WslGetDistributionConfiguration(
-  PCWSTR distributionName, ULONG *distributionVersion, ULONG *defaultUID,
-  WSL_DISTRIBUTION_FLAGS *flags, PSTR **environment, ULONG *count)
+Registry.CurrentUser.OpenSubKey(
+  "Software\Microsoft\Windows\CurrentVersion\Lxss", false)
+RegistryKey.OpenSubKey(subkeyName, false)
+RegistryKey.GetValue("DistributionName", null, DoNotExpandEnvironmentNames)
+RegistryKey.GetValueKind("Flags") == RegistryValueKind.DWord
+RegistryKey.GetValue("Flags", null)
 ```
 
-P/Invoke maps HRESULT to int, ULONG/flags to uint, and the returned environment
-array to IntPtr. A finally block frees every returned string pointer and the
-array with Marshal.FreeCoTaskMem without decoding/logging the values. Output is
-only `{ "hresult": <integer>, "version": <integer> }`, bounded to 8192 bytes and
-60 seconds. Strict UTF8/JSON framing, HRESULT zero, and exact expected version
-are required. No localized version-table parsing or registry fallback exists.
-The signature, configured-version semantics and freeing obligation follow
-[Microsoft's API reference](https://learn.microsoft.com/en-us/windows/win32/api/wslapi/nf-wslapi-wslgetdistributionconfiguration).
+Require exactly one ordinal-exact owned DistributionName match. Only that
+registration's Flags is read, with DWORD kind and signed Int32 representation
+required, then bit-preserved into UInt32. Every opened registry key closes in
+finally, including on missing/duplicate matches, invalid values and read errors.
+No registry Version or environment value is queried, expanded or logged.
+
+Output is only `{ "flags": <uint32> }`, bounded to 8192 bytes and 60 seconds.
+JavaScript requires strict UTF8/JSON, exactly that one field, and an integer in
+0..4294967295. It derives `(flags & 0x8) !== 0 ? 2 : 1` and requires the expected
+generation; only the validated numeric flags/generation may be logged.
+[Microsoft's VM_MODE constant](https://github.com/microsoft/WSL/blob/master/src/windows/service/inc/wslservice.idl)
+and [registration flag handling](https://github.com/microsoft/WSL/blob/master/src/windows/service/exe/DistributionRegistration.cpp)
+define this generation bit and preserve it across global flag overrides.
+Registry Version and WslGetDistributionConfiguration's distributionVersion
+describe filesystem/distro format, not WSL generation. The earlier P/Invoke
+query is removed, with no COM retry or alternate-query fallback.
 
 WSL2 additionally boots the exact named/root-owned guest for `/usr/bin/uname -r`.
 Its 1024-byte bounded output must be one strict UTF8 release string, at most 128
 allowlisted ASCII characters, ending in `-microsoft-standard-WSL2` case-insensitively.
-Only validated kernel/version metadata is logged. Rootfs preparation verifies
+Only validated kernel/generation/flags metadata is logged. Rootfs preparation verifies
 uname exists without altering the shared rootfs configuration. Attestation runs
 after import and again after Cargo discovery/build, immediately before the exact
-test invocation. An API, generation or kernel mismatch fails the gate.
+test invocation. A registry, generation or kernel mismatch fails the gate.
 
 ## Preserved Gate And Limits
 

@@ -95,41 +95,40 @@ function validateWslVersion(expected) {
   const raw = run("pwsh", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class TasksWslVersion {
-    [DllImport("wslapi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    private static extern int WslGetDistributionConfiguration(
-        string name, out uint version, out uint uid, out uint flags,
-        out IntPtr environment, out uint count);
-    public static int Read(string name, out uint version) {
-        uint uid, flags, count = 0;
-        IntPtr environment = IntPtr.Zero;
+$registrations = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Lxss', $false)
+if ($null -eq $registrations) { throw 'Missing WSL registrations' }
+$matchCount = 0
+[uint32]$flags = 0
+try {
+    foreach ($keyName in $registrations.GetSubKeyNames()) {
+        $registration = $registrations.OpenSubKey($keyName, $false)
+        if ($null -eq $registration) { throw 'Unreadable WSL registration' }
         try {
-            return WslGetDistributionConfiguration(name, out version, out uid,
-                out flags, out environment, out count);
+            $name = $registration.GetValue('DistributionName', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($name -isnot [string] -or -not [string]::Equals($name, $env:MT_TEST_WSL_DISTRO, [StringComparison]::Ordinal)) { continue }
+            $matchCount += 1
+            if ($matchCount -ne 1) { throw 'Duplicate owned WSL registration' }
+            if ($registration.GetValueKind('Flags') -ne [Microsoft.Win32.RegistryValueKind]::DWord) { throw 'Invalid owned WSL Flags kind' }
+            $flagsValue = $registration.GetValue('Flags', $null)
+            if ($flagsValue -isnot [int]) { throw 'Invalid owned WSL Flags value' }
+            $flags = [BitConverter]::ToUInt32([BitConverter]::GetBytes($flagsValue), 0)
         } finally {
-            if (environment != IntPtr.Zero) {
-                for (uint i = 0; i < count; i++) {
-                    Marshal.FreeCoTaskMem(Marshal.ReadIntPtr(environment, checked((int)i * IntPtr.Size)));
-                }
-                Marshal.FreeCoTaskMem(environment);
-            }
+            $registration.Dispose()
         }
     }
+    if ($matchCount -ne 1) { throw 'Missing owned WSL registration' }
+} finally {
+    $registrations.Dispose()
 }
-'@
-[uint32]$version = 0
-$status = [TasksWslVersion]::Read($env:MT_TEST_WSL_DISTRO, [ref]$version)
-@{ hresult = $status; version = $version } | ConvertTo-Json -Compress
+@{ flags = $flags } | ConvertTo-Json -Compress
 `], { timeout: 60_000, maxBuffer: 8192, env: { ...env, MT_TEST_WSL_DISTRO: distro } });
   const result = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
-  requireCondition(result && Object.keys(result).length === 2
-    && Number.isInteger(result.hresult) && Number.isInteger(result.version), "Invalid WSL version API response");
-  requireCondition(result.hresult === 0, `WSL version API failed (HRESULT ${result.hresult})`);
-  requireCondition(result.version === expected, `Imported WSL version mismatch: expected ${expected}, actual ${result.version}`);
+  requireCondition(result && typeof result === "object" && !Array.isArray(result) && Object.keys(result).length === 1
+    && Number.isInteger(result.flags) && result.flags >= 0 && result.flags <= 0xffffffff, "Invalid WSL registry Flags response");
+  // LXSS_DISTRO_FLAGS_VM_MODE in microsoft/WSL's wslservice.idl identifies
+  // generation; the registry/API Version field describes the filesystem format.
+  const actual = (result.flags & 0x8) !== 0 ? 2 : 1;
+  requireCondition(actual === expected, `Imported WSL version mismatch: expected ${expected}, actual ${actual} (flags ${result.flags})`);
   if (expected === 2) {
     const kernel = new TextDecoder("utf-8", { fatal: true })
       .decode(wsl(["/usr/bin/uname", "-r"], { maxBuffer: 1024 })).replace(/\r?\n$/, "");
@@ -137,7 +136,7 @@ $status = [TasksWslVersion]::Read($env:MT_TEST_WSL_DISTRO, [ref]$version)
       && /-microsoft-standard-WSL2$/i.test(kernel), "Owned distro did not boot a WSL2 guest kernel");
     console.log(`Attested WSL 2 guest kernel ${kernel}`);
   }
-  console.log(`Attested exact owned distro WSL version ${result.version}`);
+  console.log(`Attested exact owned distro WSL version ${actual} (flags ${result.flags})`);
 }
 
 function validateImportedOwner() {
