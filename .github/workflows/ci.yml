@@ -124,12 +124,22 @@ jobs:
         run: |
           node --input-type=module <<'NODE'
           import { existsSync, readFileSync } from 'node:fs';
+          import { gzipSync } from 'node:zlib';
           const path = 'changed-rustfmt.patch';
           if (existsSync(path)) {
             const patch = readFileSync(path);
-            // Preserve the whole artifact; never publish selected hunks or truncation.
-            if (patch.length > 0 && patch.length <= 45000) {
-              console.log(`::notice title=Complete rustfmt patch (base64)::${patch.toString('base64')}`);
+            const encoded = gzipSync(patch).toString('base64');
+            const parts = Math.ceil(encoded.length / 3000);
+            // Runner notices truncate at 4096 characters. Keep every numbered
+            // chunk, or omit the API copy entirely; the artifact remains primary.
+            if (patch.length > 0 && parts <= 10) {
+              for (let part = 1; part <= parts; part++) {
+                const message = JSON.stringify({
+                  encoding: 'gzip+base64', part, parts, bytes: patch.length,
+                  data: encoded.slice((part - 1) * 3000, part * 3000),
+                });
+                console.log(`::notice title=Complete rustfmt patch (gzip+base64) ${part}/${parts}::${message}`);
+              }
             }
           }
           NODE
