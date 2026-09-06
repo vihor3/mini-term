@@ -118,6 +118,22 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+      - name: Expose complete format patch through check annotations
+        if: ${{ failure() && steps.changed-rustfmt.outcome == 'failure' }}
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { existsSync, readFileSync } from 'node:fs';
+          const path = 'changed-rustfmt.patch';
+          if (existsSync(path)) {
+            const patch = readFileSync(path);
+            // Preserve the whole artifact; never publish selected hunks or truncation.
+            if (patch.length > 0 && patch.length <= 45000) {
+              console.log(`::notice title=Complete rustfmt patch (base64)::${patch.toString('base64')}`);
+            }
+          }
+          NODE
+
       - name: Check generated i18n dictionary
         if: ${{ !cancelled() }}
         id: generated-i18n
