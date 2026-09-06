@@ -802,6 +802,98 @@ enum WslPreludeStage {
     ResolvePython,
     VerifyGhHash,
     CheckCasesDirectory,
+    CapturedCwd,
+    LiteralArgv,
+    MissingCwd,
+    NonDirectoryCwd,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug)]
+enum WslCwdProgram {
+    Absolute,
+    Path,
+    Relative,
+}
+
+#[cfg(windows)]
+const WSL_LITERAL_ARGUMENTS: [&str; 8] = [
+    r"%s\0",
+    "literal '\";$(printf injected)",
+    "-n",
+    "--",
+    "",
+    "NAME=value",
+    "*",
+    "line one\nline two",
+];
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WslArgvDiscriminator {
+    Ascii,
+    AsciiNul,
+    Hostile,
+    Dash,
+    DoubleDash,
+    Empty,
+    Assignment,
+    Wildcard,
+    Newline,
+    WithoutEmpty,
+}
+
+#[cfg(windows)]
+const WSL_ARGV_DISCRIMINATORS: [WslArgvDiscriminator; 10] = [
+    WslArgvDiscriminator::Ascii,
+    WslArgvDiscriminator::AsciiNul,
+    WslArgvDiscriminator::Hostile,
+    WslArgvDiscriminator::Dash,
+    WslArgvDiscriminator::DoubleDash,
+    WslArgvDiscriminator::Empty,
+    WslArgvDiscriminator::Assignment,
+    WslArgvDiscriminator::Wildcard,
+    WslArgvDiscriminator::Newline,
+    WslArgvDiscriminator::WithoutEmpty,
+];
+
+#[cfg(windows)]
+fn wsl_argv_discriminator_plan(row: WslArgvDiscriminator) -> (CommandPlan, Vec<u8>) {
+    let (nul_terminated, data) = match row {
+        WslArgvDiscriminator::Ascii => (false, vec!["synthetic-ascii"]),
+        WslArgvDiscriminator::AsciiNul => (true, vec!["synthetic-ascii"]),
+        WslArgvDiscriminator::Hostile => (false, vec![WSL_LITERAL_ARGUMENTS[1]]),
+        WslArgvDiscriminator::Dash => (false, vec![WSL_LITERAL_ARGUMENTS[2]]),
+        WslArgvDiscriminator::DoubleDash => (false, vec![WSL_LITERAL_ARGUMENTS[3]]),
+        WslArgvDiscriminator::Empty => (false, vec![WSL_LITERAL_ARGUMENTS[4]]),
+        WslArgvDiscriminator::Assignment => (false, vec![WSL_LITERAL_ARGUMENTS[5]]),
+        WslArgvDiscriminator::Wildcard => (false, vec![WSL_LITERAL_ARGUMENTS[6]]),
+        WslArgvDiscriminator::Newline => (false, vec![WSL_LITERAL_ARGUMENTS[7]]),
+        WslArgvDiscriminator::WithoutEmpty => (
+            true,
+            WSL_LITERAL_ARGUMENTS[1..]
+                .iter()
+                .copied()
+                .filter(|arg| !arg.is_empty())
+                .collect(),
+        ),
+    };
+    let mut expected = Vec::new();
+    for arg in &data {
+        expected.extend_from_slice(arg.as_bytes());
+        if nul_terminated {
+            expected.push(0);
+        }
+    }
+    let format = if nul_terminated {
+        WSL_LITERAL_ARGUMENTS[0]
+    } else {
+        "%s"
+    };
+    (
+        CommandPlan::new("/usr/bin/printf", std::iter::once(format).chain(data)),
+        expected,
+    )
 }
 
 #[cfg(windows)]
@@ -880,6 +972,88 @@ fn wsl_prelude_diagnostic(stage: WslPreludeStage, output: &CommandOutput) -> Str
         output.stderr.len(),
         wsl_prelude_output_class(&output.stderr),
     )
+}
+
+#[cfg(windows)]
+fn wsl_cwd_diagnostic(
+    pre_project: bool,
+    program: WslCwdProgram,
+    stage: WslPreludeStage,
+    output: &CommandOutput,
+) -> String {
+    let mode = if pre_project { "PreProject" } else { "Project" };
+    format!(
+        "mode={mode} program_kind={program:?} {}",
+        wsl_prelude_diagnostic(stage, output),
+    )
+}
+
+#[cfg(windows)]
+fn wsl_literal_result_matches(
+    result: &Result<CommandOutput, CommandExecutionError>,
+    expected: &[u8],
+) -> bool {
+    result.as_ref().is_ok_and(|output| {
+        output.exit_code == Some(0)
+            && !output.timed_out
+            && !output.stdout_truncated
+            && !output.stderr_truncated
+            && output.stdout.len() <= WSL_FIXTURE_OUTPUT_CAP
+            && output.stderr.len() <= WSL_FIXTURE_OUTPUT_CAP
+            && output.stdout == expected
+    })
+}
+
+#[cfg(windows)]
+fn wsl_literal_result_diagnostic(
+    pre_project: bool,
+    program: WslCwdProgram,
+    result: &Result<CommandOutput, CommandExecutionError>,
+    expected: &[u8],
+) -> String {
+    let diagnostic = match result {
+        Ok(output) => wsl_cwd_diagnostic(pre_project, program, WslPreludeStage::LiteralArgv, output),
+        Err(error) => {
+            let mode = if pre_project { "PreProject" } else { "Project" };
+            format!(
+                "mode={mode} program_kind={program:?} stage=LiteralArgv dispatch_kind={:?}",
+                error.kind,
+            )
+        }
+    };
+    format!(
+        "{diagnostic} output_matches={}",
+        wsl_literal_result_matches(result, expected),
+    )
+}
+
+#[cfg(windows)]
+fn wsl_require_literal_argv(
+    pre_project: bool,
+    program: WslCwdProgram,
+    baseline: Result<CommandOutput, CommandExecutionError>,
+    expected: &[u8],
+    mut probe: impl FnMut(WslArgvDiscriminator) -> Result<CommandOutput, CommandExecutionError>,
+) -> Result<(), String> {
+    if wsl_literal_result_matches(&baseline, expected) {
+        return Ok(());
+    }
+    let mut rows = vec![format!(
+        "baseline {}",
+        wsl_literal_result_diagnostic(pre_project, program, &baseline, expected),
+    )];
+    for row in WSL_ARGV_DISCRIMINATORS {
+        let (_, expected) = wsl_argv_discriminator_plan(row);
+        let result = probe(row);
+        rows.push(format!(
+            "probe={row:?} {}",
+            wsl_literal_result_diagnostic(pre_project, WslCwdProgram::Absolute, &result, &expected),
+        ));
+    }
+    Err(format!(
+        "Actions WSL original literal-argv baseline rejected\n{}",
+        rows.join("\n"),
+    ))
 }
 
 #[cfg(windows)]
@@ -1190,8 +1364,11 @@ impl WslFixture {
         captured.source.canonical_path = path;
 
         for pre_project in [false, true] {
-            let run = |source: &ProjectExecutionSnapshot, plan: &CommandPlan| {
-                let output = if pre_project {
+            let dispatch = |source: &ProjectExecutionSnapshot,
+                            plan: &CommandPlan,
+                            stage: WslPreludeStage,
+                            program: WslCwdProgram| {
+                if pre_project {
                     let ExecutionBackend::Wsl { distro } = &source.backend else {
                         panic!("expected the owned WSL fixture")
                     };
@@ -1212,51 +1389,88 @@ impl WslFixture {
                         WSL_FIXTURE_OUTPUT_CAP,
                     )
                     .map(|result| {
-                        assert!(result.observed_connection_epoch.is_none());
+                        assert!(
+                            result.observed_connection_epoch.is_none(),
+                            "Actions WSL cwd assertion observed an epoch: {}",
+                            wsl_cwd_diagnostic(pre_project, program, stage, &result.output)
+                        );
                         result.output
                     })
                 }
-                .unwrap_or_else(|_| panic!("WSL cwd assertion could not dispatch"));
+            };
+            let run = |source: &ProjectExecutionSnapshot,
+                       plan: &CommandPlan,
+                       stage: WslPreludeStage,
+                       program: WslCwdProgram| {
+                let output = dispatch(source, plan, stage, program).unwrap_or_else(|error| {
+                    let mode = if pre_project { "PreProject" } else { "Project" };
+                    panic!(
+                        "Actions WSL cwd assertion mode={mode} program_kind={program:?} stage={stage:?} dispatch_kind={:?}",
+                        error.kind
+                    )
+                });
                 assert!(
                     !output.timed_out && !output.stdout_truncated && !output.stderr_truncated,
-                    "WSL cwd assertion output was incomplete"
+                    "Actions WSL cwd assertion output was incomplete: {}",
+                    wsl_cwd_diagnostic(pre_project, program, stage, &output)
                 );
                 output
             };
-            let output = run(&captured.source, &CommandPlan::new("/bin/pwd", ["-P"]));
-            captured.require_success("captured-cwd", &output);
-            assert!(
-                output.stdout == format!("{}\n", captured.source.canonical_path).as_bytes(),
-                "WSL command did not enter its exact captured directory"
+            let output = run(
+                &captured.source,
+                &CommandPlan::new("/bin/pwd", ["-P"]),
+                WslPreludeStage::CapturedCwd,
+                WslCwdProgram::Absolute,
             );
-            let args = [
-                r"%s\0",
-                "literal '\";$(printf injected)",
-                "-n",
-                "--",
-                "",
-                "NAME=value",
-                "*",
-                "line one\nline two",
-            ];
+            assert!(
+                output.exit_code == Some(0)
+                    && output.stdout == format!("{}\n", captured.source.canonical_path).as_bytes(),
+                "WSL command did not enter its exact captured directory: {}",
+                wsl_cwd_diagnostic(
+                    pre_project,
+                    WslCwdProgram::Absolute,
+                    WslPreludeStage::CapturedCwd,
+                    &output,
+                )
+            );
             let mut expected = Vec::new();
-            for arg in &args[1..] {
+            for arg in &WSL_LITERAL_ARGUMENTS[1..] {
                 expected.extend_from_slice(arg.as_bytes());
                 expected.push(0);
             }
-            for program in ["/usr/bin/printf", "printf", relative] {
-                let output = run(&captured.source, &CommandPlan::new(program, args));
-                captured.require_success("literal-argv", &output);
-                assert!(output.stdout == expected, "WSL argv was not literal");
+            for (program_kind, program) in [
+                (WslCwdProgram::Absolute, "/usr/bin/printf"),
+                (WslCwdProgram::Path, "printf"),
+                (WslCwdProgram::Relative, relative),
+            ] {
+                let baseline = dispatch(
+                    &captured.source,
+                    &CommandPlan::new(program, WSL_LITERAL_ARGUMENTS),
+                    WslPreludeStage::LiteralArgv,
+                    program_kind,
+                );
+                wsl_require_literal_argv(pre_project, program_kind, baseline, &expected, |row| {
+                    let (plan, _) = wsl_argv_discriminator_plan(row);
+                    dispatch(
+                        &captured.source,
+                        &plan,
+                        WslPreludeStage::LiteralArgv,
+                        WslCwdProgram::Absolute,
+                    )
+                })
+                .unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
             }
             let marker = if pre_project {
                 "preproject-dispatched"
             } else {
                 "project-dispatched"
             };
-            for path in [
-                format!("{}/missing", captured.source.canonical_path),
-                case.path("not-directory"),
+            for (stage, path) in [
+                (
+                    WslPreludeStage::MissingCwd,
+                    format!("{}/missing", captured.source.canonical_path),
+                ),
+                (WslPreludeStage::NonDirectoryCwd, case.path("not-directory")),
             ] {
                 let mut invalid = captured.source.clone();
                 invalid.canonical_path = path;
@@ -1264,14 +1478,18 @@ impl WslFixture {
                 let output = run(
                     &invalid,
                     &CommandPlan::new("/usr/bin/touch", ["--", &marker_path]),
+                    stage,
+                    WslCwdProgram::Absolute,
                 );
                 assert!(
                     output.exit_code.is_some_and(|code| code != 0),
-                    "invalid WSL cwd did not fail"
+                    "invalid WSL cwd did not fail: {}",
+                    wsl_cwd_diagnostic(pre_project, WslCwdProgram::Absolute, stage, &output)
                 );
                 assert!(
                     !case.exists(marker),
-                    "invalid WSL cwd dispatched its target"
+                    "invalid WSL cwd dispatched its target: {}",
+                    wsl_cwd_diagnostic(pre_project, WslCwdProgram::Absolute, stage, &output)
                 );
             }
         }
@@ -1389,6 +1607,200 @@ fn wsl_prelude_diagnostics_are_bounded_stage_specific_and_secret_safe() {
     let diagnostic = wsl_prelude_diagnostic(WslPreludeStage::ReadOwner, &output);
     assert!(diagnostic.contains("timed_out=true stdout_truncated=true stderr_truncated=true"));
     assert!(!diagnostic.contains("fixture_credential_"));
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_cwd_diagnostics_identify_route_program_and_stage_without_raw_output() {
+    let output = CommandOutput {
+        stdout: "The parameter is incorrect.\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+        stderr: b"fixture_credential_stderr".to_vec(),
+        exit_code: Some(-1),
+        ..Default::default()
+    };
+    for (pre_project, mode) in [(false, "Project"), (true, "PreProject")] {
+        for (program, kind) in [
+            (WslCwdProgram::Absolute, "Absolute"),
+            (WslCwdProgram::Path, "Path"),
+            (WslCwdProgram::Relative, "Relative"),
+        ] {
+            for stage in [
+                WslPreludeStage::CapturedCwd,
+                WslPreludeStage::LiteralArgv,
+                WslPreludeStage::MissingCwd,
+                WslPreludeStage::NonDirectoryCwd,
+            ] {
+                let diagnostic = wsl_cwd_diagnostic(pre_project, program, stage, &output);
+                assert!(diagnostic.starts_with(&format!(
+                    "mode={mode} program_kind={kind} stage={stage:?} "
+                )));
+                assert!(diagnostic.contains("exit=Some(-1) exit_hex=0xffffffff"));
+                assert!(diagnostic.contains("stdout_class=windows-invalid-parameter"));
+                assert!(diagnostic.contains("stderr_class=unclassified"));
+                assert!(!diagnostic.contains("fixture_credential_"));
+                assert!(!diagnostic.contains("The parameter is incorrect"));
+                assert!(diagnostic.len() < 640);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_literal_discriminator_plans_are_fixed_and_preserve_edge_cases() {
+    for (row, value) in [
+        (WslArgvDiscriminator::Ascii, "synthetic-ascii"),
+        (WslArgvDiscriminator::Hostile, "literal '\";$(printf injected)"),
+        (WslArgvDiscriminator::Dash, "-n"),
+        (WslArgvDiscriminator::DoubleDash, "--"),
+        (WslArgvDiscriminator::Empty, ""),
+        (WslArgvDiscriminator::Assignment, "NAME=value"),
+        (WslArgvDiscriminator::Wildcard, "*"),
+        (WslArgvDiscriminator::Newline, "line one\nline two"),
+    ] {
+        let (plan, expected) = wsl_argv_discriminator_plan(row);
+        assert_eq!(plan, CommandPlan::new("/usr/bin/printf", ["%s", value]));
+        assert_eq!(expected, value.as_bytes());
+    }
+    let (plan, expected) = wsl_argv_discriminator_plan(WslArgvDiscriminator::AsciiNul);
+    assert_eq!(
+        plan,
+        CommandPlan::new("/usr/bin/printf", [r"%s\0", "synthetic-ascii"])
+    );
+    assert_eq!(expected, b"synthetic-ascii\0");
+    let (plan, expected) = wsl_argv_discriminator_plan(WslArgvDiscriminator::WithoutEmpty);
+    assert_eq!(
+        plan,
+        CommandPlan::new(
+            "/usr/bin/printf",
+            [
+                r"%s\0",
+                "literal '\";$(printf injected)",
+                "-n",
+                "--",
+                "NAME=value",
+                "*",
+                "line one\nline two",
+            ],
+        )
+    );
+    assert_eq!(
+        expected,
+        b"literal '\";$(printf injected)\0-n\0--\0NAME=value\0*\0line one\nline two\0"
+    );
+    assert_eq!(WSL_LITERAL_ARGUMENTS[4], "");
+    assert_eq!(WSL_LITERAL_ARGUMENTS[7], "line one\nline two");
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_literal_discriminators_never_run_on_success_or_adopt_alternatives() {
+    let success = CommandOutput {
+        stdout: b"expected".to_vec(),
+        exit_code: Some(0),
+        ..Default::default()
+    };
+    wsl_require_literal_argv(true, WslCwdProgram::Path, Ok(success), b"expected", |_| {
+        panic!("successful original literal command must not start probes")
+    })
+    .unwrap();
+    let baseline = CommandOutput {
+        stdout: b"fixture_credential_stdout".to_vec(),
+        stderr: b"fixture_credential_stderr".to_vec(),
+        exit_code: Some(-1),
+        ..Default::default()
+    };
+    let mut probed = Vec::new();
+    let diagnostic = wsl_require_literal_argv(
+        false,
+        WslCwdProgram::Relative,
+        Ok(baseline),
+        b"expected",
+        |row| {
+            probed.push(row);
+            let (_, stdout) = wsl_argv_discriminator_plan(row);
+            Ok(CommandOutput {
+                stdout,
+                exit_code: Some(0),
+                ..Default::default()
+            })
+        },
+    )
+    .expect_err("probe successes cannot replace the original literal command failure");
+    assert_eq!(probed.len(), 10);
+    for row in WSL_ARGV_DISCRIMINATORS {
+        assert_eq!(probed.iter().filter(|probed| **probed == row).count(), 1);
+    }
+    assert_eq!(diagnostic.lines().count(), 12);
+    assert!(diagnostic.contains(
+        "baseline mode=Project program_kind=Relative stage=LiteralArgv exit=Some(-1)"
+    ));
+    assert_eq!(diagnostic.matches("program_kind=Absolute").count(), 10);
+    assert_eq!(diagnostic.matches("output_matches=true").count(), 10);
+    assert_eq!(diagnostic.matches("output_matches=false").count(), 1);
+    assert!(!diagnostic.contains("fixture_credential_"));
+    assert!(!diagnostic.contains("synthetic-ascii"));
+    assert!(diagnostic.len() < 8192);
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_literal_discriminators_reject_incomplete_mismatched_and_dispatch_failures() {
+    let mut failures = Vec::new();
+    for case in 0..7 {
+        let mut output = CommandOutput {
+            stdout: b"expected".to_vec(),
+            exit_code: Some(0),
+            ..Default::default()
+        };
+        match case {
+            0 => output.stdout = b"fixture_credential_wrong_bytes".to_vec(),
+            1 => output.exit_code = None,
+            2 => output.timed_out = true,
+            3 => output.stdout_truncated = true,
+            4 => output.stderr_truncated = true,
+            5 => output.stdout = vec![b'x'; WSL_FIXTURE_OUTPUT_CAP + 1],
+            _ => output.stderr = vec![b'x'; WSL_FIXTURE_OUTPUT_CAP + 1],
+        }
+        failures.push(Ok(output));
+    }
+    for kind in [
+        CommandExecutionErrorKind::ProgramNotFound,
+        CommandExecutionErrorKind::Disconnected,
+        CommandExecutionErrorKind::Rejected,
+        CommandExecutionErrorKind::Io,
+    ] {
+        failures.push(Err(CommandExecutionError::new(
+            kind,
+            "fixture_credential_dispatch_error",
+        )));
+    }
+    for baseline in failures {
+        let mut probes = 0;
+        let diagnostic = wsl_require_literal_argv(
+            true,
+            WslCwdProgram::Absolute,
+            baseline,
+            b"expected",
+            |_| {
+                probes += 1;
+                Err(CommandExecutionError::new(
+                    CommandExecutionErrorKind::Io,
+                    "fixture_credential_probe_error",
+                ))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(probes, 10);
+        assert_eq!(diagnostic.lines().count(), 12);
+        assert_eq!(diagnostic.matches("output_matches=false").count(), 11);
+        assert!(diagnostic.contains("mode=PreProject program_kind=Absolute stage=LiteralArgv"));
+        assert!(!diagnostic.contains("fixture_credential_"));
+        assert!(diagnostic.len() < 8192);
+    }
 }
 
 #[cfg(windows)]

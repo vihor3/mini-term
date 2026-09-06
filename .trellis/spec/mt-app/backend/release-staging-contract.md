@@ -344,6 +344,11 @@ stdin) -> Result<HostCommandResult, CommandExecutionError>`. The selectors are
 existing signature and production Null selection; the factored runner has no
 production ClosedPipe variant.
 
+Private Windows tests also use `WslCwdProgram::{Absolute, Path, Relative}`,
+static cwd stages, and `wsl_require_literal_argv` for failure-only literal-argv
+diagnostics. `WslArgvDiscriminator` selects ten fixed synthetic printf plans;
+it is not a public arbitrary-command or account-execution API.
+
 ### 3. Contracts
 
 - Require Actions, numeric run/attempt, the matching `mt-tasks-<run>-<attempt>`
@@ -364,6 +369,16 @@ production ClosedPipe variant.
 - Log only static row/stage/error classes, numeric status, capture flags and
   typed `marker_matches`. Never print raw output, marker JSON, argv, environment
   or exception text. Compare system-message classes by text, not output length.
+- A failed literal-argv baseline may collect ten fixed `/usr/bin/printf`
+  comparisons on the same already-owned fixture and public project/pre-project
+  dispatch path: ASCII, ASCII with NUL formatting, each original synthetic
+  argument separately, and the original list without its empty argument.
+  Preserve the full original list and absolute/PATH/relative executable checks.
+  Each comparison keeps the five-second/4096-byte bounds and existing cleanup.
+- Literal diagnostics log static mode/program/stage/row labels and typed
+  `output_matches` only beside the existing numeric/class metadata. A complete
+  matching baseline launches no probes; every failed baseline remains rejected
+  even if all comparisons succeed. No account stage runs after that failure.
 
 ### 4. Validation & Error Matrix
 
@@ -374,6 +389,7 @@ production ClosedPipe variant.
 | Original fails, every alternative succeeds | Still fail original baseline |
 | Wrong/partial/malformed marker or capture | Report false match, never account consent |
 | Any diagnostic launch fails | Record its static failure and retain baseline rejection |
+| Literal comparison succeeds after baseline failure | Diagnostic evidence only; never fallback success |
 
 ### 5. Good / Base / Bad
 
@@ -395,6 +411,10 @@ argv and relative/PATH/absolute executables, and proves missing/non-directory
 cwd cannot dispatch a marker command. The private account envelope must prove
 its own captured cwd through fixture evidence and reject a missing cwd before
 account access. Passing matrix units alone is not this transport evidence.
+Literal diagnostic regressions must cover all fixed plans, intact empty/newline
+cases, exactly ten comparisons after failure, zero comparisons after success,
+failed-baseline retention, complete byte matching, dispatch/capture failures and
+synthetic-secret suppression. Their Windows filter must actually execute them.
 
 ### 7. Wrong vs Correct
 

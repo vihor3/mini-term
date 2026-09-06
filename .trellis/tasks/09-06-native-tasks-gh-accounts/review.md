@@ -3,9 +3,105 @@
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
 pointer still identifies the Git child. Source review and explicitly authorized
 Actions log inspection. No passing build, lint, type-check, formatting, test,
-transport, or native acceptance is claimed for the current cwd correction.
+transport, or native acceptance is claimed for the current literal-argv diagnostics.
 
-## WSL Cwd Correction: Source Released To Main
+## WSL Literal-Argv Diagnostics: Source Released To Main
+
+The bounded test-only follow-up is authored and source-reviewed; ownership is
+released to Main. Current edits are only `tasks_account_executor/tests.rs` and
+this review. No production planner/launcher, credential/process policy, fixture
+payload removal, rootfs/config, CI/spec, Git writes or child agents. No local
+execution or verification. All new tests/diagnostics are UNRUN, Actions-only.
+
+### Actual Failure And Remaining Uncertainty
+
+Read the authorized log for
+[2cfd4cf run 34010842674, job 101426406119](https://github.com/vihor3/mini-term/actions/runs/34010842674/job/101426406119).
+Exactly one actual WSL test failed in 1.19 seconds at then-current
+`tests.rs:1160`: `stage=literal-argv exit=Some(-1)`. Cleanup succeeded for the
+owned `mt-tasks-34010842674-1` distro. Source order shows owner/pre-auth executable
+resolution/hash/setup and at least one captured-cwd assertion completed first.
+The shared assertion identifies neither Project/PreProject nor
+Absolute/PATH/Relative, and prints no output class. No program, argument or
+Windows error-message cause is inferred from the exit or elapsed time.
+
+Source tracing retains the original argument vector through `CommandPlan::new`,
+`plan_wsl_command` and `Command::args`. The fixed shell script uses positional
+parameters rather than interpolated data. This establishes the application-side
+construction, not what the runner's WSL parser accepted or why it returned -1.
+No further production change is justified by this evidence alone. Main reports
+`2cfd4cf` Linux/SSH success and Windows through Tasks success; those do not
+validate this diagnostic delta or the failing actual WSL gate.
+
+### Fixed Failure-Only Comparisons
+
+Preserved the static mode/program/stage diagnostics for cwd, literal argv and
+invalid cwd, including dispatch kind, signed/hex exit, timeout/truncation flags,
+byte counts and existing bounded UTF-8/UTF-16 output classes. No raw command,
+source path, argv, env, stdout/stderr or exception message is formatted.
+
+The original full argument vector, including empty/newline/hostile data, is now
+a private constant used unchanged by all three original program kinds on both
+routes. A complete successful baseline with exact stdout starts no probes. A
+failed/nonzero/incomplete/mismatched baseline runs these ten fixed rows once:
+
+| Static Row | Fixed `/usr/bin/printf` Input |
+| --- | --- |
+| Ascii | `%s` with `synthetic-ascii` |
+| AsciiNul | Original `%s\0` format with the same ASCII data |
+| Hostile | `%s` with the original quotes/substitution-looking argument |
+| Dash | `%s` with original `-n` |
+| DoubleDash | `%s` with original `--` |
+| Empty | `%s` with the original empty argument |
+| Assignment | `%s` with original `NAME=value` |
+| Wildcard | `%s` with original `*` |
+| Newline | `%s` with the original embedded-newline argument |
+| WithoutEmpty | Original format and full original list minus only empty |
+
+Every probe uses the same captured owned fixture, route and guarded execution
+API as its baseline, with a fixed absolute printf program, five-second timeout
+and existing 4096-byte per-stream cap. There are at most ten extra command waits
+(50 seconds plus existing bounded cleanup waits), never an open-ended retry.
+Dispatch errors are collected as typed kinds so later rows still provide evidence.
+An unexpected epoch remains an immediate ownership failure, not a probe retry.
+
+Only static enum row labels, numeric metadata/output classes and boolean
+`output_matches` appear. Matching requires success, complete bounded capture
+and exact expected bytes. The final result always rejects the original failed
+baseline even if all probes match; no probe output becomes acceptance data.
+The standalone Empty row cannot prove empty-argument cardinality by output alone
+because printf can default a missing value to empty; the unchanged full baseline
+and WithoutEmpty comparison remain necessary. These rows are diagnostics, not
+replacement product assertions or a passing transport claim.
+
+### Exact New Tests: UNRUN
+
+All are ordinary Windows tests under `tasks_account_executor::tests::`:
+
+- `wsl_cwd_diagnostics_identify_route_program_and_stage_without_raw_output`
+- `wsl_literal_discriminator_plans_are_fixed_and_preserve_edge_cases`
+- `wsl_literal_discriminators_never_run_on_success_or_adopt_alternatives`
+- `wsl_literal_discriminators_reject_incomplete_mismatched_and_dispatch_failures`
+
+These exercise the functions used by the fixture: fixed plans and expected
+bytes (including NUL), all mode/program/stage labels, exactly ten probes after
+failure, zero after success, original failure despite ten successful outputs,
+all typed dispatch errors, truncation/timeout/size/byte mismatch and suppression
+of synthetic stdout/stderr/exception secrets. They inspect values and decisions,
+not source substrings, and do not execute probes themselves.
+
+The exact ignored WSL test/filter, all original program-kind/argument/invalid-cwd
+assertions, account and cleanup cases, owned marker/hash/rootfs contract and CI
+setup remain. Main's broad Windows `tasks_account_executor` filter includes the
+new units as well as the prior `process::tests` builder unit; no CI edit is needed.
+Main owns the exact-SHA Actions rerun. Root cause and actual WSL/account acceptance
+remain pending; native hardware/secure-store acceptance is a separate gate.
+
+## Earlier WSL Cwd Correction Handoff (Superseded)
+
+Historical source/UNRUN status below predates `2cfd4cf`. The executed failure and
+current diagnostic scope above supersede that status; no further production
+change is made by this follow-up.
 
 The authorized production correction and focused regressions are authored and
 source-reviewed; ownership is released to Main. Scope is `execution_host.rs`,
@@ -93,8 +189,9 @@ New ordinary tests, all authored UNRUN:
 
 Existing project/pre-project and eight-row marker planner expectations are
 updated. The new process test inspects the actual private command builder and
-is platform-independent; the workspace gate includes it. A narrow Windows
-`tasks_account_executor::tests::` filter alone does not select this process test.
+is platform-independent; the workspace gate includes it. Main confirmed the
+actual Windows CI filter is broad `tasks_account_executor`, so it includes this
+process test too; no CI edit is needed.
 No source-string-only regression was added.
 
 The same exact ignored

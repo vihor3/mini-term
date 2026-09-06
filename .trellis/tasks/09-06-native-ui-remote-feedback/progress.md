@@ -885,3 +885,58 @@ applied its complete `full-rustfmt.patch` to index and source without local
 formatter/checks. Windows `101425983973` and actual WSL `101426095403` were
 still compiling/setup at this point, not passing regression evidence. The
 immediate format follow-up restarts the gate before expensive test builds.
+
+The complete three-file Actions formatting follow-up is committed/pushed as
+`2cfd4cf67cac1d08cf2dd320162185b2b00b2abd`: CI `34010842674`, package
+`34010842692`. Superseded WSL `101426095403` was cancelled before import and
+its cleanup passed. Current Linux `101426295439` and Windows `101426295552`
+passed all-target compilation, and Linux Clippy passed; ordinary tests continue.
+
+Actual WSL `101426406119` at `2cfd4cf` FAILED after exactly one executed
+test in 1.19 seconds: stage `literal-argv`, exit `Some(-1)`. Reaching this
+assertion proves the original owner/shim/hash checks and the first registered-
+project hostile-directory pwd assertion passed. It does not identify which
+absolute/PATH/relative executable or argument failed, and no account request
+was reached. Only-owned cleanup succeeded. Main resumed Noether for bounded
+WSL argv/source investigation and, if needed, the smallest secret-safe static
+discriminator diagnostics. No dropping hostile/empty/newline cases, skipping
+the gate, changing Job/stdin/cancel/credential policy, or local probes is allowed.
+Any materially new production abstraction needs Main's explicit scope approval.
+The first integrated WSL-wrapper ordinary tests/package continue for useful
+evidence. Parent `validation.md` now separates current and predecessor evidence
+from the still-open native acceptance checklist.
+
+Linux `101426295439` at `2cfd4cf` is now entirely SUCCESS. The full suite
+passed mt-ai 244 and mt-app 1209, including all four new WSL planner/private-
+builder tests. All five exact authenticated SSH fixtures ran individually and
+passed again, followed by sidecars and whitespace. Windows onboarding, Files
+and Tasks steps have passed and the remaining Windows/package steps continue.
+Main authorized failure-only fixed synthetic printf comparisons in the actual
+owned WSL test to separate argument, format/output and program-kind failures
+in one diagnostic run. Each row remains bounded, secret-safe and cannot make
+the original failed baseline pass. Production code/policies remain unchanged
+during this diagnostic follow-up.
+
+At `2cfd4cf`, Windows `101426295552` is now entirely SUCCESS: onboarding
+82/3, Files 49/14/5/1, execution-host 13, Tasks executor 13 (one separate WSL
+test ignored), Tasks app/config/domain 24/2/31, Git domain/app 24/6/124 and
+terminal-host library 31. All four newly added WSL planner/builder tests passed
+on Windows too. CI `34010842674` completed FAILED solely on actual WSL.
+Package `34010842692`, job `101426284311`, is SUCCESS with artifact
+`9982719381`, `Mini-Term_1.2.2-ci.49_windows-x64`. Download-only cache is
+`/home/leo/.cache/mini-term/artifacts/2cfd4cf-integration`; the passing Actions
+manifest records installer size 18,851,385 bytes and SHA-256
+`0a3437bd36a2268734a0b3f5ceee405ce6090a6e848129b16f5b4590a006c0fc`.
+No local installer/hash/app verification was run. The next delta remains
+Windows-test-only diagnostics and must not change any production policy.
+
+Noether released the single-test-file literal-argv diagnostic follow-up and
+closed. Main reviewed all ten fixed printf plans, existing source/runner fences,
+four new ordinary Windows regressions and the no-fallback/secret-safe report.
+The full original argument vector and program kinds remain unchanged; only a
+failed baseline collects comparisons, and it still rejects afterward. The
+standalone Empty row cannot prove argv cardinality by itself, so the original
+full-vector assertion remains authoritative. No production, fixture payload,
+workflow, cancellation, Job or credential policy changed. Main recorded the
+diagnostic contract and is staging only the single source file and four owned
+spec/report/validation paths for the next exact-SHA Actions run.
