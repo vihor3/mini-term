@@ -2324,10 +2324,7 @@ mod tests {
             assert!(!fixture.tree.attached && !fixture.tree.terminated);
             assert!(fixture.tree.attach(&fixture.child).is_ok());
             assert_eq!(
-                tasks_wsl_process_state(
-                    HANDLE(fixture.child.as_raw_handle()),
-                    *fixture.tree.job,
-                ),
+                tasks_wsl_process_state(HANDLE(fixture.child.as_raw_handle()), *fixture.tree.job,),
                 TasksWslRootState {
                     membership: TasksWslRootMembership::InJob,
                     liveness: TasksWslRootLiveness::Alive,

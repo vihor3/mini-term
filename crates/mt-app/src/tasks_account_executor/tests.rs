@@ -4048,7 +4048,9 @@ mod wsl_containment {
         }
 
         fn is_finished(&self) -> bool {
-            self.thread.as_ref().is_none_or(|thread| thread.is_finished())
+            self.thread
+                .as_ref()
+                .is_none_or(|thread| thread.is_finished())
         }
 
         fn join(&mut self) -> T {
@@ -4170,18 +4172,13 @@ mod wsl_containment {
                 assert_bounded_output(&output);
                 assert!(output.stdout.is_empty() && output.stderr.is_empty());
                 let matched = match client {
-                    ShortClient::Complete => {
-                        output.exit_code == Some(0) && !output.timed_out
-                    }
-                    ShortClient::Timeout => {
-                        output.timed_out && output.exit_code != Some(0)
-                    }
+                    ShortClient::Complete => output.exit_code == Some(0) && !output.timed_out,
+                    ShortClient::Timeout => output.timed_out && output.exit_code != Some(0),
                 };
                 assert!(
                     matched,
                     "WSL containment short result failed: {route:?} {client:?} exit={:?} timed_out={}",
-                    output.exit_code,
-                    output.timed_out
+                    output.exit_code, output.timed_out
                 );
                 finish_peer(started, peer);
             }
@@ -4285,7 +4282,10 @@ mod wsl_containment {
             ShortClient::Complete.plan().args,
             ["-c", ": > short-ready && exec /usr/bin/sleep 2"]
         );
-        assert_eq!(ShortClient::Complete.overlap_limit(), Duration::from_secs(2));
+        assert_eq!(
+            ShortClient::Complete.overlap_limit(),
+            Duration::from_secs(2)
+        );
         assert_eq!(ShortClient::Timeout.plan().program, "/bin/sh");
         assert_eq!(
             ShortClient::Timeout.plan().args,

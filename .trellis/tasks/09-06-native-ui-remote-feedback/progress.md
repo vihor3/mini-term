@@ -1735,3 +1735,14 @@ typed-only fixture diagnostics, and is submitting the scoped production patch
 together with the already committed formatter successor. All eight new units,
 eight actual peer rows and the unchanged actual WSL baseline still require
 fresh exact-SHA Actions proof; no native UI or broader WSL acceptance is claimed.
+
+Production candidate df2bae6cefdf292caccb9e07f04611f2b6446c76 was pushed with
+551595b, starting CI34032592031 and Package34032592140. Linux101484792373
+failed only formatting; exact-run artifact9989112016 supplied the complete
+small whitespace-only patch for execution_host.rs/Tasks tests.rs. Main read
+and applied it in full without a local formatter/check. Rootfs101484792472
+passed, Windows101484792500 is checking and WSL101484913601 has completed
+owned import and entered test compilation. Main will now push the formatter
+successor so its exact source receives the full Linux/Windows/WSL gates,
+then confirm the superseded job's owned cleanup. No df2bae6 actual-test result
+or production success is claimed at this point.
