@@ -338,6 +338,34 @@ jobs:
               -p mt-app --bin mini-term --no-fail-fast "$suite"
           done
 
+      - name: Run owned Agent state regressions
+        shell: bash
+        run: |
+          for suite in agent_semantics:: agent_runtime::tests::; do
+            listing=$(cargo test --locked --target x86_64-pc-windows-msvc \
+              -p mt-ai --lib "$suite" -- --list)
+            printf '%s\n' "$listing"
+            if ! printf '%s\n' "$listing" | grep -q ': test$'; then
+              echo "No tests discovered for $suite" >&2
+              exit 1
+            fi
+            cargo test --locked --target x86_64-pc-windows-msvc \
+              -p mt-ai --lib --no-fail-fast "$suite"
+          done
+          cargo test --locked --target x86_64-pc-windows-msvc \
+            -p mt-terminal --lib --no-fail-fast
+          for suite in pane::tests:: store::remote_agents::tests:: store::ai::route_tests::; do
+            listing=$(cargo test --locked --target x86_64-pc-windows-msvc \
+              -p mt-app --bin mini-term "$suite" -- --list)
+            printf '%s\n' "$listing"
+            if ! printf '%s\n' "$listing" | grep -q ': test$'; then
+              echo "No tests discovered for $suite" >&2
+              exit 1
+            fi
+            cargo test --locked --target x86_64-pc-windows-msvc \
+              -p mt-app --bin mini-term --no-fail-fast "$suite"
+          done
+
       - name: Run focused onboarding tests
         shell: bash
         run: |

@@ -225,6 +225,10 @@ impl ParserState {
         self.processor.advance(term, bytes);
     }
 
+    pub(crate) fn in_ground_state(&self) -> bool {
+        self.tail.state == TailState::Ground && !self.tail.overflowed
+    }
+
     fn tail(&self) -> &[u8] {
         &self.tail.bytes
     }
@@ -252,6 +256,8 @@ enum TailState {
 struct ParserTail {
     state: TailState,
     bytes: Vec<u8>,
+    // Tail truncation loses framing proof; only a parser reset restores it.
+    overflowed: bool,
 }
 
 impl ParserTail {
@@ -259,6 +265,7 @@ impl ParserTail {
         for &byte in bytes {
             self.advance_byte(byte);
             if self.bytes.len() > PARSER_TAIL_MAX_BYTES {
+                self.overflowed = true;
                 self.state = TailState::Ground;
                 self.bytes.clear();
             }
@@ -269,6 +276,7 @@ impl ParserTail {
         if self.state == TailState::Sync {
             self.bytes.push(byte);
             if self.bytes.ends_with(b"\x1b[?2026l") || self.bytes.len() >= PARSER_TAIL_MAX_BYTES {
+                self.overflowed |= self.bytes.len() >= PARSER_TAIL_MAX_BYTES;
                 self.state = TailState::Ground;
                 self.bytes.clear();
             }

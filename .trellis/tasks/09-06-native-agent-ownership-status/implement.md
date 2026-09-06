@@ -36,6 +36,18 @@ including first explicit-start promotion and duplicate-start state/age handling.
 Nine new and two expanded production-backed regressions are authored. Main owns
 Actions and native gates; no regression has run yet for this Agent slice.
 
+## 2026-09-07 Codex State Regression
+
+- [x] Trace the native Unknown symptom to missing Codex semantic production.
+- [x] Compare Orca's owned Codex state sources and record precise applicability.
+- [x] Add bounded live-screen semantic decoding and fenced remote integration.
+- [x] Complete independent source review and focused regression coverage.
+- [ ] Obtain exact-commit Actions evidence and a matching Windows artifact.
+
+This follow-up does not invalidate the previous layout package's build evidence,
+but that package reproduces this newly reported native Agent defect. Keep native
+acceptance distinct from source review and automated regression results.
+
 ## Actions-Only Cases
 
 - Empty/no-Agent terminals across repeated automatic/manual refresh and failure.

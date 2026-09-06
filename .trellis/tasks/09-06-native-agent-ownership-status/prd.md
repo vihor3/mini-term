@@ -21,6 +21,15 @@ Resolve feedback items 1, 2, 3, and 16: quiet routine refresh, semantic Agent ac
 
 ## Evidence
 
+### 2026-09-07 Native Regression
+
+The user reports a Mini-Term-owned SSH Codex terminal displaying its native
+`Working (2s ... esc to interrupt)` status while the exact sidebar Agent stays
+`Unknown` in the Actions-built native layout package. Fix this within R2; keep
+the approved layout and ownership scope unchanged. Process attestation alone
+must remain Unknown, but reliable live Codex task-state evidence must reach the
+existing owned semantic observation boundary.
+
 [Source-only research](../09-05-sidebar-agent-status/research/09-06-native-feedback.md)
 records the static refresh glyph, terminal-wide output recency, route-filtered
 process inventory, and current Runtime label fallback. Orca's managed PTY,

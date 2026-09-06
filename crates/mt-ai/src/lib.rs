@@ -62,7 +62,10 @@ pub use agent_runtime::{
     AgentRuntimeRegistry, AgentRuntimeState, AgentSemanticObservation, AgentSemanticOwner,
     AgentWeakEpisode, activity_from_legacy_status,
 };
-pub use agent_semantics::activity_from_owned_title;
+pub use agent_semantics::{
+    AgentScreenRow, CodexScreenEvidence, activity_from_owned_title, codex_screen_evidence,
+    codex_screen_marker,
+};
 pub use detect::{AI_COMMANDS, interactive_ai_command_name, is_interactive_ai_command};
 pub use hook_server::{HookState, HookStatusInfo, is_attention_cause};
 pub use monitor::{HookLifecycleEvent, SessionIdentity, StatusChange, StatusEmitter, StatusSink};

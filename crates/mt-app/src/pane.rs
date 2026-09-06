@@ -111,6 +111,7 @@ pub struct TerminalPane {
     /// 后端 pane 编号,见模块注释。
     pty_id: u32,
     emulator: Arc<TerminalEmulator>,
+    codex_screen: Option<Arc<parking_lot::Mutex<PtyCodexScreen>>>,
     transport: Option<TerminalTransport>,
     focus: FocusHandle,
     /// 渲染 + 键盘 + IME 全在这一层([`mt_ui::TerminalView`])。
@@ -291,6 +292,7 @@ impl TerminalTransport {
 
 struct LaunchOutcome {
     transport: TerminalTransport,
+    codex_screen: Option<Arc<parking_lot::Mutex<PtyCodexScreen>>>,
     terminal_incarnation_id: TerminalIncarnationId,
     recovery: TerminalRecovery,
     backend_notice: Option<String>,
@@ -302,10 +304,15 @@ fn observe_pty_output(
     ai: &AiBridge,
     tx: &mpsc::UnboundedSender<PaneSignal>,
     titles: &mut PtyTitleObserver,
+    codex_screen: Option<&parking_lot::Mutex<PtyCodexScreen>>,
     bytes: &[u8],
 ) {
     let observed_at_unix_ms = chrono::Utc::now().timestamp_millis();
-    emulator.advance(bytes);
+    if let Some(screen) = codex_screen {
+        screen.lock().observe_output(emulator, bytes, observed_at_unix_ms);
+    } else {
+        emulator.advance(bytes);
+    }
     if let Some((title, observed_at_unix_ms)) = titles.observe(bytes, observed_at_unix_ms) {
         let _ = tx.unbounded_send(PaneSignal::Title {
             title,
@@ -315,6 +322,226 @@ fn observe_pty_output(
     ai.perception().observe_output(pty_id, bytes);
     crate::git_watch::observe_output(pty_id, bytes);
     let _ = tx.unbounded_send(PaneSignal::Output);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CodexScreenOwner {
+    pub route: mt_ai::AgentRoute,
+    pub run_id: mt_identity::AgentRunId,
+    pub provider: mt_ai::AgentProvider,
+    pub process: mt_ai::AgentProcessIdentity,
+    pub source: crate::execution_host::ExecutionSourceSignature,
+    pub sampled_at_unix_ms: i64,
+}
+
+impl CodexScreenOwner {
+    pub(crate) fn same_run(&self, other: &Self) -> bool {
+        self.route == other.route
+            && self.run_id == other.run_id
+            && self.provider == other.provider
+            && self.process == other.process
+            && self.source == other.source
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CapturedCodexScreen {
+    pub owner: CodexScreenOwner,
+    pub evidence: mt_ai::CodexScreenEvidence,
+    pub revision: u64,
+    pub observed_at_unix_ms: i64,
+}
+
+/// Reader-owned evidence, polled under one short lock. No AppStore, tracker, or
+/// event-sequence lock is acquired while this lock or the emulator lock is held.
+#[derive(Default, Debug)]
+pub(crate) struct PtyCodexScreen {
+    owner: Option<CodexScreenOwner>,
+    revision: u64,
+    last_output_at_unix_ms: Option<i64>,
+    last_markers: Vec<String>,
+    pending: Option<CapturedCodexScreen>,
+    incomplete_owner: Option<CodexScreenOwner>,
+    incomplete_baseline: Option<CodexMarkerBaseline>,
+    frame_incomplete: bool,
+}
+
+#[derive(Debug)]
+struct CodexMarkerBaseline {
+    first_row: usize,
+    markers: Vec<Option<String>>,
+}
+
+impl CodexMarkerBaseline {
+    fn from_screen(screen: &mt_terminal::CurrentScreen) -> Self {
+        Self {
+            first_row: screen.first_row,
+            markers: screen
+                .rows
+                .iter()
+                .map(|row| mt_ai::codex_screen_marker(&row.text).map(str::to_string))
+                .collect(),
+        }
+    }
+
+    fn proves_change(&self, row: usize, marker: &str) -> bool {
+        row.checked_sub(self.first_row)
+            .and_then(|index| self.markers.get(index))
+            .is_some_and(|before| before.as_deref() != Some(marker))
+    }
+}
+
+fn decode_codex_screen(screen: &mt_terminal::CurrentScreen) -> Option<mt_ai::CodexScreenEvidence> {
+    let rows = screen
+        .rows
+        .iter()
+        .map(|row| mt_ai::AgentScreenRow {
+            text: &row.text,
+            first_cell_bold: row.first_cell_bold,
+            wrapped: row.wrapped,
+        })
+        .collect::<Vec<_>>();
+    mt_ai::codex_screen_evidence(&rows, screen.cursor_row, screen.cursor_visible)
+}
+
+impl PtyCodexScreen {
+    pub(crate) fn bind_owner(&mut self, owner: Option<CodexScreenOwner>) {
+        let owner = owner.filter(|owner| owner.provider.as_str() == mt_ai::AgentProvider::CODEX);
+        if self
+            .owner
+            .as_ref()
+            .zip(owner.as_ref())
+            .is_none_or(|(old, new)| !old.same_run(new))
+        {
+            self.pending = None;
+            self.incomplete_owner = None;
+            self.incomplete_baseline = None;
+            self.frame_incomplete = false;
+        }
+        self.owner = owner;
+    }
+
+    pub(crate) fn observe_output(
+        &mut self,
+        emulator: &TerminalEmulator,
+        bytes: &[u8],
+        observed_at_unix_ms: i64,
+    ) {
+        let Some(owner) = self.owner.as_ref() else {
+            emulator.advance(bytes);
+            return;
+        };
+        let (before, after) = emulator.advance_with_current_screen(bytes);
+        let ordered = observed_at_unix_ms >= 0
+            && self
+                .last_output_at_unix_ms
+                .is_none_or(|time| time <= observed_at_unix_ms);
+        self.last_output_at_unix_ms = Some(
+            self.last_output_at_unix_ms
+                .unwrap_or(observed_at_unix_ms)
+                .max(observed_at_unix_ms),
+        );
+        let Some(revision) = self.revision.checked_add(1) else {
+            self.pending = None;
+            return;
+        };
+        self.revision = revision;
+        if !ordered {
+            self.pending = None;
+        }
+        let owner_is_fresh = (0..=4_000)
+            .contains(&observed_at_unix_ms.saturating_sub(owner.sampled_at_unix_ms));
+        if after.is_none() {
+            if !self.frame_incomplete {
+                self.incomplete_owner = (before.is_some() && ordered && owner_is_fresh)
+                    .then(|| owner.clone());
+                self.incomplete_baseline = before.as_ref().map(CodexMarkerBaseline::from_screen);
+            }
+            self.frame_incomplete = true;
+            return;
+        }
+        let completed_owned_frame = before.is_some()
+            || self
+                .incomplete_owner
+                .as_ref()
+                .is_some_and(|start| start.same_run(owner));
+        let baseline = if before.is_some() {
+            before.as_ref().map(CodexMarkerBaseline::from_screen)
+        } else {
+            self.incomplete_baseline.take()
+        };
+        self.frame_incomplete = false;
+        self.incomplete_owner = None;
+        self.incomplete_baseline = None;
+        let decoded = after.as_ref().and_then(decode_codex_screen);
+        let Some(evidence) = decoded else {
+            // Absence is not Waiting/Done. Retain the pre-erase marker too, so
+            // an identical split repaint cannot refresh a pre-attestation grid.
+            if let Some(baseline) = baseline {
+                let markers = baseline.markers.into_iter().flatten().collect::<Vec<_>>();
+                if !markers.is_empty() {
+                    self.last_markers = markers;
+                }
+            }
+            self.pending = None;
+            return;
+        };
+        if !ordered || !completed_owned_frame || !owner_is_fresh {
+            self.pending = None;
+            self.last_markers = vec![evidence.marker];
+            return;
+        }
+        let marker_row = after.as_ref().expect("complete screen was decoded").first_row
+            + evidence.marker_row;
+        let changed_by_output = baseline
+            .as_ref()
+            .is_some_and(|old| old.proves_change(marker_row, &evidence.marker))
+            && !self.last_markers.contains(&evidence.marker);
+        self.last_markers = vec![evidence.marker.clone()];
+        if !changed_by_output {
+            return;
+        }
+        // Keep the earliest still-current state through fast counter updates.
+        // A later inventory can then bracket it instead of chasing every redraw.
+        if self.pending.as_ref().is_some_and(|pending| {
+            pending.owner.same_run(owner)
+                && pending.evidence.activity == evidence.activity
+                && (0..=mt_ai::AGENT_SEMANTIC_MAX_AGE_MS)
+                    .contains(&observed_at_unix_ms.saturating_sub(pending.observed_at_unix_ms))
+        }) {
+            return;
+        }
+        self.pending = Some(CapturedCodexScreen {
+            owner: owner.clone(),
+            evidence,
+            revision,
+            observed_at_unix_ms,
+        });
+    }
+
+    pub(crate) fn take_confirmed(
+        &mut self,
+        owner: Option<&CodexScreenOwner>,
+        requested_at_unix_ms: i64,
+        now: i64,
+    ) -> Option<CapturedCodexScreen> {
+        let pending = self.pending.as_ref()?;
+        if owner.is_none_or(|owner| !pending.owner.same_run(owner))
+            || pending.revision > self.revision
+            || !(0..=mt_ai::AGENT_SEMANTIC_MAX_AGE_MS)
+                .contains(&now.saturating_sub(pending.observed_at_unix_ms))
+        {
+            self.pending = None;
+            return None;
+        }
+        if requested_at_unix_ms <= pending.observed_at_unix_ms {
+            return None;
+        }
+        if self.frame_incomplete {
+            return None;
+        }
+        self.pending.take()
+    }
 }
 
 #[derive(Default)]
@@ -371,7 +598,7 @@ fn host_event_sink(
     let mut titles = PtyTitleObserver::default();
     move |event| match event {
         HostedEvent::Output { bytes, .. } => {
-            observe_pty_output(pty_id, &emulator, &ai, &tx, &mut titles, &bytes);
+            observe_pty_output(pty_id, &emulator, &ai, &tx, &mut titles, None, &bytes);
         }
         HostedEvent::Exited { exit_code } => {
             let _ = tx.unbounded_send(PaneSignal::Exit(exit_code));
@@ -448,6 +675,7 @@ fn start_hosted(
                 LaunchOutcome {
                     terminal_incarnation_id: descriptor.incarnation_id.clone(),
                     transport: TerminalTransport::Hosted(session),
+                    codex_screen: None,
                     recovery: TerminalRecovery::Fresh,
                     backend_notice,
                 }
@@ -495,6 +723,7 @@ fn start_hosted(
         Ok(LaunchOutcome {
             terminal_incarnation_id: descriptor.incarnation_id,
             transport: TerminalTransport::Hosted(session),
+            codex_screen: None,
             recovery: TerminalRecovery::RestoredHistory,
             backend_notice: Some(if descriptor.recovery_available {
                 "Restored from terminal history.".into()
@@ -516,6 +745,7 @@ fn start_hosted(
         Ok(session) => Ok(LaunchOutcome {
             terminal_incarnation_id: session.descriptor().incarnation_id.clone(),
             transport: TerminalTransport::Hosted(session),
+            codex_screen: None,
             recovery: TerminalRecovery::Reattached,
             backend_notice: None,
         }),
@@ -578,6 +808,8 @@ fn start_legacy(
     let output_ai = ai.clone();
     let output_tx = tx.clone();
     let titles = parking_lot::Mutex::new(PtyTitleObserver::default());
+    let codex_screen = Arc::new(parking_lot::Mutex::new(PtyCodexScreen::default()));
+    let output_screen = codex_screen.clone();
     let pty = PtySession::spawn_with_options(spec, options, move |bytes| {
         observe_pty_output(
             pty_id,
@@ -585,11 +817,13 @@ fn start_legacy(
             &output_ai,
             &output_tx,
             &mut titles.lock(),
+            Some(&output_screen),
             bytes,
         );
     })?;
     Ok(LaunchOutcome {
         transport: TerminalTransport::Legacy(pty),
+        codex_screen: Some(codex_screen),
         terminal_incarnation_id,
         recovery: TerminalRecovery::Compatibility,
         backend_notice,
@@ -675,10 +909,11 @@ impl TerminalPane {
             )
         };
 
-        let (transport, terminal_incarnation_id, recovery, backend_notice, spawn_error) =
+        let (transport, codex_screen, terminal_incarnation_id, recovery, backend_notice, spawn_error) =
             match launch {
                 Ok(outcome) => (
                     Some(outcome.transport),
+                    outcome.codex_screen,
                     outcome.terminal_incarnation_id,
                     outcome.recovery,
                     outcome.backend_notice,
@@ -688,6 +923,7 @@ impl TerminalPane {
                     let msg = format!("{error:#}");
                     eprintln!("[pane {pty_id}] PTY 启动失败: {msg}");
                     (
+                        None,
                         None,
                         fallback_incarnation.unwrap_or_default(),
                         TerminalRecovery::Unavailable,
@@ -761,6 +997,9 @@ impl TerminalPane {
                             });
                         }
                         if disconnected.is_some() || exit.is_some() {
+                            if let Some(screen) = &pane.codex_screen {
+                                screen.lock().bind_owner(None);
+                            }
                             pane.ai.remove_pane(pane.pty_id);
                         }
                         if let Some(error) = disconnected.as_ref() {
@@ -881,6 +1120,7 @@ impl TerminalPane {
         Self {
             pty_id,
             emulator,
+            codex_screen,
             transport,
             focus,
             view,
@@ -943,6 +1183,10 @@ impl TerminalPane {
     /// 按自己的可用像素 `resize` emulator,等于让缩略图去改真终端的行列。
     pub fn emulator(&self) -> Arc<TerminalEmulator> {
         self.emulator.clone()
+    }
+
+    pub(crate) fn codex_screen(&self) -> Option<Arc<parking_lot::Mutex<PtyCodexScreen>>> {
+        self.codex_screen.clone()
     }
 
     /// 当前终端配色。缩略图要用同一份,否则浮层里的画面配色与切过去看到的不一致。
@@ -1358,6 +1602,9 @@ impl TerminalPane {
 
     /// 关闭 pane:杀子进程 + 清掉 AI 感知里的一切痕迹 + 收掉查找条。
     pub fn shutdown(&mut self) {
+        if let Some(screen) = &self.codex_screen {
+            screen.lock().bind_owner(None);
+        }
         if let Some(transport) = self.transport.as_mut()
             && let Err(err) = transport.kill()
         {
@@ -1371,6 +1618,9 @@ impl TerminalPane {
     /// Releases the GUI attachment. Hosted terminals keep running; the legacy
     /// transport still terminates when its `PtySession` is dropped.
     pub fn detach(&mut self) {
+        if let Some(screen) = &self.codex_screen {
+            screen.lock().bind_owner(None);
+        }
         self.transport = None;
         self.ai.remove_pane(self.pty_id);
         self.close_search_state();
@@ -1387,8 +1637,58 @@ impl TerminalPane {
 }
 
 #[cfg(test)]
+pub(crate) fn codex_test_frame(status: &str) -> Vec<u8> {
+    format!(
+        "\x1b[?2026h\x1b[2J\x1b[H{status}\r\n\r\n\x1b[1m\u{203a}\x1b[0m Ask Codex to do anything\r\n\r\ngpt-6-astra max \u{00b7} ~/mini-term\x1b[3;3H\x1b[?25h\x1b[?2026l"
+    ).into_bytes()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_live_grid_frame_and_idle_do_not_use_title_or_output_recency() {
+        let emulator = TerminalEmulator::new(TermSize::new(100, 30));
+        let (_, screen) = emulator.advance_with_current_screen(&codex_test_frame(
+            "Working (2s \u{2022} esc to interrupt)",
+        ));
+        let evidence = decode_codex_screen(&screen.unwrap()).unwrap();
+        assert_eq!(evidence.activity, mt_ai::AgentActivity::Working);
+        assert_eq!(evidence.footer, "gpt-6-astra max \u{00b7} ~/mini-term");
+        let (_, screen) = emulator.advance_with_current_screen(&codex_test_frame(""));
+        assert!(decode_codex_screen(&screen.unwrap()).is_none());
+        let (_, screen) = emulator.advance_with_current_screen(b"\x1b]2;Working\x07\x1b[5n");
+        assert!(decode_codex_screen(&screen.unwrap()).is_none());
+    }
+
+    #[test]
+    fn codex_frame_requires_closed_sync_and_utf8_at_native_cursor() {
+        let emulator = TerminalEmulator::new(TermSize::new(100, 30));
+        let frame = codex_test_frame("Working (2s \u{2022} esc to interrupt)");
+        for (index, byte) in frame.iter().enumerate() {
+            let (_, screen) = emulator.advance_with_current_screen(&[*byte]);
+            let evidence = screen.as_ref().and_then(decode_codex_screen);
+            if index + 1 < frame.len() {
+                assert!(evidence.is_none());
+            } else {
+                assert_eq!(evidence.unwrap().activity, mt_ai::AgentActivity::Working);
+            }
+        }
+    }
+
+    #[test]
+    fn codex_quoted_status_and_composer_draft_are_not_native_working() {
+        let emulator = TerminalEmulator::new(TermSize::new(100, 30));
+        for status in ["quoted Working (2s \u{2022} esc to interrupt)", "", "shell output"] {
+            let (_, screen) = emulator.advance_with_current_screen(&codex_test_frame(status));
+            assert!(decode_codex_screen(&screen.unwrap()).is_none());
+        }
+        let (_, screen) = emulator.advance_with_current_screen(
+            "\x1b[3;3HWorking (2s \u{2022} esc to interrupt)".as_bytes(),
+        );
+        assert!(decode_codex_screen(&screen.unwrap()).is_none());
+    }
 
     #[test]
     fn title_capture_preserves_output_time_without_redraw_or_repeat_renewal() {

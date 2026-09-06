@@ -216,9 +216,10 @@ Correct: source episode -> accepted runtime supersession -> audit-only fallback
 
 ### 1. Scope / Trigger
 
-Use this boundary for a provider-specific native title or exact provider-session
-semantic observation after positive live ownership has been established. Title
-decoding alone does not prove ownership, foreground status, or process liveness.
+Use this boundary for a provider-specific native title, current-screen status,
+or exact provider-session semantic observation after positive live ownership
+has been established. Decoding alone does not prove ownership, foreground
+status, or process liveness.
 This supersedes the older generic output-recency exception above.
 
 ### 2. Signatures
@@ -246,6 +247,21 @@ pub fn activity_from_owned_title(
     provider: &AgentProvider,
     title: &str,
 ) -> Option<AgentActivity>;
+
+pub struct AgentScreenRow<'a> {
+    pub text: &'a str,
+    pub first_cell_bold: bool,
+    pub wrapped: bool,
+}
+
+pub fn codex_screen_evidence(
+    rows: &[AgentScreenRow<'_>],
+    cursor_row: usize,
+    cursor_visible: bool,
+) -> Option<CodexScreenEvidence>;
+
+// Syntax only, for marker-change baselines; not task-state or ownership proof.
+pub fn codex_screen_marker(text: &str) -> Option<&str>;
 
 impl AgentRuntimeRegistry {
     pub fn observe_semantic(
@@ -290,6 +306,37 @@ impl AgentRuntimeRegistry {
 - Native title decoding accepts only bounded provider-specific markers. It
   rejects controls and titles over 1,024 bytes. Arbitrary conversation names,
   redraws, output words and Codex task titles do not assert semantic activity.
+- Current-screen evidence is a separate producer, not an exception for arbitrary
+  output text. Use the existing VT emulator's active grid and cursor, independent
+  of user scroll position. Recognize bounded provider-native status/composer
+  structure; reject transcript quotes, typed draft text, partial frames and
+  unrelated shell output. Snapshot restore, render/configuration changes and
+  polling do not produce fresh semantic observations.
+- Capture at most 16 rows before and eight after the active cursor, at most
+  512 columns, 2,048 bytes per row and 32 KiB total. Preserve prompt boldness
+  and wrap facts. Incomplete UTF-8/ANSI/synchronized frames are not candidates;
+  loss of parser framing through bounded-tail overflow disables screen evidence
+  until parser reset rather than pretending the frame ended.
+- Codex's explicit elapsed/interrupt status next to its live composer may prove
+  Working. Its composer and shortcuts footer remain available during work, and
+  streaming can hide the status row: those elements or absence of Working do not
+  prove Waiting, Done or exit. Preserve stronger Hook states and freshness-
+  qualified last-known data when no positive semantic marker is available.
+- Repeated unchanged screen evidence cannot renew its capture time because
+  other terminal content changed. Native status counter changes are new evidence
+  only with the original output capture time and independently confirmed owner.
+  Structural footer validation and animated prefixes are not freshness keys.
+  Split frames retain their pre-frame semantic baseline and owner so completion
+  of a non-semantic control sequence cannot freshen retained Working text.
+  Keep marker provenance independent of cursor/composer validity: an invalid
+  before-context does not prove the marker was absent. Cursor movement or
+  visibility alone cannot create a new semantic timestamp. Ownership loss or
+  replacement discards unfinished-frame authority, even if the same run later
+  becomes eligible again.
+  `CurrentScreen::first_row` plus `CodexScreenEvidence::marker_row` identifies
+  the marker's current grid row for the before/after comparison; an uncovered
+  before-row cannot prove a change. The syntax-only marker decoder may retain
+  negative baselines without admitting a semantic candidate.
 
 ### 4. Validation & Error Matrix
 
@@ -307,12 +354,16 @@ impl AgentRuntimeRegistry {
 | Old, future, duplicate-time or pre-owner semantic timestamp | `StaleSemanticObservation` |
 | Known run with an old event sequence | `OutOfOrder` |
 | Process remains but semantic age expires | Retain state with Stale freshness; no manufactured Waiting/Done |
+| Owned Codex native Working region without Hook or OSC title | Accept fresh screen semantics after foreground confirmation |
+| Composer alone, quoted Working, scrollback, restored or incomplete frame | No new task-state assertion |
 | Provider and cwd match multiple independent runs | Do not collapse their identity |
 
 ### 5. Good / Base / Bad
 
 - Good: an exact foreground provider title updates its run, while another
   independent process on the same terminal remains Unknown.
+- Good: an actual VT repaint changes the native Codex elapsed marker and a
+  later scheduled foreground sample confirms its exact owner before projection.
 - Base: a valid owned process with no semantic telemetry is detected with
   Unknown activity and retains its provider identity.
 - Bad: mark every process Working because the shared terminal just redrew.
@@ -323,7 +374,11 @@ Cover process/PTY normalization, Hook priority, independent same-provider runs,
 all owner dimensions, malformed identities, stale/future/duplicate timestamps,
 owner/epoch changes, accepted ordering and presentation freshness. Verify title
 markers with provider-specific fixtures and negative arbitrary-title/transcript
-cases. Assert original semantic time survives repeated inventory and that a
+cases. Exercise actual VT frame capture through the owned semantic producer for
+Codex Working, not only a hand-built semantic observation. Assert current-grid
+independence from scrolling, partial/chunked redraw rejection, unchanged marker
+non-renewal and Hook priority. Assert original semantic time survives repeated
+inventory and that a
 later genuine launch is not blocked by the retired weak latch. Execute all
 tests in Actions; source review and authored tests are not passing evidence.
 Snapshot route epochs, siblings and owner times around rejected newer events;
@@ -337,6 +392,12 @@ Wrong: `process.activity = if recent_output { Working } else { Waiting }`.
 Correct: submit liveness as Unknown, then submit a separately captured exact-run
 semantic observation only when its owner, provider marker and original timestamp
 are proven. Project the accepted state and its freshness, not the raw hint.
+
+Wrong: remove the generic recency fallback and test only that all unhooked
+processes remain Unknown, without a positive provider-native producer test.
+
+Correct: keep Unknown as the no-evidence baseline and exercise actual VT frame
+capture, provider decoding and accepted exact-owner semantic projection together.
 
 ## Scenario: Provider-less Hook Exit
 

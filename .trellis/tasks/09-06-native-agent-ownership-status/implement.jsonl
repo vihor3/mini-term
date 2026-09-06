@@ -4,3 +4,4 @@
 {"file":".trellis/spec/mt-ssh/backend/remote-agent-inventory-contract.md","reason":"Bounded authenticated process identity without leaking environment/argv."}
 {"file":".trellis/spec/mt-app/backend/worktree-context-contract.md","reason":"Exact run/title ownership across background worktrees."}
 {"file":".trellis/tasks/09-05-sidebar-agent-status/research/09-06-native-feedback.md","reason":"Reported symptoms, current inference failures, and Orca reference anchors."}
+{"file":".trellis/tasks/09-06-native-agent-ownership-status/research/09-07-codex-state-evidence.md","reason":"Native Unknown regression, bounded current-screen evidence and Codex marker/absence semantics."}

@@ -40,6 +40,29 @@ The current PTY-recency clauses in `mt-ai` and `mt-app` specs require a narrow
 successor contract after implementation. Do not leave competing rules in the
 specs or patch only a polling timeout while retaining the false inference.
 
+## Codex Live Terminal Evidence Follow-up
+
+The 2026-09-07 screenshot exposes a missing semantic producer, not an incorrect
+sidebar label: Codex conversation titles carry no state and current remote
+integration only decodes title markers. Add bounded provider-specific evidence
+from the live terminal's active Codex status/composer region, parsed from the
+existing VT emulator rather than scanning raw escape bytes or scrollback.
+
+Expected product boundary: `mt-ai` owns the pure provider decoder; `mt-terminal`
+may expose a bounded current-screen read if existing APIs cannot capture it
+atomically; `mt-app` pane/output and remote polling own original capture time,
+route, foreground PID/start ticks, connection epoch and accepted projection.
+Retain Hook priority and confirm ownership with a sample scheduled after capture.
+Scrolling, restored snapshots, unrelated redraws and cached old text are not new
+semantic events. Continuous Working updates must not starve confirmation; a
+newer contradictory state must not publish an obsolete pending Working sample.
+
+Do not modify layout, process discovery scope, Hook credentials, legacy weak
+lifecycle reconciliation or runtime identities. Add focused production-path
+regressions for the screenshot, idle composer, old/quoted status text, foreground
+replacement, delayed inventory, reconnect and strong Hook precedence. Execute
+all checks and package generation only in existing GitHub Actions workflows.
+
 ## Catalog Presentation
 
 Track automatic inventory refresh separately from user-requested refresh.

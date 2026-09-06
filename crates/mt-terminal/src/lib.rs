@@ -127,6 +127,87 @@ struct CursorFloor {
 /// 快路径失效,不封顶的话 reader 线程可能被拖出一次可见的卡顿。
 const FLOOR_SAMPLE_BUDGET: usize = 256 * 1024;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurrentScreenRow {
+    pub text: String,
+    pub first_cell_bold: bool,
+    pub wrapped: bool,
+}
+
+/// A cursor-near read of active grid rows, independent of display offset/history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurrentScreen {
+    pub rows: Vec<CurrentScreenRow>,
+    pub first_row: usize,
+    pub cursor_row: usize,
+    pub cursor_visible: bool,
+}
+
+fn current_screen(term: &Term<EventQueue>) -> Option<CurrentScreen> {
+    use alacritty_terminal::index::{Column, Line};
+    use alacritty_terminal::term::cell::Flags;
+
+    let cursor = term.grid().cursor.point;
+    if term.columns() > 512 || cursor.line.0 < 0 {
+        return None;
+    }
+    let cursor_row = cursor.line.0 as usize;
+    let start = cursor_row.saturating_sub(16);
+    let end = (cursor_row + 9).min(term.screen_lines());
+    if cursor_row >= end {
+        return None;
+    }
+    let mut rows = Vec::with_capacity(end.saturating_sub(start));
+    let mut total_bytes = 0;
+    for line in start..end {
+        let row = &term.grid()[Line(line as i32)];
+        let mut text = String::new();
+        let mut first_cell_bold = None;
+        let mut wrapped = false;
+        for column in 0..term.columns() {
+            let cell = &row[Column(column)];
+            wrapped |= cell.flags.contains(Flags::WRAPLINE);
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            if !cell.c.is_whitespace() && first_cell_bold.is_none() {
+                first_cell_bold = Some(cell.flags.contains(Flags::BOLD));
+            }
+            text.push(cell.c);
+            if let Some(extra) = cell.zerowidth() {
+                for ch in extra.iter().take(9) {
+                    text.push(*ch);
+                }
+                if extra.len() > 8 {
+                    return None;
+                }
+            }
+            if text.len() > 2048 {
+                return None;
+            }
+        }
+        text.truncate(text.trim_end_matches(' ').len());
+        total_bytes += text.len();
+        if total_bytes > 32 * 1024 {
+            return None;
+        }
+        rows.push(CurrentScreenRow {
+            text,
+            first_cell_bold: first_cell_bold.unwrap_or(false),
+            wrapped,
+        });
+    }
+    Some(CurrentScreen {
+        rows,
+        first_row: start,
+        cursor_row: cursor_row - start,
+        cursor_visible: term.mode().contains(TermMode::SHOW_CURSOR),
+    })
+}
+
 /// 光标当前所在的 **grid 绝对行** = `cursor.line + history_size`。
 ///
 /// 内容每被顶进历史一行,它的 `Line` 减 1、`history_size` 加 1,两者之和守恒 ——
@@ -189,22 +270,44 @@ impl TerminalEmulator {
     /// 追踪光标水位时**改成逐字节推进**(见 [`Self::arm_cursor_floor`]):要找的
     /// 那个位置只在整批数据的**中间态**里存在,喂完再读就已经被后续输出推走了。
     pub fn advance(&self, bytes: &[u8]) {
+        self.advance_inspecting(bytes, |_, _| ());
+    }
+
+    /// Read bounded before/after facts under the existing reader lock order.
+    /// Incomplete VT/UTF-8 or synchronized frames have no inspectable snapshot.
+    /// Only callers handling real output may assign observation time to these.
+    pub fn advance_with_current_screen(
+        &self,
+        bytes: &[u8],
+    ) -> (Option<CurrentScreen>, Option<CurrentScreen>) {
+        self.advance_inspecting(bytes, |term, complete| {
+            complete.then(|| current_screen(term)).flatten()
+        })
+    }
+
+    fn advance_inspecting<R>(
+        &self,
+        bytes: &[u8],
+        inspect: impl Fn(&Term<EventQueue>, bool) -> R,
+    ) -> (R, R) {
         let mut term = self.term.lock();
         let mut parser = self.parser.lock();
         let mut floor = self.cursor_floor.lock();
-        let Some(floor) = floor.as_mut().filter(|f| f.budget > 0) else {
+        let before = inspect(&term, parser.in_ground_state());
+        if let Some(floor) = floor.as_mut().filter(|f| f.budget > 0) {
+            let (sampled, rest) = bytes.split_at(bytes.len().min(floor.budget));
+            for byte in sampled {
+                parser.advance(&mut term, std::slice::from_ref(byte));
+                floor.min = floor.min.min(cursor_row(&term));
+            }
+            floor.budget -= sampled.len();
+            if !rest.is_empty() {
+                parser.advance(&mut term, rest);
+            }
+        } else {
             parser.advance(&mut term, bytes);
-            return;
-        };
-        let (sampled, rest) = bytes.split_at(bytes.len().min(floor.budget));
-        for byte in sampled {
-            parser.advance(&mut term, std::slice::from_ref(byte));
-            floor.min = floor.min.min(cursor_row(&term));
         }
-        floor.budget -= sampled.len();
-        if !rest.is_empty() {
-            parser.advance(&mut term, rest);
-        }
+        (before, inspect(&term, parser.in_ground_state()))
     }
 
     /// Capture a bounded, compressed visual checkpoint for cold recovery.
@@ -392,6 +495,46 @@ impl TerminalEmulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_screen_is_atomic_bounded_and_independent_of_scrollback_view() {
+        let emulator = TerminalEmulator::new(TermSize::new(80, 8));
+        for _ in 0..20 {
+            emulator.advance(b"old history\r\n");
+        }
+        emulator.advance(b"\x1b[H\x1b[2J\x1b[1mlive\x1b[0m\r\n\r\nfooter\x1b[1;5H");
+        emulator.with_term_mut(|term| term.scroll_display(alacritty_terminal::grid::Scroll::Top));
+        assert!(emulator.visible_lines().iter().any(|line| line == "old history"));
+        let (before, after) = emulator.advance_with_current_screen(b"\x1b[5n");
+        assert_eq!(before, after);
+        let screen = after.unwrap();
+        assert_eq!(screen.rows[0].text, "live");
+        assert!(screen.rows[0].first_cell_bold);
+        assert_eq!(screen.cursor_row, 0);
+        let huge = TerminalEmulator::new(TermSize::new(513, 8));
+        assert!(huge.advance_with_current_screen(b"text").1.is_none());
+    }
+
+    #[test]
+    fn current_screen_excludes_unfinished_ansi_utf8_and_synchronized_output() {
+        let emulator = TerminalEmulator::new(TermSize::new(80, 8));
+        assert!(emulator.advance_with_current_screen(b"\x1b[").1.is_none());
+        assert!(emulator.advance_with_current_screen(b"0m").1.is_some());
+        assert!(emulator.advance_with_current_screen(b"\xe2\x80").1.is_none());
+        assert!(emulator.advance_with_current_screen(b"\xa2").1.is_some());
+        assert!(emulator.advance_with_current_screen(b"\x1b[?2026hnext").1.is_none());
+        let (before, after) = emulator.advance_with_current_screen(b"\x1b[?2026l");
+        assert!(before.is_none());
+        assert_eq!(after.unwrap().rows[0].text, "\u{2022}next");
+        for prefix in [b"\x1b[?2026h".as_slice(), b"\x1b]2;".as_slice()] {
+            let emulator = TerminalEmulator::new(TermSize::new(80, 8));
+            emulator.advance(prefix);
+            emulator.advance(&vec![b'x'; 2 * 1024 * 1024 + 1]);
+            assert!(emulator.advance_with_current_screen(b"\x1b[?2026l\x07").1.is_none());
+            emulator.reset_parser_state();
+            assert!(emulator.advance_with_current_screen(b"").1.is_some());
+        }
+    }
 
     /// 往终端里推 `n` 行文本。
     fn feed_lines(e: &TerminalEmulator, n: usize) {

@@ -29,6 +29,13 @@ RemoteAgentPollState = {
 pub fn remote_agent_status_enabled() -> bool;
 ```
 
+The live Codex producer uses `TerminalEmulator::advance_with_current_screen`
+for before/after current-grid facts under the existing emulator lock order.
+`PtyCodexScreen::bind_owner`, `observe_output` and `take_confirmed` retain the
+reader's run/route/process/source and original evidence time. Foreground poll
+confirmation then submits `AgentSemanticObservation`; render/title code never
+parses transcript text into activity.
+
 Rollback environment:
 
 ```text
@@ -80,6 +87,14 @@ MINI_TERM_REMOTE_AGENT_STATUS=0
   late pre-capture reply is not confirmation. Owner change or age expiry rejects
   it. Never restamp retained titles on polls or treat restored/replayed titles
   as new semantic observations.
+- Codex current-screen semantics use actual parsed PTY output, a bounded native
+  status/composer capture and the same foreground/source/route/epoch fences.
+  Keep screen evidence separate from display titles. Confirm with an inventory
+  scheduled strictly after capture, not a pre-capture request returning late.
+  Repeated same-state counter updates must not keep replacing the earliest
+  pending capture and starve confirmation; absent or contradictory newer screen
+  evidence must prevent publication of an obsolete pending Working sample.
+  Failed ownership/epoch confirmation never retimestamps retained screen data.
 - Runtime display titles are separate from activity. Exact owned history title
   metadata carries run/session/route/source/epoch and cannot bind to a replacement
   connection. An ambiguous history match does not choose the first run. All
@@ -217,6 +232,9 @@ MINI_TERM_REMOTE_AGENT_STATUS=0
   no phantom feed/provider/title/close ownership and no old-episode revival.
 - Title tests vary capture/scheduling/completion order, PID/start ticks, provider,
   route, epoch and freshness, and reject pre-capture in-flight confirmation.
+- Screen tests use actual VT frames before the production owner/registry path;
+  cover fast counter updates, absent/changed markers before delayed confirmation,
+  scrollback, replay, chunked redraw, multiple runs and stronger Hook semantics.
 - Presentation tests cover live work, steady waiting/approval/completion/error,
   offline/stale work, no evidence, and catalog-progress independence.
 - All checks and disposable fixture execution run only in GitHub Actions.
