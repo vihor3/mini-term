@@ -1,5 +1,5 @@
 // Standalone synthetic gh executable. Compiled and executed by Actions tests only.
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -49,6 +49,30 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("--suspended") {
         std::fs::write(std::env::var_os("MT_FIXTURE_MARKER").unwrap(), b"resumed").unwrap();
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--capture-lifecycle") {
+        let mode = args.get(1).map(String::as_str).unwrap();
+        if mode == "exit-no-ack" {
+            std::process::exit(23);
+        }
+        assert!(matches!(
+            mode,
+            "cancel-ack" | "cancel-no-ack" | "cancel-cleanup-failed"
+        ));
+        std::fs::write(evidence_path("MT_FIXTURE_READY", "ready"), b"started").unwrap();
+        let mut control = [0];
+        std::io::stdin().read_exact(&mut control).unwrap();
+        assert_eq!(control, [b'x']);
+        if mode == "cancel-no-ack" {
+            std::process::exit(23);
+        }
+        let status = if mode == "cancel-ack" {
+            "cancelled"
+        } else {
+            "cleanup-failed"
+        };
+        println!("{{\"status\":\"{status}\"}}");
         return;
     }
     assert!(!args.iter().any(|arg| arg.contains(PREFIX)));

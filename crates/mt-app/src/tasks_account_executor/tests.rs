@@ -376,6 +376,78 @@ fn native_windows_failed_attachment_reaps_the_suspended_child() {
     assert!(!marker.exists(), "unassigned child was resumed");
 }
 
+#[test]
+fn private_capture_diagnostics_keep_cancellation_acknowledgement_required() {
+    for (mode, expected, ack) in [
+        ("cancel-ack", AccountExecutionError::Cancelled, true),
+        ("cancel-no-ack", AccountExecutionError::CleanupFailed, false),
+        (
+            "cancel-cleanup-failed",
+            AccountExecutionError::CleanupFailed,
+            false,
+        ),
+    ] {
+        let evidence = DescendantEvidence::new();
+        let cancellation = AccountCancellation::default();
+        let bounded = AccountExecutionControl::new(
+            Duration::from_secs(15),
+            cancellation.clone(),
+            None,
+        )
+        .unwrap();
+        let mut command = Command::new(&fixture().executable);
+        command.args(["--capture-lifecycle", mode]);
+        evidence.configure(&mut command);
+        let canceller = evidence.cancel_after_start(cancellation);
+        let (result, diagnostics) = process::trace_capture(Instant::now(), || {
+            process::envelope_fixture(command, &bounded, 4096)
+        });
+        assert!(
+            canceller.join().unwrap(),
+            "private capture fixture never became ready"
+        );
+        assert!(
+            result.err() == Some(expected),
+            "wrong capture error for {mode}: {}",
+            diagnostics.describe()
+        );
+        let diagnostic = diagnostics.describe();
+        assert!(diagnostic.contains("stage=StopLatched"));
+        assert!(diagnostic.contains("latched=Some(Cancelled)"));
+        assert!(diagnostic.contains("write_ok=Some(true)"));
+        assert!(diagnostic.contains("stage=TreeRetired"));
+        assert!(diagnostic.contains(&format!("cleanup_ack=Some({ack})")));
+    }
+}
+
+#[test]
+fn private_capture_unstopped_exit_is_not_relabelled_by_later_cancellation() {
+    let cancellation = AccountCancellation::default();
+    let bounded = AccountExecutionControl::new(
+        Duration::from_secs(15),
+        cancellation.clone(),
+        None,
+    )
+    .unwrap();
+    let mut command = Command::new(&fixture().executable);
+    command.args(["--capture-lifecycle", "exit-no-ack"]);
+    let (result, diagnostics) = process::trace_capture(Instant::now(), || {
+        process::envelope_fixture(command, &bounded, 4096)
+    });
+    cancellation.cancel();
+    assert!(bounded.cancellation().is_cancelled());
+    assert!(matches!(
+        result,
+        Err(AccountExecutionError::HostHelperUnavailable)
+    ));
+    let diagnostic = diagnostics.describe();
+    assert!(diagnostic.contains("stage=Exited"));
+    assert!(diagnostic.contains("exit=Some(23) latched=None control=None"));
+    assert!(diagnostic.contains("stage=TreeRetired"));
+    assert!(diagnostic.contains("cleanup_ack=Some(false)"));
+    assert!(!diagnostic.contains("stage=StopLatched"));
+}
+
 #[cfg(unix)]
 fn envelope_request(
     plan: &SelectedAccountRequestPlan,
@@ -1184,6 +1256,52 @@ struct WslFixture {
 }
 
 #[cfg(windows)]
+#[derive(Clone, Copy, Debug)]
+enum WslLifecycleCase {
+    PipeDescendant,
+    DataTimeout,
+    DataCancel,
+    LookupTimeout,
+    LookupCancel,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct WslReadinessObservation {
+    ready: bool,
+    probe_count: u32,
+    first_probe_started_us: u128,
+    probe_started_us: u128,
+    probe_returned_us: u128,
+    cancel_us: u128,
+}
+
+#[cfg(windows)]
+impl WslReadinessObservation {
+    fn record_probe(&mut self, ready: bool, started_us: u128, returned_us: u128) {
+        if self.probe_count == 0 {
+            self.first_probe_started_us = started_us;
+        }
+        self.probe_count = self.probe_count.saturating_add(1);
+        self.ready = ready;
+        self.probe_started_us = started_us;
+        self.probe_returned_us = returned_us;
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "ready={} probe_count={} first_probe_started_us={} probe_started_us={} probe_returned_us={} cancel_us={}",
+            self.ready,
+            self.probe_count,
+            self.first_probe_started_us,
+            self.probe_started_us,
+            self.probe_returned_us,
+            self.cancel_us
+        )
+    }
+}
+
+#[cfg(windows)]
 impl WslFixture {
     fn open() -> Self {
         assert!(
@@ -1551,15 +1669,21 @@ impl WslFixture {
     fn cancel_after_start(
         &self,
         cancellation: AccountCancellation,
-    ) -> std::thread::JoinHandle<bool> {
+        started: Instant,
+    ) -> std::thread::JoinHandle<WslReadinessObservation> {
         let fixture = self.clone();
         std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(10);
+            let mut observation = WslReadinessObservation::default();
             loop {
+                let probe_started_us = started.elapsed().as_micros();
                 let ready = fixture.exists("ready");
+                let probe_returned_us = started.elapsed().as_micros();
+                observation.record_probe(ready, probe_started_us, probe_returned_us);
                 if ready || Instant::now() >= deadline {
                     cancellation.cancel();
-                    return ready;
+                    observation.cancel_us = started.elapsed().as_micros();
+                    return observation;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -1578,6 +1702,30 @@ impl WslFixture {
             "WSL request left a live Linux descendant"
         );
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_readiness_diagnostics_retain_earlier_false_probes_in_fixed_storage() {
+    let mut observation = WslReadinessObservation::default();
+    observation.record_probe(false, 0, 5);
+    observation.record_probe(false, 10, 15);
+    assert_eq!(observation.probe_count, 2);
+    assert_eq!(observation.first_probe_started_us, 0);
+    assert!(!observation.ready);
+    observation.record_probe(true, 20, 25);
+    observation.cancel_us = 30;
+    assert_eq!(
+        observation.describe(),
+        "ready=true probe_count=3 first_probe_started_us=0 probe_started_us=20 probe_returned_us=25 cancel_us=30"
+    );
+
+    observation.probe_count = u32::MAX;
+    observation.record_probe(false, u128::MAX - 1, u128::MAX);
+    assert_eq!(observation.probe_count, u32::MAX);
+    assert_eq!(observation.first_probe_started_us, 0);
+    assert!(!observation.ready);
+    assert!(observation.describe().len() < 512);
 }
 
 #[cfg(windows)]
@@ -2122,43 +2270,71 @@ fn tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host() {
         AccountError::MalformedResponse.into()
     );
 
-    for (login, cancel) in [
-        ("PipeDescendant", false),
-        ("Slow", false),
-        ("Slow", true),
-        ("LookupSlow", false),
-        ("LookupSlow", true),
+    for lifecycle in [
+        WslLifecycleCase::PipeDescendant,
+        WslLifecycleCase::DataTimeout,
+        WslLifecycleCase::DataCancel,
+        WslLifecycleCase::LookupTimeout,
+        WslLifecycleCase::LookupCancel,
     ] {
+        let (login, cancel, expected) = match lifecycle {
+            WslLifecycleCase::PipeDescendant => ("PipeDescendant", false, None),
+            WslLifecycleCase::DataTimeout => {
+                ("Slow", false, Some(AccountExecutionError::TimedOut))
+            }
+            WslLifecycleCase::DataCancel => {
+                ("Slow", true, Some(AccountExecutionError::Cancelled))
+            }
+            WslLifecycleCase::LookupTimeout => {
+                ("LookupSlow", false, Some(AccountExecutionError::TimedOut))
+            }
+            WslLifecycleCase::LookupCancel => {
+                ("LookupSlow", true, Some(AccountExecutionError::Cancelled))
+            }
+        };
         let case = fixture.case();
         let cancellation = AccountCancellation::default();
-        let success = login == "PipeDescendant";
+        let success = expected.is_none();
         let bounded = AccountExecutionControl::new(
             Duration::from_secs(if success || cancel { 30 } else { 5 }),
             cancellation.clone(),
             None,
         )
         .unwrap();
-        let canceller = cancel.then(|| case.cancel_after_start(cancellation));
-        let result =
-            execute_selected_account(&case.source, &selected("github.com", login), &bounded);
-        if let Some(canceller) = canceller {
-            assert!(
-                canceller.join().unwrap(),
-                "WSL descendant did not become ready"
-            );
-        }
-        if success {
-            assert!(result.result.is_ok());
-        } else {
-            assert_eq!(
-                result.result.unwrap_err(),
-                if cancel {
-                    AccountExecutionError::Cancelled
-                } else {
-                    AccountExecutionError::TimedOut
-                }
-            );
-        }
+        // Capture and the concurrent guarded readiness command share one clock.
+        let started = Instant::now();
+        let canceller = cancel.then(|| case.cancel_after_start(cancellation, started));
+        let (result, diagnostics) = process::trace_capture(started, || {
+            execute_selected_account(&case.source, &selected("github.com", login), &bounded)
+        });
+        let returned_us = started.elapsed().as_micros();
+        let cancelled_at_return = bounded.cancellation().is_cancelled();
+        let readiness = canceller.map(|canceller| {
+            canceller.join().unwrap_or_else(|_| {
+                panic!(
+                    "WSL readiness thread failed: case={lifecycle:?} returned_us={returned_us} cancelled_at_return={cancelled_at_return}\n{}",
+                    diagnostics.describe()
+                )
+            })
+        });
+        let actual = result.result.as_ref().err().copied();
+        let diagnostic = || {
+            let readiness = readiness
+                .as_ref()
+                .map(WslReadinessObservation::describe)
+                .unwrap_or_else(|| "none".into());
+            format!(
+                "case={lifecycle:?} result={actual:?} returned_us={returned_us} cancelled_at_return={cancelled_at_return} {readiness}\n{}",
+                diagnostics.describe()
+            )
+        };
+        assert!(
+            readiness.as_ref().is_none_or(|readiness| readiness.ready),
+            "WSL descendant did not become ready: {}",
+            diagnostic()
+        );
+        assert!(result.observed_connection_epoch.is_none());
+        assert!(actual == expected, "WSL lifecycle failed: {}", diagnostic());
         case.assert_retired();
     }
 }

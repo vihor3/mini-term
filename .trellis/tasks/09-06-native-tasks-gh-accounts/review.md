@@ -3,9 +3,155 @@
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
 pointer still identifies the Git child. Source review and explicitly authorized
 Actions log inspection. No passing build, lint, type-check, formatting, test,
-transport, or native acceptance is claimed for the current empty-argv correction.
+transport, or native acceptance is claimed for the current cancellation diagnostic
+delta. The preceding empty-argv correction has now reached actual WSL execution.
 
-## WSL Empty-Argv Correction: Source Released To Main
+## WSL Cancellation Diagnostics: Source Released To Main
+
+The bounded diagnostic slice and five focused regressions are authored and
+source-reviewed; ownership is released to Main with no implementation blocker.
+Only `tasks_account_executor/process.rs`, `tasks_account_executor/tests.rs`,
+`tasks_account_executor/gh_fixture.rs`, and this report changed. No production
+result remapping, shared ProcessTree/execution_host, Python/SSH envelope, public
+API, credential policy, CI/spec, launcher or rootfs-layout changes. No local
+execution/verification, Git writes or child agents. All current changes are
+UNRUN, Actions-only. Main owns integration, same-run fixture rebuild and rerun.
+
+### Actual Evidence And Source Limits
+
+Read the authorized log for
+[5a070e1 run 34013775348, job 101434114219](https://github.com/vihor3/mini-term/actions/runs/34013775348/job/101434114219).
+Exactly one actual WSL test failed in 20.19 seconds at then-current
+`tests.rs:2153`, returning `HostHelperUnavailable` instead of `Cancelled`.
+Owned distro cleanup succeeded for `mt-tasks-34013775348-1`.
+
+By source order, the original and new literal/captured-cwd/empty-cardinality
+checks, capability/discovery, selected-account proofs and secret rejection,
+Rotate cwd marker, missing-cwd/helper/error and large-response cases completed
+before this failure. Empty-argv transport is therefore exercised successfully
+on this runner. The old assertion does not identify DataCancel (`Slow`) versus
+LookupCancel (`LookupSlow`), transport exit status, control-latch timing or host
+cleanup acknowledgement. Readiness joined successfully, but the failed case's
+`assert_retired` did not run. There is no passing full WSL transport or failed
+cancellation descendant-cleanup claim.
+
+Main now reports 5a Linux, Windows and package completed successfully, with only
+the actual WSL cancellation gate failed. Linux includes mt-app 1211 tests, the
+new empty tests and all five actual SSH fixtures. Those results precede this
+diagnostic delta.
+
+Source-proven ordering:
+
+- Private `capture` checks control at its loop head, then polls `try_wait`.
+  Observed exit breaks to owned-tree cleanup and bounded pipe draining without
+  another production control check. A cancellation arriving after that last
+  check can therefore remain unlatched through return. This is a real source
+  window, not proof that it produced this runner failure.
+- `run_wsl` maps an otherwise unstopped nonzero transport exit to
+  `HostHelperUnavailable`; a decoded helper-unavailable reply can also produce
+  that category. The old assertion alone does not establish which route ran.
+- `WslFixture::cancel_after_start` calls the ordinary guarded WSL `/usr/bin/test`
+  readiness command before setting cancellation. Its success includes generic
+  runner pipe draining and owned Job retirement. It can overlap the private
+  account capture. A successful join proves eventual readiness, not that the
+  cancellation request preceded the private child's exit or API result.
+- Python's existing stdin byte/EOF handling raises cancellation and retires
+  credential children before emitting a typed reply. Private cooperative stop
+  still requires `host_reply_confirms_cleanup`; absent/invalid or explicitly
+  cleanup-failed replies remain `CleanupFailed`. No late flag, nonzero status
+  or successful Windows Job retirement is accepted as a substitute.
+
+The actual nonzero-exit cause and the role, if any, of the concurrently retired
+readiness process remain unconfirmed. No Job interference, stdin failure or
+Python defect is inferred from elapsed time or the error category.
+
+### Bounded Same-Clock Observations
+
+`cfg(test)` private `trace_capture` owns six fixed slots, scoped to the current
+thread and reset on normal return or unwind. It preserves the closure's result
+without decoding, substituting or adopting any alternative. Existing captures
+without an active trace retain no observations. Stages are `Attached`,
+`StopLatched`, `ControlWrite`, `Exited`, `TreeRetired` and `Drained`.
+
+Each observed stage records elapsed microseconds, numeric exit status, the
+already latched typed stop error, and a separate control sample. ControlWrite
+records only whether the fixed byte write succeeded; Drained records typed
+cleanup-acknowledgement and numeric stdout/stderr byte counts. No private bytes,
+source/path, argv, environment, account identity or output-derived text enters
+the record. Byte counts carry no inferred output class. `TreeRetired` means
+local owned cleanup completed, not that Linux descendant cleanup is proved.
+
+The five original lifecycle cases retain their order, timeout values and
+assertions, with fixed `PipeDescendant`, `DataTimeout`, `DataCancel`,
+`LookupTimeout`, `LookupCancel` labels. Capture, API return, first readiness
+probe start, last probe start/return, and cancellation all use the SAME
+`started: Instant`. A saturating `u32` probe count includes all completed false
+probes as well as the final probe, while the first timestamp is retained even
+when it is zero. This prevents an earlier false readiness execution from being
+mistaken for no concurrent probe when the account child exits before the final
+probe starts. Storage stays fixed-size; no event list or extra probes are added.
+The cancel timestamp follows the atomic flag store; the control samples expose
+the observed state. Timestamps describe observed boundaries, not exact OS exit
+times. Only a failing assertion formats this metadata, including a static
+readiness-thread failure if that thread panics. Original failure always remains
+failure; no retries, extra WSL probes, delays, fallback or skipped cases.
+
+The next Actions failure can distinguish an unlatched exit before the cancel
+request, a late control sample during exit/drain, and an acknowledged versus
+unacknowledged stop. Overlap with the readiness command is timing evidence,
+not by itself proof of cross-Job process interference.
+
+### Exact New Tests: UNRUN
+
+- `tasks_account_executor::process::tests::capture_diagnostics_are_bounded_payload_free_metadata`
+- `tasks_account_executor::process::tests::capture_diagnostics_preserve_results_and_reset_after_panics`
+- `tasks_account_executor::tests::private_capture_diagnostics_keep_cancellation_acknowledgement_required`
+- `tasks_account_executor::tests::private_capture_unstopped_exit_is_not_relabelled_by_later_cancellation`
+- `tasks_account_executor::tests::wsl_readiness_diagnostics_retain_earlier_false_probes_in_fixed_storage`
+
+The first two exercise bounded typed formatting with synthetic private payloads,
+late control samples, unchanged results, unwind reset and thread isolation.
+The next two execute the existing compiled synthetic fixture through the actual
+private capture and ProcessTree path on Windows/Linux. Fixed fixture modes wait
+for the real control byte and return a valid cancellation acknowledgement, no
+acknowledgement, or cleanup-failed acknowledgement; expected results remain
+`Cancelled`, `CleanupFailed`, `CleanupFailed`. A real exit 23 without a stop
+remains `HostHelperUnavailable` when cancellation is subsequently requested.
+These are guarded child/pipe lifecycle regressions, not source-string tests or
+a substitute for actual Linux descendant acceptance.
+
+The fifth test exercises the same readiness recorder used by the actual WSL
+canceller: two false probes followed by a ready probe retain count three, first
+start zero, final probe times and cancellation time. It also checks counter
+saturation, retained first-start data, a later false result and bounded numeric
+formatting. It does not execute WSL or claim a passing transport result.
+
+Updated exact ignored test:
+`tasks_account_executor::tests::tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host`.
+All earlier literal/empty/cwd/account/cancel/descendant assertions and failure-only
+discriminators remain. Existing broad Windows Tasks and workspace test filters
+cover the five new ordinary tests. No CI or fixture marker/manifest contract
+change is required; the existing same-run shim build incorporates its four
+additional fixed synthetic modes.
+
+### Not Fixed / Remaining Gates
+
+The actual WSL cancellation failure is NOT claimed fixed. Production stop/check,
+exit/cleanup/drain, private pipes and zeroing, suspended/no-window Job attachment,
+stdin policy, deadlines/caps, source/epoch and error categories are unchanged.
+The sole non-cfg production textual change names the previously ignored control
+write result so test-only code can observe its success; production still ignores
+it exactly as before. Shared ProcessTree or Python/SSH changes would require a
+concrete proposal and Main coordination after evidence.
+
+Current compile/type-check, lint, formatting, ordinary tests and the exact actual
+WSL gate remain UNRUN. Next Actions evidence is needed before choosing a safe
+production correction. Native hardware/secure-store acceptance remains separate.
+
+## Earlier WSL Empty-Argv Correction Handoff (Superseded)
+
+Historical status below predates 5a070e1. The actual execution evidence and
+cancellation diagnostic handoff above supersede its pending-empty-argv status.
 
 The approved correction and focused regressions are authored and source-reviewed;
 ownership is released to Main with no implementation blocker. Scope is only

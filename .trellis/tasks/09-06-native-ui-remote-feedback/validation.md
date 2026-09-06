@@ -2,37 +2,36 @@
 
 ## Latest Completed Candidate
 
-- Product commit: `2cfd4cf67cac1d08cf2dd320162185b2b00b2abd`.
-- CI: https://github.com/vihor3/mini-term/actions/runs/34010842674
-- Windows Package: https://github.com/vihor3/mini-term/actions/runs/34010842692
-- State: Linux/Windows/package SUCCESS; actual WSL FAILED at the new
-  literal-argv assertion. Complete transport correction is not validated.
+- Product commit: `5a070e149e76d289c08cc64e9cd3d05deb8259b8`.
+- CI: https://github.com/vihor3/mini-term/actions/runs/34013775348
+- Windows Package: https://github.com/vihor3/mini-term/actions/runs/34013775268
+- State: Linux/Windows/package SUCCESS; actual WSL FAILED at a cancellation
+  assertion. Complete cancellation/transport correction is not validated.
 - All five implementation slices are independently source-reviewed. All
   execution, including diagnostics, formatting and fixtures, remains Actions-only.
 
 Subsequent test-only diagnostic attempts are tracked in `progress.md`; their
 running/failed gates do not inherit a pass from this completed candidate.
 
-Current WSL job101426406119 discovered and executed exactly one test in 1.19 s.
-It passed the original marker/shim/hash/case checks and the registered-project
-hostile-directory `pwd -P` assertion, then failed at `literal-argv`, exit -1.
-The existing message does not identify which of the absolute/PATH/relative
-executables failed. No account request was reached; owned cleanup succeeded.
-The bounded next source investigation must retain literal/empty/newline cases,
-original source ownership and process/credential guards. Linux/Windows full
-compilation passed at this SHA. Linux job101426295439 is entirely SUCCESS,
-including mt-ai 244, mt-app 1209, all four new WSL planner/builder regressions,
-the five separately executed actual SSH fixtures, sidecars and whitespace.
-Windows job101426295552 is entirely SUCCESS: onboarding 82/3, Files 49/14/5/1,
-execution-host 13, Tasks executor 13 (one separate WSL test ignored), Tasks
+Current WSL job101434114219 discovered and executed exactly one test in 20.19 s.
+It passed marker/shim/hash, hostile captured cwd, literal/empty argument counts
+on project/pre-project routes, account enumeration/selected identity/secret
+rejection and error cases by source order. It then returned HostHelperUnavailable
+where cancellation expected Cancelled. Readiness passed; the failed iteration's
+later descendant-retirement assertion was not reached. Owned cleanup succeeded.
+The old failure does not identify data versus lookup cancellation or its cause.
+The next bounded test-only trace preserves all assertions and acknowledgement
+requirements; it has no passing evidence yet. Linux job101433980963 is entirely
+SUCCESS, including mt-ai 244, mt-app 1211, new empty-argument regressions, the
+five separately executed actual SSH fixtures, sidecars and whitespace.
+Windows job101433980851 is entirely SUCCESS: onboarding 82/3, Files 49/14/5/1,
+execution-host 14, Tasks executor 18 (one separate WSL test ignored), Tasks
 app/config/domain 24/2/31, Git domain/app 24/6/124, terminal-host library 31.
-All four new WSL planner/private-builder tests explicitly passed on Windows too.
+The new empty-argument planner/private-builder tests explicitly passed on Windows.
 
-Package job101426284311 is SUCCESS. Artifact9982719381 is
-`Mini-Term_1.2.2-ci.49_windows-x64`, with a passing Actions validation manifest;
-downloaded only to `/home/leo/.cache/mini-term/artifacts/2cfd4cf-integration`.
-Installer size is 18,851,385 bytes and its Actions-recorded SHA-256 is
-`0a3437bd36a2268734a0b3f5ceee405ce6090a6e848129b16f5b4590a006c0fc`.
+Package job101433965140 is SUCCESS. Artifact9983573681 is
+`Mini-Term_1.2.2-ci.53_windows-x64`, not downloaded or launched locally.
+Artifact: https://github.com/vihor3/mini-term/actions/runs/34013775268/artifacts/9983573681
 This artifact does not establish successful actual WSL or native UI acceptance.
 
 ## Proven Predecessor

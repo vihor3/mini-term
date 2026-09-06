@@ -421,3 +421,68 @@ synthetic-secret suppression. Their Windows filter must actually execute them.
 Wrong: return success when the explicit-root or closed-pipe diagnostic works.
 Correct: fail the original path, record the bounded difference, and require a
 separately reviewed production or fixture fix with fresh Actions evidence.
+
+## Scenario: Private Capture Lifecycle Diagnostics
+
+### 1. Scope / Trigger
+
+Use bounded test-only observations when an actual host cancellation fails but
+the error alone cannot distinguish exit, stop, pipe draining and cleanup order.
+
+### 2. Signatures
+
+Private `cfg(test)` `trace_capture(started: Instant, action: impl FnOnce() -> T)
+-> (T, CaptureDiagnostics)` stores six thread-local stage slots: Attached,
+StopLatched, ControlWrite, Exited, TreeRetired and Drained. The actual WSL fixture
+uses fixed lifecycle case labels and `WslReadinessObservation` on the same clock.
+
+### 3. Contracts
+
+- Retain only numeric elapsed/exit/byte-count metadata, typed stop/control
+  errors, fixed stage/case labels and boolean write/cleanup acknowledgements.
+  No private pipe bytes, account identity, paths, argv, environment or exception
+  text enters the diagnostic record. Format only failing actual assertions.
+- Reset thread-local capture scope on success and unwind; reject nested traces.
+  Preserve the action's result. Observations must not change production control,
+  error mapping, Job ownership, stdin handling, deadlines or cleanup decisions.
+- Readiness records the first probe start, final probe start/return, saturating
+  numeric probe count and cancellation time using the capture's same Instant.
+  Keep fixed-size storage and existing probe cadence; no new retry or fallback.
+- A local tree retirement is not proof of Linux descendant cleanup. Cooperative
+  cancellation still requires the existing typed host cleanup acknowledgement;
+  missing/invalid/cleanup-failed replies remain CleanupFailed. A later cancel
+  flag cannot relabel an already returned unstopped nonzero transport exit.
+- Preserve every original lifecycle assertion and final descendant check.
+  A failing result does not prove its later descendant check ran. Observed
+  timing overlap alone does not establish cross-Job interference or OS cause.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Cancel byte received, valid typed acknowledgement | Preserve Cancelled |
+| Stop without acknowledgement or with cleanup-failed | Preserve CleanupFailed |
+| Unstopped exit followed by later cancellation | Preserve original transport error |
+| Earlier false readiness probe, later ready probe | Retain first timestamp and full bounded count |
+| Action panics or another thread observes capture | Clear scope on unwind; isolate other thread |
+
+### 5. Good / Base / Bad
+
+Good: same-clock typed observations distinguish unlatched exit from acknowledged
+stop. Base: unknown cause remains unknown. Bad: make a failing gate green by
+remapping nonzero exit to cancellation without host cleanup confirmation.
+
+### 6. Tests Required
+
+Actions ordinary Windows/Linux tests cover fixed metadata bounds, secret
+suppression, result preservation, unwind/thread isolation, and compiled synthetic
+child modes for acknowledged/unacknowledged cancellation and unstopped exit.
+Windows tests cover first false-probe retention and counter saturation. Rebuild
+the same-run synthetic gh fixture and execute the exact actual WSL test; unit
+diagnostics alone do not prove the actual cancellation/descendant gate.
+
+### 7. Wrong vs Correct
+
+Wrong: infer a cancellation race from elapsed time and accept absent cleanup.
+Correct: retain the failure, record bounded ordering evidence, then review a
+specific production correction and require fresh exact-SHA Actions evidence.

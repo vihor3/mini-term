@@ -1016,3 +1016,57 @@ applied its complete `full-rustfmt.patch` to source/index without local tools
 or checks. Windows `101433676281` and actual WSL `101433777054` were still
 in compile/setup, not current passing evidence. The immediate format-only
 follow-up restarts the same full gates; no assertion or production policy changed.
+
+The complete three-file Actions format correction is committed/pushed as
+`5a070e149e76d289c08cc64e9cd3d05deb8259b8`: CI `34013775348`, package
+`34013775268`. Superseded WSL `101433777054` imported its owned fixture before
+cancellation during the test step; cleanup succeeded and no passing result is
+claimed. Current Linux `101433980963` passed formatting and is compiling;
+Windows `101433980851` is compiling and actual WSL `101434114219` is setting
+up its same-run artifact. Product source and index are clean; original unrelated
+dirty paths remain untouched. All sub-agents are closed pending concrete evidence.
+
+Actual WSL `101434114219` at `5a070e1` executed exactly one test and FAILED
+after 20.19 seconds at tests.rs:2153: actual HostHelperUnavailable versus expected
+Cancelled. Source order proves all original and new cwd/literal/empty-cardinality
+checks and the capability/discovery/selected-account/secret/error/Rotate/large-
+response cases completed before the cancellation loop. Its failing canceller's
+readiness assertion passed, but the message does not identify Slow versus
+LookupSlow and the failed iteration's final descendant-retirement assertion was
+not reached. Owned distro cleanup succeeded. This is real empty-argv/account
+pipeline progress, not a passing entire cancellation/transport gate.
+
+Main resumed Noether for bounded private capture/run_wsl lifecycle investigation
+and focused tests/report. Trace stop checks, child exit, cleanup/drain and the
+fixture's concurrent owned-WSL readiness command. Preserve Job/suspended/no-window,
+source/epoch, private credential buffers, limits and distinct CleanupFailed.
+Never classify an arbitrary exit as Cancelled or accept cancellation without
+host cleanup acknowledgement. If source cannot prove the cause, add only bounded
+static case/stage/exit/control/ack diagnostics, never raw private output. Shared
+ProcessTree, Python/SSH envelope or distro-policy changes require a concrete
+proposal before edits. All execution remains Actions-only; ordinary tests and
+package at `5a070e1` continue for their useful evidence.
+
+At `5a070e1`, CI34013775348 is now complete and FAILED only on actual WSL.
+Linux101433980963 fully passed (mt-ai244, mt-app1211, all five actual SSH
+fixtures, sidecars and final checks). Windows101433980851 fully passed:
+onboarding82/3, Files49/14/5/1, execution-host14, Tasks executor18 plus one
+separate ignored WSL case, Tasks app/config/domain24/2/31, Git24/6/124 and
+terminal-host library31. New empty-argument tests explicitly passed in both.
+Package34013775268/job101433965140 is SUCCESS; artifact9983573681 is
+Mini-Term_1.2.2-ci.53_windows-x64, not downloaded or launched. Main updated
+validation.md to this exact completed candidate without claiming actual WSL
+or native acceptance.
+
+Noether released/froze the bounded cancellation diagnostic slice and five new
+focused tests, then closed. Main reviewed the three source files and report:
+six cfg(test) fixed capture slots, same-clock case/readiness/return timestamps,
+first-probe retention and saturating probe count, typed stop/control/write/ack
+and numeric exit/byte metadata only. Original lifecycle cases, deadline/cadence,
+readiness/result assertions and final descendant checks remain. Production
+behavior is unchanged; a named discarded write result only enables test-only
+write-success observation. No shared ProcessTree, launcher, Python/SSH,
+credential, CI or rootfs-policy changes. Synthetic-only lifecycle modes preserve
+Cancelled versus CleanupFailed and nonzero exit semantics in focused tests.
+Main recorded the executable diagnostic contract. All new verification is
+UNRUN until the scoped commit and same-run Actions fixture rebuild/rerun.

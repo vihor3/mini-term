@@ -55,6 +55,136 @@ struct PrivateCapture {
     exit_code: Option<i32>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum CaptureStage {
+    Attached,
+    StopLatched,
+    ControlWrite,
+    Exited,
+    TreeRetired,
+    Drained,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum CaptureDetail {
+    None,
+    ControlWrite(Option<bool>),
+    Drained {
+        cleanup_ack: Option<bool>,
+        stdout_bytes: usize,
+        stderr_bytes: usize,
+    },
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct CaptureObservation {
+    stage: CaptureStage,
+    at_us: u128,
+    exit_code: Option<i32>,
+    latched: Option<AccountExecutionError>,
+    control: Option<AccountExecutionError>,
+    detail: CaptureDetail,
+}
+
+#[cfg(test)]
+pub(super) struct CaptureDiagnostics {
+    started: Instant,
+    observations: [Option<CaptureObservation>; 6],
+}
+
+#[cfg(test)]
+impl CaptureDiagnostics {
+    pub(super) fn describe(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut result = String::new();
+        for observation in self.observations.iter().flatten() {
+            let CaptureObservation {
+                stage,
+                at_us,
+                exit_code,
+                latched,
+                control,
+                detail,
+            } = observation;
+            // Only typed metadata enters this record, never either private pipe.
+            let (write_ok, cleanup_ack, stdout_bytes, stderr_bytes) = match detail {
+                CaptureDetail::None => (None, None, None, None),
+                CaptureDetail::ControlWrite(ok) => (*ok, None, None, None),
+                CaptureDetail::Drained {
+                    cleanup_ack,
+                    stdout_bytes,
+                    stderr_bytes,
+                } => (None, *cleanup_ack, Some(*stdout_bytes), Some(*stderr_bytes)),
+            };
+            let _ = writeln!(
+                result,
+                "stage={stage:?} at_us={at_us} exit={exit_code:?} latched={latched:?} control={control:?} write_ok={write_ok:?} cleanup_ack={cleanup_ack:?} stdout_bytes={stdout_bytes:?} stderr_bytes={stderr_bytes:?}"
+            );
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CAPTURE_DIAGNOSTICS: std::cell::RefCell<Option<CaptureDiagnostics>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(super) fn trace_capture<T>(
+    started: Instant,
+    action: impl FnOnce() -> T,
+) -> (T, CaptureDiagnostics) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CAPTURE_DIAGNOSTICS.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    CAPTURE_DIAGNOSTICS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(slot.is_none(), "capture diagnostics cannot be nested");
+        *slot = Some(CaptureDiagnostics {
+            started,
+            observations: [None; 6],
+        });
+    });
+    let _reset = Reset;
+    let result = action();
+    let diagnostics = CAPTURE_DIAGNOSTICS.with(|slot| slot.borrow_mut().take().unwrap());
+    (result, diagnostics)
+}
+
+#[cfg(test)]
+fn observe_capture(
+    stage: CaptureStage,
+    control: &AccountExecutionControl,
+    deadline: Instant,
+    latched: Option<AccountExecutionError>,
+    exit_code: Option<i32>,
+    detail: CaptureDetail,
+) {
+    CAPTURE_DIAGNOSTICS.with(|slot| {
+        if let Some(diagnostics) = slot.borrow_mut().as_mut() {
+            diagnostics.observations[stage as usize] = Some(CaptureObservation {
+                stage,
+                at_us: diagnostics.started.elapsed().as_micros(),
+                exit_code,
+                latched,
+                control: control.check(deadline).err(),
+                detail,
+            });
+        }
+    });
+}
+
 fn sanitize(command: &mut Command) {
     for key in REMOVED_ENV {
         command.env_remove(key);
@@ -413,6 +543,15 @@ fn capture(
         let _ = owned.cleanup();
         return Err(AccountExecutionError::CleanupFailed);
     }
+    #[cfg(test)]
+    observe_capture(
+        CaptureStage::Attached,
+        control,
+        deadline,
+        None,
+        None,
+        CaptureDetail::None,
+    );
     let (Some(stdout), Some(stderr)) = (owned.child.stdout.take(), owned.child.stderr.take())
     else {
         owned.cleanup()?;
@@ -451,10 +590,34 @@ fn capture(
                 stopped = Some(AccountError::MalformedResponse.into());
             }
             if stopped.is_some() {
+                #[cfg(test)]
+                observe_capture(
+                    CaptureStage::StopLatched,
+                    control,
+                    deadline,
+                    stopped,
+                    exit_code,
+                    CaptureDetail::None,
+                );
                 if cooperative {
+                    #[cfg(test)]
+                    let mut write_ok = None;
                     if let Some(mut stdin) = owned.child.stdin.take() {
-                        let _ = stdin.write_all(b"x");
+                        let _write = stdin.write_all(b"x");
+                        #[cfg(test)]
+                        {
+                            write_ok = Some(_write.is_ok());
+                        }
                     }
+                    #[cfg(test)]
+                    observe_capture(
+                        CaptureStage::ControlWrite,
+                        control,
+                        deadline,
+                        stopped,
+                        exit_code,
+                        CaptureDetail::ControlWrite(write_ok),
+                    );
                     stop_deadline = Instant::now() + CLEANUP_TIMEOUT;
                 } else {
                     owned.cleanup()?;
@@ -465,6 +628,15 @@ fn capture(
         match owned.child.try_wait() {
             Ok(Some(status)) => {
                 exit_code = status.code();
+                #[cfg(test)]
+                observe_capture(
+                    CaptureStage::Exited,
+                    control,
+                    deadline,
+                    stopped,
+                    exit_code,
+                    CaptureDetail::None,
+                );
                 // Retire descendants before draining: they may still own inherited pipes.
                 break;
             }
@@ -481,6 +653,15 @@ fn capture(
         thread::sleep(POLL);
     }
     owned.cleanup()?;
+    #[cfg(test)]
+    observe_capture(
+        CaptureStage::TreeRetired,
+        control,
+        deadline,
+        stopped,
+        exit_code,
+        CaptureDetail::None,
+    );
     let drain_deadline = Instant::now() + CLEANUP_TIMEOUT;
     while !stdout_reader.is_finished() || !stderr_reader.is_finished() {
         if Instant::now() >= drain_deadline {
@@ -503,6 +684,19 @@ fn capture(
             );
         }
     }
+    #[cfg(test)]
+    observe_capture(
+        CaptureStage::Drained,
+        control,
+        deadline,
+        stopped,
+        exit_code,
+        CaptureDetail::Drained {
+            cleanup_ack: cooperative.then(|| super::host_reply_confirms_cleanup(&stdout.0)),
+            stdout_bytes: stdout.0.len(),
+            stderr_bytes: stderr.0.len(),
+        },
+    );
     if let Some(error) = stopped {
         if cooperative && !super::host_reply_confirms_cleanup(&stdout.0) {
             return Err(AccountExecutionError::CleanupFailed);
@@ -599,6 +793,126 @@ pub(super) fn envelope_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_diagnostics_are_bounded_payload_free_metadata() {
+        let control = AccountExecutionControl::new(
+            Duration::from_secs(15),
+            super::super::AccountCancellation::default(),
+            None,
+        )
+        .unwrap();
+        let deadline = Instant::now() + control.timeout();
+        for (raw, ack) in [
+            (
+                br#"{"status":"output","stdout":"fixture_credential_stdout","stderr":"fixture_credential_stderr","exit_code":0}"#.as_slice(),
+                true,
+            ),
+            (
+                br#"{"status":"cancelled","token":"fixture_credential_extra"}"#.as_slice(),
+                false,
+            ),
+            (br#"{"status":"cleanup-failed"}"#.as_slice(), false),
+        ] {
+            let ((), diagnostics) = trace_capture(Instant::now(), || {
+                for stage in [
+                    CaptureStage::Attached,
+                    CaptureStage::StopLatched,
+                    CaptureStage::ControlWrite,
+                    CaptureStage::Exited,
+                    CaptureStage::TreeRetired,
+                    CaptureStage::Drained,
+                ] {
+                    observe_capture(
+                        stage,
+                        &control,
+                        deadline,
+                        Some(AccountExecutionError::Cancelled),
+                        Some(-1),
+                        CaptureDetail::Drained {
+                            cleanup_ack: Some(super::super::host_reply_confirms_cleanup(raw)),
+                            stdout_bytes: raw.len(),
+                            stderr_bytes: 0,
+                        },
+                    );
+                }
+            });
+            let diagnostic = diagnostics.describe();
+            assert_eq!(diagnostic.lines().count(), 6);
+            assert!(diagnostic.len() < 2048);
+            assert!(diagnostic.contains(&format!("cleanup_ack=Some({ack})")));
+            assert!(!diagnostic.contains("fixture_credential_"));
+            assert!(diagnostic.contains(&format!("stdout_bytes=Some({})", raw.len())));
+            assert!(diagnostic.contains("stderr_bytes=Some(0)"));
+            assert!(!diagnostic.contains("\"status\""));
+            assert!(!diagnostic.contains("token"));
+        }
+    }
+
+    #[test]
+    fn capture_diagnostics_preserve_results_and_reset_after_panics() {
+        let cancellation = super::super::AccountCancellation::default();
+        let control = AccountExecutionControl::new(
+            Duration::from_secs(15),
+            cancellation.clone(),
+            None,
+        )
+        .unwrap();
+        let deadline = Instant::now() + control.timeout();
+        let (result, diagnostics) = trace_capture(Instant::now(), || {
+            observe_capture(
+                CaptureStage::Exited,
+                &control,
+                deadline,
+                None,
+                Some(23),
+                CaptureDetail::None,
+            );
+            cancellation.cancel();
+            observe_capture(
+                CaptureStage::Drained,
+                &control,
+                deadline,
+                None,
+                Some(23),
+                CaptureDetail::Drained {
+                    cleanup_ack: Some(false),
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                },
+            );
+            Err::<(), _>(AccountExecutionError::HostHelperUnavailable)
+        });
+        assert_eq!(result, Err(AccountExecutionError::HostHelperUnavailable));
+        let exited = diagnostics.observations[CaptureStage::Exited as usize].unwrap();
+        let drained = diagnostics.observations[CaptureStage::Drained as usize].unwrap();
+        assert_eq!(exited.control, None);
+        assert_eq!(drained.control, Some(AccountExecutionError::Cancelled));
+        assert_eq!(drained.latched, None);
+        assert!(
+            std::panic::catch_unwind(|| {
+                trace_capture(Instant::now(), || {
+                    panic!("synthetic diagnostic scope failure")
+                });
+            })
+            .is_err()
+        );
+        let ((), empty) = trace_capture(Instant::now(), || {
+            std::thread::spawn(move || {
+                observe_capture(
+                    CaptureStage::Attached,
+                    &control,
+                    deadline,
+                    None,
+                    None,
+                    CaptureDetail::None,
+                );
+            })
+            .join()
+            .unwrap();
+        });
+        assert!(empty.observations.iter().all(Option::is_none));
+    }
 
     #[test]
     fn wsl_launcher_preserves_private_envelope_argv_with_root_cwd() {
