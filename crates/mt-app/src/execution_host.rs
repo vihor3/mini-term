@@ -656,6 +656,82 @@ pub(crate) struct ProcessTree {
     terminated: bool,
 }
 
+#[cfg(all(test, windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TasksWslActiveProcesses {
+    Count(u32),
+    QueryFailed,
+}
+
+#[cfg(all(test, windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TasksWslRetirement {
+    pub(crate) before_us: u128,
+    pub(crate) after_us: u128,
+    pub(crate) active_processes: TasksWslActiveProcesses,
+    pub(crate) succeeded: bool,
+}
+
+#[cfg(all(test, windows))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TasksWslRetirementTrace {
+    pub(crate) calls: u32,
+    pub(crate) first: Option<TasksWslRetirement>,
+    pub(crate) last: Option<TasksWslRetirement>,
+}
+
+#[cfg(all(test, windows))]
+thread_local! {
+    static TASKS_WSL_RETIREMENT: std::cell::RefCell<Option<(Instant, TasksWslRetirementTrace)>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn tasks_wsl_retirement_trace<T>(
+    started: Instant,
+    action: impl FnOnce() -> T,
+) -> (T, TasksWslRetirementTrace) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TASKS_WSL_RETIREMENT.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+    TASKS_WSL_RETIREMENT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(slot.is_none(), "retirement diagnostics cannot be nested");
+        *slot = Some((started, TasksWslRetirementTrace::default()));
+    });
+    let _reset = Reset;
+    let result = action();
+    let (_, trace) = TASKS_WSL_RETIREMENT.with(|slot| slot.borrow_mut().take().unwrap());
+    (result, trace)
+}
+
+#[cfg(all(test, windows))]
+fn observe_tasks_wsl_retirement(
+    before: Option<(u128, TasksWslActiveProcesses)>,
+    succeeded: bool,
+) {
+    let Some((before_us, active_processes)) = before else {
+        return;
+    };
+    TASKS_WSL_RETIREMENT.with(|slot| {
+        if let Some((started, trace)) = slot.borrow_mut().as_mut() {
+            let observation = TasksWslRetirement {
+                before_us,
+                after_us: started.elapsed().as_micros(),
+                active_processes,
+                succeeded,
+            };
+            trace.calls = trace.calls.saturating_add(1);
+            trace.first.get_or_insert(observation);
+            trace.last = Some(observation);
+        }
+    });
+}
+
 #[cfg(windows)]
 impl ProcessTree {
     pub(crate) fn configure(command: &mut Command) -> Result<Self, CommandExecutionError> {
@@ -749,7 +825,12 @@ impl ProcessTree {
             return Ok(());
         }
 
-        unsafe { TerminateJobObject(*self.job, 1) }.map_err(|error| {
+        #[cfg(test)]
+        let observation = self.tasks_wsl_retirement_before();
+        let result = unsafe { TerminateJobObject(*self.job, 1) };
+        #[cfg(test)]
+        observe_tasks_wsl_retirement(observation, result.is_ok());
+        result.map_err(|error| {
             command_error(
                 CommandExecutionErrorKind::Io,
                 format!("process job could not be terminated: {error}"),
@@ -757,6 +838,38 @@ impl ProcessTree {
         })?;
         self.terminated = true;
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn tasks_wsl_retirement_before(&self) -> Option<(u128, TasksWslActiveProcesses)> {
+        use windows::Win32::System::JobObjects::{
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+            QueryInformationJobObject,
+        };
+
+        TASKS_WSL_RETIREMENT.with(|slot| {
+            let slot = slot.borrow();
+            let (started, _) = slot.as_ref()?;
+            let mut information = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            let count = u32::try_from(std::mem::size_of_val(&information))
+                .ok()
+                .filter(|size| {
+                    // This passive query cannot change the existing termination decision.
+                    unsafe {
+                        QueryInformationJobObject(
+                            Some(*self.job),
+                            JobObjectBasicAccountingInformation,
+                            std::ptr::from_mut(&mut information).cast(),
+                            *size,
+                            None,
+                        )
+                    }
+                    .is_ok()
+                })
+                .map(|_| TasksWslActiveProcesses::Count(information.ActiveProcesses))
+                .unwrap_or(TasksWslActiveProcesses::QueryFailed);
+            Some((started.elapsed().as_micros(), count))
+        })
     }
 }
 
@@ -1309,6 +1422,77 @@ mod tests {
                 cwd: None,
             }
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tasks_wsl_retirement_observer_preserves_results_and_distinguishes_missing_queries() {
+        let (result, absent) = tasks_wsl_retirement_trace(Instant::now(), || Err::<(), _>(23));
+        assert_eq!(result, Err(23));
+        assert_eq!(absent, TasksWslRetirementTrace::default());
+        for active in [TasksWslActiveProcesses::Count(0), TasksWslActiveProcesses::QueryFailed] {
+            let (result, trace) = tasks_wsl_retirement_trace(Instant::now(), || {
+                observe_tasks_wsl_retirement(Some((0, active)), false);
+                Err::<(), _>(23)
+            });
+            assert_eq!(result, Err(23));
+            assert_eq!(trace.calls, 1);
+            assert_eq!(trace.first, trace.last);
+            let observation = trace.first.unwrap();
+            assert_eq!(observation.active_processes, active);
+            assert!(!observation.succeeded);
+        }
+        let ((), trace) = tasks_wsl_retirement_trace(Instant::now(), || {
+            observe_tasks_wsl_retirement(Some((0, TasksWslActiveProcesses::Count(1))), true);
+            TASKS_WSL_RETIREMENT.with(|slot| {
+                slot.borrow_mut().as_mut().unwrap().1.calls = u32::MAX;
+            });
+            observe_tasks_wsl_retirement(Some((0, TasksWslActiveProcesses::QueryFailed)), false);
+        });
+        assert_eq!(trace.calls, u32::MAX);
+        assert_eq!(trace.first.unwrap().active_processes, TasksWslActiveProcesses::Count(1));
+        assert_eq!(trace.last.unwrap().active_processes, TasksWslActiveProcesses::QueryFailed);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tasks_wsl_retirement_observer_resets_on_unwind_and_is_thread_local() {
+        assert!(std::panic::catch_unwind(|| {
+            tasks_wsl_retirement_trace(Instant::now(), || {
+                observe_tasks_wsl_retirement(Some((0, TasksWslActiveProcesses::QueryFailed)), false);
+                panic!("synthetic retirement scope failure");
+            });
+        }).is_err());
+        let ((), trace) = tasks_wsl_retirement_trace(Instant::now(), || {
+            std::thread::spawn(|| {
+                observe_tasks_wsl_retirement(Some((0, TasksWslActiveProcesses::Count(1))), true);
+            }).join().unwrap();
+        });
+        assert_eq!(trace, TasksWslRetirementTrace::default());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tasks_wsl_retirement_observer_records_the_existing_guarded_termination() {
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"), "Actions-only fixture");
+        let (result, trace) = tasks_wsl_retirement_trace(Instant::now(), || {
+            run_process(
+                "cmd.exe",
+                &["/d", "/c", "exit", "/b", "23"].map(String::from),
+                None,
+                Duration::from_secs(5),
+                4096,
+            )
+        });
+        let output = result.unwrap_or_else(|_| panic!("guarded retirement fixture failed"));
+        assert_eq!(output.exit_code, Some(23));
+        assert_eq!(trace.calls, 1);
+        assert_eq!(trace.first, trace.last);
+        let observation = trace.first.unwrap();
+        assert!(observation.before_us <= observation.after_us);
+        assert!(observation.succeeded);
+        assert!(matches!(observation.active_processes, TasksWslActiveProcesses::Count(_)));
+        assert!(format!("{trace:?}").len() < 1024);
     }
 
     #[cfg(windows)]

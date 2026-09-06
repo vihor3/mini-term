@@ -148,6 +148,16 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
   Jobs and the host envelope own child cleanup. A failed cleanup acknowledgement
   is explicit, not reported as success or safe rollback. The bounded ordinary
   origin read has before/after cancellation checks, not physical cancellation.
+- Host-envelope replies use one closed typed JSON object schema in both
+  `decode_host_reply` and `host_reply_confirms_cleanup`. Status-only variants
+  are empty struct variants (`Cancelled {}`), not unit variants; valid wire
+  replies still contain only `status`. Internally tagged Serde unit variants
+  ignore extra content even with the enum's `deny_unknown_fields` attribute.
+  Output replies require exactly status/stdout/stderr/integer exit_code. Reject
+  extra, duplicate, missing, incorrectly typed or unknown fields/statuses.
+  Invalid framing is Protocol during decoding and never a cleanup confirmation;
+  a stopped cooperative capture without valid confirmation stays CleanupFailed.
+  Do not echo rejected fields or raw parser errors into public diagnostics.
 - Foreground access is explicit, not a consequence of rendering or a service
   notification. Showing Tasks, activating its worktree/mode and opening or
   reactivating a WorkItem allocate owned accesses and revalidate origin and the
@@ -214,6 +224,7 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
 | Tasks choice changes | Invalidate only that exact account scope; never change global gh |
 | WSL/SSH lacks Python 3.8+ | `HostHelperUnavailable`; native Windows remains Python-free |
 | Credential lookup/token echo/cleanup fails | Static sanitized error, no token or raw diagnostics returned |
+| Host-envelope reply contains extra/duplicate/wrong-type fields | Protocol; false cleanup acknowledgement, not a successful stop |
 | API rate limit or network failure | Preserve same-identity last-known rows when present |
 | JSON is truncated, invalid UTF-8, malformed, or has an unknown state | Reject as `MalformedResponse` |
 | First SSH stage reconnects before execution | Adopt its observed epoch for the request source |
@@ -258,6 +269,11 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
   assert private native pipes, Windows suspended-child/Job ownership, inherited
   environment removal, same-credential proofs, bounded cancellation/timeout,
   descendant retirement and no secret in argv/results/config/diagnostics.
+- Exercise every status-only host reply plus Output through both decoding and
+  cleanup acknowledgement. Preserve valid wire/error mappings, reject extra
+  scalar/nested/token fields, duplicate status/known fields, missing output
+  fields and wrong types. Do not weaken malformed-ack assertions to accommodate
+  Serde's unit-variant behavior.
 - Linux authenticated loopback SSH uses the shared runner-only fixture, isolated
   HOME/keys and a proven synthetic gh path. Explicit ignored tests inspect actual
   channel stdout/stderr and epoch replacement. Ordinary workspace tests do not

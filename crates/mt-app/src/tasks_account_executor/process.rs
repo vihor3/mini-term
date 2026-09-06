@@ -55,6 +55,146 @@ struct PrivateCapture {
     exit_code: Option<i32>,
 }
 
+#[cfg(all(test, windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeWindowsMessage {
+    Unknown,
+    Win32(u32),
+}
+
+#[cfg(all(test, windows))]
+const WINDOWS_TRANSPORT_ERROR_CODES: &[u32] = {
+    use windows::Win32::Foundation as win;
+
+    // Message IDs outside the enabled binding namespaces need no extra API feature.
+    const RPC_S_SERVER_UNAVAILABLE: u32 = 1722;
+    const RPC_S_CALL_FAILED: u32 = 1726;
+    const RPC_S_CALL_FAILED_DNE: u32 = 1727;
+    const WSAENOTSOCK: u32 = 10038;
+    const WSAECONNABORTED: u32 = 10053;
+    const WSAECONNRESET: u32 = 10054;
+    &[
+        win::ERROR_INVALID_FUNCTION.0,
+        win::ERROR_FILE_NOT_FOUND.0,
+        win::ERROR_PATH_NOT_FOUND.0,
+        win::ERROR_ACCESS_DENIED.0,
+        win::ERROR_INVALID_HANDLE.0,
+        win::ERROR_GEN_FAILURE.0,
+        win::ERROR_SHARING_VIOLATION.0,
+        win::ERROR_NOT_SUPPORTED.0,
+        win::ERROR_INVALID_PARAMETER.0,
+        win::ERROR_BROKEN_PIPE.0,
+        win::ERROR_BAD_PIPE.0,
+        win::ERROR_PIPE_BUSY.0,
+        win::ERROR_NO_DATA.0,
+        win::ERROR_PIPE_NOT_CONNECTED.0,
+        win::ERROR_OPERATION_ABORTED.0,
+        win::ERROR_PROCESS_ABORTED.0,
+        win::ERROR_IO_DEVICE.0,
+        win::ERROR_CONNECTION_ABORTED.0,
+        RPC_S_SERVER_UNAVAILABLE,
+        RPC_S_CALL_FAILED,
+        RPC_S_CALL_FAILED_DNE,
+        win::RPC_X_BAD_STUB_DATA as u32,
+        win::ERROR_INVALID_USER_BUFFER.0,
+        WSAENOTSOCK,
+        WSAECONNABORTED,
+        WSAECONNRESET,
+    ]
+};
+
+#[cfg(all(test, windows))]
+fn windows_system_message(code: u32) -> Option<String> {
+    use windows::Win32::System::Diagnostics::Debug::{
+        FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FormatMessageW,
+    };
+
+    let mut buffer = [0_u16; 512];
+    let length = unsafe {
+        FormatMessageW(
+            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            None,
+            code,
+            0,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            buffer.len() as u32,
+            None,
+        )
+    } as usize;
+    if length == 0 || length >= buffer.len() {
+        return None;
+    }
+    String::from_utf16(&buffer[..length]).ok()
+}
+
+#[cfg(all(test, windows))]
+fn native_windows_message(bytes: &[u8]) -> NativeWindowsMessage {
+    if bytes.is_empty() || bytes.len() > 4096 {
+        return NativeWindowsMessage::Unknown;
+    }
+    let text = if bytes.contains(&0)
+        || bytes.starts_with(&[0xff, 0xfe])
+        || bytes.starts_with(&[0xfe, 0xff])
+    {
+        let mut pairs = bytes.chunks_exact(2);
+        let big_endian = bytes.starts_with(&[0xfe, 0xff]);
+        let units = pairs
+            .by_ref()
+            .map(|pair| {
+                if big_endian {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect::<Vec<_>>();
+        if !pairs.remainder().is_empty() {
+            return NativeWindowsMessage::Unknown;
+        }
+        let Ok(text) = String::from_utf16(&units) else {
+            return NativeWindowsMessage::Unknown;
+        };
+        text
+    } else {
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return NativeWindowsMessage::Unknown;
+        };
+        text.to_owned()
+    };
+    // Only BOM/newline framing is ignored; never search within a private payload.
+    let text = text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&text)
+        .trim_matches(['\r', '\n']);
+    for &code in WINDOWS_TRANSPORT_ERROR_CODES {
+        if windows_system_message(code)
+            .is_some_and(|message| message.trim_matches(['\r', '\n']) == text)
+        {
+            return NativeWindowsMessage::Win32(code);
+        }
+    }
+    NativeWindowsMessage::Unknown
+}
+
+#[cfg(all(test, windows))]
+fn failing_native_messages(
+    stdout: &[u8],
+    stderr: &[u8],
+    exit_code: Option<i32>,
+    cleanup_ack: Option<bool>,
+) -> Option<(NativeWindowsMessage, NativeWindowsMessage)> {
+    if !CAPTURE_DIAGNOSTICS.with(|slot| slot.borrow().is_some())
+        || !exit_code.is_some_and(|code| code != 0)
+        || cleanup_ack != Some(false)
+    {
+        return None;
+    }
+    Some((
+        native_windows_message(stdout),
+        native_windows_message(stderr),
+    ))
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 enum CaptureStage {
@@ -75,6 +215,8 @@ enum CaptureDetail {
         cleanup_ack: Option<bool>,
         stdout_bytes: usize,
         stderr_bytes: usize,
+        #[cfg(windows)]
+        native_messages: Option<(NativeWindowsMessage, NativeWindowsMessage)>,
     },
 }
 
@@ -118,12 +260,21 @@ impl CaptureDiagnostics {
                     cleanup_ack,
                     stdout_bytes,
                     stderr_bytes,
+                    ..
                 } => (None, *cleanup_ack, Some(*stdout_bytes), Some(*stderr_bytes)),
             };
             let _ = writeln!(
                 result,
                 "stage={stage:?} at_us={at_us} exit={exit_code:?} latched={latched:?} control={control:?} write_ok={write_ok:?} cleanup_ack={cleanup_ack:?} stdout_bytes={stdout_bytes:?} stderr_bytes={stderr_bytes:?}"
             );
+            #[cfg(windows)]
+            if let CaptureDetail::Drained {
+                native_messages: Some((stdout, stderr)),
+                ..
+            } = detail
+            {
+                let _ = writeln!(result, "native_stdout={stdout:?} native_stderr={stderr:?}");
+            }
         }
         result
     }
@@ -685,6 +836,8 @@ fn capture(
         }
     }
     #[cfg(test)]
+    let cleanup_ack = cooperative.then(|| super::host_reply_confirms_cleanup(&stdout.0));
+    #[cfg(test)]
     observe_capture(
         CaptureStage::Drained,
         control,
@@ -692,9 +845,11 @@ fn capture(
         stopped,
         exit_code,
         CaptureDetail::Drained {
-            cleanup_ack: cooperative.then(|| super::host_reply_confirms_cleanup(&stdout.0)),
+            cleanup_ack,
             stdout_bytes: stdout.0.len(),
             stderr_bytes: stderr.0.len(),
+            #[cfg(windows)]
+            native_messages: failing_native_messages(&stdout.0, &stderr.0, exit_code, cleanup_ack),
         },
     );
     if let Some(error) = stopped {
@@ -794,6 +949,64 @@ pub(super) fn envelope_fixture(
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_message_matches_complete_system_messages_in_utf8_and_utf16() {
+        for &code in WINDOWS_TRANSPORT_ERROR_CODES {
+            let message = windows_system_message(code)
+                .unwrap_or_else(|| panic!("allowlisted system message unavailable: code={code}"));
+            let utf16 = std::iter::once(0xfeff).chain(message.encode_utf16()).collect::<Vec<_>>();
+            for bytes in [
+                message.as_bytes().to_vec(),
+                format!("\u{feff}{message}").into_bytes(),
+                utf16.iter().flat_map(|unit| unit.to_le_bytes()).collect(),
+                utf16.iter().flat_map(|unit| unit.to_be_bytes()).collect(),
+                message.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+            ] {
+                assert_eq!(native_windows_message(&bytes), NativeWindowsMessage::Win32(code));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_message_rejects_private_substrings_unknown_and_malformed_data() {
+        let message = windows_system_message(109).expect("pipe system message unavailable");
+        for bytes in [
+            format!("fixture_credential_prefix{message}").into_bytes(),
+            format!("{message}fixture_credential_suffix").into_bytes(),
+            serde_json::to_vec(&serde_json::json!({"token": "fixture_credential_nested", "error": message})).unwrap(),
+            b"fixture_credential_unknown".to_vec(),
+            Vec::new(),
+            vec![b'x'; 4097],
+            vec![0xff],
+            vec![0xff, 0xfe, 0x20],
+            vec![0xff, 0xfe, 0x00, 0xd8],
+        ] {
+            let class = native_windows_message(&bytes);
+            assert_eq!(class, NativeWindowsMessage::Unknown);
+            assert_eq!(format!("{class:?}"), "Unknown");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_message_observation_is_failure_only_without_result_remapping() {
+        let message = windows_system_message(109).expect("pipe system message unavailable");
+        assert_eq!(failing_native_messages(message.as_bytes(), b"", Some(-1), Some(false)), None);
+        let (result, _) = trace_capture(Instant::now(), || {
+            for (exit, ack) in [(Some(0), Some(false)), (None, Some(false)), (Some(-1), Some(true)), (Some(-1), None)] {
+                assert_eq!(failing_native_messages(message.as_bytes(), b"", exit, ack), None);
+            }
+            assert_eq!(
+                failing_native_messages(message.as_bytes(), b"fixture_credential_stderr", Some(-1), Some(false)),
+                Some((NativeWindowsMessage::Win32(109), NativeWindowsMessage::Unknown))
+            );
+            Err::<(), _>(AccountExecutionError::HostHelperUnavailable)
+        });
+        assert_eq!(result, Err(AccountExecutionError::HostHelperUnavailable));
+    }
+
     #[test]
     fn capture_diagnostics_are_bounded_payload_free_metadata() {
         let control = AccountExecutionControl::new(
@@ -833,6 +1046,8 @@ mod tests {
                             cleanup_ack: Some(super::super::host_reply_confirms_cleanup(raw)),
                             stdout_bytes: raw.len(),
                             stderr_bytes: 0,
+                            #[cfg(windows)]
+                            native_messages: None,
                         },
                     );
                 }
@@ -876,6 +1091,8 @@ mod tests {
                     cleanup_ack: Some(false),
                     stdout_bytes: 0,
                     stderr_bytes: 0,
+                    #[cfg(windows)]
+                    native_messages: None,
                 },
             );
             Err::<(), _>(AccountExecutionError::HostHelperUnavailable)

@@ -1083,3 +1083,112 @@ the already-passing ci.53 package to
 `/home/leo/.cache/mini-term/artifacts/5a070e1-integration` and offered its Actions
 artifact link for native pre-acceptance, explicitly retaining the failed WSL gate.
 No installer launch or local artifact verification was performed.
+
+The complete Actions formatting successor is committed/pushed as
+`bb79421870083ef6c6a45c1921bd2baef0266e52`: CI34015670072 and
+package34015670075. Linux101438890459 passed formatting and entered compilation;
+Windows101438890388 is compiling, rootfs101438890296 passed and actual
+WSL101438999280 is setting up. No current diagnostic test pass is claimed yet.
+The downloaded ci.53 Actions manifest reports status passed, installer size
+18,852,484 and SHA256
+`22b14e7f57961ae3f95e09faee5c892599c49a52f653ac1e2975c1a6a49e2121`.
+These are manifest observations, not local verification.
+
+Superseded d376636 WSL101438728422 was cancelled DURING import, without an
+Imported message. Its always-cleanup step then FAILED with static
+`wsl.exe failed (4294967295)`, unlike previous successful interrupted cleanups.
+No test ran and no cleanup success is claimed. The shared setup error does not
+identify which wsl call failed. Main resumed Pauli only for a bounded source/log
+review and proposal concerning interrupted-import cleanup; no CI/source edits
+are authorized before Main reviews that proposal. Preserve exact owned-state
+guards, final failure on unconfirmed removal, other/default distros and no
+global shutdown/config. Current product cancellation evidence remains separate.
+
+Pauli confirmed the superseded cleanup log cannot distinguish enumeration,
+unregister or final verification. Proposed bounded cleanup retries require
+additional phase evidence and cannot prove interrupted-import quiescence from
+an absent listing. Main declined a retry-state-machine change without that
+evidence: the existing step fails closed and retains ownership state, and this
+cancelled ephemeral runner is not current product/test success. Pauli made no
+edits and closed. Runner interruption/persistent service failure remains an
+explicit cleanup limitation; current normal actual WSL cleanup must still pass.
+
+Actual WSL101438999280 at bb79421 executed exactly one test and FAILED in
+20.85 seconds, now with decisive ordering evidence. DataCancel returned
+HostHelperUnavailable at155760us with cancelled_at_return=false. Capture attached
+at2534us, observed exit-1 at155611us with latched/control both None, retired its
+local tree at155666us and drained at155727us with ack=false, stdout118 bytes,
+stderr0. There was no StopLatched or ControlWrite. Readiness succeeded on probe2:
+first start2632us, final start196952us/end299384us, cancel299386us. Thus the API
+had already returned before cancellation; relabelling a late cancellation cannot
+fix this observed failure. It overlaps the earlier false ordinary-WSL readiness
+probe, but that alone does not prove cross-Job interference or the OS cause.
+The failed iteration's final descendant assertion was not reached. The exact
+owned distro cleanup SUCCESS is independently observed.
+
+Main resumed Noether for a bounded concrete early-exit/concurrency diagnostic
+or correction proposal before edits. Do not replace the concurrent readiness
+path, weaken descendant proof, expose private bytes, remap errors or relax Job
+guards. Shared process/launcher/Python/SSH changes require explicit coordination.
+Official Microsoft Job-object and upstream WSL transport sources were checked as
+background only; no matching runner WSL1 root cause was established from them.
+Linux/Windows/package bb79421 continue; compilation and Clippy passed but their
+remaining tests/package are not yet complete.
+
+Main approved Noether's next bounded TEST-ONLY slice: full-message allowlisted
+Windows output classification and passive same-clock observations immediately
+around the existing TerminateJobObject, including bounded active-process count
+or explicit query failure. Shared execution_host/ProcessTree access is limited
+to that cfg(all(test,windows)) observer; no production API/cleanup/Job-policy
+change. First/final readiness start/return/retirement records remain fixed-size,
+and the original concurrent scenario/result/ack/descendant assertions remain.
+No raw pipe/argv/path/environment/process names or arbitrary errors may escape.
+
+At bb79421, Linux101438890459 and Windows101438890388 are now FAILED on
+the same new capture_diagnostics_are_bounded_payload_free_metadata acknowledgement
+assertion (process.rs843). Linux mt-ai244 and mt-app1214 passed, with one failed
+and five ignored app tests. The other three new Linux capture tests passed;
+actual SSH/sidecar-test/whitespace stages were skipped after root test failure.
+Windows passed onboarding82/3, Files49/14/5/1, execution-host14; Tasks had
+22 passes, one failure and one separate ignored WSL case. Its other four new
+diagnostic tests passed. Later Tasks/Git/sidecar/terminal stages were skipped.
+Both compiler paths and Linux Clippy passed. Package is still running.
+
+Main supplied those exact logs to Noether and requested a confirmed diagnosis
+before any production protocol correction: internally tagged unit-status replies
+may accept extra fields despite the enum attribute. Do not simply weaken the
+new secret/ack expectation. Any mod.rs change needs Main coordination; current
+approved classifier/observer diagnostics continue independently.
+
+Noether confirmed locked Serde1.0.229's internally tagged unit-variant visitor
+ignores extra fields, so a Cancelled reply with extra token content is wrongly
+accepted as cleanup acknowledgement. This is a real schema hole exposed by the
+new test, not a reason to weaken it. Main authorized the minimal mod.rs change
+to empty struct status variants with identical valid JSON/error mappings, and
+all-status valid/extra/duplicate/type regressions through decoding and cleanup
+acknowledgement. The original failing assertion stays intact. Main recorded the
+strict wire contract. This production protocol correction is separate from the
+test-only early-exit/Job observations and still needs fresh Actions evidence.
+
+Package34015670075/job101438873772 at bb79421 is SUCCESS, artifact9984115137
+Mini-Term_1.2.2-ci.55_windows-x64. It was not downloaded or launched. CI34015670072
+is fully completed and FAILED on the cross-platform new ack regression plus
+the actual WSL DataCancel early exit; this package is not a full-gate pass.
+
+Noether released/froze the five-source-file correction/diagnostic slice plus
+review.md, then closed. Main reviewed the exact HostReply wire correction,
+all-status/Output assertions, compiled synthetic extra-field cancellation case,
+26-code complete-message classifier and passive fixed-storage retirement query.
+Eight new tests are authored, with existing metadata/capture/readiness tests
+retained or strengthened. Original DataCancel concurrency, limits, expected
+result and final descendant checks are unchanged. Only strict malformed-host-
+reply rejection changes production behavior; instrumentation is test-only and
+existing termination still executes once with unchanged arguments/result.
+No dependency/CI/rootfs/launcher/Python/SSH policy change. Main updated the two
+affected contracts. All current validation remains UNRUN until the next exact-
+SHA Actions gates; there is still no early-exit fix claim.
+
+For any formatter-only successor, Main will avoid cancelling while WSL import
+is in progress: wait until its import has completed and the exact test step is
+active before superseding, then observe owned cleanup. This is coordinator
+sequencing, not a workflow change or a guarantee against runner termination.

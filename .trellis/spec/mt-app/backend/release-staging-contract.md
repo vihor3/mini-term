@@ -436,6 +436,11 @@ Private `cfg(test)` `trace_capture(started: Instant, action: impl FnOnce() -> T)
 StopLatched, ControlWrite, Exited, TreeRetired and Drained. The actual WSL fixture
 uses fixed lifecycle case labels and `WslReadinessObservation` on the same clock.
 
+Windows test builds also expose `tasks_wsl_retirement_trace(started, action)
+-> (T, TasksWslRetirementTrace)`, retaining first/last numeric retirement records
+and a saturating call count. `TasksWslActiveProcesses` distinguishes Count from
+QueryFailed; an absent retirement record is not either of those observations.
+
 ### 3. Contracts
 
 - Retain only numeric elapsed/exit/byte-count metadata, typed stop/control
@@ -455,6 +460,21 @@ uses fixed lifecycle case labels and `WslReadinessObservation` on the same clock
 - Preserve every original lifecycle assertion and final descendant check.
   A failing result does not prove its later descendant check ran. Observed
   timing overlap alone does not establish cross-Job interference or OS cause.
+- Only an active private test trace with a nonzero transport exit and false
+  cleanup acknowledgement may classify native output. Decode at most 4096 bytes
+  as valid UTF-8/UTF-16. Compare the COMPLETE message, allowing only BOM/newline
+  framing, against a fixed small Win32 allowlist obtained with FormatMessageW
+  into a fixed 512-unit buffer. Retain Unknown or the matched numeric code only;
+  no substrings, output-derived labels, guessed codes from length or raw text.
+- The shared Windows test observer queries JobObjectBasicAccountingInformation
+  only in an active trace, records active-process Count or QueryFailed and
+  same-clock times around the EXISTING TerminateJobObject call. Preserve its
+  exactly-once invocation, arguments, result/error mapping and ownership state.
+  No Job handles, process IDs/names, extra termination or breakaway policy.
+- First/final readiness records retain probe start AND return, plus their
+  corresponding fixed retirement traces. Intermediate calls are counted, not
+  accumulated in an unbounded list. A count of zero, failed query and missing
+  observation remain distinct. No count establishes Linux cleanup by itself.
 
 ### 4. Validation & Error Matrix
 
@@ -465,6 +485,9 @@ uses fixed lifecycle case labels and `WslReadinessObservation` on the same clock
 | Unstopped exit followed by later cancellation | Preserve original transport error |
 | Earlier false readiness probe, later ready probe | Retain first timestamp and full bounded count |
 | Action panics or another thread observes capture | Clear scope on unwind; isolate other thread |
+| Payload contains a system message plus private text | Unknown; no substring classification |
+| No active trace, successful exit or valid cleanup reply | Do not classify private output |
+| Job count query fails or no retirement call occurred | Explicit QueryFailed or absent record, never invented zero |
 
 ### 5. Good / Base / Bad
 
@@ -480,6 +503,12 @@ child modes for acknowledged/unacknowledged cancellation and unstopped exit.
 Windows tests cover first false-probe retention and counter saturation. Rebuild
 the same-run synthetic gh fixture and execute the exact actual WSL test; unit
 diagnostics alone do not prove the actual cancellation/descendant gate.
+Windows coverage also compares complete system messages in supported encodings,
+rejects malformed/oversized/embedded private payloads, preserves classification
+guards, and covers retirement result preservation, unwind/thread isolation and
+one real guarded nonzero child exit. First-probe retirement evidence must survive
+later probes in fixed storage. The actual WSL scenario stays concurrent and
+retains the original expected error and descendant-retirement assertions.
 
 ### 7. Wrong vs Correct
 

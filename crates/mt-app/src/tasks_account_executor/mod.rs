@@ -360,30 +360,31 @@ enum HostReply {
         stderr: String,
         exit_code: i32,
     },
+    // Empty struct variants enforce closed fields; Serde's unit variants do not.
     #[serde(rename = "cancelled")]
-    Cancelled,
+    Cancelled {},
     #[serde(rename = "timed-out")]
-    TimedOut,
+    TimedOut {},
     #[serde(rename = "helper-unavailable")]
-    HelperUnavailable,
+    HelperUnavailable {},
     #[serde(rename = "client-missing")]
-    ClientMissing,
+    ClientMissing {},
     #[serde(rename = "credential-lookup-failed")]
-    CredentialLookupFailed,
+    CredentialLookupFailed {},
     #[serde(rename = "credential-store-unavailable")]
-    CredentialStoreUnavailable,
+    CredentialStoreUnavailable {},
     #[serde(rename = "named-account-unsupported")]
-    NamedAccountUnsupported,
+    NamedAccountUnsupported {},
     #[serde(rename = "identity-mismatch")]
-    IdentityMismatch,
+    IdentityMismatch {},
     #[serde(rename = "cleanup-failed")]
-    CleanupFailed,
+    CleanupFailed {},
     #[serde(rename = "unsafe-output")]
-    UnsafeOutput,
+    UnsafeOutput {},
     #[serde(rename = "malformed")]
-    Malformed,
+    Malformed {},
     #[serde(rename = "failed")]
-    Failed,
+    Failed {},
 }
 
 fn decode_host_reply(
@@ -409,25 +410,25 @@ fn decode_host_reply(
                 ..CommandOutput::default()
             })
         }
-        HostReply::Cancelled => Err(AccountExecutionError::Cancelled),
-        HostReply::TimedOut => Err(AccountExecutionError::TimedOut),
-        HostReply::HelperUnavailable => Err(AccountExecutionError::HostHelperUnavailable),
-        HostReply::ClientMissing => Err(AccountError::ClientMissing.into()),
-        HostReply::CredentialLookupFailed => Err(AccountError::CredentialLookupFailed.into()),
-        HostReply::CredentialStoreUnavailable => {
+        HostReply::Cancelled {} => Err(AccountExecutionError::Cancelled),
+        HostReply::TimedOut {} => Err(AccountExecutionError::TimedOut),
+        HostReply::HelperUnavailable {} => Err(AccountExecutionError::HostHelperUnavailable),
+        HostReply::ClientMissing {} => Err(AccountError::ClientMissing.into()),
+        HostReply::CredentialLookupFailed {} => Err(AccountError::CredentialLookupFailed.into()),
+        HostReply::CredentialStoreUnavailable {} => {
             Err(AccountError::CredentialStoreUnavailable.into())
         }
-        HostReply::NamedAccountUnsupported => {
+        HostReply::NamedAccountUnsupported {} => {
             Err(AccountError::UnsupportedNamedAccountLookup.into())
         }
-        HostReply::IdentityMismatch => Err(AccountError::WrongHostOrAccount.into()),
-        HostReply::CleanupFailed => Err(AccountExecutionError::CleanupFailed),
-        HostReply::UnsafeOutput => Err(AccountExecutionError::SecretOutputRejected),
-        HostReply::Malformed => Err(AccountError::MalformedResponse.into()),
-        HostReply::Failed => Err(AccountError::CommandFailed.into()),
+        HostReply::IdentityMismatch {} => Err(AccountError::WrongHostOrAccount.into()),
+        HostReply::CleanupFailed {} => Err(AccountExecutionError::CleanupFailed),
+        HostReply::UnsafeOutput {} => Err(AccountExecutionError::SecretOutputRejected),
+        HostReply::Malformed {} => Err(AccountError::MalformedResponse.into()),
+        HostReply::Failed {} => Err(AccountError::CommandFailed.into()),
     }
 }
 
 pub(crate) fn host_reply_confirms_cleanup(bytes: &[u8]) -> bool {
-    matches!(serde_json::from_slice::<HostReply>(bytes), Ok(reply) if !matches!(reply, HostReply::CleanupFailed))
+    matches!(serde_json::from_slice::<HostReply>(bytes), Ok(reply) if !matches!(reply, HostReply::CleanupFailed {}))
 }

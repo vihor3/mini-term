@@ -3,10 +3,166 @@
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
 pointer still identifies the Git child. Source review and explicitly authorized
 Actions log inspection. No passing build, lint, type-check, formatting, test,
-transport, or native acceptance is claimed for the current cancellation diagnostic
-delta. The preceding empty-argv correction has now reached actual WSL execution.
+transport, or native acceptance is claimed for the current protocol correction
+and retirement/classifier diagnostic delta. All new validation is UNRUN.
 
-## WSL Cancellation Diagnostics: Source Released To Main
+## Strict Host Reply And WSL Retirement Diagnostics: Source Released To Main
+
+The approved slice is authored and source-reviewed, with no implementation
+blocker. Ownership is released to Main and source writes are frozen. Exact
+release paths are `tasks_account_executor/mod.rs`, `process.rs`, `tests.rs`,
+`gh_fixture.rs`, the narrowly authorized test-observer surface in
+`execution_host.rs`, and this report. Main owns specs, CI, formatter artifacts,
+staging/commits and exact-SHA Actions reruns. No local execution, automated
+checks, Git writes or child agents occurred.
+
+### Exact New Evidence
+
+Read the authorized
+[bb79421 WSL log, run 34015670072 / job 101438999280](https://github.com/vihor3/mini-term/actions/runs/34015670072/job/101438999280).
+Exactly one actual test failed in 20.85 seconds, now identified as `DataCancel`.
+The private API returned `HostHelperUnavailable` at 155760 us with cancellation
+false. Capture observed exit -1 at 155611 us, local tree retirement at 155666 us
+and drained pipes at 155727 us: no latched stop, no control cancellation, no
+cleanup acknowledgement, 118 stdout bytes and zero stderr bytes. Neither
+StopLatched nor ControlWrite occurred. Readiness completed two probes: first
+start 2632 us, final start/return 196952/299384 us, cancellation 299386 us.
+Owned `mt-tasks-34015670072-1` cleanup succeeded.
+
+The private process/API had already exited before cancellation. Cancellation
+remapping cannot fix this observed failure. An earlier false readiness command
+overlapped the request, but the evidence does NOT establish cross-Job causation
+or identify a native error from byte length. The failed case's Linux descendant
+assertion still did not run. All original literal/cwd/empty/cardinality and
+preceding account cases remain exercised by source order, not a passing full
+WSL transport claim.
+
+Also read the authorized
+[bb79421 Linux log, job 101438890459](https://github.com/vihor3/mini-term/actions/runs/34015670072/job/101438890459).
+mt-app had 1214 passed, one failed and five ignored. The sole failure was
+`capture_diagnostics_are_bounded_payload_free_metadata`, then at process.rs:843.
+The other three Linux diagnostic/lifecycle tests passed. Main reports the same
+sole assertion failure on Windows job 101438890388 (Tasks 22 passed, one failed,
+one ignored; execution-host 14 passed). Later SSH/sidecar/whitespace gates on
+Linux and later Tasks/Git/terminal gates on Windows did not run after those
+failures. Compile and Clippy passed before the failures.
+
+Main reports package run 34015670075 succeeded for bb79421, artifact 9984115137,
+`Mini-Term_1.2.2-ci.55_windows-x64`. Packaging success does not validate the
+failed ordinary tests, actual WSL cancellation, or this unrun source delta.
+
+### Confirmed Protocol Defect And Correction
+
+The lockfile selects Serde 1.0.229. Its
+[internally tagged derive branch](https://raw.githubusercontent.com/serde-rs/serde/v1.0.229/serde_derive/src/de/enum_internally.rs)
+routes unit variants to a
+[visitor that consumes extra map entries as IgnoredAny](https://raw.githubusercontent.com/serde-rs/serde/v1.0.229/serde/src/private/de.rs).
+Consequently the synthetic `cancelled` reply with an extra `token` field was
+accepted by `host_reply_confirms_cleanup` despite enum-level deny_unknown_fields.
+This is the erroneous expected-false case in the failed metadata test, not a
+reason to weaken that assertion. No actual token disclosure is inferred.
+
+All twelve status-only HostReply variants are now empty struct variants under
+the existing attribute. The
+[struct derive path](https://raw.githubusercontent.com/serde-rs/serde/v1.0.229/serde_derive/src/de/struct_.rs)
+enforces unknown-field rejection. Match arms were adjusted; valid wire objects,
+existing error mappings, Output fields and cleanup-failed treatment are unchanged.
+There is no custom string parser or public API change. Invalid extra/duplicate
+fields and wrong field types return Protocol from decoding and false from
+cleanup acknowledgement. The cooperative capture path therefore retains
+CleanupFailed for such an invalid stopped reply.
+
+The original failing metadata assertion and synthetic extra-token input remain
+unchanged. A fixed `cancel-extra-field` fixture mode now reads the actual control
+byte and emits a status-plus-extra-field reply; the existing guarded capture
+test requires CleanupFailed, never Cancelled. It does not supply a real token.
+
+### Passive Native Error And Retirement Evidence
+
+The Windows-only test classifier runs solely for an actively traced, nonzero
+transport exit without a valid cleanup acknowledgement. It reads only already
+captured bytes, capped at 4096, supports strict UTF-8 and UTF-16 LE/BE decoding,
+and ignores only BOM/newline framing. It compares the COMPLETE message against
+26 fixed relevant system-message IDs. Named Win32 constants are used where the
+enabled bindings provide them; named numeric RPC/socket IDs need no new feature.
+The five suggested general-function/buffer/stub error IDs are included without
+inferring any error from the observed 118-byte length.
+
+[FormatMessageW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-formatmessagew)
+uses only FROM_SYSTEM plus IGNORE_INSERTS, a 512-unit fixed buffer, no input text,
+inserts, arbitrary IDs or allocation flag. Only `Win32(code)` from the fixed list
+or `Unknown` enters diagnostics. Unknown, malformed, over-cap, JSON-contained
+or prefix/suffix-contaminated messages remain Unknown. No raw private text,
+argv, environment, account fields or output-derived labels leave the classifier.
+Production result selection, private pipes and zeroing are unchanged.
+
+The shared `cfg(all(test, windows))` observer scopes fixed TLS storage around
+the existing readiness command. Its only runner hooks are immediately before
+and after the EXISTING TerminateJobObject call. That call still executes exactly
+once per original invocation with the same arguments, error conversion and
+terminated-state update. Before it, an active observer may query basic Job
+accounting; only the numeric ActiveProcesses count or static QueryFailed is
+retained. Missing observations are None, not a fabricated zero. No Job/process
+handles, IDs, names, raw errors or arguments enter the record. No extra cleanup,
+termination, wait, retry, breakaway or alternate readiness transport is added.
+
+TLS records a saturating call count and first/final typed observations only;
+each has same-clock before/after times and a success boolean. It resets on
+return or unwind and does not cross threads. The readiness recorder now retains
+FIRST and final probe start/return times and their corresponding retirement
+traces, together with its saturating probe count. All use the same started
+Instant as private capture and cancellation. Existing cadence, deadlines,
+concurrent transport, baseline failure and descendant assertions remain.
+
+[Job accounting documentation](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information)
+describes ActiveProcesses as a Job association count, with reference-lifetime
+effects. It is not a Linux descendant-cleanup proof. Retirement timing and a
+native error match may narrow the next investigation; neither count nor timing
+alone establishes a cross-Job cause. No Job, WSL launcher, Python or SSH policy
+correction is claimed or implemented.
+
+### Eight New Tests: Authored UNRUN
+
+- `tasks_account_executor::tests::host_reply_statuses_keep_valid_mappings_and_reject_unknown_or_duplicate_fields`
+- `tasks_account_executor::tests::host_reply_output_requires_typed_unique_closed_fields`
+- `tasks_account_executor::process::tests::native_windows_message_matches_complete_system_messages_in_utf8_and_utf16`
+- `tasks_account_executor::process::tests::native_windows_message_rejects_private_substrings_unknown_and_malformed_data`
+- `tasks_account_executor::process::tests::native_windows_message_observation_is_failure_only_without_result_remapping`
+- `execution_host::tests::tasks_wsl_retirement_observer_preserves_results_and_distinguishes_missing_queries`
+- `execution_host::tests::tasks_wsl_retirement_observer_resets_on_unwind_and_is_thread_local`
+- `execution_host::tests::tasks_wsl_retirement_observer_records_the_existing_guarded_termination`
+
+Protocol tests cover every valid status/error mapping and Output required fields,
+extra nested/token fields, duplicate status/known fields, invalid field types
+and integer bounds through both decoder and acknowledgement APIs. Classifier
+tests cover complete system messages across UTF encodings, private payloads
+containing system text, malformed UTF, bounds, Unknown and every gating branch.
+Observer tests cover preserved results, missing/query-failed/zero distinctions,
+count saturation, first/final retention, unwind/thread isolation and an actual
+guarded fixed cmd.exe exit 23 through the unchanged ordinary runner.
+
+Updated tests/fixtures: the existing guarded cancellation-acknowledgement test
+adds the extra-field mode; the readiness fixed-storage regression distinguishes
+first/final retirement metadata and retains first return time through saturation.
+The exact ignored
+`tasks_account_executor::tests::tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host`
+keeps its original cases and assertions, with enriched failure-only metadata.
+Existing Windows execution-host/Tasks filters and the workspace gate cover this
+slice. No CI, manifest, rootfs-path, marker-contract or dependency change is needed.
+
+### Remaining Gates
+
+All eight new tests, updated fixtures, protocol correction, observer and classifier
+are UNRUN. No local build/test/format/lint/syntax/whitespace verification occurred.
+Main must apply complete Actions formatter output and obtain new exact-SHA
+Linux/Windows tests plus the same-run actual WSL gate. The independent native
+hardware/secure-store acceptance requirement remains. The WSL early-exit cause
+is still unconfirmed and is NOT marked fixed.
+
+## Earlier WSL Cancellation Diagnostics Handoff (Superseded)
+
+Historical status below predates bb79421. The exact evidence, protocol correction
+and passive retirement/classifier handoff above supersede it.
 
 The bounded diagnostic slice and five focused regressions are authored and
 source-reviewed; ownership is released to Main with no implementation blocker.
