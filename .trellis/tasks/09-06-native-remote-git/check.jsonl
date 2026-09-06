@@ -7,3 +7,4 @@
 {"file":".trellis/tasks/09-06-native-ui-remote-feedback/prd.md","reason":"Explicit WSL follow-up approval and unchanged native acceptance constraints."}
 {"file":".trellis/tasks/09-06-native-remote-git/research/wsl-instance-retirement.md","reason":"Review the exact causal A/B bounds, on-stack ownership, result preservation and inference limits."}
 {"file":".trellis/spec/mt-app/backend/release-staging-contract.md","reason":"Enforce the public-only diagnostic exception without relaxing production cleanup or logging."}
+{"file":".trellis/spec/mt-app/backend/github-project-tasks-contract.md","reason":"Validate private WSL cleanup evidence and concurrent peer survival without weakening original lifecycle assertions."}

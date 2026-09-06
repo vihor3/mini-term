@@ -2,10 +2,129 @@
 
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
 pointer still identifies the Git child. Source review and explicitly authorized
-Actions log inspection only. The current combined diagnostic/Git receipt slices
-are UNRUN; source review is complete, not an execution gate.
+Actions log inspection only. The current production containment, eight new unit
+tests and eight appended actual WSL rows are UNRUN; source review is complete.
+Main reports the predecessor's eighteen diagnostic and two Git safety tests
+passed on Windows. That evidence does not validate this production candidate.
 No local build, test, lint, formatting, syntax, whitespace, transport or native
-acceptance is claimed. WSL early-exit causality remains unresolved.
+acceptance is claimed. Timing evidence supports the retirement boundary only;
+kernel-member identity and broader WSL behavior remain unproven.
+
+## Final WSL Containment Check: Source Released To Main
+
+Reviewed Newton's released wsl-containment-implementation.md and production
+slice, then Tesla's wsl-containment-fixtures.md and finalized appended fixture
+module. Reused the completed production/Git reviews rather than restarting the
+earlier diagnostics. No remaining concrete finding or source/API blocker was
+identified; this final containment check needed no source fix. Only this report
+was edited by the checker. The exact check-owned paths are now released and
+frozen for Main:
+
+- `crates/mt-app/src/execution_host.rs`
+- `crates/mt-app/src/tasks_account_executor/process.rs`
+- `crates/mt-app/src/tasks_account_executor/tests.rs`
+- `.trellis/tasks/09-06-native-tasks-gh-accounts/review.md`
+
+Main owns specs, progress, formatter artifacts, Git, CI and the exact-SHA gate.
+No other source/config/dependency files were changed. No local automated checks,
+fixtures, probes, app launches, Git commands, upstream/CI fetches or children.
+
+### Combined Source Conclusions
+
+- The production slice retains strict/native defaults and selects WslClientRoot
+  only from typed registered/pre-project ownership or private run_wsl. WSL adds
+  SILENT_BREAKAWAY_OK while retaining KILL_ON_JOB_CLOSE, suspended/no-window root
+  creation, exact assignment before resume, fallible cleanup and bounded reap.
+  Private capture remains separate with unchanged sanitation/control/strict ack.
+  No production wait, Job retention, source retargeting or result remap appears.
+- The new fixture call is after the entire original actual-test lifecycle loop.
+  Its original setup/account/cwd/argv/privacy checks, private 50-ms polling,
+  ten-second readiness budget, result checks and descendant assertions remain
+  intact. The failure-only A/B timing module is not invoked by the new rows.
+- Four ordinary rows cover Project/PreProject times Complete/Timeout. Each
+  starts its short client first, requires that client's own fresh short-ready,
+  then starts an independent peer and requires peer-ready. Both workers must
+  still be pending and the short's fixed completion/timeout window must remain
+  open. Completion requires empty normal exit 0; timeout requires the actual
+  timeout receipt, not a transport error accepted as timeout.
+- Four private rows cover data/lookup cancellation/timeout. Private and peer
+  directories are distinct fresh UUIDs. The private request starts and proves
+  its existing descendant ready before the peer starts. The private deadline
+  must remain open and both workers pending at peer readiness; only then is
+  cancellation signalled or normal timeout awaited. Exact production Cancelled
+  or TimedOut is required. The unchanged ready/release/one-second/absent-marker
+  postcheck still supplies descendant evidence; no private bytes or diagnostic
+  text are parsed to manufacture acknowledgement.
+- Every row requires the peer pending after the earlier client returns/retire
+  checks complete, before its fixed fifteen-second sleep can have elapsed.
+  The peer must then return normal exit 0, exact start/end stdout and empty
+  stderr. This checks survival across retirement; it is not just sequential
+  success or a worker started after the affected client already finished.
+- Worker owns each join handle. Private unwind signals cancellation before
+  joining. The later peer carries that same cancellation handle, so peer
+  startup/readiness/assertion unwind signals private cancellation before waiting
+  for the peer. Spawn failure unwinds through the already-owned earlier worker;
+  normal joins remove the handle without spurious cancellation. Public joins
+  retain finite script/runner bounds; no manual kill or held completed Job.
+- Root/distro attestation is required before any case creation. Existing case()
+  performs fresh UUID mkdir without -p; collisions fail. Fixed public plans read
+  only their own markers. All failure text is static/typed/numeric, with no
+  stdout/stderr body, private payload, argv/environment or arbitrary error echo.
+- Eight rows add at most 3,240 Windows-to-WSL calls: twelve mkdir, four ordinary
+  short calls, eight peers, four private envelopes, twelve descendant postchecks
+  and sixteen readiness loops capped at 200 calls each. Readiness also has a
+  ten-second budget with 50-ms intervals. Ordinary short/probe/setup calls retain
+  five-second/4096-byte limits; peers have fixed fifteen-second sleep and
+  twenty-second runner deadlines. Private cancel/timeout limits remain 15/5
+  seconds for these new rows. Final in-progress probes, cleanup grace and OS
+  scheduling remain documented limits, not hidden retries or changed baselines.
+
+### Eight New Unit Tests: Source Reviewed, UNRUN
+
+- `execution_host::tests::process_tree_policy_follows_typed_sources_not_executable_or_path`
+- `execution_host::tests::windows_process_tree_policies_set_exact_job_limits_and_keep_strict_default`
+- `execution_host::tests::windows_process_tree_policies_keep_exact_root_attachment_and_retirement`
+- `tasks_account_executor::process::tests::private_wsl_entry_rejects_non_wsl_sources_before_capture`
+- `tasks_account_executor::process::tests::private_root_cleanup_preserves_failure_before_assignment_for_both_policies`
+- `tasks_account_executor::tests::wsl_containment::containment_requires_attested_root_before_case_creation`
+- `tasks_account_executor::tests::wsl_containment::containment_public_plans_and_limits_are_fixed`
+- `tasks_account_executor::tests::wsl_containment::containment_worker_ownership_joins_and_cancels_on_unwind`
+
+The first five include actual native Job-limit/root guard tests and the real
+private pre-assignment failure cleanup. The last three pin fixture ownership,
+literal plans/budgets and join/cancel behavior; the unwind test confirms that
+cancellation is observed before joining a panicking worker without double panic.
+These tests do not establish actual WSL peer survival. The eight real rows are
+appended to the existing single ignored
+`tasks_account_executor::tests::tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host`,
+not new skipped tests or an alternative passing gate.
+
+### Evidence And Remaining Limits
+
+Main's authoritative predecessor evidence is f1fde4d Windows job 101478701601:
+all eighteen timing/public regressions and both Git receipt safety tests passed
+(execution-host 25, Tasks 44 plus one ignored, Git 126). Package 101478701516
+passed; Linux formatting failed. Actual WSL 101478843292 still failed its
+original DataCancel assertion while showing the positive Immediate/AfterProducer
+timing contrast; owned cleanup passed. None validates this new ownership/peer
+fixture source based on the formatter successor 551595b.
+
+Required next evidence remains exact-SHA Actions build/lint/format/unit gates
+and the original actual WSL test executing once, including every original
+assertion and all eight appended rows, followed by owned-distro cleanup.
+Current production success is not claimed. Short/private-first startup and
+verified overlap do not force cold instance startup: setup and earlier cases
+can warm WSL. No distro restart/shutdown was added or authorized here.
+
+Silent breakaway is not selective for shared infrastructure; escaped relays,
+interop and guest daemons remain outside full containment claims. Ordinary WSL
+still has no positive guest-stop acknowledgement, and the existing typed WSL -1
+Git uncertainty/no-replay/exact-ID lease review is preserved. Private Linux
+group/ack evidence is not Windows Job or universal guest cleanup proof. WSL2,
+enabled interop, nested Jobs, real external/shared-distro clients and native UI
+acceptance remain separate. No new supervisor or fault-injection framework is
+needed for this release. Earlier source-release sections below are historical;
+this section is the current combined containment handoff.
 
 ## Final Combined Check: Source Released To Main
 
@@ -1869,3 +1988,146 @@ this patch. The lease remains process-local and explicit release still relies
 on the user's stopped-operation confirmation; no durable recovery, positive
 guest-stop proof or causal Job conclusion is claimed. Newton's released version
 still requires its separate final/combined check when Main authorizes it.
+
+## WSL Client Containment: Independent Read-Only WIP Review
+
+Scope follows Main's new production-candidate authorization, the fresh curated
+Git/Tasks contexts, parent PRD's Explicit WSL Follow-Up Approval, Git contract's
+WSL Client Containment scenario and private Tasks ownership paragraph. The
+earlier diagnostic-only/no-flag handoffs above are historical, not the authority
+for this newly approved candidate. Newton owns execution_host.rs/process.rs;
+Tesla separately owns appended Tasks peer-survival fixtures. Only this addendum
+was written. No source edits, children, Git operations, local automated checks,
+upstream investigation, CI inspection or probes occurred.
+
+### Current Source Findings
+
+No concrete routing, flag-selection, root-cleanup or output-contract defect was
+identified in the production WIP inspected. This is provisional source review,
+not writer release, compilation evidence or a passing containment gate.
+
+- execution_host.rs:57 maps the captured backend explicitly: Local is
+  StrictTree, Wsl is WslClientRoot, SSH has no process policy. The registered
+  executor consumes that mapping in its Process arm (:414); the SSH branch is
+  unchanged. PreProjectLocalContext has its own typed mapping (:262), passed by
+  execute_pre_project_local_command (:369). No executable/path/environment
+  heuristic determines policy, and public planner/result APIs stay unchanged.
+- The ordinary runner still selects Null stdin. Its old private strict wrapper
+  is now test-only because both production callers pass the policy explicitly;
+  the shared body preserves command argv/cwd, capture limits and result fields.
+  The already-attested test-only marker probe also selects WSL explicitly.
+- ProcessTree::configure remains the strict default (:1587). Its factored
+  Windows constructor sets exactly KILL_ON_JOB_CLOSE for strict and adds only
+  SILENT_BREAKAWAY_OK for WSL (:1615). The same extended-limit structure and
+  SetInformationJobObject call are used. No launch breakaway bit, shared Job,
+  retained handle, production wait/retry or user-distro change appears.
+- Both flags are imported from the already-enabled Win32_System_JobObjects
+  namespace and combined as the existing LimitFlags type. Cargo.toml directly
+  enables that feature and the selected lockfile entry is windows 0.61.3; no
+  dependency/feature change is needed by this source shape. The locked generated
+  bindings are not cached locally, so exact Windows compilation remains an
+  Actions gate, not a source-inspection pass claim.
+- CREATE_SUSPENDED/CREATE_NO_WINDOW, exact root AssignProcessToJobObject before
+  resume, attached-before-resume bookkeeping, explicit TerminateJobObject,
+  failure propagation, terminated-on-success only and final owned-handle Drop
+  remain intact (:1602, :1648, :1677). Spawn/configuration failures retain owned
+  cleanup; attach/resume/read setup errors still take the existing bounded
+  cleanup/direct-child fallback. No missing attachment becomes successful.
+- Unix configure_with_policy delegates to the existing dedicated process-group
+  configuration (:647), preserving non-Windows behavior. The Windows exception
+  does not change native/default Job limits or interactive PTY/SSH execution.
+- Private run_wsl validates typed WSL first and passes WslClientRoot explicitly
+  (process.rs:659), independently of its cooperative=true argument. All native
+  unselected/lookup/proof/data captures explicitly pass StrictTree (:433, :456,
+  :472); the cooperative synthetic envelope fixture is also explicitly strict.
+  This keeps private bytes in the private capture path, never the ordinary
+  runner or a new general command-result surface.
+- Private sanitation, sole Python cwd entry, control pipe, latched stop/deadline,
+  owned root cleanup, bounded drain and strict cleanup acknowledgement remain
+  unchanged. Missing acknowledgement after a stop is still CleanupFailed
+  (:922); unstopped nonzero launcher exit is still HostHelperUnavailable
+  (:679). No account/source/proof fencing or error remap is altered.
+
+### WIP Regression Inspection
+
+Three shared-runner test functions were visible during the pass, all UNRUN:
+
+- `execution_host::tests::process_tree_policy_follows_typed_sources_not_executable_or_path`
+  checks registered/pre-project Local and WSL policy selection, misleading
+  native executable/path text, shared planning and SSH separation.
+- `execution_host::tests::windows_process_tree_policies_set_exact_job_limits_and_keep_strict_default`
+  queries actual configured Job limits for default/explicit strict/WSL and pins
+  unchanged creation flags. It does not merely compare two policy constants.
+- `execution_host::tests::windows_process_tree_policies_keep_exact_root_attachment_and_retirement`
+  creates an owned suspended root under both policies, verifies attachment and
+  live membership, checks the actual retirement result and bounded root exit,
+  and checks termination idempotence. The fixture owner exists before fallible
+  attachment/assertions, preserving Drop cleanup on unwind.
+
+These cover the inspected policy mechanics but do not substitute for Tesla's
+appended actual WSL peer-survival tests or the original private account/lifecycle
+assertions. Private explicit policy is source-traced here; final combined review
+must check its released regressions and all original assertions. No source
+ownership transfers in this WIP review.
+
+### Evidence And Limits
+
+Main supplies f1fde4d actual WSL job 101478843292: Immediate retired an overlapping
+probe before its start-only producer failed; AfterProducer held the same timing
+boundary until exact-marker producer success. Both timing issues were null,
+but the original DataCancel assertion still failed and owned cleanup passed.
+This supports the retirement boundary on that owned WSL1 fixture, not kernel
+membership, this candidate's correctness, WSL2 or native UI acceptance.
+
+The candidate intentionally stops promising containment of eligible escaped
+Windows relay/interop descendants. Ordinary WSL still has no positive guest-stop
+acknowledgement; typed WSL -1 Git receipts must retain their separately corrected
+uncertain write lease. Private Linux groups/control/strict acknowledgement keep
+their existing limited ownership, not a new guarantee for escaped daemons.
+Nested Jobs, enabled interop, WSL2 and real shared-distro behavior remain explicit
+acceptance risks. No new supervisor, fault-injection framework or requirements
+expansion is proposed. Main owns final authorization, specs/Git/CI and exact-SHA
+gates after Newton and Tesla release.
+
+## Newton Containment Release: Partial Final Check
+
+Read the finalized wsl-containment-implementation.md handoff and released
+execution_host.rs/tasks_account_executor/process.rs source. No concrete defect
+remains in this production slice; no source fix was needed. All five focused
+tests were inspected, including the final explicit SSH fixture construction:
+
+- `execution_host::tests::process_tree_policy_follows_typed_sources_not_executable_or_path`
+- `execution_host::tests::windows_process_tree_policies_set_exact_job_limits_and_keep_strict_default`
+- `execution_host::tests::windows_process_tree_policies_keep_exact_root_attachment_and_retirement`
+- `tasks_account_executor::process::tests::private_wsl_entry_rejects_non_wsl_sources_before_capture`
+- `tasks_account_executor::process::tests::private_root_cleanup_preserves_failure_before_assignment_for_both_policies`
+
+The last two call the real private entry/cleanup boundaries. Local and SSH
+snapshots with WSL-looking path/program data are rejected before capture. The
+pre-assignment case creates an owned suspended native root under each policy,
+requires CleanupFailed from the unattached Job while separately requiring
+direct-root reaping, and constructs its owner before fallible assertions. The
+shared limit test queries configured Job state; the root test verifies exact
+membership, bounded exit and termination idempotence. These are native guard
+tests and typed routing checks, not real WSL2 or guest-descendant evidence.
+
+The provisional production conclusions above remain valid: strict is the
+default, both ordinary routes retain typed WSL authority, private run_wsl
+selects its policy explicitly, the marker test does so only after attestation,
+and original timing hooks, private pipes/control/acknowledgement and cleanup
+error/results remain intact. No additional diagnostics or policy expansion is
+needed for the source reviewed.
+
+Evidence distinction: Main reports the f1fde4d Windows job 101478701601 passed
+all eighteen predecessor timing/public regressions and both Git receipt safety
+tests (execution-host 25, Tasks 44 plus one ignored, Git 126); package job
+101478701516 passed. Its Linux formatting failed, and original actual WSL still
+failed despite positive timing evidence. Those results do not validate the
+new production containment or peer-survival fixture slice. Its five focused
+tests and Tesla's additions remain UNRUN pending fresh exact-SHA Actions.
+
+This is only the completed Newton portion of the final check. Tesla retains
+Tasks tests.rs ownership until its explicit release; no edit was made there or
+to any source. The combined source release remains pending that fixture review.
+Only this report was updated. No local automated verification, transport probes,
+upstream/CI fetch, Git operation or child agent occurred.

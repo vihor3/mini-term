@@ -54,6 +54,14 @@ pub enum ExecutionBackend {
 }
 
 impl ExecutionBackend {
+    fn process_tree_policy(&self) -> Option<ProcessTreePolicy> {
+        match self {
+            Self::Local => Some(ProcessTreePolicy::StrictTree),
+            Self::Wsl { .. } => Some(ProcessTreePolicy::WslClientRoot),
+            Self::Ssh { .. } => None,
+        }
+    }
+
     pub fn signature(&self) -> ExecutionBackendSignature {
         match self {
             Self::Local => ExecutionBackendSignature::Local,
@@ -251,6 +259,13 @@ pub enum PreProjectLocalContext {
 }
 
 impl PreProjectLocalContext {
+    fn process_tree_policy(&self) -> ProcessTreePolicy {
+        match self {
+            Self::Native { .. } => ProcessTreePolicy::StrictTree,
+            Self::Wsl { .. } => ProcessTreePolicy::WslClientRoot,
+        }
+    }
+
     pub fn from_host_path(path: &str) -> Result<Self, CommandExecutionError> {
         if path.is_empty() || path.contains('\0') {
             return Err(command_error(
@@ -339,7 +354,7 @@ pub fn plan_pre_project_local_command(
 }
 
 /// Execute a local or automatic-WSL command before project registration while
-/// retaining the existing timeout, bounded-output, and process-tree cleanup.
+/// retaining the existing bounds and execution-backend-specific cleanup.
 pub fn execute_pre_project_local_command(
     context: &PreProjectLocalContext,
     plan: &CommandPlan,
@@ -351,7 +366,15 @@ pub fn execute_pre_project_local_command(
     else {
         unreachable!("pre-project local planning never produces SSH commands")
     };
-    run_process(&program, &args, cwd, timeout, output_cap)
+    run_process_with_stdin(
+        &program,
+        &args,
+        cwd,
+        timeout,
+        output_cap,
+        ProcessStdin::Null,
+        context.process_tree_policy(),
+    )
 }
 
 pub fn plan_host_command(
@@ -388,7 +411,19 @@ pub fn execute_host_command(
 ) -> Result<HostCommandResult, CommandExecutionError> {
     match plan_host_command(snapshot, plan)? {
         PlannedHostCommand::Process { program, args, cwd } => {
-            let output = run_process(&program, &args, cwd, timeout, output_cap)?;
+            let policy = snapshot
+                .backend
+                .process_tree_policy()
+                .expect("process plan must have a local or WSL backend");
+            let output = run_process_with_stdin(
+                &program,
+                &args,
+                cwd,
+                timeout,
+                output_cap,
+                ProcessStdin::Null,
+                policy,
+            )?;
             Ok(HostCommandResult {
                 output,
                 observed_connection_epoch: None,
@@ -529,7 +564,15 @@ pub(crate) fn tasks_wsl_marker_probe(
     let PlannedHostCommand::Process { program, args, cwd } = plan else {
         unreachable!("owned WSL marker planning must produce a process")
     };
-    let output = run_process_with_stdin(&program, &args, cwd, Duration::from_secs(5), 4096, stdin)?;
+    let output = run_process_with_stdin(
+        &program,
+        &args,
+        cwd,
+        Duration::from_secs(5),
+        4096,
+        stdin,
+        ProcessTreePolicy::WslClientRoot,
+    )?;
     Ok(HostCommandResult {
         output,
         observed_connection_epoch: None,
@@ -585,6 +628,14 @@ fn command_error(
     CommandExecutionError::new(kind, message)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProcessTreePolicy {
+    StrictTree,
+    // WSL may start shared instance infrastructure under its client. Keep the
+    // exact root owned, without promising cleanup of escaped relays or interop.
+    WslClientRoot,
+}
+
 #[cfg(unix)]
 pub(crate) struct ProcessTree {
     process_group_id: Option<i32>,
@@ -593,6 +644,13 @@ pub(crate) struct ProcessTree {
 
 #[cfg(unix)]
 impl ProcessTree {
+    pub(crate) fn configure_with_policy(
+        command: &mut Command,
+        _policy: ProcessTreePolicy,
+    ) -> Result<Self, CommandExecutionError> {
+        Self::configure(command)
+    }
+
     pub(crate) fn configure(command: &mut Command) -> Result<Self, CommandExecutionError> {
         use std::os::unix::process::CommandExt as _;
 
@@ -1527,11 +1585,18 @@ pub(crate) mod tasks_wsl_public_timing {
 #[cfg(windows)]
 impl ProcessTree {
     pub(crate) fn configure(command: &mut Command) -> Result<Self, CommandExecutionError> {
+        Self::configure_with_policy(command, ProcessTreePolicy::StrictTree)
+    }
+
+    pub(crate) fn configure_with_policy(
+        command: &mut Command,
+        policy: ProcessTreePolicy,
+    ) -> Result<Self, CommandExecutionError> {
         use std::os::windows::process::CommandExt as _;
         use windows::Win32::System::JobObjects::{
             CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-            SetInformationJobObject,
+            JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JobObjectExtendedLimitInformation, SetInformationJobObject,
         };
 
         // CREATE_SUSPENDED closes the spawn-to-assignment window: no child code
@@ -1547,7 +1612,12 @@ impl ProcessTree {
         // SAFETY: CreateJobObjectW returned a newly owned handle.
         let job = unsafe { windows::core::Owned::new(job) };
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        limits.BasicLimitInformation.LimitFlags = match policy {
+            ProcessTreePolicy::StrictTree => JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            ProcessTreePolicy::WslClientRoot => {
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
+            }
+        };
         let limits_size = u32::try_from(std::mem::size_of_val(&limits)).map_err(|_| {
             command_error(
                 CommandExecutionErrorKind::Io,
@@ -1867,6 +1937,7 @@ enum ProcessStdin {
     ClosedPipe,
 }
 
+#[cfg(test)]
 fn run_process(
     program: &str,
     args: &[String],
@@ -1874,7 +1945,15 @@ fn run_process(
     timeout: Duration,
     output_cap: usize,
 ) -> Result<CommandOutput, CommandExecutionError> {
-    run_process_with_stdin(program, args, cwd, timeout, output_cap, ProcessStdin::Null)
+    run_process_with_stdin(
+        program,
+        args,
+        cwd,
+        timeout,
+        output_cap,
+        ProcessStdin::Null,
+        ProcessTreePolicy::StrictTree,
+    )
 }
 
 fn run_process_with_stdin(
@@ -1884,6 +1963,7 @@ fn run_process_with_stdin(
     timeout: Duration,
     output_cap: usize,
     stdin: ProcessStdin,
+    policy: ProcessTreePolicy,
 ) -> Result<CommandOutput, CommandExecutionError> {
     let mut command = Command::new(program);
     command
@@ -1898,7 +1978,12 @@ fn run_process_with_stdin(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    let mut process_tree = ProcessTree::configure(&mut command)?;
+    let mut process_tree = match policy {
+        ProcessTreePolicy::StrictTree => ProcessTree::configure(&mut command),
+        ProcessTreePolicy::WslClientRoot => {
+            ProcessTree::configure_with_policy(&mut command, policy)
+        }
+    }?;
     let mut child = command.spawn().map_err(|error| {
         let kind = if error.kind() == std::io::ErrorKind::NotFound {
             CommandExecutionErrorKind::ProgramNotFound
@@ -2088,6 +2173,182 @@ mod tests {
 
     fn command() -> CommandPlan {
         CommandPlan::new("gh", ["issue", "list", "--repo", "host/o/r"])
+    }
+
+    #[test]
+    fn process_tree_policy_follows_typed_sources_not_executable_or_path() {
+        for path in ["/repo", r"\\wsl.localhost\Ubuntu\repo"] {
+            for program in ["gh", "wsl.exe", "cmd.exe"] {
+                let plan = CommandPlan::new(program, ["--version"]);
+                let native = snapshot(ExecutionBackend::Local, path);
+                let pre_project = PreProjectLocalContext::Native {
+                    cwd: PathBuf::from(path),
+                };
+                assert_eq!(
+                    native.backend.process_tree_policy(),
+                    Some(ProcessTreePolicy::StrictTree)
+                );
+                assert_eq!(
+                    pre_project.process_tree_policy(),
+                    ProcessTreePolicy::StrictTree
+                );
+                assert_eq!(
+                    plan_host_command(&native, &plan).unwrap(),
+                    plan_pre_project_local_command(&pre_project, &plan).unwrap()
+                );
+            }
+        }
+        let wsl = snapshot(
+            ExecutionBackend::Wsl {
+                distro: "Ubuntu".into(),
+            },
+            "/repo",
+        );
+        let pre_project = PreProjectLocalContext::Wsl {
+            distro: "Ubuntu".into(),
+            cwd: "/repo".into(),
+        };
+        assert_eq!(
+            wsl.backend.process_tree_policy(),
+            Some(ProcessTreePolicy::WslClientRoot)
+        );
+        assert_eq!(
+            pre_project.process_tree_policy(),
+            ProcessTreePolicy::WslClientRoot
+        );
+        assert_eq!(
+            plan_host_command(&wsl, &command()).unwrap(),
+            plan_pre_project_local_command(&pre_project, &command()).unwrap()
+        );
+        let ssh = snapshot(
+            ExecutionBackend::Ssh {
+                connection: SshConnection {
+                    id: "fixture".into(),
+                    name: "fixture".into(),
+                    host: "example.invalid".into(),
+                    port: 22,
+                    user: "fixture".into(),
+                    password: None,
+                    identity_file: None,
+                    group: None,
+                },
+                connection_fingerprint: 1,
+                connection_epoch: Some(2),
+            },
+            "/repo",
+        );
+        assert_eq!(ssh.backend.process_tree_policy(), None);
+        assert!(matches!(
+            plan_host_command(&ssh, &command()).unwrap(),
+            PlannedHostCommand::Ssh { .. }
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_process_tree_policies_set_exact_job_limits_and_keep_strict_default() {
+        use windows::Win32::System::JobObjects::{
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            QueryInformationJobObject,
+        };
+
+        assert_eq!(
+            std::env::var("GITHUB_ACTIONS").as_deref(),
+            Ok("true"),
+            "Actions-only fixture"
+        );
+        assert_eq!(WINDOWS_PROCESS_CREATION_FLAGS, 0x0800_0004);
+        for policy in [
+            None,
+            Some(ProcessTreePolicy::StrictTree),
+            Some(ProcessTreePolicy::WslClientRoot),
+        ] {
+            let mut command = Command::new("cmd.exe");
+            let tree = match policy {
+                None => ProcessTree::configure(&mut command),
+                Some(policy) => ProcessTree::configure_with_policy(&mut command, policy),
+            }
+            .unwrap_or_else(|_| panic!("process policy fixture configuration failed"));
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            assert!(
+                unsafe {
+                    QueryInformationJobObject(
+                        Some(*tree.job),
+                        JobObjectExtendedLimitInformation,
+                        std::ptr::from_mut(&mut limits).cast(),
+                        std::mem::size_of_val(&limits) as u32,
+                        None,
+                    )
+                }
+                .is_ok(),
+                "process policy fixture query failed"
+            );
+            let expected = if policy == Some(ProcessTreePolicy::WslClientRoot) {
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
+            } else {
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            };
+            assert_eq!(limits.BasicLimitInformation.LimitFlags, expected);
+            assert!(!tree.attached && !tree.terminated);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_process_tree_policies_keep_exact_root_attachment_and_retirement() {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::HANDLE;
+
+        assert_eq!(
+            std::env::var("GITHUB_ACTIONS").as_deref(),
+            Ok("true"),
+            "Actions-only fixture"
+        );
+        for policy in [
+            ProcessTreePolicy::StrictTree,
+            ProcessTreePolicy::WslClientRoot,
+        ] {
+            let mut command = Command::new("cmd.exe");
+            command
+                .args(["/d", "/c", "set /p MT_TEST_ROOT_INPUT="])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let tree = ProcessTree::configure_with_policy(&mut command, policy)
+                .unwrap_or_else(|_| panic!("root policy fixture configuration failed"));
+            let child = command
+                .spawn()
+                .unwrap_or_else(|_| panic!("root policy fixture spawn failed"));
+            let mut fixture = TasksWslRootFixture { tree, child };
+            assert!(!fixture.tree.attached && !fixture.tree.terminated);
+            assert!(fixture.tree.attach(&fixture.child).is_ok());
+            assert_eq!(
+                tasks_wsl_process_state(
+                    HANDLE(fixture.child.as_raw_handle()),
+                    *fixture.tree.job,
+                ),
+                TasksWslRootState {
+                    membership: TasksWslRootMembership::InJob,
+                    liveness: TasksWslRootLiveness::Alive,
+                }
+            );
+            let (result, trace) =
+                tasks_wsl_retirement_trace(Instant::now(), || fixture.tree.terminate());
+            assert!(result.is_ok());
+            assert!(fixture.tree.terminated);
+            assert_eq!(trace.calls, 1);
+            assert!(trace.first.unwrap().succeeded);
+            assert!(
+                wait_for_child_exit(&mut fixture.child, PROCESS_CLEANUP_TIMEOUT)
+                    .unwrap()
+                    .is_some()
+            );
+            let (result, trace) =
+                tasks_wsl_retirement_trace(Instant::now(), || fixture.tree.terminate());
+            assert!(result.is_ok());
+            assert_eq!(trace.calls, 0);
+        }
     }
 
     #[test]

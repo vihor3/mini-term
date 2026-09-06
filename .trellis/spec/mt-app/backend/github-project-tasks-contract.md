@@ -148,6 +148,14 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
   Jobs and the host envelope own child cleanup. A failed cleanup acknowledgement
   is explicit, not reported as success or safe rollback. The bounded ordinary
   origin read has before/after cancellation checks, not physical cancellation.
+- WSL private capture explicitly selects the client-root policy described in
+  [WSL client containment](./git-host-contract.md#scenario-wsl-client-containment),
+  never a policy inferred from cooperative stdin. It keeps the suspended root
+  assigned before resume, but its Windows Job does not prove Linux cleanup or
+  contain every relay/interop descendant. The unchanged Python envelope owns
+  gh's new process group, bounded kill/wait, and the strict cleanup reply.
+  Missing/invalid acknowledgement remains CleanupFailed. Deliberately escaped
+  daemons or Windows interop outside that group are not covered by its promise.
 - Host-envelope replies use one closed typed JSON object schema in both
   `decode_host_reply` and `host_reply_confirms_cleanup`. Status-only variants
   are empty struct variants (`Cancelled {}`), not unit variants; valid wire

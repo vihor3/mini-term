@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use mt_github::{AccountError, CommandOutput, CommandPlan, SelectedAccountRequestPlan};
 
 use crate::execution_host::{
-    ExecutionBackend, ProcessTree, ProjectExecutionSnapshot, serialize_posix_argv,
+    ExecutionBackend, ProcessTree, ProcessTreePolicy, ProjectExecutionSnapshot,
+    serialize_posix_argv,
 };
 
 use super::{AccountExecutionControl, AccountExecutionError, CLEANUP_TIMEOUT};
@@ -436,6 +437,7 @@ fn run_native_with(
             deadline,
             output_limit,
             false,
+            ProcessTreePolicy::StrictTree,
         )?;
         control.check(deadline)?;
         return public_unselected(data, captured);
@@ -452,7 +454,14 @@ fn run_native_with(
         ])
         .current_dir(&snapshot.canonical_path);
     sanitize(&mut lookup);
-    let captured = capture(lookup, control, deadline, SECRET_LIMIT + 2, false)?;
+    let captured = capture(
+        lookup,
+        control,
+        deadline,
+        SECRET_LIMIT + 2,
+        false,
+        ProcessTreePolicy::StrictTree,
+    )?;
     let token = credential(captured)?;
     let proof = mt_github::account_plan(selected.account().host());
     let run_data = |plan: &CommandPlan, limit: usize| {
@@ -461,7 +470,14 @@ fn run_native_with(
         let value = std::str::from_utf8(&token.0)
             .map_err(|_| AccountExecutionError::Account(AccountError::CredentialLookupFailed))?;
         command.env(super::auth_variable(selected.account().host()), value);
-        let captured = capture(command, control, deadline, limit, false)?;
+        let captured = capture(
+            command,
+            control,
+            deadline,
+            limit,
+            false,
+            ProcessTreePolicy::StrictTree,
+        )?;
         control.check(deadline)?;
         public_data(captured, Some(&token))
     };
@@ -659,6 +675,7 @@ pub(super) fn run_wsl(
         Instant::now() + control.timeout(),
         wire_cap,
         true,
+        ProcessTreePolicy::WslClientRoot,
     )?;
     if captured.exit_code != Some(0) {
         return Err(AccountExecutionError::HostHelperUnavailable);
@@ -711,6 +728,7 @@ fn capture(
     deadline: Instant,
     output_limit: usize,
     cooperative: bool,
+    policy: ProcessTreePolicy,
 ) -> Result<PrivateCapture, AccountExecutionError> {
     control.check(deadline)?;
     command
@@ -721,7 +739,8 @@ fn capture(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let tree = ProcessTree::configure(&mut command).map_err(|_| AccountError::CommandFailed)?;
+    let tree = ProcessTree::configure_with_policy(&mut command, policy)
+        .map_err(|_| AccountError::CommandFailed)?;
     let child = command.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             AccountError::ClientMissing
@@ -836,7 +855,8 @@ fn capture(
                     exit_code,
                     CaptureDetail::None,
                 );
-                // Retire descendants before draining: they may still own inherited pipes.
+                // Retire current Job/group members before bounded draining;
+                // WSL relays outside the client Job may still own pipes.
                 break;
             }
             Ok(None) => {}
@@ -985,6 +1005,7 @@ pub(super) fn envelope_fixture(
         Instant::now() + control.timeout(),
         wire_cap,
         true,
+        ProcessTreePolicy::StrictTree,
     )?;
     if result.exit_code != Some(0) {
         return Err(AccountExecutionError::HostHelperUnavailable);
@@ -996,6 +1017,92 @@ pub(super) fn envelope_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_wsl_entry_rejects_non_wsl_sources_before_capture() {
+        use mt_identity::{ExecutionHostId, HostInstallId, RepoId, WorktreeId};
+
+        let host = ExecutionHostId::derive("private-policy-fixture", &HostInstallId::new());
+        let repo = RepoId::derive(&host, "fixture");
+        let mut source = ProjectExecutionSnapshot {
+            project_id: "fixture".into(),
+            root_project_id: "fixture".into(),
+            worktree_id: WorktreeId::derive(&repo, "fixture", None),
+            execution_host_id: host,
+            canonical_path: r"\\wsl.localhost\Ubuntu\repo".into(),
+            root_source_path: r"\\wsl.localhost\Ubuntu\repo".into(),
+            backend: ExecutionBackend::Local,
+            host_label: "fixture".into(),
+        };
+        let control = AccountExecutionControl::new(
+            Duration::from_secs(5),
+            super::super::AccountCancellation::default(),
+            None,
+        )
+        .unwrap();
+        for backend in [
+            ExecutionBackend::Local,
+            ExecutionBackend::Ssh {
+                connection: mt_config::SshConnection {
+                    id: "fixture".into(),
+                    name: "fixture".into(),
+                    host: "example.invalid".into(),
+                    port: 22,
+                    user: "fixture".into(),
+                    password: None,
+                    identity_file: None,
+                    group: None,
+                },
+                connection_fingerprint: 1,
+                connection_epoch: Some(2),
+            },
+        ] {
+            source.backend = backend;
+            assert!(matches!(
+                run_wsl(
+                    &source,
+                    &CommandPlan::new("wsl.exe", ["--version"]),
+                    &control,
+                    4096,
+                ),
+                Err(AccountExecutionError::InvalidContext)
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_root_cleanup_preserves_failure_before_assignment_for_both_policies() {
+        assert_eq!(
+            std::env::var("GITHUB_ACTIONS").as_deref(),
+            Ok("true"),
+            "Actions-only fixture"
+        );
+        for policy in [
+            ProcessTreePolicy::StrictTree,
+            ProcessTreePolicy::WslClientRoot,
+        ] {
+            let mut command = Command::new("cmd.exe");
+            command
+                .args(["/d", "/c", "exit /b 0"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let tree = ProcessTree::configure_with_policy(&mut command, policy)
+                .unwrap_or_else(|_| panic!("private root policy fixture configuration failed"));
+            let child = command
+                .spawn()
+                .unwrap_or_else(|_| panic!("private root policy fixture spawn failed"));
+            let mut owned = OwnedChild {
+                child,
+                tree,
+                cleaned: false,
+            };
+            assert_eq!(owned.cleanup(), Err(AccountExecutionError::CleanupFailed));
+            assert!(owned.child.try_wait().unwrap().is_some());
+            assert!(owned.cleaned);
+        }
+    }
 
     #[cfg(windows)]
     #[test]

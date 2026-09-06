@@ -303,8 +303,9 @@ never insert raw data or add a second handwritten quoting implementation.
 - Encode original empty values as POSIX empty arguments inside the single
   nonempty command string. Preserve their positions and count, including
   consecutive/leading/trailing empties; never drop or replace them with spaces.
-- Keep ordinary Null stdin, suspended/no-window creation, strict Job attachment,
-  bounded capture, deadlines and process-tree cleanup. No user/default-distro,
+- Keep ordinary Null stdin, suspended/no-window creation, exact root attachment,
+  bounded capture, deadlines and the backend-specific cleanup contract below.
+  No user/default-distro,
   interop, automount, global environment or credential-policy change.
 - Tasks privately builds only `exec <serialized-envelope-argv>` from the same
   fixed launch root. Its existing Python `os.chdir(cwd)` remains the sole cwd
@@ -348,3 +349,90 @@ Correct: always launch at `/`, then require exact Linux directory entry before
 the original command, without changing captured request authority. Encode empty
 arguments for the Linux shell instead of passing empty launcher fields or
 silently deleting values that the original command requires.
+
+## Scenario: WSL Client Containment
+
+### 1. Scope / Trigger
+
+Actions retirement-timing evidence for f1fde4d showed an overlapping public peer
+fail after immediate short-command Job retirement, but complete normally when
+the same boundary waited until peer return. This supports retirement interference
+on the owned WSL1 fixture, not identification of a kernel process or WSL2 proof.
+The production correction must use typed WSL ownership, never the diagnostic wait.
+
+### 2. Signatures
+
+Keep public execution/planner APIs unchanged. A crate-private strict-tree versus
+WSL-client-root policy reaches ProcessTree configuration through the captured
+ProjectExecutionSnapshot backend, PreProjectLocalContext, or private Tasks
+run_wsl entry. The default configure path remains strict for existing callers.
+
+### 3. Contracts
+
+- Strict/native Windows Jobs retain only KILL_ON_JOB_CLOSE. Typed WSL client
+  Jobs additionally allow SILENT_BREAKAWAY_OK so retiring one client does not
+  adopt and terminate shared WSL instance descendants. Do not infer the policy
+  from executable name, cwd, environment or cooperative-stdin mode.
+- Preserve CREATE_SUSPENDED | CREATE_NO_WINDOW, exact root assignment before
+  resume, fallible attachment cleanup, bounded direct-root reap, explicit
+  TerminateJobObject and final owned-handle closure. The root remains managed.
+  No CREATE_BREAKAWAY_FROM_JOB launch flag, production wait/retry, shared
+  per-distro Job, distro shutdown, configuration change or new dependency.
+- Silent breakaway applies to eligible descendants generally, not selectively
+  to WSL infrastructure. Windows relay/interop descendants may escape the
+  client Job; ancestor Job policy can further constrain inheritance. Do not
+  promise full Windows descendant containment for this WSL-only path.
+- Ordinary WSL execution has no positive Linux guest-stop acknowledgement.
+  Timeout, missing reply, executor failure or the known launcher-loss receipt
+  retains existing uncertain Git write ownership. Bounded caller return is not
+  guest quiescence; no automatic replay or reconciliation-only lease release.
+- Private Tasks keeps its separate host envelope, control channel, process-group
+  cleanup and strict acknowledgement. Never route private bytes through this
+  ordinary runner. Native, SSH and interactive PTY behavior is unchanged.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+| --- | --- |
+| Typed registered/pre-project WSL command | WSL client-root policy; exact captured source |
+| Native/default caller, even with a WSL-looking name | Existing strict-tree policy |
+| WSL peer outlives short command completion or timeout | Peer completes normally; no production hold |
+| Private WSL cancellation/timeout with concurrent peer | Strict acknowledgement and own descendant cleanup; peer survives |
+| Assignment/resume/retirement failure | Preserve existing error and owned-root cleanup |
+| Ordinary WSL guest lifetime not established | No guest-stop or safe-replay claim |
+
+### 5. Good / Base / Bad
+
+Good: retain the exact suspended WSL root while allowing shared descendants to
+outlive that client. Base: launcher loss keeps a Git mutation uncertain. Bad:
+relax all native Jobs or treat closing a WSL launcher as Linux cleanup proof.
+
+### 6. Tests Required
+
+Actions pins exact strict versus WSL Job flags and typed routing for both
+ordinary entry points and private capture. Preserve native descendant, root
+assignment/resume/failure and cleanup coverage. Keep every original actual WSL
+account/lifecycle/descendant assertion unchanged; append bounded owned-fixture
+concurrent-peer regressions for ordinary completion/timeout and private
+cancel/timeout, without activating the diagnostic hold. Run the real Git lease
+classification/review tests. WSL2, enabled interop, nested Jobs and real-device
+native acceptance remain separate from the isolated WSL1 gate.
+
+The appended fixture uses eight client-first rows after the untouched original
+lifecycle loop. It requires own-marker readiness and pending workers before
+retirement, then a still-pending peer and exact final public markers afterward.
+Use twelve fresh no-reuse UUID directories; ordinary short calls have 5s
+deadlines, fixed 2s/10s bodies, and each fixed 15s peer has a 20s deadline.
+Private cancellation/timeout controls remain 15s/5s with strict stop replies
+and the existing descendant postchecks. Sixteen readiness loops have absolute
+10s dispatch budgets, 50ms intervals and 200-call caps; with forty fixed calls,
+at most 3240 adapter calls are added. Captures remain bounded, bodies never log,
+and unwind aborts pending private work before joining. Existing final-command
+and cleanup grace still apply; OS scheduling is not a hard wall-clock promise.
+Client-first ordering does not force cold instance startup after case setup.
+
+### 7. Wrong vs Correct
+
+Wrong: make a WSL cancellation appear successful by dropping cleanup evidence.
+Correct: preserve the private host acknowledgement and exact write uncertainty
+while changing only which descendants inherit the per-client Windows Job.

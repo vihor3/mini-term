@@ -3933,4 +3933,408 @@ fn tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host() {
         assert!(actual == expected, "WSL lifecycle failed: {}", diagnostic());
         case.assert_retired();
     }
+    wsl_containment::assert_peer_survival(&fixture);
+}
+
+#[cfg(windows)]
+mod wsl_containment {
+    use super::*;
+    use crate::execution_host::{
+        PreProjectLocalContext, execute_host_command, execute_pre_project_local_command,
+    };
+
+    const PEER_SLEEP: Duration = Duration::from_secs(15);
+    const PEER_TIMEOUT: Duration = Duration::from_secs(20);
+    const SHORT_TIMEOUT: Duration = Duration::from_secs(5);
+    const PRIVATE_CANCEL_TIMEOUT: Duration = Duration::from_secs(15);
+    const PRIVATE_TIMEOUT: Duration = Duration::from_secs(5);
+    const READINESS_TIMEOUT: Duration = Duration::from_secs(10);
+    const READINESS_INTERVAL: Duration = Duration::from_millis(50);
+    const MAX_READINESS_PROBES: usize = 200;
+    const PEER_SCRIPT: &str = r"printf '%s\n' mt-containment-start && : > peer-ready && /usr/bin/sleep 15 && printf '%s\n' mt-containment-end";
+    const PEER_OUTPUT: &[u8] = b"mt-containment-start\nmt-containment-end\n";
+    const COMPLETE_SCRIPT: &str = r": > short-ready && exec /usr/bin/sleep 2";
+    const TIMEOUT_SCRIPT: &str = r": > short-ready && exec /usr/bin/sleep 10";
+
+    #[derive(Clone, Copy, Debug)]
+    enum Route {
+        Project,
+        PreProject,
+    }
+
+    impl Route {
+        fn execute(
+            self,
+            fixture: &WslFixture,
+            plan: &CommandPlan,
+            timeout: Duration,
+        ) -> Result<CommandOutput, CommandExecutionError> {
+            match self {
+                Self::Project => {
+                    let result = execute_host_command(
+                        &fixture.source,
+                        plan,
+                        timeout,
+                        WSL_FIXTURE_OUTPUT_CAP,
+                    )?;
+                    assert!(result.observed_connection_epoch.is_none());
+                    Ok(result.output)
+                }
+                Self::PreProject => {
+                    let ExecutionBackend::Wsl { distro } = &fixture.source.backend else {
+                        panic!("WSL containment requires its captured distribution")
+                    };
+                    execute_pre_project_local_command(
+                        &PreProjectLocalContext::Wsl {
+                            distro: distro.clone(),
+                            cwd: fixture.source.canonical_path.clone(),
+                        },
+                        plan,
+                        timeout,
+                        WSL_FIXTURE_OUTPUT_CAP,
+                    )
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ShortClient {
+        Complete,
+        Timeout,
+    }
+
+    impl ShortClient {
+        fn plan(self) -> CommandPlan {
+            match self {
+                Self::Complete => CommandPlan::new("/bin/sh", ["-c", COMPLETE_SCRIPT]),
+                Self::Timeout => CommandPlan::new("/bin/sh", ["-c", TIMEOUT_SCRIPT]),
+            }
+        }
+
+        fn overlap_limit(self) -> Duration {
+            match self {
+                Self::Complete => Duration::from_secs(2),
+                Self::Timeout => SHORT_TIMEOUT,
+            }
+        }
+    }
+
+    fn owns_root(fixture: &WslFixture) -> bool {
+        matches!(
+            (&fixture.source.backend, &fixture.attested_distro),
+            (ExecutionBackend::Wsl { distro }, Some(attested)) if distro == attested
+        ) && fixture.source.canonical_path == "/mini-term-fixture"
+            && fixture.source.root_source_path == "/mini-term-fixture"
+    }
+
+    struct Worker<T> {
+        thread: Option<std::thread::JoinHandle<T>>,
+        abort_request: Option<AccountCancellation>,
+    }
+
+    impl<T: Send + 'static> Worker<T> {
+        fn spawn(
+            abort_request: Option<AccountCancellation>,
+            action: impl FnOnce() -> T + Send + 'static,
+        ) -> Self {
+            let thread = std::thread::Builder::new()
+                .spawn(action)
+                .unwrap_or_else(|_| panic!("WSL containment worker could not start"));
+            Self {
+                thread: Some(thread),
+                abort_request,
+            }
+        }
+
+        fn is_finished(&self) -> bool {
+            self.thread.as_ref().is_none_or(|thread| thread.is_finished())
+        }
+
+        fn join(&mut self) -> T {
+            self.thread
+                .take()
+                .expect("WSL containment worker already joined")
+                .join()
+                .unwrap_or_else(|_| panic!("WSL containment worker panicked"))
+        }
+    }
+
+    impl<T> Drop for Worker<T> {
+        fn drop(&mut self) {
+            if let Some(thread) = self.thread.take() {
+                if let Some(cancellation) = &self.abort_request {
+                    cancellation.cancel();
+                }
+                // Public commands have no cancellation API: their fixed sleep
+                // and runner deadline bound this join, including during unwind.
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn wait_ready<T: Send + 'static>(case: &WslFixture, name: &str, worker: &Worker<T>) {
+        let deadline = Instant::now() + READINESS_TIMEOUT;
+        for _ in 0..MAX_READINESS_PROBES {
+            assert!(
+                Instant::now() < deadline && !worker.is_finished(),
+                "WSL containment worker did not become ready while running"
+            );
+            if case.exists(name) {
+                return;
+            }
+            std::thread::sleep(READINESS_INTERVAL);
+        }
+        panic!("WSL containment readiness probe limit exceeded");
+    }
+
+    fn peer_plan() -> CommandPlan {
+        CommandPlan::new("/bin/sh", ["-c", PEER_SCRIPT])
+    }
+
+    type Peer = Worker<Result<CommandOutput, CommandExecutionError>>;
+
+    fn start_peer(
+        case: &WslFixture,
+        abort_request: Option<AccountCancellation>,
+    ) -> (Instant, Peer) {
+        let source = case.clone();
+        let started = Instant::now();
+        // Abort the earlier private request before joining this peer if its
+        // startup/readiness or the owning case unwinds.
+        let peer = Worker::spawn(abort_request, move || {
+            Route::Project.execute(&source, &peer_plan(), PEER_TIMEOUT)
+        });
+        wait_ready(case, "peer-ready", &peer);
+        (started, peer)
+    }
+
+    fn assert_bounded_output(output: &CommandOutput) {
+        assert!(
+            !output.stdout_truncated
+                && !output.stderr_truncated
+                && output.stdout.len() <= WSL_FIXTURE_OUTPUT_CAP
+                && output.stderr.len() <= WSL_FIXTURE_OUTPUT_CAP,
+            "WSL containment output exceeded its capture bounds"
+        );
+    }
+
+    fn finish_peer(started: Instant, mut peer: Peer) {
+        // Readiness proved guest entry; before the fixed sleep can elapse,
+        // require the independent client still to be pending after retirement.
+        assert!(
+            started.elapsed() < PEER_SLEEP && !peer.is_finished(),
+            "WSL containment did not retain an overlapping public peer"
+        );
+        let output = peer.join().unwrap_or_else(|error| {
+            panic!("WSL containment peer dispatch failed: {:?}", error.kind)
+        });
+        assert_bounded_output(&output);
+        assert!(
+            output.exit_code == Some(0)
+                && !output.timed_out
+                && output.stdout == PEER_OUTPUT
+                && output.stderr.is_empty(),
+            "WSL containment peer did not complete with its exact public markers: exit={:?} timed_out={} stdout_bytes={} stderr_bytes={}",
+            output.exit_code,
+            output.timed_out,
+            output.stdout.len(),
+            output.stderr.len()
+        );
+    }
+
+    pub(super) fn assert_peer_survival(fixture: &WslFixture) {
+        assert!(owns_root(fixture), "WSL containment source is not attested");
+        for route in [Route::Project, Route::PreProject] {
+            for client in [ShortClient::Complete, ShortClient::Timeout] {
+                let case = fixture.case();
+                let source = case.clone();
+                let short_started = Instant::now();
+                let mut short = Worker::spawn(None, move || {
+                    route.execute(&source, &client.plan(), SHORT_TIMEOUT)
+                });
+                wait_ready(&case, "short-ready", &short);
+                let (started, peer) = start_peer(&case, None);
+                assert!(
+                    short_started.elapsed() < client.overlap_limit()
+                        && !short.is_finished()
+                        && !peer.is_finished(),
+                    "WSL containment short client did not overlap its later peer: {route:?} {client:?}"
+                );
+                let output = short.join().unwrap_or_else(|error| {
+                    panic!(
+                        "WSL containment short client failed: {route:?} {client:?} {:?}",
+                        error.kind
+                    )
+                });
+                assert_bounded_output(&output);
+                assert!(output.stdout.is_empty() && output.stderr.is_empty());
+                let matched = match client {
+                    ShortClient::Complete => {
+                        output.exit_code == Some(0) && !output.timed_out
+                    }
+                    ShortClient::Timeout => {
+                        output.timed_out && output.exit_code != Some(0)
+                    }
+                };
+                assert!(
+                    matched,
+                    "WSL containment short result failed: {route:?} {client:?} exit={:?} timed_out={}",
+                    output.exit_code,
+                    output.timed_out
+                );
+                finish_peer(started, peer);
+            }
+        }
+
+        for lifecycle in [
+            WslLifecycleCase::DataCancel,
+            WslLifecycleCase::DataTimeout,
+            WslLifecycleCase::LookupCancel,
+            WslLifecycleCase::LookupTimeout,
+        ] {
+            let (login, cancel, expected) = match lifecycle {
+                WslLifecycleCase::DataCancel => ("Slow", true, AccountExecutionError::Cancelled),
+                WslLifecycleCase::DataTimeout => ("Slow", false, AccountExecutionError::TimedOut),
+                WslLifecycleCase::LookupCancel => {
+                    ("LookupSlow", true, AccountExecutionError::Cancelled)
+                }
+                WslLifecycleCase::LookupTimeout => {
+                    ("LookupSlow", false, AccountExecutionError::TimedOut)
+                }
+                WslLifecycleCase::PipeDescendant => unreachable!(),
+            };
+            let peer_case = fixture.case();
+            let case = fixture.case();
+            let cancellation = AccountCancellation::default();
+            let timeout = if cancel {
+                PRIVATE_CANCEL_TIMEOUT
+            } else {
+                PRIVATE_TIMEOUT
+            };
+            let bounded =
+                AccountExecutionControl::new(timeout, cancellation.clone(), None).unwrap();
+            let source = case.source.clone();
+            let request_started = Instant::now();
+            let mut request = Worker::spawn(Some(cancellation.clone()), move || {
+                execute_selected_account(&source, &selected("github.com", login), &bounded)
+            });
+            wait_ready(&case, "ready", &request);
+            let (started, peer) = start_peer(&peer_case, Some(cancellation.clone()));
+            assert!(
+                request_started.elapsed() < timeout
+                    && !request.is_finished()
+                    && !peer.is_finished(),
+                "WSL containment private request did not overlap its later peer: {lifecycle:?}"
+            );
+            if cancel {
+                cancellation.cancel();
+            }
+            let result = request.join();
+            assert!(result.observed_connection_epoch.is_none());
+            // Readiness excludes pre-dispatch stops. The real WSL executor
+            // requires the strict host cleanup acknowledgement for these errors.
+            let actual = result.result.as_ref().err().copied();
+            assert!(
+                actual == Some(expected),
+                "WSL containment private cleanup failed: {lifecycle:?} result={actual:?}"
+            );
+            case.assert_retired();
+            finish_peer(started, peer);
+        }
+    }
+
+    #[test]
+    fn containment_requires_attested_root_before_case_creation() {
+        let mut fixture = WslFixture {
+            source: snapshot(Path::new("/mini-term-fixture")),
+            attested_distro: Some("owned-fixture".into()),
+        };
+        assert!(!owns_root(&fixture));
+        fixture.source.backend = ExecutionBackend::Wsl {
+            distro: "owned-fixture".into(),
+        };
+        assert!(owns_root(&fixture));
+        let mut changed = fixture.clone();
+        changed.attested_distro = None;
+        assert!(!owns_root(&changed));
+        changed.attested_distro = Some("different-fixture".into());
+        assert!(!owns_root(&changed));
+        let mut changed = fixture.clone();
+        changed.source.canonical_path.push_str("/cases/reused");
+        assert!(!owns_root(&changed));
+        fixture.source.root_source_path.push_str("/different");
+        assert!(!owns_root(&fixture));
+    }
+
+    #[test]
+    fn containment_public_plans_and_limits_are_fixed() {
+        assert_eq!(peer_plan().program, "/bin/sh");
+        assert_eq!(
+            peer_plan().args,
+            [
+                "-c",
+                r"printf '%s\n' mt-containment-start && : > peer-ready && /usr/bin/sleep 15 && printf '%s\n' mt-containment-end",
+            ]
+        );
+        assert_eq!(PEER_SLEEP, Duration::from_secs(15));
+        assert_eq!(PEER_TIMEOUT, Duration::from_secs(20));
+        assert_eq!(PEER_OUTPUT, b"mt-containment-start\nmt-containment-end\n");
+        assert_eq!(ShortClient::Complete.plan().program, "/bin/sh");
+        assert_eq!(
+            ShortClient::Complete.plan().args,
+            ["-c", ": > short-ready && exec /usr/bin/sleep 2"]
+        );
+        assert_eq!(ShortClient::Complete.overlap_limit(), Duration::from_secs(2));
+        assert_eq!(ShortClient::Timeout.plan().program, "/bin/sh");
+        assert_eq!(
+            ShortClient::Timeout.plan().args,
+            ["-c", ": > short-ready && exec /usr/bin/sleep 10"]
+        );
+        assert_eq!(ShortClient::Timeout.overlap_limit(), Duration::from_secs(5));
+        assert_eq!(SHORT_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(PRIVATE_CANCEL_TIMEOUT, Duration::from_secs(15));
+        assert_eq!(PRIVATE_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(WSL_FIXTURE_OUTPUT_CAP, 4096);
+        assert_eq!(READINESS_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(READINESS_INTERVAL, Duration::from_millis(50));
+        assert_eq!(MAX_READINESS_PROBES, 200);
+    }
+
+    #[test]
+    fn containment_worker_ownership_joins_and_cancels_on_unwind() {
+        let cancellation = AccountCancellation::default();
+        let mut worker = Worker::spawn(Some(cancellation.clone()), || 7);
+        assert_eq!(worker.join(), 7);
+        drop(worker);
+        assert!(!cancellation.is_cancelled());
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let completed = finished.clone();
+        {
+            let _worker = Worker::spawn(None, move || {
+                completed.store(true, Ordering::Release);
+            });
+        }
+        assert!(finished.load(Ordering::Acquire));
+
+        let observed_cancel = cancellation.clone();
+        let cancelled_before_join = Arc::new(AtomicBool::new(false));
+        let observed_order = cancelled_before_join.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _worker: Worker<()> = Worker::spawn(Some(cancellation.clone()), move || {
+                // Drop must signal before joining, even if that worker panics.
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while !observed_cancel.is_cancelled() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                observed_order.store(observed_cancel.is_cancelled(), Ordering::Release);
+                panic!("synthetic containment worker unwind");
+            });
+            panic!("synthetic containment owner unwind");
+        }));
+        assert!(result.is_err());
+        assert!(cancellation.is_cancelled());
+        assert!(cancelled_before_join.load(Ordering::Acquire));
+    }
 }

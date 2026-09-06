@@ -6,3 +6,4 @@
 {"file":".trellis/tasks/09-06-native-ui-remote-feedback/prd.md","reason":"Explicit user approval now includes the reproduced WSL lifecycle issue without changing SSH/UI scope."}
 {"file":".trellis/tasks/09-06-native-remote-git/research/wsl-instance-retirement.md","reason":"Bounded public two-row single-probe causal comparison; no production Job-policy change."}
 {"file":".trellis/spec/mt-app/backend/release-staging-contract.md","reason":"Private/public output boundaries and narrowly authorized test-only pre-retirement wait."}
+{"file":".trellis/spec/mt-app/backend/github-project-tasks-contract.md","reason":"Private WSL client-root ownership preserves host-envelope group cleanup, control and strict acknowledgement."}

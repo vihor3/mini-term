@@ -1661,3 +1661,77 @@ detaching a native test worker. The eighteen diagnostic functions and both Git
 safety tests remain UNRUN. Main read the final report and guard, retained all
 original private/production behavior, and is preparing the scoped Actions
 candidate. Unrelated pre-existing dirty files remain outside this submission.
+
+Scoped candidate f1fde4dc8e7a3e3560acc57aa3009fbef9ef0490 was committed/pushed,
+starting CI34030386551 and Package34030386556. Linux101478701475 failed its
+formatting gate. Main downloaded exact-run artifact9988409408, read the entire
+full-rustfmt.patch and applied it mechanically to execution_host.rs, Git tests
+and Tasks tests only. Rootfs101478701638 succeeded; WSL101478843292 completed
+owned import and is in the actual-test step. Windows101478701601 is compiling.
+The formatter successor is intentionally not pushed before the timing result;
+no local checks or WSL operations occurred, and no diagnostic pass is claimed.
+
+Main committed the complete generated formatter patch as551595b without push,
+so f1fde4d's running jobs were not cancelled. ActualWSL101478843292 completed
+one test, failed22.07s at the unchanged DataCancel assertion. Private returned
+HostHelperUnavailable163576us, before cancellation298938us; first readiness
+retired145955-145982us Count5 while the private root was NotInJob/Alive. Private
+exit-1 at155006us still had no stop or valid acknowledgement; no private bytes
+were exposed. Owned mt-tasks-34030386551-1 cleanup succeeded11:40:53Z.
+
+The public timing contrast supplied positive retirement-interference evidence.
+Immediate: empty probe exit0 completed135056us, retired135091-135116us Count4;
+producer returned143955us exit9 with only the start marker. AfterProducer:
+equivalent empty probe exit0 completed134642us and held; producer returned
+1086362us exit0 with exact start/end markers, then released1086394us and retired
+1086405-1086410us Count0. Both timing_issue fields were null. This single
+post-failure WSL1 contrast supports the retirement boundary, not a kernel member
+identity, universal causality or WSL2 compatibility. Original failure stayed red.
+
+Main authorized the previously reviewed typed WSL-client-root policy candidate:
+WSL-only KILL_ON_JOB_CLOSE | SILENT_BREAKAWAY_OK, preserving suspended exact-root
+assignment/resume and all fallible root cleanup. Newton owns execution_host.rs
+and private process.rs; Tesla owns appended actual peer-survival fixtures in
+Tasks tests.rs. No private envelope/control/ack, original lifecycle assertions,
+PTY, native/SSH, dependency, workflow or production-delay change is authorized.
+Main added the production ownership contract with explicit escaped-descendant,
+ordinary guest-stop and WSL2/interop/nested-Job limits. Source and tests are being
+authored; this candidate has not run in Actions.
+
+All f1fde4d jobs have now completed. Windows101478701601 succeeded: onboarding
+82/3, Files49/14/5/1, execution-host25, Tasks executor44 plus1ignored actualWSL,
+Tasksapp/config/domain24/2/31, Git24/6/126 and terminal-host31. All eighteen
+public timing/comparison regressions and both new Git safety tests explicitly
+passed. Package101478701516/run34030386556 succeeded; its installer was not
+downloaded or launched. Linux remains failed at formatting and actual WSL remains
+failed at the original assertion, so no full compatible candidate is claimed.
+The generated formatter commit551595b stays local until the production source
+and fixture slices are reviewed, avoiding an unnecessary intermediate CI run.
+
+Noether's independent read-only production WIP check found no concrete typed
+routing/flag/root-cleanup/private-capture defect in Newton's current slice.
+Final check still awaits both releases. Main's fixture-contract review requested
+short/private-client-first startup in Tesla's new peer cases, with marker-proven
+overlap before retirement and a still-pending peer afterward. This strengthens
+the cleanup regression but does not force cold WSL startup; no distro restart
+or original-loop change is authorized.
+
+Newton released/froze the production policy and five focused tests. Main read
+its exact diff/handoff; Noether's partial final check found no defect. Tesla
+then released/froze eight client-first peer-survival rows appended only after
+the entire unchanged original lifecycle loop, plus three ownership/plan/join
+tests. Main reviewed both overlap guards and the exact bounds:12 fresh cases,
+8 finite15s peers/20s deadlines,4 short5s calls,4 private requests,12 descendant
+postcheck commands,16 capped10s readiness loops; at most3240 adapter calls.
+The healthy peer sleeps add about two minutes. No public body/private bytes log,
+original assertions or diagnostic holds change, and setup may warm the instance.
+Main documented these limits and transferred all three source files to Noether
+for the final combined check. Current production/fixture execution is UNRUN.
+
+Noether completed the final combined containment check with no remaining source
+finding and no further source fix. It released/froze all three source files and
+the current review report. Main read the final report, checked the bounded
+typed-only fixture diagnostics, and is submitting the scoped production patch
+together with the already committed formatter successor. All eight new units,
+eight actual peer rows and the unchanged actual WSL baseline still require
+fresh exact-SHA Actions proof; no native UI or broader WSL acceptance is claimed.
