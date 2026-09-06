@@ -1126,9 +1126,18 @@ fn wsl_prelude_diagnostics_are_bounded_stage_specific_and_secret_safe() {
     }
     for (text, class) in [
         ("chdir(/fixture_credential_path) failed 2", "cwd-failed"),
-        ("Error code: Wsl/Service/E_ACCESSDENIED fixture_credential_error", "access-denied"),
-        ("Failed to translate fixture_credential_path", "path-translation"),
-        ("No such file or directory: fixture_credential_path", "file-not-found"),
+        (
+            "Error code: Wsl/Service/E_ACCESSDENIED fixture_credential_error",
+            "access-denied",
+        ),
+        (
+            "Failed to translate fixture_credential_path",
+            "path-translation",
+        ),
+        (
+            "No such file or directory: fixture_credential_path",
+            "file-not-found",
+        ),
     ] {
         assert_eq!(wsl_prelude_output_class(text.as_bytes()), class);
     }

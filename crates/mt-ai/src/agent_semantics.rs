@@ -69,15 +69,33 @@ mod tests {
         for (provider, title, activity) in [
             ("pi", "\u{03c0} : project", AgentActivity::Working),
             ("pi", "\u{03c0} ! approve tool", AgentActivity::Blocked),
-            ("pi", "\u{03c0} > waiting label : working", AgentActivity::Waiting),
-            ("opencode", "\u{280b} OC | conversation", AgentActivity::Working),
+            (
+                "pi",
+                "\u{03c0} > waiting label : working",
+                AgentActivity::Waiting,
+            ),
+            (
+                "opencode",
+                "\u{280b} OC | conversation",
+                AgentActivity::Working,
+            ),
             ("opencode", "OC | conversation", AgentActivity::Waiting),
             ("claude", "\u{2733} task title", AgentActivity::Waiting),
             ("claude", "\u{280b} Claude Code", AgentActivity::Working),
-            ("grok", "\u{280b} - reading files - grok", AgentActivity::Working),
+            (
+                "grok",
+                "\u{280b} - reading files - grok",
+                AgentActivity::Working,
+            ),
         ] {
-            assert_eq!(activity_from_owned_title(&provider.parse().unwrap(), title), Some(activity));
-            assert_eq!(activity_from_owned_title(&"codex".parse().unwrap(), title), None);
+            assert_eq!(
+                activity_from_owned_title(&provider.parse().unwrap(), title),
+                Some(activity)
+            );
+            assert_eq!(
+                activity_from_owned_title(&"codex".parse().unwrap(), title),
+                None
+            );
         }
     }
 
@@ -85,13 +103,27 @@ mod tests {
     fn arbitrary_titles_redraws_and_transcripts_have_no_semantics() {
         for provider in ["claude", "codex", "opencode", "pi", "grok"] {
             for title in [
-                "", "working", "done", "permission required", "codex - working",
-                "shell | pi : project", "\u{280b} arbitrary task", "\x1b[2J",
-                "\u{03c0}: project", "OC | ", "\u{280b} fix tests - grok",
+                "",
+                "working",
+                "done",
+                "permission required",
+                "codex - working",
+                "shell | pi : project",
+                "\u{280b} arbitrary task",
+                "\x1b[2J",
+                "\u{03c0}: project",
+                "OC | ",
+                "\u{280b} fix tests - grok",
             ] {
-                assert_eq!(activity_from_owned_title(&provider.parse().unwrap(), title), None);
+                assert_eq!(
+                    activity_from_owned_title(&provider.parse().unwrap(), title),
+                    None
+                );
             }
         }
-        assert_eq!(activity_from_owned_title(&"pi".parse().unwrap(), &"x".repeat(1025)), None);
+        assert_eq!(
+            activity_from_owned_title(&"pi".parse().unwrap(), &"x".repeat(1025)),
+            None
+        );
     }
 }

@@ -715,3 +715,14 @@ including staged payload and extracted NSIS verification. This older non-Agent
 installer does not validate the pending full-source candidate, overall CI,
 actual remote transport or native interaction. Main will push only reviewed
 follow-ups with the Agent commit; all execution remains Actions-only.
+
+McClintock released the precise fake HEAD lookup and stronger unchanged-status/
+zero-dispatch assertions. Main reviewed and committed the 19-file follow-up as
+`0b284756a5ce9d1fe82771961ce82ef35e1cba0d`, then pushed it with `8ab8c27`.
+This is the first candidate containing the entire reviewed Agent slice:
+CI `34007314719`, package `34007314807`. Linux `101416803570` stopped at
+changed Rust formatting; generated i18n is unchanged and passed. Main downloaded
+and applied the complete exact-run `full-rustfmt.patch` to index and working
+source (23 product files), with no local formatter or checker. Windows
+`101416803507` compilation and actual WSL `101416918481` continue; the format
+follow-up is held from push until their useful compile/diagnostic evidence.

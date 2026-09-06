@@ -160,10 +160,7 @@ impl HookState {
     /// Test-only observation of Hook age; polling must not renew this timestamp.
     #[cfg(test)]
     pub(crate) fn status_age(&self, pty_id: u32) -> Option<Duration> {
-        self.last_hook_time
-            .lock()
-            .get(&pty_id)
-            .map(|t| t.elapsed())
+        self.last_hook_time.lock().get(&pty_id).map(|t| t.elapsed())
     }
 
     /// 当前会话身份;从未收到带 session_id 的事件时返回 None
@@ -177,9 +174,7 @@ impl HookState {
     /// 误推断为 claude-code,靠后续带 turn_id 的事件在这里纠正并重新通知。
     fn record_session(&self, pty_id: u32, identity: HookSessionId) -> bool {
         let mut map = self.last_session.lock();
-        let changed = map
-            .get(&pty_id)
-            .is_none_or(|prev| prev != &identity);
+        let changed = map.get(&pty_id).is_none_or(|prev| prev != &identity);
         map.insert(pty_id, identity);
         changed
     }
@@ -187,9 +182,7 @@ impl HookState {
     /// 更新指定 PTY 的 hook 状态
     pub(crate) fn update(&self, pty_id: u32, status: String) {
         self.hook_enabled.lock().insert(pty_id);
-        self.last_hook_time
-            .lock()
-            .insert(pty_id, Instant::now());
+        self.last_hook_time.lock().insert(pty_id, Instant::now());
         self.last_hook_status.lock().insert(pty_id, status);
     }
 
@@ -221,7 +214,10 @@ impl HookState {
     ) -> (ActiveHookSession, bool) {
         let mut map = self.active_sessions.lock();
         let queue = map.entry(pty_id).or_default();
-        if let Some(session) = queue.iter_mut().find(|s| s.identity.session_id == session_id) {
+        if let Some(session) = queue
+            .iter_mut()
+            .find(|s| s.identity.session_id == session_id)
+        {
             if agent.is_some() {
                 session.identity.agent = agent;
             }
@@ -254,7 +250,9 @@ impl HookState {
     fn end_session(&self, pty_id: u32, session_id: &str) -> Option<EndedHookSession> {
         let mut map = self.active_sessions.lock();
         let queue = map.get_mut(&pty_id)?;
-        let index = queue.iter().position(|s| s.identity.session_id == session_id)?;
+        let index = queue
+            .iter()
+            .position(|s| s.identity.session_id == session_id)?;
         let session = queue.remove(index)?;
         let empty = queue.is_empty();
         let can_clear_receipt = session.receipt.is_some()
@@ -262,7 +260,11 @@ impl HookState {
         if empty {
             map.remove(&pty_id);
         }
-        Some(EndedHookSession { session, was_last: empty, can_clear_receipt })
+        Some(EndedHookSession {
+            session,
+            was_last: empty,
+            can_clear_receipt,
+        })
     }
 
     /// 给已结束的会话 id 打墓碑
@@ -348,10 +350,12 @@ fn classify_notification(notification_type: Option<&str>) -> NotificationKind {
         // `task_complete` 是 grok 的类型（回合做完时的知会）。它必须归 Passive:
         // 判 Confirmation 会让每次任务完成都点亮「有事等你确认」的黄灯,
         // 而真正的完成播报另有 Stop 事件负责。
-        Some("idle_prompt") | Some("auth_success") | Some("elicitation_complete")
-        | Some("elicitation_response") | Some("agent_completed") | Some("task_complete") => {
-            NotificationKind::Passive
-        }
+        Some("idle_prompt")
+        | Some("auth_success")
+        | Some("elicitation_complete")
+        | Some("elicitation_response")
+        | Some("agent_completed")
+        | Some("task_complete") => NotificationKind::Passive,
         _ => NotificationKind::Unknown,
     }
 }
@@ -404,10 +408,7 @@ fn is_confirmation_notification(message: &str) -> bool {
 }
 
 /// Notification 是否「需要用户确认」:类型优先,类型缺失才看文案。
-fn notification_needs_confirmation(
-    notification_type: Option<&str>,
-    message: Option<&str>,
-) -> bool {
+fn notification_needs_confirmation(notification_type: Option<&str>, message: Option<&str>) -> bool {
     match classify_notification(notification_type) {
         NotificationKind::Confirmation => true,
         NotificationKind::Passive => false,
@@ -420,7 +421,11 @@ fn notification_needs_confirmation(
 /// Notification 需细分后归一化：权限/确认类与真正的权限请求同义，归一化为
 /// "PermissionRequest"（否则 UI 拿不到 notification_type/message，无法区分闲置
 /// 提醒——闲置提醒不是待办，不该点黄灯）；重试类已映射 ai-working，原样透传。
-fn event_cause<'a>(event: &'a str, notification_type: Option<&str>, message: Option<&str>) -> &'a str {
+fn event_cause<'a>(
+    event: &'a str,
+    notification_type: Option<&str>,
+    message: Option<&str>,
+) -> &'a str {
     if event == "Notification" && notification_needs_confirmation(notification_type, message) {
         "PermissionRequest"
     } else {
@@ -435,10 +440,7 @@ fn event_cause<'a>(event: &'a str, notification_type: Option<&str>, message: Opt
 /// (原为 `pub(crate)`:老架构里「点不点黄灯」由前端 TS 复算,迁移后 UI 在同一
 /// 进程内,直接用本函数,免得再养一份会漂移的副本。)
 pub fn is_attention_cause(cause: &str) -> bool {
-    matches!(
-        cause,
-        "PermissionRequest" | "Elicitation" | "StopFailure"
-    )
+    matches!(cause, "PermissionRequest" | "Elicitation" | "StopFailure")
 }
 
 /// 将 hook 事件名映射为 PTY 状态
@@ -546,7 +548,13 @@ pub fn handle_hook_payload(
     payload: HookPayload,
 ) {
     let Some(pty_id) = payload.pty_id else { return };
-    let Some(event) = payload.event.as_deref().or(payload.hook_event_name.as_deref()) else { return };
+    let Some(event) = payload
+        .event
+        .as_deref()
+        .or(payload.hook_event_name.as_deref())
+    else {
+        return;
+    };
     let sid = payload.session_id.as_deref().filter(|sid| {
         !sid.trim().is_empty() && sid.len() <= 512 && !sid.chars().any(char::is_control)
     });
@@ -554,7 +562,9 @@ pub fn handle_hook_payload(
         // Never fall back to the current pane identity or capture on an end.
         let Some(sid) = sid else { return };
         hook_state.mark_session_ended(pty_id, sid.to_string());
-        let Some(ended) = hook_state.end_session(pty_id, sid) else { return };
+        let Some(ended) = hook_state.end_session(pty_id, sid) else {
+            return;
+        };
         let session = ended.session;
         if payload.reason.as_deref() != Some("clear") {
             if ended.was_last {
@@ -585,13 +595,19 @@ pub fn handle_hook_payload(
             return;
         }
         let (session, started) = hook_state.recognize_session(
-            pty_id, payload.agent.clone(), sid, event == "SessionStart", tracker,
+            pty_id,
+            payload.agent.clone(),
+            sid,
+            event == "SessionStart",
+            tracker,
         );
         (Some(session), started)
     } else {
         (None, false)
     };
-    let weak_episode = session.as_ref().and_then(|session| session.receipt)
+    let weak_episode = session
+        .as_ref()
+        .and_then(|session| session.receipt)
         .and_then(|receipt| receipt.episode);
     if let Some(session) = &session {
         let identity = &session.identity;
@@ -606,8 +622,11 @@ pub fn handle_hook_payload(
                 cwd,
                 weak_episode,
                 hook_lifecycle: identity.lifecycle_id.map(|id| {
-                    if started { crate::HookLifecycleEvent::Started(id) }
-                    else { crate::HookLifecycleEvent::Observed(id) }
+                    if started {
+                        crate::HookLifecycleEvent::Started(id)
+                    } else {
+                        crate::HookLifecycleEvent::Observed(id)
+                    }
                 }),
             });
         }
@@ -617,7 +636,9 @@ pub fn handle_hook_payload(
         // Any provider correction above still travels as an identity event.
         return;
     }
-    let agent = session.as_ref().and_then(|session| session.identity.agent.clone())
+    let agent = session
+        .as_ref()
+        .and_then(|session| session.identity.agent.clone())
         .or(payload.agent.clone());
     let Some(status) = map_event_to_status(
         event,
@@ -633,7 +654,11 @@ pub fn handle_hook_payload(
         tracker.mark_ai_session_if_receipt(pty_id, agent.as_deref().unwrap_or("claude"), receipt);
     }
     hook_state.update(pty_id, status.to_string());
-    let cause = event_cause(event, payload.notification_type.as_deref(), payload.message.as_deref());
+    let cause = event_cause(
+        event,
+        payload.notification_type.as_deref(),
+        payload.message.as_deref(),
+    );
     emitter.emit_hook_status(StatusChange {
         pty_id,
         status: status.to_string(),
@@ -868,10 +893,16 @@ mod tests {
         }
     }
 
-    fn hook_payload(event: &str, sid: Option<&str>, agent: &str, reason: Option<&str>) -> HookPayload {
+    fn hook_payload(
+        event: &str,
+        sid: Option<&str>,
+        agent: &str,
+        reason: Option<&str>,
+    ) -> HookPayload {
         serde_json::from_value(serde_json::json!({
             "pty_id": 1, "event": event, "session_id": sid, "agent": agent, "reason": reason,
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     fn produce(
@@ -881,7 +912,12 @@ mod tests {
         event: &str,
         sid: &str,
     ) {
-        handle_hook_payload(hooks, emitter, tracker, hook_payload(event, Some(sid), "codex", None));
+        handle_hook_payload(
+            hooks,
+            emitter,
+            tracker,
+            hook_payload(event, Some(sid), "codex", None),
+        );
     }
 
     #[test]
@@ -897,7 +933,11 @@ mod tests {
             produce(&hooks, &tracker, &emitter, "SessionStart", "old");
             produce(&hooks, &tracker, &emitter, "UserPromptSubmit", "old");
             tracker.track_input_with_line_snapshot(1, "\x04", None);
-            tracker.track_input_with_line_snapshot(1, if pending { "launcher\r" } else { "claude\r" }, None);
+            tracker.track_input_with_line_snapshot(
+                1,
+                if pending { "launcher\r" } else { "claude\r" },
+                None,
+            );
             let later = tracker.weak_session_snapshot(1);
             let started = tracker.ai_session_started_at(1);
             for event in ["SessionStart", "Stop", "UserPromptSubmit", "UnknownEvent"] {
@@ -916,12 +956,25 @@ mod tests {
             }
             assert_eq!(captured.statuses.lock().len(), before);
             let statuses = captured.statuses.lock();
-            assert!(statuses.iter().all(|status| status.weak_episode == original));
+            assert!(
+                statuses
+                    .iter()
+                    .all(|status| status.weak_episode == original)
+            );
             let exit = statuses.last().unwrap();
             assert_eq!(exit.cause.as_deref(), Some("SessionEnd"));
             assert_eq!(exit.hook_session.as_ref().unwrap().session_id, "old");
-            assert_eq!(exit.hook_session.as_ref().unwrap().agent.as_deref(), Some("codex"));
-            assert!(captured.identities.lock().iter().all(|identity| identity.weak_episode == original));
+            assert_eq!(
+                exit.hook_session.as_ref().unwrap().agent.as_deref(),
+                Some("codex")
+            );
+            assert!(
+                captured
+                    .identities
+                    .lock()
+                    .iter()
+                    .all(|identity| identity.weak_episode == original)
+            );
             tracker.note_output(1, "PS D:\\project> claude\r\n");
             assert_eq!(tracker.ai_session_agent(1).as_deref(), Some("claude"));
             assert!(tracker.weak_detection_episode(1) > original);
@@ -942,8 +995,10 @@ mod tests {
             produce(&hooks, &tracker, &emitter, "SessionStart", "resumed");
             let first_lifecycle = hooks.session_of(1).unwrap().lifecycle_id;
             assert!(first_lifecycle.is_some());
-            assert_eq!(captured.identities.lock().last().unwrap().hook_lifecycle,
-                first_lifecycle.map(crate::HookLifecycleEvent::Started));
+            assert_eq!(
+                captured.identities.lock().last().unwrap().hook_lifecycle,
+                first_lifecycle.map(crate::HookLifecycleEvent::Started)
+            );
             produce(&hooks, &tracker, &emitter, "SessionStart", "resumed");
             assert_eq!(captured.identities.lock().len(), 1);
             assert_eq!(hooks.session_of(1).unwrap().lifecycle_id, first_lifecycle);
@@ -965,12 +1020,31 @@ mod tests {
             assert!(!hooks.is_session_ended(1, "resumed"));
             let second_lifecycle = hooks.session_of(1).unwrap().lifecycle_id;
             assert_ne!(second_lifecycle, first_lifecycle);
-            assert_eq!(captured.identities.lock().last().unwrap().hook_lifecycle,
-                second_lifecycle.map(crate::HookLifecycleEvent::Started));
-            assert_eq!(captured.identities.lock().last().unwrap().weak_episode, second);
+            assert_eq!(
+                captured.identities.lock().last().unwrap().hook_lifecycle,
+                second_lifecycle.map(crate::HookLifecycleEvent::Started)
+            );
+            assert_eq!(
+                captured.identities.lock().last().unwrap().weak_episode,
+                second
+            );
             produce(&hooks, &tracker, &emitter, "SessionEnd", "resumed");
-            assert_eq!(captured.statuses.lock().last().unwrap().weak_episode, second);
-            assert_eq!(captured.statuses.lock().last().unwrap().hook_session.as_ref().unwrap().lifecycle_id, second_lifecycle);
+            assert_eq!(
+                captured.statuses.lock().last().unwrap().weak_episode,
+                second
+            );
+            assert_eq!(
+                captured
+                    .statuses
+                    .lock()
+                    .last()
+                    .unwrap()
+                    .hook_session
+                    .as_ref()
+                    .unwrap()
+                    .lifecycle_id,
+                second_lifecycle
+            );
             assert!(!tracker.is_ai_session(1));
         }
     }
@@ -984,21 +1058,39 @@ mod tests {
         tracker.track_input_with_line_snapshot(1, "launcher\r", None);
         produce(&hooks, &tracker, &emitter, "UserPromptSubmit", "session");
         let lifecycle = hooks.session_of(1).unwrap().lifecycle_id.unwrap();
-        assert_eq!(captured.identities.lock().last().unwrap().hook_lifecycle,
-            Some(crate::HookLifecycleEvent::Observed(lifecycle)));
+        assert_eq!(
+            captured.identities.lock().last().unwrap().hook_lifecycle,
+            Some(crate::HookLifecycleEvent::Observed(lifecycle))
+        );
         tracker.note_output(1, "PS D:\\project> claude\r\n");
         let later = tracker.weak_session_snapshot(1);
         produce(&hooks, &tracker, &emitter, "SessionStart", "session");
         assert_eq!(captured.identities.lock().len(), 2);
-        assert_eq!(captured.identities.lock().last().unwrap().hook_lifecycle,
-            Some(crate::HookLifecycleEvent::Started(lifecycle)));
-        assert_eq!(captured.identities.lock().last().unwrap().weak_episode, None);
+        assert_eq!(
+            captured.identities.lock().last().unwrap().hook_lifecycle,
+            Some(crate::HookLifecycleEvent::Started(lifecycle))
+        );
+        assert_eq!(
+            captured.identities.lock().last().unwrap().weak_episode,
+            None
+        );
         assert_eq!(tracker.weak_session_snapshot(1), later);
         produce(&hooks, &tracker, &emitter, "SessionStart", "session");
         assert_eq!(captured.identities.lock().len(), 2);
         produce(&hooks, &tracker, &emitter, "SessionEnd", "session");
         assert_eq!(tracker.weak_session_snapshot(1), later);
-        assert_eq!(captured.statuses.lock().last().unwrap().hook_session.as_ref().unwrap().lifecycle_id, Some(lifecycle));
+        assert_eq!(
+            captured
+                .statuses
+                .lock()
+                .last()
+                .unwrap()
+                .hook_session
+                .as_ref()
+                .unwrap()
+                .lifecycle_id,
+            Some(lifecycle)
+        );
     }
 
     #[test]
@@ -1016,22 +1108,56 @@ mod tests {
                 produce(&hooks, &tracker, &emitter, "SessionStart", "inner");
             }
             let status = hooks.get_status(1);
-            handle_hook_payload(&hooks, &emitter, &tracker,
-                hook_payload("SessionEnd", Some(ending), "codex", clear.then_some("clear")));
+            handle_hook_payload(
+                &hooks,
+                &emitter,
+                &tracker,
+                hook_payload(
+                    "SessionEnd",
+                    Some(ending),
+                    "codex",
+                    clear.then_some("clear"),
+                ),
+            );
             assert!(tracker.is_ai_session(1));
             assert_eq!(tracker.weak_detection_episode(1), episode);
             assert!(hooks.is_hook_enabled(1));
             assert_eq!(hooks.get_status(1), status);
             assert!(hooks.is_session_ended(1, ending));
-            assert_eq!(captured.statuses.lock().last().unwrap().hook_session.as_ref().unwrap().session_id, ending);
+            assert_eq!(
+                captured
+                    .statuses
+                    .lock()
+                    .last()
+                    .unwrap()
+                    .hook_session
+                    .as_ref()
+                    .unwrap()
+                    .session_id,
+                ending
+            );
             assert_eq!(captured.statuses.lock().last().unwrap().status, "idle");
             if clear {
                 produce(&hooks, &tracker, &emitter, "SessionStart", "after-clear");
             }
-            produce(&hooks, &tracker, &emitter, "SessionEnd", if clear { "after-clear" } else { "outer" });
+            produce(
+                &hooks,
+                &tracker,
+                &emitter,
+                "SessionEnd",
+                if clear { "after-clear" } else { "outer" },
+            );
             assert!(!hooks.is_hook_enabled(1));
             assert!(!tracker.is_ai_session(1));
-            assert_eq!(captured.statuses.lock().iter().filter(|status| status.cause.as_deref() == Some("SessionEnd")).count(), 2);
+            assert_eq!(
+                captured
+                    .statuses
+                    .lock()
+                    .iter()
+                    .filter(|status| status.cause.as_deref() == Some("SessionEnd"))
+                    .count(),
+                2
+            );
         }
     }
 
@@ -1043,24 +1169,40 @@ mod tests {
                 let tracker = SessionTracker::new();
                 let captured = Arc::new(CapturedHooks::default());
                 let emitter = StatusEmitter::new(captured.clone());
-                tracker.track_input_with_line_snapshot(1, if pending { "launcher\r" } else { "claude\r" }, None);
+                tracker.track_input_with_line_snapshot(
+                    1,
+                    if pending { "launcher\r" } else { "claude\r" },
+                    None,
+                );
                 let source = tracker.weak_session_snapshot(1);
                 for sid in [None, Some("never-seen"), Some("")] {
-                    handle_hook_payload(&hooks, &emitter, &tracker, hook_payload("SessionEnd", sid, "codex", None));
+                    handle_hook_payload(
+                        &hooks,
+                        &emitter,
+                        &tracker,
+                        hook_payload("SessionEnd", sid, "codex", None),
+                    );
                 }
                 assert!(captured.statuses.lock().is_empty());
                 assert_eq!(tracker.weak_session_snapshot(1), source);
                 produce(&hooks, &tracker, &emitter, event, "unknown-owner");
                 assert_eq!(tracker.weak_session_snapshot(1), source);
                 assert_eq!(captured.statuses.lock().last().unwrap().weak_episode, None);
-                assert_eq!(captured.identities.lock().last().unwrap().weak_episode, None);
+                assert_eq!(
+                    captured.identities.lock().last().unwrap().weak_episode,
+                    None
+                );
                 tracker.note_output(1, "PS D:\\project> claude\r\n");
                 let published = tracker.weak_session_snapshot(1);
                 assert_eq!(published.0.as_deref(), Some("claude"));
                 // Neither a repeated start nor a provider correction upgrades
                 // a previously unknown receipt to the now-published source.
-                handle_hook_payload(&hooks, &emitter, &tracker,
-                    hook_payload("SessionStart", Some("unknown-owner"), "claude", None));
+                handle_hook_payload(
+                    &hooks,
+                    &emitter,
+                    &tracker,
+                    hook_payload("SessionStart", Some("unknown-owner"), "claude", None),
+                );
                 produce(&hooks, &tracker, &emitter, "SessionEnd", "unknown-owner");
                 assert_eq!(tracker.weak_session_snapshot(1), published);
                 assert_eq!(captured.statuses.lock().last().unwrap().weak_episode, None);
@@ -1100,7 +1242,12 @@ mod tests {
         let before = captured.statuses.lock().len();
         let source = tracker.weak_session_snapshot(1);
         for sid in [None, Some("late-unseen"), Some("")] {
-            handle_hook_payload(&hooks, &emitter, &tracker, hook_payload("SessionEnd", sid, "codex", None));
+            handle_hook_payload(
+                &hooks,
+                &emitter,
+                &tracker,
+                hook_payload("SessionEnd", sid, "codex", None),
+            );
         }
         assert_eq!(captured.statuses.lock().len(), before);
         assert_eq!(hooks.get_status(1).as_deref(), Some("ai-working"));
@@ -1125,8 +1272,20 @@ mod tests {
             produce(&hooks, &tracker, &emitter, event, "unseen");
             assert_eq!(tracker.weak_session_snapshot(1), source);
         }
-        assert!(captured.statuses.lock().iter().all(|status| status.weak_episode.is_none()));
-        assert!(captured.identities.lock().iter().all(|identity| identity.weak_episode.is_none()));
+        assert!(
+            captured
+                .statuses
+                .lock()
+                .iter()
+                .all(|status| status.weak_episode.is_none())
+        );
+        assert!(
+            captured
+                .identities
+                .lock()
+                .iter()
+                .all(|identity| identity.weak_episode.is_none())
+        );
     }
 
     #[test]
@@ -1205,17 +1364,27 @@ mod tests {
         let state = HookState::new();
         assert!(state.session_of(1).is_none());
 
-        state.record_session(1, HookSessionId {
-            agent: Some("claude-code".into()), session_id: "sid-a".into(), lifecycle_id: None,
-        });
+        state.record_session(
+            1,
+            HookSessionId {
+                agent: Some("claude-code".into()),
+                session_id: "sid-a".into(),
+                lifecycle_id: None,
+            },
+        );
         let s = state.session_of(1).unwrap();
         assert_eq!(s.session_id, "sid-a");
         assert_eq!(s.agent.as_deref(), Some("claude-code"));
 
         // /clear 换会话:同 pty 覆盖为新 id
-        state.record_session(1, HookSessionId {
-            agent: Some("claude-code".into()), session_id: "sid-b".into(), lifecycle_id: None,
-        });
+        state.record_session(
+            1,
+            HookSessionId {
+                agent: Some("claude-code".into()),
+                session_id: "sid-b".into(),
+                lifecycle_id: None,
+            },
+        );
         assert_eq!(state.session_of(1).unwrap().session_id, "sid-b");
 
         // SessionEnd / PTY 关闭走 remove:会话身份一并清除
@@ -1279,10 +1448,20 @@ mod tests {
         assert!(state.end_session(1, "sid-0").is_none());
         // 结束 sid-1..sid-(CAP-1):每次集合都还非空
         for i in 1..ACTIVE_SESSIONS_CAP {
-            assert!(!state.end_session(1, &format!("sid-{}", i)).unwrap().was_last);
+            assert!(
+                !state
+                    .end_session(1, &format!("sid-{}", i))
+                    .unwrap()
+                    .was_last
+            );
         }
         // 结束最后一个成员即空——证明 sid-0 确实已被挤出(否则此处非空)
-        assert!(state.end_session(1, &format!("sid-{}", ACTIVE_SESSIONS_CAP)).unwrap().was_last);
+        assert!(
+            state
+                .end_session(1, &format!("sid-{}", ACTIVE_SESSIONS_CAP))
+                .unwrap()
+                .was_last
+        );
     }
 
     #[test]
@@ -1371,7 +1550,10 @@ mod tests {
     /// 不映射它,pane 会确定性地卡在 ai-working 直到下一轮对话。
     #[test]
     fn stop_failure_falls_back_to_ai_idle() {
-        assert_eq!(map_event("StopFailure", Some("claude-code"), None), Some("ai-idle"));
+        assert_eq!(
+            map_event("StopFailure", Some("claude-code"), None),
+            Some("ai-idle")
+        );
         // 但它不是「完成」:cause 必须原样透传,UI 的 isAiCompletion 只认 Stop
         assert_eq!(event_cause("StopFailure", None, None), "StopFailure");
         // 需要用户回来重发 → 走 attention 黄灯
@@ -1418,7 +1600,11 @@ mod tests {
         );
         // 权限请求即便文案是本地化的、关键词全不匹配,也照样归一化点黄灯
         assert_eq!(
-            event_cause("Notification", Some("permission_prompt"), Some("Bash ツールの実行")),
+            event_cause(
+                "Notification",
+                Some("permission_prompt"),
+                Some("Bash ツールの実行")
+            ),
             "PermissionRequest"
         );
         // MCP 表单打开 → 黄灯;表单已提交 → 不再是待办
@@ -1464,7 +1650,8 @@ mod tests {
         use crate::monitor::{StatusChange, StatusEmitter};
         use std::sync::Mutex as StdMutex;
 
-        let seen: Arc<StdMutex<Vec<(String, Option<String>)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let seen: Arc<StdMutex<Vec<(String, Option<String>)>>> =
+            Arc::new(StdMutex::new(Vec::new()));
         let sink_seen = seen.clone();
         let emitter = StatusEmitter::new(Arc::new(move |c: StatusChange| {
             sink_seen.lock().unwrap().push((c.status, c.cause));
@@ -1475,7 +1662,11 @@ mod tests {
         note_user_interrupt(&state, &emitter, 1, Some("claude".into()));
         note_user_interrupt(&state, &emitter, 1, Some("claude".into()));
 
-        assert_eq!(state.get_status(1).as_deref(), Some("ai-idle"), "结论必须落盘");
+        assert_eq!(
+            state.get_status(1).as_deref(),
+            Some("ai-idle"),
+            "结论必须落盘"
+        );
         assert_eq!(
             *seen.lock().unwrap(),
             vec![("ai-idle".to_string(), Some("Interrupt".to_string()))],
@@ -1580,7 +1771,11 @@ mod tests {
     fn idle_reminder_notification_keeps_event_name() {
         // 闲置提醒不是待办:保持 Notification 原名,UI 不点黄灯也不算完成
         assert_eq!(
-            event_cause("Notification", None, Some("Claude is waiting for your input")),
+            event_cause(
+                "Notification",
+                None,
+                Some("Claude is waiting for your input")
+            ),
             "Notification"
         );
         // 无文案无从判定,保守不归一化(真授权另有 PermissionRequest/Elicitation 兜底)
@@ -1590,10 +1785,16 @@ mod tests {
     #[test]
     fn non_notification_events_pass_through() {
         // 事件名原样透传:UI 的 isAiCompletion 只认 Stop,黄灯认 PermissionRequest/Elicitation
-        assert_eq!(event_cause("PermissionRequest", None, None), "PermissionRequest");
+        assert_eq!(
+            event_cause("PermissionRequest", None, None),
+            "PermissionRequest"
+        );
         assert_eq!(event_cause("Elicitation", None, None), "Elicitation");
         assert_eq!(event_cause("Stop", None, None), "Stop");
-        assert_eq!(event_cause("UserPromptSubmit", None, None), "UserPromptSubmit");
+        assert_eq!(
+            event_cause("UserPromptSubmit", None, None),
+            "UserPromptSubmit"
+        );
     }
 
     // ---- Grok Build 特有语义 ----

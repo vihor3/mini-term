@@ -398,7 +398,12 @@ mod tests {
         let remote_path = "project 'one' $(printf path-leak)";
         let command = build_remote_login_command_with_env(remote_path, Some(&route));
         let mut fixture = Command::new("python3");
-        fixture.args(["-c", include_str!("ssh_login_tests.py"), &command, remote_path]);
+        fixture.args([
+            "-c",
+            include_str!("ssh_login_tests.py"),
+            &command,
+            remote_path,
+        ]);
         for (key, value) in route.pairs() {
             fixture.arg(key).arg(value);
         }

@@ -1015,7 +1015,8 @@ impl OrcaProjectSidebar {
             AgentActivity::Unknown => "Unknown",
         };
         let activity = crate::agent_activity::activity_label_with_freshness(
-            activity, agent.activity_freshness,
+            activity,
+            agent.activity_freshness,
         );
         let activity_color = if agent.attention
             || matches!(
@@ -1560,7 +1561,10 @@ mod status_tests {
         assert_eq!(indicator.activity, SidebarActivity::LastKnownWork);
         assert_eq!(indicator.connectivity, Some(AgentConnectivity::Live));
         agent.activity_freshness = mt_ai::AgentActivityFreshness::Fresh;
-        assert_eq!(SidebarIndicator::from_target(&agent).activity, SidebarActivity::Working);
+        assert_eq!(
+            SidebarIndicator::from_target(&agent).activity,
+            SidebarActivity::Working
+        );
     }
 
     #[test]

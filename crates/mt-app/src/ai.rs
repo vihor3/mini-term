@@ -286,7 +286,9 @@ mod tests {
         tracker.clear_ai_session(7);
         tracker.track_input_with_line_snapshot(7, "claude\r", None);
         assert!(tracker.weak_detection_episode(7) > captured);
-        let AiEvent::Session { identity, .. } = rx.try_recv().unwrap() else { panic!("missing identity"); };
+        let AiEvent::Session { identity, .. } = rx.try_recv().unwrap() else {
+            panic!("missing identity");
+        };
         assert_eq!(identity.weak_episode, captured);
         assert_eq!(identity.agent.as_deref(), Some("codex"));
         let Some(mt_ai::HookLifecycleEvent::Started(lifecycle_id)) = identity.hook_lifecycle else {
@@ -294,17 +296,39 @@ mod tests {
         };
         let mut compatibility_identity = identity.clone();
         compatibility_identity.hook_lifecycle = None;
-        assert_eq!(serde_json::to_value(&identity).unwrap(), serde_json::to_value(compatibility_identity).unwrap());
-        let AiEvent::Status { change, .. } = rx.try_recv().unwrap() else { panic!("missing status"); };
+        assert_eq!(
+            serde_json::to_value(&identity).unwrap(),
+            serde_json::to_value(compatibility_identity).unwrap()
+        );
+        let AiEvent::Status { change, .. } = rx.try_recv().unwrap() else {
+            panic!("missing status");
+        };
         assert_eq!(change.weak_episode, captured);
         assert_eq!(change.agent.as_deref(), Some("codex"));
-        assert_eq!(change.hook_session.as_ref().unwrap().session_id, "source-session");
-        assert_eq!(change.hook_session.as_ref().unwrap().agent.as_deref(), Some("codex"));
-        assert_eq!(change.hook_session.as_ref().unwrap().lifecycle_id, Some(lifecycle_id));
+        assert_eq!(
+            change.hook_session.as_ref().unwrap().session_id,
+            "source-session"
+        );
+        assert_eq!(
+            change.hook_session.as_ref().unwrap().agent.as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            change.hook_session.as_ref().unwrap().lifecycle_id,
+            Some(lifecycle_id)
+        );
         let mut compatibility_change = change.clone();
         compatibility_change.hook_session = None;
-        assert_eq!(serde_json::to_value(&change).unwrap(), serde_json::to_value(compatibility_change).unwrap());
-        assert!(serde_json::to_value(change).unwrap().get("hookSession").is_none());
+        assert_eq!(
+            serde_json::to_value(&change).unwrap(),
+            serde_json::to_value(compatibility_change).unwrap()
+        );
+        assert!(
+            serde_json::to_value(change)
+                .unwrap()
+                .get("hookSession")
+                .is_none()
+        );
     }
 
     #[test]
@@ -362,7 +386,9 @@ mod tests {
         });
         assert_eq!(sink.next_sequence.load(Ordering::Relaxed), 1);
         let AiEvent::Status {
-            route: captured, change: queued, ..
+            route: captured,
+            change: queued,
+            ..
         } = rx.try_recv().unwrap()
         else {
             panic!("expected the event queued before exit");

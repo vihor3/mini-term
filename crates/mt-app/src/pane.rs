@@ -90,13 +90,19 @@ pub enum PaneEvent {
     /// 调用路径是 `AppStore::write_to_pane`(在 `store.update` 里调),那里再去
     /// `AppStore::global(cx).update` 就是同一实体的嵌套 update,gpui 直接 panic。
     AiMarks(MarkerBatch),
-    TitleChanged { title: String, observed_at_unix_ms: i64 },
+    TitleChanged {
+        title: String,
+        observed_at_unix_ms: i64,
+    },
 }
 
 /// reader / watcher 线程 → 主线程的信号。
 enum PaneSignal {
     Output,
-    Title { title: String, observed_at_unix_ms: i64 },
+    Title {
+        title: String,
+        observed_at_unix_ms: i64,
+    },
     Exit(Option<u32>),
     Disconnected(String),
 }
@@ -301,7 +307,10 @@ fn observe_pty_output(
     let observed_at_unix_ms = chrono::Utc::now().timestamp_millis();
     emulator.advance(bytes);
     if let Some((title, observed_at_unix_ms)) = titles.observe(bytes, observed_at_unix_ms) {
-        let _ = tx.unbounded_send(PaneSignal::Title { title, observed_at_unix_ms });
+        let _ = tx.unbounded_send(PaneSignal::Title {
+            title,
+            observed_at_unix_ms,
+        });
     }
     ai.perception().observe_output(pty_id, bytes);
     crate::git_watch::observe_output(pty_id, bytes);
@@ -319,16 +328,24 @@ struct OutputTitle(Option<String>);
 
 impl mt_terminal::alacritty_terminal::vte::Perform for OutputTitle {
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        if !params.first().is_some_and(|kind| *kind == b"0" || *kind == b"2") || params.len() < 2 {
+        if !params
+            .first()
+            .is_some_and(|kind| *kind == b"0" || *kind == b"2")
+            || params.len() < 2
+        {
             return;
         }
         let mut title = String::new();
         for (index, param) in params[1..].iter().enumerate() {
-            let Ok(value) = std::str::from_utf8(param) else { return; };
+            let Ok(value) = std::str::from_utf8(param) else {
+                return;
+            };
             if title.len() + value.len() + usize::from(index > 0) > 1024 {
                 return;
             }
-            if index > 0 { title.push(';'); }
+            if index > 0 {
+                title.push(';');
+            }
             title.push_str(value);
         }
         self.0 = Some(title);
@@ -371,7 +388,8 @@ fn capture_output_title(
     observed_at_unix_ms: Option<i64>,
 ) -> Option<(String, i64)> {
     let observed_at_unix_ms = observed_at_unix_ms?;
-    if title.len() > 1024 || title.chars().any(char::is_control)
+    if title.len() > 1024
+        || title.chars().any(char::is_control)
         || previous.as_ref() == Some(&title)
     {
         return None;
@@ -561,7 +579,14 @@ fn start_legacy(
     let output_tx = tx.clone();
     let titles = parking_lot::Mutex::new(PtyTitleObserver::default());
     let pty = PtySession::spawn_with_options(spec, options, move |bytes| {
-        observe_pty_output(pty_id, &output_emulator, &output_ai, &output_tx, &mut titles.lock(), bytes);
+        observe_pty_output(
+            pty_id,
+            &output_emulator,
+            &output_ai,
+            &output_tx,
+            &mut titles.lock(),
+            bytes,
+        );
     })?;
     Ok(LaunchOutcome {
         transport: TerminalTransport::Legacy(pty),
@@ -699,7 +724,10 @@ impl TerminalPane {
                 let mut title_observation = None;
                 match signal {
                     PaneSignal::Output => {}
-                    PaneSignal::Title { title, observed_at_unix_ms } => {
+                    PaneSignal::Title {
+                        title,
+                        observed_at_unix_ms,
+                    } => {
                         title_observation = Some((title, observed_at_unix_ms));
                     }
                     PaneSignal::Exit(code) => exit = Some(code),
@@ -709,7 +737,10 @@ impl TerminalPane {
                 while let Ok(extra) = rx.try_recv() {
                     match extra {
                         PaneSignal::Output => {}
-                        PaneSignal::Title { title, observed_at_unix_ms } => {
+                        PaneSignal::Title {
+                            title,
+                            observed_at_unix_ms,
+                        } => {
                             title_observation = Some((title, observed_at_unix_ms));
                         }
                         PaneSignal::Exit(code) => exit = Some(code),
@@ -719,10 +750,15 @@ impl TerminalPane {
                 if this
                     .update(cx, |pane, cx| {
                         pane.drain_term_events(cx);
-                        if !pane.exited && exit.is_none() && disconnected.is_none()
+                        if !pane.exited
+                            && exit.is_none()
+                            && disconnected.is_none()
                             && let Some((title, observed_at_unix_ms)) = title_observation
                         {
-                            cx.emit(PaneEvent::TitleChanged { title, observed_at_unix_ms });
+                            cx.emit(PaneEvent::TitleChanged {
+                                title,
+                                observed_at_unix_ms,
+                            });
                         }
                         if disconnected.is_some() || exit.is_some() {
                             pane.ai.remove_pane(pane.pty_id);
@@ -1358,12 +1394,16 @@ mod tests {
     fn title_capture_preserves_output_time_without_redraw_or_repeat_renewal() {
         let mut previous = None;
         assert!(capture_output_title(&mut previous, "retained".into(), None).is_none());
-        assert_eq!(capture_output_title(&mut previous, "owned".into(), Some(100)),
-            Some(("owned".into(), 100)));
+        assert_eq!(
+            capture_output_title(&mut previous, "owned".into(), Some(100)),
+            Some(("owned".into(), 100))
+        );
         assert!(capture_output_title(&mut previous, "owned".into(), Some(200)).is_none());
         assert!(capture_output_title(&mut previous, "owned".into(), None).is_none());
-        assert_eq!(capture_output_title(&mut previous, "new state".into(), Some(300)),
-            Some(("new state".into(), 300)));
+        assert_eq!(
+            capture_output_title(&mut previous, "new state".into(), Some(300)),
+            Some(("new state".into(), 300))
+        );
         assert!(capture_output_title(&mut previous, "x".repeat(1025), Some(400)).is_none());
     }
 
@@ -1374,13 +1414,27 @@ mod tests {
         let mut observer = PtyTitleObserver::default();
         assert!(observer.observe(b"ordinary output\x1b[2J", 1).is_none());
         assert!(observer.observe(b"\x1b]2;ow", 2).is_none());
-        assert_eq!(observer.observe(b"ned; task\x07", 3), Some(("owned; task".into(), 3)));
+        assert_eq!(
+            observer.observe(b"ned; task\x07", 3),
+            Some(("owned; task".into(), 3))
+        );
         assert!(observer.observe(b"\x1b]2;owned; task\x1b\\", 4).is_none());
         emulator.advance(b"\x1b[5n");
         let events = emulator.events().drain();
-        assert!(events.iter().any(|event| matches!(event, TermEvent::Title(title) if title == "retained")));
-        assert!(events.iter().any(|event| matches!(event, TermEvent::PtyWrite(_))));
-        assert_eq!(observer.observe(b"\x1b]0;\x07", 5), Some((String::new(), 5)));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TermEvent::Title(title) if title == "retained"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TermEvent::PtyWrite(_)))
+        );
+        assert_eq!(
+            observer.observe(b"\x1b]0;\x07", 5),
+            Some((String::new(), 5))
+        );
     }
 
     #[test]

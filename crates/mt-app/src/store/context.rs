@@ -11,8 +11,7 @@ use std::ffi::OsStr;
 use gpui::{App, Context, Entity, Window};
 use mt_ai::{
     AgentActivity, AgentActivityFreshness, AgentConfirmation, AgentConnectivity, AgentEvidence,
-    AgentProvider, AgentRoute, AgentRuntimeState,
-    sessions::AiSession,
+    AgentProvider, AgentRoute, AgentRuntimeState, sessions::AiSession,
 };
 use mt_identity::{
     AgentEventId, AgentRunId, ExecutionHostId, PaneKey, TabId, TerminalIncarnationId,
@@ -20,8 +19,8 @@ use mt_identity::{
 };
 use mt_layout::ProjectWorktreeBinding;
 
-use crate::pane::TerminalRecovery;
 use crate::execution_host::{ExecutionBackendSignature, ExecutionSourceSignature};
+use crate::pane::TerminalRecovery;
 use crate::tree::{PaneState, PaneStatus};
 
 use super::{AppStore, ProjectState, RemoteAgentProbeCapability};
@@ -50,7 +49,10 @@ impl RuntimeTitleOwner {
             run_id: run.run_id.clone(),
             route: run.route.clone(),
             provider: run.provider.clone(),
-            session_id: run.provider_session_id.clone().filter(|id| !id.is_empty())?,
+            session_id: run
+                .provider_session_id
+                .clone()
+                .filter(|id| !id.is_empty())?,
             connection_epoch: run.connection_epoch,
         })
     }
@@ -63,9 +65,9 @@ impl RuntimeTitleOwner {
         self.route.execution_host_id == source.execution_host_id
             && self.route.worktree_id == source.worktree_id
             && match &source.backend {
-                ExecutionBackendSignature::Ssh { connection_epoch, .. } => {
-                    connection_epoch.is_some() && *connection_epoch == self.connection_epoch
-                }
+                ExecutionBackendSignature::Ssh {
+                    connection_epoch, ..
+                } => connection_epoch.is_some() && *connection_epoch == self.connection_epoch,
                 ExecutionBackendSignature::Local | ExecutionBackendSignature::Wsl { .. } => {
                     self.connection_epoch.is_none()
                 }
@@ -107,10 +109,17 @@ pub(super) struct RuntimeLiveTitle {
 }
 
 impl RuntimeLiveTitle {
-    fn for_run<'a>(&'a self, run: &AgentRuntimeState, source: Option<&ExecutionSourceSignature>) -> Option<&'a str> {
-        (self.route == run.route && self.provider == run.provider
-            && run.process == Some(self.process) && !run.activity.is_ended()
-            && source == Some(&self.source)).then_some(self.title.as_str())
+    fn for_run<'a>(
+        &'a self,
+        run: &AgentRuntimeState,
+        source: Option<&ExecutionSourceSignature>,
+    ) -> Option<&'a str> {
+        (self.route == run.route
+            && self.provider == run.provider
+            && run.process == Some(self.process)
+            && !run.activity.is_ended()
+            && source == Some(&self.source))
+        .then_some(self.title.as_str())
     }
 }
 
@@ -240,8 +249,10 @@ fn usable_runtime_title(value: &str) -> Option<String> {
 fn runtime_fallback_title(label: &str, identity: &str) -> String {
     let label = usable_runtime_title(label).unwrap_or_else(|| "Terminal".into());
     let label = label.chars().take(64).collect::<String>();
-    let identity = identity.strip_prefix(AgentRunId::PREFIX)
-        .or_else(|| identity.strip_prefix(TerminalSessionId::PREFIX)).unwrap_or(identity);
+    let identity = identity
+        .strip_prefix(AgentRunId::PREFIX)
+        .or_else(|| identity.strip_prefix(TerminalSessionId::PREFIX))
+        .unwrap_or(identity);
     let identity = identity.chars().take(8).collect::<String>();
     format!("{label} [{identity}]")
 }
@@ -253,16 +264,18 @@ fn runtime_display_title(
     fallback: &str,
     identity: &str,
 ) -> String {
-    custom_title.and_then(usable_runtime_title)
+    custom_title
+        .and_then(usable_runtime_title)
         .or_else(|| session_title.and_then(usable_runtime_title))
         .or_else(|| live_title.and_then(usable_runtime_title))
         .unwrap_or_else(|| runtime_fallback_title(fallback, identity))
 }
 
 fn live_runtime_title(provider: &AgentProvider, title: &str) -> Option<String> {
-    let mut title = title.trim().trim_start_matches(|ch| {
-        ('\u{2800}'..='\u{28ff}').contains(&ch) || ch == '\u{2733}'
-    }).trim();
+    let mut title = title
+        .trim()
+        .trim_start_matches(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch) || ch == '\u{2733}')
+        .trim();
     match provider.as_str() {
         AgentProvider::OPENCODE => {
             title = title.strip_prefix("\u{25a3} ").unwrap_or(title);
@@ -278,13 +291,30 @@ fn live_runtime_title(provider: &AgentProvider, title: &str) -> Option<String> {
     let title = usable_runtime_title(title)?;
     let lower = title.to_ascii_lowercase();
     let cwd_like = title.starts_with(['/', '\\', '~'])
-        || title.as_bytes().get(1..3).is_some_and(|drive| drive == b":/" || drive == b":\\")
+        || title
+            .as_bytes()
+            .get(1..3)
+            .is_some_and(|drive| drive == b":/" || drive == b":\\")
         || (!title.contains(char::is_whitespace)
             && (title.contains(['/', '\\']) || (title.contains('@') && title.contains(':'))));
-    if cwd_like || lower == provider.as_str()
-        || matches!(lower.as_str(), "claude code" | "working" | "waiting" | "done"
-            | "starting" | "permission required" | "terminal" | "untitled"
-            | "bash" | "zsh" | "fish" | "pwsh" | "powershell")
+    if cwd_like
+        || lower == provider.as_str()
+        || matches!(
+            lower.as_str(),
+            "claude code"
+                | "working"
+                | "waiting"
+                | "done"
+                | "starting"
+                | "permission required"
+                | "terminal"
+                | "untitled"
+                | "bash"
+                | "zsh"
+                | "fish"
+                | "pwsh"
+                | "powershell"
+        )
     {
         return None;
     }
@@ -501,7 +531,8 @@ fn preferred_agent_route_project_id<'a>(
 
 impl AppStore {
     pub(super) fn clear_runtime_live_title(&mut self, route: &AgentRoute) {
-        self.runtime_live_titles.retain(|_, title| &title.route != route);
+        self.runtime_live_titles
+            .retain(|_, title| &title.route != route);
     }
 
     pub(super) fn record_runtime_live_title(
@@ -513,17 +544,28 @@ impl AppStore {
         title: &str,
     ) {
         let Some(run) = self.agent_runtime.run(run_id).filter(|run| {
-            &run.route == route && run.process == Some(process) && !run.activity.is_ended()
+            &run.route == route
+                && run.process == Some(process)
+                && !run.activity.is_ended()
                 && run.confirmation == AgentConfirmation::LiveConfirmed
                 && run.evidence >= AgentEvidence::ProcessAttested
-        }) else { return; };
+        }) else {
+            return;
+        };
         let Some(title) = live_runtime_title(&run.provider, title) else {
             self.runtime_live_titles.remove(run_id);
             return;
         };
-        self.runtime_live_titles.insert(run_id.clone(), RuntimeLiveTitle {
-            route: route.clone(), provider: run.provider.clone(), process, source, title,
-        });
+        self.runtime_live_titles.insert(
+            run_id.clone(),
+            RuntimeLiveTitle {
+                route: route.clone(),
+                provider: run.provider.clone(),
+                process,
+                source,
+                title,
+            },
+        );
     }
 
     pub(super) fn current_agent_route_for_pane(
@@ -536,9 +578,17 @@ impl AppStore {
             return None;
         }
         let binding = self.project_worktree_bindings.get(project_id)?;
-        let panel = self.project_states.get(project_id)?.panels.iter().find(|panel| {
-            panel.layout.pane(&pane.id).is_some_and(|current| current.pty_id == Some(pty_id))
-        })?;
+        let panel = self
+            .project_states
+            .get(project_id)?
+            .panels
+            .iter()
+            .find(|panel| {
+                panel
+                    .layout
+                    .pane(&pane.id)
+                    .is_some_and(|current| current.pty_id == Some(pty_id))
+            })?;
         exact_terminal_route(
             self.terminal_routes.get(&pty_id),
             &binding.execution_host_id,
@@ -558,9 +608,13 @@ impl AppStore {
         }
         match self.current_agent_route_for_pane(project_id, pane) {
             Some(route) if self.agent_runtime.runs().any(|run| &run.route == route) => {
-                return super::ai::accepted_agent_projection(&self.agent_runtime, route, false).live;
+                return super::ai::accepted_agent_projection(&self.agent_runtime, route, false)
+                    .live;
             }
-            None if pane.pty_id.is_some_and(|pty_id| self.terminal_routes.contains_key(&pty_id)) => {
+            None if pane
+                .pty_id
+                .is_some_and(|pty_id| self.terminal_routes.contains_key(&pty_id)) =>
+            {
                 return false;
             }
             _ => {}
@@ -570,8 +624,11 @@ impl AppStore {
 
     pub fn pane_agent_provider(&self, project_id: &str, pane: &PaneState) -> Option<String> {
         if pane.pty_id.is_none() {
-            return pane.shows_ai_session(self.config.ai_auto_resume.unwrap_or(true))
-                .then(|| pane.ai_agent()).flatten().map(str::to_string);
+            return pane
+                .shows_ai_session(self.config.ai_auto_resume.unwrap_or(true))
+                .then(|| pane.ai_agent())
+                .flatten()
+                .map(str::to_string);
         }
         if !self.pane_has_live_agent(project_id, pane) {
             return None;
@@ -579,24 +636,36 @@ impl AppStore {
         if let Some(route) = self.current_agent_route_for_pane(project_id, pane)
             && self.agent_runtime.runs().any(|run| &run.route == route)
         {
-            return super::ai::accepted_agent_projection(&self.agent_runtime, route, false).provider;
+            return super::ai::accepted_agent_projection(&self.agent_runtime, route, false)
+                .provider;
         }
         pane.ai_agent().map(str::to_string)
     }
 
     pub(crate) fn runtime_title_request(&self, project_id: &str) -> Option<RuntimeTitleRequest> {
-        let source = self.project_execution_snapshot(project_id).ok()?.source_signature();
-        let owners = self.agent_runtime.runs().filter_map(|run| {
-            let owner = RuntimeTitleOwner::from_run(run)?;
-            if !owner.matches_source(&source)
-                || run.connectivity != AgentConnectivity::Live
-                || self.resolve_agent_target(&run.run_id).is_none()
-            {
-                return None;
-            }
-            Some(owner)
-        }).collect();
-        Some(RuntimeTitleRequest { project_id: project_id.to_string(), source, owners })
+        let source = self
+            .project_execution_snapshot(project_id)
+            .ok()?
+            .source_signature();
+        let owners = self
+            .agent_runtime
+            .runs()
+            .filter_map(|run| {
+                let owner = RuntimeTitleOwner::from_run(run)?;
+                if !owner.matches_source(&source)
+                    || run.connectivity != AgentConnectivity::Live
+                    || self.resolve_agent_target(&run.run_id).is_none()
+                {
+                    return None;
+                }
+                Some(owner)
+            })
+            .collect();
+        Some(RuntimeTitleRequest {
+            project_id: project_id.to_string(),
+            source,
+            owners,
+        })
     }
 
     pub(crate) fn apply_runtime_session_titles(
@@ -605,17 +674,24 @@ impl AppStore {
         sessions: &[AiSession],
         cx: &mut Context<Self>,
     ) {
-        let current_source = self.project_execution_snapshot(&request.project_id)
-            .ok().map(|snapshot| snapshot.source_signature());
+        let current_source = self
+            .project_execution_snapshot(&request.project_id)
+            .ok()
+            .map(|snapshot| snapshot.source_signature());
         if current_source.as_ref() != Some(&request.source) {
             return;
         }
         self.runtime_session_titles.retain(|run_id, title| {
-            self.agent_runtime.run(run_id).is_some_and(|run| title.owner.matches(run))
+            self.agent_runtime
+                .run(run_id)
+                .is_some_and(|run| title.owner.matches(run))
         });
         let mut changed = false;
         for owner in &request.owners {
-            if !self.agent_runtime.run(&owner.run_id).is_some_and(|run| owner.matches(run))
+            if !self
+                .agent_runtime
+                .run(&owner.run_id)
+                .is_some_and(|run| owner.matches(run))
                 || self.resolve_agent_target(&owner.run_id).is_none()
             {
                 continue;
@@ -624,10 +700,13 @@ impl AppStore {
                 continue;
             };
             let title = RuntimeSessionTitle {
-                owner: owner.clone(), source: request.source.clone(), title,
+                owner: owner.clone(),
+                source: request.source.clone(),
+                title,
             };
             if self.runtime_session_titles.get(&owner.run_id) != Some(&title) {
-                self.runtime_session_titles.insert(owner.run_id.clone(), title);
+                self.runtime_session_titles
+                    .insert(owner.run_id.clone(), title);
                 changed = true;
             }
         }
@@ -642,23 +721,39 @@ impl AppStore {
         pane: &PaneState,
         run: Option<&AgentRuntimeState>,
     ) -> String {
-        let source = self.project_execution_snapshot(project_id).ok()
+        let source = self
+            .project_execution_snapshot(project_id)
+            .ok()
             .map(|snapshot| snapshot.source_signature());
         let session_title = run.and_then(|run| {
-            self.runtime_session_titles.get(&run.run_id)?.for_run(run, source.as_ref())
+            self.runtime_session_titles
+                .get(&run.run_id)?
+                .for_run(run, source.as_ref())
         });
         let live_title = run.and_then(|run| {
-            self.runtime_live_titles.get(&run.run_id)?.for_run(run, source.as_ref())
+            self.runtime_live_titles
+                .get(&run.run_id)?
+                .for_run(run, source.as_ref())
         });
-        let label = run.map(|run| run.provider.as_str().to_string())
+        let label = run
+            .map(|run| run.provider.as_str().to_string())
             .unwrap_or_else(|| self.pane_display_label(project_id, pane));
-        let identity = run.map(|run| run.run_id.as_str()).unwrap_or(pane.terminal_session_id.as_str());
-        runtime_display_title(pane.custom_title.as_deref(), session_title, live_title, &label, identity)
+        let identity = run
+            .map(|run| run.run_id.as_str())
+            .unwrap_or(pane.terminal_session_id.as_str());
+        runtime_display_title(
+            pane.custom_title.as_deref(),
+            session_title,
+            live_title,
+            &label,
+            identity,
+        )
     }
 
     pub fn terminal_runtime_label(&self, project_id: &str, pane: &PaneState) -> String {
         let route = self.current_agent_route_for_pane(project_id, pane);
-        let run = route.and_then(|route| super::ai::single_live_agent_for_route(&self.agent_runtime, route));
+        let run = route
+            .and_then(|route| super::ai::single_live_agent_for_route(&self.agent_runtime, route));
         self.runtime_pane_label(project_id, pane, run)
     }
 
@@ -766,10 +861,9 @@ impl AppStore {
                 provider: run.provider.clone(),
                 provider_session_id: run.provider_session_id.clone(),
                 activity: run.activity,
-                activity_freshness: self.agent_runtime.activity_freshness(
-                    &run.run_id,
-                    chrono::Utc::now().timestamp_millis(),
-                ),
+                activity_freshness: self
+                    .agent_runtime
+                    .activity_freshness(&run.run_id, chrono::Utc::now().timestamp_millis()),
                 connectivity: run.connectivity,
                 connection_epoch: run.connection_epoch,
                 evidence: run.evidence,
@@ -887,11 +981,18 @@ impl AppStore {
                         && self.active_worktree_id() == Some(&binding.worktree_id)
                         && state.active_panel().map(|active| &active.tab_id) == Some(&panel.tab_id)
                         && active_pane_id.as_deref() == Some(pane.id.as_str());
-                    let display_status = pane.pty_id.filter(|pty_id| !self.is_pty_exited(*pty_id))
+                    let display_status = pane
+                        .pty_id
+                        .filter(|pty_id| !self.is_pty_exited(*pty_id))
                         .and_then(|_| self.current_agent_route_for_pane(&project.id, pane))
-                        .and_then(|route| super::ai::agent_display_status(
-                            &self.agent_runtime, route, chrono::Utc::now().timestamp_millis(),
-                        )).unwrap_or(pane.status);
+                        .and_then(|route| {
+                            super::ai::agent_display_status(
+                                &self.agent_runtime,
+                                route,
+                                chrono::Utc::now().timestamp_millis(),
+                            )
+                        })
+                        .unwrap_or(pane.status);
                     rows.push(TerminalJumpView {
                         target,
                         project_name: project.name.clone(),
@@ -1093,7 +1194,8 @@ impl AppStore {
     }
 
     pub(super) fn remove_agent_runtime_route(&mut self, route: &AgentRoute) {
-        self.runtime_session_titles.retain(|_, title| &title.owner.route != route);
+        self.runtime_session_titles
+            .retain(|_, title| &title.owner.route != route);
         self.clear_runtime_live_title(route);
         let removed: Vec<_> = self
             .agent_runtime
@@ -1213,8 +1315,12 @@ impl AppStore {
                             )
                         })
                         .unwrap_or((TerminalRecovery::Unavailable, None, false));
-                    let mut agents = self.agent_runtime.runs()
-                        .filter(|run| route.as_ref() == Some(&run.route) && !run.activity.is_ended())
+                    let mut agents = self
+                        .agent_runtime
+                        .runs()
+                        .filter(|run| {
+                            route.as_ref() == Some(&run.route) && !run.activity.is_ended()
+                        })
                         .filter_map(|run| self.resolve_agent_target(&run.run_id))
                         .collect::<Vec<_>>();
                     agents.sort_by(compare_agent_targets);
@@ -1693,9 +1799,13 @@ mod tests {
 
     fn title_session(id: &str, provider: &str, title: &str) -> AiSession {
         AiSession {
-            id: id.into(), session_type: provider.into(), title: title.into(),
-            timestamp: "2026-09-06T00:00:00Z".into(), model: None,
-            wsl_distro: None, ssh_connection_id: Some("ssh".into()),
+            id: id.into(),
+            session_type: provider.into(),
+            title: title.into(),
+            timestamp: "2026-09-06T00:00:00Z".into(),
+            model: None,
+            wsl_distro: None,
+            ssh_connection_id: Some("ssh".into()),
         }
     }
 
@@ -1709,8 +1819,10 @@ mod tests {
             title_session("exact-session", "claude", "Other provider title"),
             title_session("exact-session", "codex", "Owned conversation"),
         ];
-        assert_eq!(session_title_for_owner(&owner, &source, &sessions).as_deref(),
-            Some("Owned conversation"));
+        assert_eq!(
+            session_title_for_owner(&owner, &source, &sessions).as_deref(),
+            Some("Owned conversation")
+        );
         assert!(session_title_for_owner(&owner, &source, &sessions[..2]).is_none());
         let mut changed_source = source.clone();
         changed_source.backend = ExecutionBackendSignature::Local;
@@ -1726,7 +1838,8 @@ mod tests {
         let source = title_source(&run);
         let title = RuntimeSessionTitle {
             owner: RuntimeTitleOwner::from_run(&run).unwrap(),
-            source: source.clone(), title: "Owned".into(),
+            source: source.clone(),
+            title: "Owned".into(),
         };
         assert_eq!(title.for_run(&run, Some(&source)), Some("Owned"));
         let mut changed = run.clone();
@@ -1760,7 +1873,10 @@ mod tests {
         let owner = RuntimeTitleOwner::from_run(&run).unwrap();
         let source = title_source(&run);
         let sessions = [title_session("exact-session", "codex", "Owned")];
-        assert_eq!(session_title_for_owner(&owner, &source, &sessions).as_deref(), Some("Owned"));
+        assert_eq!(
+            session_title_for_owner(&owner, &source, &sessions).as_deref(),
+            Some("Owned")
+        );
         for epoch in [None, Some(2)] {
             let changed_source = source.clone().with_connection_epoch(epoch);
             assert!(session_title_for_owner(&owner, &changed_source, &sessions).is_none());
@@ -1786,51 +1902,116 @@ mod tests {
         let episode = tracker.weak_detection_episode(7);
         let mut registry = mt_ai::AgentRuntimeRegistry::default();
         let weak = mt_ai::AgentObservation {
-            event_id: AgentEventId::new(), route: run.route.clone(), sequence: 1,
-            connection_epoch: Some(1), weak_episode: episode, provider: run.provider.clone(),
-            provider_session_id: None, process: None, activity: AgentActivity::Unknown,
-            connectivity: AgentConnectivity::Live, confirmation: AgentConfirmation::LiveConfirmed,
-            evidence: AgentEvidence::PtyActivity, received_at_unix_ms: 1,
+            event_id: AgentEventId::new(),
+            route: run.route.clone(),
+            sequence: 1,
+            connection_epoch: Some(1),
+            weak_episode: episode,
+            provider: run.provider.clone(),
+            provider_session_id: None,
+            process: None,
+            activity: AgentActivity::Unknown,
+            connectivity: AgentConnectivity::Live,
+            confirmation: AgentConfirmation::LiveConfirmed,
+            evidence: AgentEvidence::PtyActivity,
+            received_at_unix_ms: 1,
         };
-        let mt_ai::AgentApplyOutcome::Applied { run_id: alias, .. } = registry.observe(weak) else { panic!("weak rejected"); };
+        let mt_ai::AgentApplyOutcome::Applied { run_id: alias, .. } = registry.observe(weak) else {
+            panic!("weak rejected");
+        };
         registry.observe(mt_ai::AgentObservation {
-            event_id: AgentEventId::new(), route: run.route.clone(), sequence: 2,
-            connection_epoch: Some(1), weak_episode: episode, provider: run.provider.clone(),
-            provider_session_id: run.provider_session_id.clone(), process: run.process,
-            activity: AgentActivity::Done, connectivity: AgentConnectivity::Live,
-            confirmation: AgentConfirmation::LiveConfirmed, evidence: AgentEvidence::Hook,
+            event_id: AgentEventId::new(),
+            route: run.route.clone(),
+            sequence: 2,
+            connection_epoch: Some(1),
+            weak_episode: episode,
+            provider: run.provider.clone(),
+            provider_session_id: run.provider_session_id.clone(),
+            process: run.process,
+            activity: AgentActivity::Done,
+            connectivity: AgentConnectivity::Live,
+            confirmation: AgentConfirmation::LiveConfirmed,
+            evidence: AgentEvidence::Hook,
             received_at_unix_ms: 2,
         });
         assert!(registry.is_superseded_weak_alias(&alias));
         assert_eq!(registry.runs().count(), 2);
-        let selected = super::super::ai::single_live_agent_for_route(&registry, &run.route).unwrap();
+        let selected =
+            super::super::ai::single_live_agent_for_route(&registry, &run.route).unwrap();
         let owner = RuntimeTitleOwner::from_run(selected).unwrap();
-        let title = session_title_for_owner(&owner, &source, &[title_session("exact-session", "codex", "Exact title")]);
-        assert_eq!(runtime_display_title(None, title.as_deref(), None, "shell", selected.run_id.as_str()), "Exact title");
+        let title = session_title_for_owner(
+            &owner,
+            &source,
+            &[title_session("exact-session", "codex", "Exact title")],
+        );
+        assert_eq!(
+            runtime_display_title(
+                None,
+                title.as_deref(),
+                None,
+                "shell",
+                selected.run_id.as_str()
+            ),
+            "Exact title"
+        );
         registry.observe_hook_exit(run.route.clone(), AgentEventId::new(), 3, Some(1), 3);
         assert!(super::super::ai::single_live_agent_for_route(&registry, &run.route).is_none());
         assert!(!super::super::ai::accepted_agent_projection(&registry, &run.route, false).live);
         assert!(registry.is_superseded_weak_alias(&alias));
         assert!(!registry.run(&alias).unwrap().activity.is_ended());
-        let fallback = runtime_display_title(None, None, None, "shell", run.route.terminal_session_id.as_str());
+        let fallback = runtime_display_title(
+            None,
+            None,
+            None,
+            "shell",
+            run.route.terminal_session_id.as_str(),
+        );
         assert!(fallback.starts_with("shell ["));
         assert!(!fallback.contains("Exact title"));
     }
 
     #[test]
     fn runtime_title_prefers_manual_names_and_bounds_distinguishable_fallbacks() {
-        assert_eq!(runtime_display_title(Some("  Manual\nname  "), Some("Session"), Some("Live"), "ssh", "terminal1"),
-            "Manual name");
-        assert_eq!(runtime_display_title(Some(" \n"), Some("Session"), Some("Live"), "ssh", "terminal1"),
-            "Session");
-        assert_eq!(runtime_display_title(None, None, Some("Live"), "ssh", "terminal1"), "Live");
-        let first_id = format!("{}11111111-0000-4000-8000-000000000000", TerminalSessionId::PREFIX);
-        let second_id = format!("{}22222222-0000-4000-8000-000000000000", TerminalSessionId::PREFIX);
+        assert_eq!(
+            runtime_display_title(
+                Some("  Manual\nname  "),
+                Some("Session"),
+                Some("Live"),
+                "ssh",
+                "terminal1"
+            ),
+            "Manual name"
+        );
+        assert_eq!(
+            runtime_display_title(
+                Some(" \n"),
+                Some("Session"),
+                Some("Live"),
+                "ssh",
+                "terminal1"
+            ),
+            "Session"
+        );
+        assert_eq!(
+            runtime_display_title(None, None, Some("Live"), "ssh", "terminal1"),
+            "Live"
+        );
+        let first_id = format!(
+            "{}11111111-0000-4000-8000-000000000000",
+            TerminalSessionId::PREFIX
+        );
+        let second_id = format!(
+            "{}22222222-0000-4000-8000-000000000000",
+            TerminalSessionId::PREFIX
+        );
         let first = runtime_display_title(None, None, None, "duplicate-ssh", &first_id);
         let second = runtime_display_title(None, None, None, "duplicate-ssh", &second_id);
         assert_ne!(first, second);
         assert!(first.contains("11111111"));
-        assert_eq!(usable_runtime_title(&"x".repeat(200)).unwrap().len(), RUNTIME_TITLE_LIMIT);
+        assert_eq!(
+            usable_runtime_title(&"x".repeat(200)).unwrap().len(),
+            RUNTIME_TITLE_LIMIT
+        );
         assert!(!usable_runtime_title("a\u{1b}b").unwrap().contains('\u{1b}'));
     }
 
@@ -1840,47 +2021,80 @@ mod tests {
         assert!(live_runtime_title(&claude, "\u{280b} Claude Code").is_none());
         assert!(live_runtime_title(&claude, "\u{2733} /repo").is_none());
         assert!(live_runtime_title(&claude, "root@host:~").is_none());
-        assert_eq!(live_runtime_title(&claude, "\u{2733} Fix ownership").as_deref(), Some("Fix ownership"));
+        assert_eq!(
+            live_runtime_title(&claude, "\u{2733} Fix ownership").as_deref(),
+            Some("Fix ownership")
+        );
         let opencode = "opencode".parse().unwrap();
-        assert_eq!(live_runtime_title(&opencode, "\u{280b} OC | Review changes").as_deref(), Some("Review changes"));
+        assert_eq!(
+            live_runtime_title(&opencode, "\u{280b} OC | Review changes").as_deref(),
+            Some("Review changes")
+        );
         let pi = "pi".parse().unwrap();
         assert!(live_runtime_title(&pi, "\u{03c0} > /repo").is_none());
-        assert_eq!(live_runtime_title(&pi, "\u{03c0} : Fix tests").as_deref(), Some("Fix tests"));
+        assert_eq!(
+            live_runtime_title(&pi, "\u{03c0} : Fix tests").as_deref(),
+            Some("Fix tests")
+        );
     }
 
     #[test]
     fn acknowledged_waiting_and_done_are_not_renewed_by_unchanged_process_inventory() {
-        for activity in [AgentActivity::Waiting, AgentActivity::Blocked, AgentActivity::Done, AgentActivity::Failed] {
+        for activity in [
+            AgentActivity::Waiting,
+            AgentActivity::Blocked,
+            AgentActivity::Done,
+            AgentActivity::Failed,
+        ] {
             let run = title_run();
             let mut registry = mt_ai::AgentRuntimeRegistry::default();
             let outcome = registry.observe(mt_ai::AgentObservation {
-                event_id: run.last_event_id.clone(), route: run.route.clone(),
-                sequence: 1, connection_epoch: Some(1), provider: run.provider.clone(),
+                event_id: run.last_event_id.clone(),
+                route: run.route.clone(),
+                sequence: 1,
+                connection_epoch: Some(1),
+                provider: run.provider.clone(),
                 weak_episode: None,
-                provider_session_id: run.provider_session_id.clone(), process: run.process,
-                activity, connectivity: AgentConnectivity::Live,
-                confirmation: AgentConfirmation::LiveConfirmed, evidence: AgentEvidence::Hook,
+                provider_session_id: run.provider_session_id.clone(),
+                process: run.process,
+                activity,
+                connectivity: AgentConnectivity::Live,
+                confirmation: AgentConfirmation::LiveConfirmed,
+                evidence: AgentEvidence::Hook,
                 received_at_unix_ms: 100,
             });
-            let mt_ai::AgentApplyOutcome::Applied { run_id, .. } = outcome else { panic!("Hook rejected"); };
+            let mt_ai::AgentApplyOutcome::Applied { run_id, .. } = outcome else {
+                panic!("Hook rejected");
+            };
             let acknowledged = registry.run(&run_id).unwrap().last_event_id.clone();
             for sequence in 2..=4 {
-                registry.apply_process_inventory(mt_ai::AgentProcessInventoryObservation {
-                    event_id: AgentEventId::new(), route: run.route.clone(), sequence,
-                    connection_epoch: 1,
-                    weak_episode: None,
-                    processes: vec![mt_ai::AgentProcessObservation {
-                        provider: run.provider.clone(), process: run.process.unwrap(),
-                        activity: AgentActivity::Unknown,
-                    }],
-                    received_at_unix_ms: 100 + sequence as i64 * 2_000,
-                }).unwrap();
+                registry
+                    .apply_process_inventory(mt_ai::AgentProcessInventoryObservation {
+                        event_id: AgentEventId::new(),
+                        route: run.route.clone(),
+                        sequence,
+                        connection_epoch: 1,
+                        weak_episode: None,
+                        processes: vec![mt_ai::AgentProcessObservation {
+                            provider: run.provider.clone(),
+                            process: run.process.unwrap(),
+                            activity: AgentActivity::Unknown,
+                        }],
+                        received_at_unix_ms: 100 + sequence as i64 * 2_000,
+                    })
+                    .unwrap();
                 let current = registry.run(&run_id).unwrap();
                 assert_eq!(current.activity, activity);
                 assert_eq!(current.last_event_id, acknowledged);
                 assert_eq!(current.received_at_unix_ms, 100);
-                let projection = super::super::ai::accepted_agent_projection(&registry, &run.route, false);
-                assert!(!agent_event_is_unread(Some(&acknowledged), &current.last_event_id, activity, projection.attention));
+                let projection =
+                    super::super::ai::accepted_agent_projection(&registry, &run.route, false);
+                assert!(!agent_event_is_unread(
+                    Some(&acknowledged),
+                    &current.last_event_id,
+                    activity,
+                    projection.attention
+                ));
                 assert!(projection.live);
             }
         }

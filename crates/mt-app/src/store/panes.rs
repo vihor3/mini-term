@@ -1152,9 +1152,18 @@ impl AppStore {
             match event {
                 PaneEvent::Exited(code) => store.on_pty_exit(pty_id, *code, cx),
                 PaneEvent::UserInput => store.clear_pane_attention_by_pty(pty_id, cx),
-                PaneEvent::TitleChanged { title, observed_at_unix_ms } => {
+                PaneEvent::TitleChanged {
+                    title,
+                    observed_at_unix_ms,
+                } => {
                     if let Some(route) = expected_route.as_ref() {
-                        store.observe_terminal_title(pty_id, route, title, *observed_at_unix_ms, cx);
+                        store.observe_terminal_title(
+                            pty_id,
+                            route,
+                            title,
+                            *observed_at_unix_ms,
+                            cx,
+                        );
                     }
                 }
                 // AI 任务标记。**必须走事件而不是在 write 里直接 update store** ——

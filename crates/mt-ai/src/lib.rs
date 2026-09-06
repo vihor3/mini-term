@@ -55,13 +55,12 @@ mod util;
 
 pub use agent_runtime::{
     AGENT_RUNTIME_PROTOCOL_VERSION, AGENT_SEMANTIC_MAX_AGE_MS, AgentActivity,
-    AgentActivityFreshness, AgentApplyOutcome, AgentConfirmation,
-    AgentConnectivity, AgentConnectivityObservation, AgentEvidence, AgentObservation,
-    AgentFallbackSupersession, AgentHookLifecycleId, AgentWeakEpisode,
-    AgentObservationIgnored, AgentProcessIdentity, AgentProcessInventoryObservation,
-    AgentProcessObservation, AgentProvider, AgentRoute, AgentRuntimeRegistry, AgentRuntimeState,
-    AgentSemanticObservation, AgentSemanticOwner,
-    activity_from_legacy_status,
+    AgentActivityFreshness, AgentApplyOutcome, AgentConfirmation, AgentConnectivity,
+    AgentConnectivityObservation, AgentEvidence, AgentFallbackSupersession, AgentHookLifecycleId,
+    AgentObservation, AgentObservationIgnored, AgentProcessIdentity,
+    AgentProcessInventoryObservation, AgentProcessObservation, AgentProvider, AgentRoute,
+    AgentRuntimeRegistry, AgentRuntimeState, AgentSemanticObservation, AgentSemanticOwner,
+    AgentWeakEpisode, activity_from_legacy_status,
 };
 pub use agent_semantics::activity_from_owned_title;
 pub use detect::{AI_COMMANDS, interactive_ai_command_name, is_interactive_ai_command};

@@ -35,11 +35,12 @@ use std::cell::RefCell;
 
 use gpui::{
     AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder, px,
+    SharedString, StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder,
+    px,
 };
-use mt_ui::tooltip::Tooltip;
 use mt_ai::sessions::{AiSession, LineageEdge};
 use mt_ui::icons::{AiVendor, BrandIcon};
+use mt_ui::tooltip::Tooltip;
 
 use crate::i18n::t;
 use crate::menu;
@@ -256,13 +257,16 @@ impl BranchFamilyPanel {
                 .background_executor()
                 .spawn(async move {
                     let sessions = mt_ai::sessions::get_ai_sessions(project_path.clone());
-                    let disk =
-                        mt_ai::sessions::scan_session_lineage(project_path, Some(bookkept));
+                    let disk = mt_ai::sessions::scan_session_lineage(project_path, Some(bookkept));
                     (sessions, disk)
                 })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
-                if this.owner.as_ref().is_none_or(|owner| !owner.is_current(this.store.read(cx))) {
+                if this
+                    .owner
+                    .as_ref()
+                    .is_none_or(|owner| !owner.is_current(this.store.read(cx)))
+                {
                     this.rows = Some(Vec::new());
                     cx.notify();
                     return;
@@ -339,7 +343,9 @@ impl BranchFamilyPanel {
     fn render_row(&self, row: FamilyRow, cx: &mut Context<Self>) -> impl IntoElement {
         let session = row.session;
         let is_current = session.id == self.session_id;
-        let live = self.owner.as_ref()
+        let live = self
+            .owner
+            .as_ref()
             .and_then(|owner| owner.exact_target(&session, self.store.read(cx)))
             .and_then(|target| {
                 if target.activity_freshness == mt_ai::AgentActivityFreshness::Stale {
@@ -380,7 +386,9 @@ impl BranchFamilyPanel {
                         // 挂回 `self._tasks` 会随面板一起被取消。
                         let store = this.store.clone();
                         let session = clicked.clone();
-                        let Some(owner) = this.owner.clone() else { return; };
+                        let Some(owner) = this.owner.clone() else {
+                            return;
+                        };
                         window.defer(cx, move |window, cx| {
                             jump_to_session(&store, owner, session, window, cx).detach();
                         });
@@ -463,13 +471,7 @@ mod tests {
     /// 逐字段摘要(`FamilyRow` 不带 `PartialEq`,见类型注释)。
     fn shape(rows: &[FamilyRow]) -> Vec<(&str, &str, &str)> {
         rows.iter()
-            .map(|r| {
-                (
-                    r.session.id.as_str(),
-                    r.prefix.as_str(),
-                    r.title.as_str(),
-                )
-            })
+            .map(|r| (r.session.id.as_str(), r.prefix.as_str(), r.title.as_str()))
             .collect()
     }
 
@@ -482,14 +484,13 @@ mod tests {
             session("r2", "根二", "3"),
             session("c2", "另一支", "4"),
         ];
-        let edges = vec![
-            edge("c1", "r1", Some("改走流式")),
-            edge("c2", "r2", None),
-        ];
+        let edges = vec![edge("c1", "r1", Some("改走流式")), edge("c2", "r2", None)];
 
         let rows = build_family_rows(&sessions, &edges, "c1");
         assert_eq!(
-            rows.iter().map(|r| r.session.id.as_str()).collect::<Vec<_>>(),
+            rows.iter()
+                .map(|r| r.session.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["r1", "c1"],
             "r2 那一支一行都不许出现"
         );
@@ -565,7 +566,9 @@ mod tests {
             vec!["", "├─ ", "│  └─ ", "└─ "],
         );
         assert_eq!(
-            rows.iter().map(|r| r.session.id.as_str()).collect::<Vec<_>>(),
+            rows.iter()
+                .map(|r| r.session.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["r", "a", "a1", "b"],
         );
     }

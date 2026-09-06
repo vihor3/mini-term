@@ -14,8 +14,8 @@ use std::time::Duration;
 // 与 tracker/hook_server 那批表同一条命脉:用 parking_lot 免掉锁中毒。
 use parking_lot::Mutex;
 
-use crate::hook_server::{HookSessionId, HookState};
 use crate::agent_runtime::{AgentHookLifecycleId, AgentWeakEpisode};
+use crate::hook_server::{HookSessionId, HookState};
 use crate::tracker::SessionTracker;
 
 /// 一次状态变化。字段与原 `PtyStatusChangePayload` 完全一致
@@ -172,33 +172,46 @@ impl StatusEmitter {
         let weak_episode = change.weak_episode;
         let mut prev = self.prev.lock();
         if let Some(previous) = prev.get(&pty_id) {
-            let same_owner = change.hook_session.as_ref()
+            let same_owner = change
+                .hook_session
+                .as_ref()
                 .is_none_or(|owner| previous.hook_session.as_ref() == Some(owner));
             if previous.status == status && same_owner {
                 match cause {
-                    None if weak_episode.is_none() || weak_episode == previous.weak_episode => return,
+                    None if weak_episode.is_none() || weak_episode == previous.weak_episode => {
+                        return;
+                    }
                     Some(c) if crate::hook_server::is_attention_cause(c) => {}
-                    Some(c) if previous.cause.as_deref() == Some(c)
-                        && (weak_episode.is_none() || weak_episode == previous.weak_episode) => return,
+                    Some(c)
+                        if previous.cause.as_deref() == Some(c)
+                            && (weak_episode.is_none()
+                                || weak_episode == previous.weak_episode) =>
+                    {
+                        return;
+                    }
                     _ => {}
                 }
             }
         }
-        let remembered_episode = weak_episode.or_else(|| prev.get(&pty_id).and_then(|previous| previous.weak_episode));
-        let remembered_session = change.hook_session.clone()
-            .or_else(|| prev.get(&pty_id).and_then(|previous| previous.hook_session.clone()));
+        let remembered_episode =
+            weak_episode.or_else(|| prev.get(&pty_id).and_then(|previous| previous.weak_episode));
+        let remembered_session = change.hook_session.clone().or_else(|| {
+            prev.get(&pty_id)
+                .and_then(|previous| previous.hook_session.clone())
+        });
         let remembered_cause = match (cause, prev.get(&pty_id)) {
-            (None, Some(previous)) if previous.status == status => {
-                previous.cause.clone()
-            }
+            (None, Some(previous)) if previous.status == status => previous.cause.clone(),
             _ => cause.map(str::to_string),
         };
-        prev.insert(pty_id, EmittedStatus {
-            status: status.to_string(),
-            cause: remembered_cause,
-            weak_episode: remembered_episode,
-            hook_session: remembered_session,
-        });
+        prev.insert(
+            pty_id,
+            EmittedStatus {
+                status: status.to_string(),
+                cause: remembered_cause,
+                weak_episode: remembered_episode,
+                hook_session: remembered_session,
+            },
+        );
         self.sink.status_changed(change);
     }
 
@@ -440,8 +453,13 @@ mod tests {
         for (pty_id, status, cause) in states {
             tracker.track_input_with_line_snapshot(pty_id, "claude\r", None);
             hooks.update(pty_id, status.to_string());
-            emitter.emit_if_changed_with_episode(pty_id, status, Some(cause), Some("claude".into()),
-                tracker.weak_detection_episode(pty_id));
+            emitter.emit_if_changed_with_episode(
+                pty_id,
+                status,
+                Some(cause),
+                Some("claude".into()),
+                tracker.weak_detection_episode(pty_id),
+            );
         }
         tracker.track_input_with_line_snapshot(2, "\x03", None);
         tracker.track_input_with_line_snapshot(2, "\x03", None);
@@ -459,17 +477,34 @@ mod tests {
             assert!(hooks.status_age(pty_id).unwrap() >= Duration::from_secs(10));
         }
         hooks.update(1, "ai-idle".into());
-        emitter.emit_if_changed_with_episode(1, "ai-idle", Some("Stop"), Some("claude".into()),
-            tracker.weak_detection_episode(1));
+        emitter.emit_if_changed_with_episode(
+            1,
+            "ai-idle",
+            Some("Stop"),
+            Some("claude".into()),
+            tracker.weak_detection_episode(1),
+        );
         hooks.remove(2);
-        emitter.emit_if_changed_with_episode(2, "idle", Some("SessionEnd"), None,
-            tracker.weak_detection_episode(2));
+        emitter.emit_if_changed_with_episode(
+            2,
+            "idle",
+            Some("SessionEnd"),
+            None,
+            tracker.weak_detection_episode(2),
+        );
         poll_panes(&hooks, &tracker, &emitter, &[1, 2, 3, 4, 5]);
         let changes = seen.lock();
         assert_eq!(changes.len(), states.len() + 2);
         assert_eq!(changes[states.len()].cause.as_deref(), Some("Stop"));
-        assert_eq!(changes[states.len() + 1].cause.as_deref(), Some("SessionEnd"));
-        assert!(changes.iter().all(|change| !matches!(change.cause.as_deref(), Some("Stall" | "StallExit"))));
+        assert_eq!(
+            changes[states.len() + 1].cause.as_deref(),
+            Some("SessionEnd")
+        );
+        assert!(
+            changes
+                .iter()
+                .all(|change| !matches!(change.cause.as_deref(), Some("Stall" | "StallExit")))
+        );
     }
 
     #[test]
@@ -504,8 +539,13 @@ mod tests {
         let emitter = StatusEmitter::new(Arc::new(|_: StatusChange| {}));
         tracker.track_input_with_line_snapshot(1, "claude\r", None);
         hooks.update(1, "ai-working".into());
-        emitter.emit_if_changed_with_episode(1, "ai-working", Some("PermissionRequest"), Some("claude".into()),
-            tracker.weak_detection_episode(1));
+        emitter.emit_if_changed_with_episode(
+            1,
+            "ai-working",
+            Some("PermissionRequest"),
+            Some("claude".into()),
+            tracker.weak_detection_episode(1),
+        );
         tracker.clear_ai_session(1);
         tracker.track_input_with_line_snapshot(1, "claude\r", None);
         poll_panes(&hooks, &tracker, &emitter, &[1]);
@@ -515,10 +555,14 @@ mod tests {
 
     #[test]
     fn production_input_hook_exit_dedup_and_later_episode_do_not_resurrect_fallback() {
-        use crate::{AgentActivity, AgentApplyOutcome, AgentConfirmation, AgentConnectivity,
-            AgentEvidence, AgentObservation, AgentObservationIgnored, AgentRoute, AgentRuntimeRegistry};
-        use mt_identity::{AgentEventId, ExecutionHostId, HostInstallId, PaneKey, RepoId,
-            TabId, TerminalIncarnationId, TerminalSessionId, WorktreeId};
+        use crate::{
+            AgentActivity, AgentApplyOutcome, AgentConfirmation, AgentConnectivity, AgentEvidence,
+            AgentObservation, AgentObservationIgnored, AgentRoute, AgentRuntimeRegistry,
+        };
+        use mt_identity::{
+            AgentEventId, ExecutionHostId, HostInstallId, PaneKey, RepoId, TabId,
+            TerminalIncarnationId, TerminalSessionId, WorktreeId,
+        };
 
         struct RuntimeSink {
             route: AgentRoute,
@@ -529,24 +573,54 @@ mod tests {
                 let mut state = self.state.lock();
                 state.1 += 1;
                 let sequence = state.1;
-                let activity = crate::activity_from_legacy_status(&change.status, change.cause.as_deref()).unwrap();
+                let activity =
+                    crate::activity_from_legacy_status(&change.status, change.cause.as_deref())
+                        .unwrap();
                 let hook = change.cause.is_some();
                 let outcome = if hook && activity.is_ended() && change.agent.is_none() {
-                    state.0.observe_hook_exit(self.route.clone(), AgentEventId::new(), sequence, None, 100)
+                    state.0.observe_hook_exit(
+                        self.route.clone(),
+                        AgentEventId::new(),
+                        sequence,
+                        None,
+                        100,
+                    )
                 } else {
-                    let provider = change.agent.as_deref().map(|agent| agent.parse().unwrap())
-                        .or_else(|| state.0.active_run_for_route(&self.route).map(|run| run.provider.clone()))
+                    let provider = change
+                        .agent
+                        .as_deref()
+                        .map(|agent| agent.parse().unwrap())
+                        .or_else(|| {
+                            state
+                                .0
+                                .active_run_for_route(&self.route)
+                                .map(|run| run.provider.clone())
+                        })
                         .expect("an emitted AI/lifecycle observation has an owner");
                     state.0.observe(AgentObservation {
-                        event_id: AgentEventId::new(), route: self.route.clone(), sequence,
-                        connection_epoch: None, provider, provider_session_id: None, process: None,
-                        weak_episode: change.weak_episode, activity,
-                        connectivity: AgentConnectivity::Live, confirmation: AgentConfirmation::LiveConfirmed,
-                        evidence: if hook { AgentEvidence::Hook } else { AgentEvidence::PtyActivity },
+                        event_id: AgentEventId::new(),
+                        route: self.route.clone(),
+                        sequence,
+                        connection_epoch: None,
+                        provider,
+                        provider_session_id: None,
+                        process: None,
+                        weak_episode: change.weak_episode,
+                        activity,
+                        connectivity: AgentConnectivity::Live,
+                        confirmation: AgentConfirmation::LiveConfirmed,
+                        evidence: if hook {
+                            AgentEvidence::Hook
+                        } else {
+                            AgentEvidence::PtyActivity
+                        },
                         received_at_unix_ms: 100,
                     })
                 };
-                assert!(matches!(&outcome, AgentApplyOutcome::Applied { .. }), "{outcome:?}");
+                assert!(
+                    matches!(&outcome, AgentApplyOutcome::Applied { .. }),
+                    "{outcome:?}"
+                );
             }
 
             fn session_identified(&self, identity: SessionIdentity) {
@@ -554,25 +628,41 @@ mod tests {
                 state.1 += 1;
                 let sequence = state.1;
                 let outcome = state.0.observe(AgentObservation {
-                    event_id: AgentEventId::new(), route: self.route.clone(), sequence,
-                    connection_epoch: None, provider: identity.agent.unwrap().parse().unwrap(),
-                    provider_session_id: Some(identity.session_id), process: None,
-                    weak_episode: identity.weak_episode, activity: AgentActivity::Unknown,
-                    connectivity: AgentConnectivity::Live, confirmation: AgentConfirmation::LiveConfirmed,
-                    evidence: AgentEvidence::Hook, received_at_unix_ms: 100,
+                    event_id: AgentEventId::new(),
+                    route: self.route.clone(),
+                    sequence,
+                    connection_epoch: None,
+                    provider: identity.agent.unwrap().parse().unwrap(),
+                    provider_session_id: Some(identity.session_id),
+                    process: None,
+                    weak_episode: identity.weak_episode,
+                    activity: AgentActivity::Unknown,
+                    connectivity: AgentConnectivity::Live,
+                    confirmation: AgentConfirmation::LiveConfirmed,
+                    evidence: AgentEvidence::Hook,
+                    received_at_unix_ms: 100,
                 });
-                assert!(matches!(outcome, AgentApplyOutcome::Applied { created: true, .. }));
+                assert!(matches!(
+                    outcome,
+                    AgentApplyOutcome::Applied { created: true, .. }
+                ));
             }
         }
 
         let host = ExecutionHostId::derive("local", &HostInstallId::new());
         let route = AgentRoute {
             worktree_id: WorktreeId::derive(&RepoId::derive(&host, "/repo/.git"), "/repo", None),
-            execution_host_id: host, tab_id: TabId::new(), pane_key: PaneKey::new(),
-            terminal_session_id: TerminalSessionId::new(), terminal_incarnation_id: TerminalIncarnationId::new(),
+            execution_host_id: host,
+            tab_id: TabId::new(),
+            pane_key: PaneKey::new(),
+            terminal_session_id: TerminalSessionId::new(),
+            terminal_incarnation_id: TerminalIncarnationId::new(),
         };
         let state = Arc::new(Mutex::new((AgentRuntimeRegistry::default(), 0)));
-        let emitter = StatusEmitter::new(Arc::new(RuntimeSink { route: route.clone(), state: state.clone() }));
+        let emitter = StatusEmitter::new(Arc::new(RuntimeSink {
+            route: route.clone(),
+            state: state.clone(),
+        }));
         let tracker = SessionTracker::new();
         let hooks = HookState::new();
         tracker.track_input_with_line_snapshot(1, "claude\r", None);
@@ -582,7 +672,10 @@ mod tests {
         assert_eq!(weak.weak_episode, Some(old_episode));
         assert_eq!(weak.activity, AgentActivity::Unknown);
         emitter.notify_session_identity(SessionIdentity {
-            pty_id: 1, agent: Some("claude".into()), session_id: "session".into(), cwd: None,
+            pty_id: 1,
+            agent: Some("claude".into()),
+            session_id: "session".into(),
+            cwd: None,
             weak_episode: tracker.weak_detection_episode(1),
             hook_lifecycle: None,
         });
@@ -590,21 +683,46 @@ mod tests {
             let state = state.lock();
             assert_eq!(state.0.runs().count(), 2);
             assert!(state.0.is_superseded_weak_alias(&weak.run_id));
-            assert_eq!(state.0.fallback_supersession(&weak.run_id).unwrap().sequence, 2);
-            assert_eq!(state.0.active_run_for_route(&route).unwrap().evidence, AgentEvidence::Hook);
+            assert_eq!(
+                state
+                    .0
+                    .fallback_supersession(&weak.run_id)
+                    .unwrap()
+                    .sequence,
+                2
+            );
+            assert_eq!(
+                state.0.active_run_for_route(&route).unwrap().evidence,
+                AgentEvidence::Hook
+            );
         }
         hooks.update(1, "ai-working".into());
         tracker.mark_ai_session(1, "claude");
-        emitter.emit_if_changed_with_episode(1, "ai-working", Some("UserPromptSubmit"), Some("claude".into()),
-            tracker.weak_detection_episode(1));
+        emitter.emit_if_changed_with_episode(
+            1,
+            "ai-working",
+            Some("UserPromptSubmit"),
+            Some("claude".into()),
+            tracker.weak_detection_episode(1),
+        );
         hooks.remove(1);
         tracker.clear_ai_session(1);
-        emitter.emit_if_changed_with_episode(1, "idle", Some("SessionEnd"), None,
-            tracker.weak_detection_episode(1));
-        for _ in 0..4 { poll_panes(&hooks, &tracker, &emitter, &[1]); }
+        emitter.emit_if_changed_with_episode(
+            1,
+            "idle",
+            Some("SessionEnd"),
+            None,
+            tracker.weak_detection_episode(1),
+        );
+        for _ in 0..4 {
+            poll_panes(&hooks, &tracker, &emitter, &[1]);
+        }
         {
             let state = state.lock();
-            assert_eq!(state.1, 4, "Hook exit already emitted idle; monitor must dedup");
+            assert_eq!(
+                state.1, 4,
+                "Hook exit already emitted idle; monitor must dedup"
+            );
             assert_eq!(state.0.run(&weak.run_id), Some(&weak));
             assert!(state.0.is_superseded_weak_alias(&weak.run_id));
             assert!(state.0.active_run_for_route(&route).is_none());
@@ -618,17 +736,30 @@ mod tests {
         for epoch in [None, Some(99)] {
             let mut state = state.lock();
             let outcome = state.0.observe(AgentObservation {
-                event_id: AgentEventId::new(), route: route.clone(), sequence: 100,
-                connection_epoch: epoch, provider: weak.provider.clone(), provider_session_id: None,
-                process: None, weak_episode: Some(old_episode), activity: AgentActivity::Working,
-                connectivity: AgentConnectivity::Live, confirmation: AgentConfirmation::LiveConfirmed,
-                evidence: AgentEvidence::PtyActivity, received_at_unix_ms: 99_000,
+                event_id: AgentEventId::new(),
+                route: route.clone(),
+                sequence: 100,
+                connection_epoch: epoch,
+                provider: weak.provider.clone(),
+                provider_session_id: None,
+                process: None,
+                weak_episode: Some(old_episode),
+                activity: AgentActivity::Working,
+                connectivity: AgentConnectivity::Live,
+                confirmation: AgentConfirmation::LiveConfirmed,
+                evidence: AgentEvidence::PtyActivity,
+                received_at_unix_ms: 99_000,
             });
-            assert_eq!(outcome, AgentApplyOutcome::Ignored(AgentObservationIgnored::SupersededWeakEpisode));
+            assert_eq!(
+                outcome,
+                AgentApplyOutcome::Ignored(AgentObservationIgnored::SupersededWeakEpisode)
+            );
             assert_eq!(state.0.run(&later.run_id), Some(&later));
             assert!(state.0.is_superseded_weak_alias(&weak.run_id));
         }
-        for _ in 0..3 { poll_panes(&hooks, &tracker, &emitter, &[1]); }
+        for _ in 0..3 {
+            poll_panes(&hooks, &tracker, &emitter, &[1]);
+        }
         assert_eq!(state.lock().1, 5);
         tracker.track_input_with_line_snapshot(1, "/exit\r", None);
         poll_panes(&hooks, &tracker, &emitter, &[1]);

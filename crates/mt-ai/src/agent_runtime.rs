@@ -30,8 +30,11 @@ pub struct AgentWeakEpisode(u64);
 impl AgentWeakEpisode {
     pub(crate) fn next() -> Option<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1))
-            .ok().map(|previous| Self(previous + 1))
+        NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .ok()
+        .map(|previous| Self(previous + 1))
     }
 }
 
@@ -43,8 +46,11 @@ pub struct AgentHookLifecycleId(u64);
 impl AgentHookLifecycleId {
     pub(crate) fn next() -> Option<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1))
-            .ok().map(|previous| Self(previous + 1))
+        NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .ok()
+        .map(|previous| Self(previous + 1))
     }
 }
 
@@ -377,21 +383,36 @@ impl AgentRuntimeRegistry {
             return AgentApplyOutcome::Ignored(reason);
         }
         let unbound_weak = is_unbound_weak_observation(&observation);
-        if unbound_weak && observation.weak_episode.is_some_and(|episode| {
-            self.superseded_weak_episodes.get(&observation.route).is_some_and(|fence| episode <= *fence)
-                || self.latest_weak_episodes.get(&observation.route).is_some_and(|latest| episode < *latest)
-        }) {
+        if unbound_weak
+            && observation.weak_episode.is_some_and(|episode| {
+                self.superseded_weak_episodes
+                    .get(&observation.route)
+                    .is_some_and(|fence| episode <= *fence)
+                    || self
+                        .latest_weak_episodes
+                        .get(&observation.route)
+                        .is_some_and(|latest| episode < *latest)
+            })
+        {
             return AgentApplyOutcome::Ignored(AgentObservationIgnored::SupersededWeakEpisode);
         }
 
         if observation.process.is_none()
-            && observation.provider_session_id.as_deref().is_some_and(|session| {
-                self.runs.values().filter(|state| {
-                    state.route == observation.route
-                        && state.provider == observation.provider
-                        && state.provider_session_id.as_deref() == Some(session)
-                }).take(2).count() > 1
-            })
+            && observation
+                .provider_session_id
+                .as_deref()
+                .is_some_and(|session| {
+                    self.runs
+                        .values()
+                        .filter(|state| {
+                            state.route == observation.route
+                                && state.provider == observation.provider
+                                && state.provider_session_id.as_deref() == Some(session)
+                        })
+                        .take(2)
+                        .count()
+                        > 1
+                })
         {
             return AgentApplyOutcome::Ignored(AgentObservationIgnored::AmbiguousRun);
         }
@@ -404,7 +425,8 @@ impl AgentRuntimeRegistry {
                     && state.provider == observation.provider
                     && !state.activity.is_ended()
                     && !self.fallback_supersessions.contains_key(&state.run_id)
-                    && !(unbound_weak && observation.weak_episode.is_some()
+                    && !(unbound_weak
+                        && observation.weak_episode.is_some()
                         && is_unbound_weak_state(state)
                         && state.weak_episode < observation.weak_episode)
                     && !(observation.evidence == AgentEvidence::Hook
@@ -415,7 +437,8 @@ impl AgentRuntimeRegistry {
         {
             return AgentApplyOutcome::Ignored(AgentObservationIgnored::AmbiguousRun);
         }
-        if unbound_weak && observation.weak_episode.is_none()
+        if unbound_weak
+            && observation.weak_episode.is_none()
             && matched.is_none()
             && self.legacy_weak_fences.contains(&observation.route)
         {
@@ -425,7 +448,10 @@ impl AgentRuntimeRegistry {
         // heuristic run. Ordering supplements source episode validation; a
         // newer poll sequence alone is never proof of a new launch.
         if matched.is_none()
-            && matches!(observation.evidence, AgentEvidence::PtyActivity | AgentEvidence::ProcessAttested)
+            && matches!(
+                observation.evidence,
+                AgentEvidence::PtyActivity | AgentEvidence::ProcessAttested
+            )
             && self.runs.values().any(|state| {
                 state.route == observation.route
                     && !is_newer(
@@ -501,10 +527,16 @@ impl AgentRuntimeRegistry {
         lifecycle_id: AgentHookLifecycleId,
         explicit_start: bool,
     ) -> Result<Option<AgentRunId>, AgentObservationIgnored> {
-        let valid_session = observation.provider_session_id.as_deref().is_some_and(|session| {
-            !session.trim().is_empty() && session.len() <= 512 && !session.chars().any(char::is_control)
-        });
-        if !valid_session || observation.process.is_some()
+        let valid_session = observation
+            .provider_session_id
+            .as_deref()
+            .is_some_and(|session| {
+                !session.trim().is_empty()
+                    && session.len() <= 512
+                    && !session.chars().any(char::is_control)
+            });
+        if !valid_session
+            || observation.process.is_some()
             || observation.evidence != AgentEvidence::Hook
             || observation.confirmation != AgentConfirmation::LiveConfirmed
             || observation.connectivity != AgentConnectivity::Live
@@ -512,8 +544,12 @@ impl AgentRuntimeRegistry {
         {
             return Err(AgentObservationIgnored::UnresolvedHookOwner);
         }
-        self.validate_event(&observation.event_id, &observation.route,
-            observation.sequence, observation.connection_epoch)?;
+        self.validate_event(
+            &observation.event_id,
+            &observation.route,
+            observation.sequence,
+            observation.connection_epoch,
+        )?;
 
         let key = (observation.route.clone(), lifecycle_id);
         if let Some(run_id) = self.hook_lifecycles.get(&key) {
@@ -524,9 +560,12 @@ impl AgentRuntimeRegistry {
             if state.activity.is_ended() {
                 return Err(AgentObservationIgnored::EndedRun);
             }
-            if !is_newer(state.connection_epoch, state.last_sequence,
-                observation.connection_epoch, observation.sequence)
-            {
+            if !is_newer(
+                state.connection_epoch,
+                state.last_sequence,
+                observation.connection_epoch,
+                observation.sequence,
+            ) {
                 return Err(AgentObservationIgnored::OutOfOrder);
             }
             // The source token also carries genuine provider corrections; the
@@ -537,13 +576,26 @@ impl AgentRuntimeRegistry {
             return Err(AgentObservationIgnored::UnresolvedHookOwner);
         }
 
-        let exact: Vec<_> = self.runs.values().filter(|state| {
-            state.route == observation.route && bound_provider_session_matches(state, observation)
-        }).collect();
-        if explicit_start && !exact.is_empty() && exact.iter().all(|state| state.activity.is_ended()) {
-            if exact.iter().any(|state| !is_newer(state.connection_epoch, state.last_sequence,
-                observation.connection_epoch, observation.sequence))
-            {
+        let exact: Vec<_> = self
+            .runs
+            .values()
+            .filter(|state| {
+                state.route == observation.route
+                    && bound_provider_session_matches(state, observation)
+            })
+            .collect();
+        if explicit_start
+            && !exact.is_empty()
+            && exact.iter().all(|state| state.activity.is_ended())
+        {
+            if exact.iter().any(|state| {
+                !is_newer(
+                    state.connection_epoch,
+                    state.last_sequence,
+                    observation.connection_epoch,
+                    observation.sequence,
+                )
+            }) {
                 return Err(AgentObservationIgnored::OutOfOrder);
             }
             return Ok(None);
@@ -560,9 +612,12 @@ impl AgentRuntimeRegistry {
             if self.hook_lifecycles.values().any(|owner| owner == run_id) {
                 return Err(AgentObservationIgnored::UnresolvedHookOwner);
             }
-            if !is_newer(state.connection_epoch, state.last_sequence,
-                observation.connection_epoch, observation.sequence)
-            {
+            if !is_newer(
+                state.connection_epoch,
+                state.last_sequence,
+                observation.connection_epoch,
+                observation.sequence,
+            ) {
                 return Err(AgentObservationIgnored::OutOfOrder);
             }
         }
@@ -660,29 +715,38 @@ impl AgentRuntimeRegistry {
         }
 
         let mut provider_counts = HashMap::new();
-        let observations: Vec<_> = inventory.processes.iter().map(|process| {
-            *provider_counts.entry(process.provider.clone()).or_insert(0usize) += 1;
-            AgentObservation {
-                event_id: inventory.event_id.clone(),
-                route: inventory.route.clone(),
-                sequence: inventory.sequence,
-                connection_epoch: Some(inventory.connection_epoch),
-                provider: process.provider.clone(),
-                provider_session_id: None,
-                process: Some(process.process),
-                weak_episode: inventory.weak_episode,
-                activity: AgentActivity::Unknown,
-                connectivity: AgentConnectivity::Live,
-                confirmation: AgentConfirmation::LiveConfirmed,
-                evidence: AgentEvidence::ProcessAttested,
-                received_at_unix_ms: inventory.received_at_unix_ms,
-            }
-        }).collect();
+        let observations: Vec<_> = inventory
+            .processes
+            .iter()
+            .map(|process| {
+                *provider_counts
+                    .entry(process.provider.clone())
+                    .or_insert(0usize) += 1;
+                AgentObservation {
+                    event_id: inventory.event_id.clone(),
+                    route: inventory.route.clone(),
+                    sequence: inventory.sequence,
+                    connection_epoch: Some(inventory.connection_epoch),
+                    provider: process.provider.clone(),
+                    provider_session_id: None,
+                    process: Some(process.process),
+                    weak_episode: inventory.weak_episode,
+                    activity: AgentActivity::Unknown,
+                    connectivity: AgentConnectivity::Live,
+                    confirmation: AgentConfirmation::LiveConfirmed,
+                    evidence: AgentEvidence::ProcessAttested,
+                    received_at_unix_ms: inventory.received_at_unix_ms,
+                }
+            })
+            .collect();
         // Resolve every candidate against pre-batch facts. One weak alias must
         // never be assigned to whichever independent process happens to be first.
-        let matches: Vec<_> = observations.iter().map(|observation| {
-            self.find_run(observation, provider_counts[&observation.provider] == 1)
-        }).collect();
+        let matches: Vec<_> = observations
+            .iter()
+            .map(|observation| {
+                self.find_run(observation, provider_counts[&observation.provider] == 1)
+            })
+            .collect();
 
         self.accept_epoch(&inventory.route, Some(inventory.connection_epoch));
         let observed_processes = unique;
@@ -786,15 +850,25 @@ impl AgentRuntimeRegistry {
                     && state.provider_session_id.as_ref() == Some(session)
             }
         };
-        let unique_owner = self.runs.values().filter(|candidate| {
-            candidate.route == observation.route
-                && candidate.provider == observation.provider
-                && !candidate.activity.is_ended()
-                && match &observation.owner {
-                    AgentSemanticOwner::ForegroundProcess(process) => candidate.process == Some(*process),
-                    AgentSemanticOwner::ProviderSession(session) => candidate.provider_session_id.as_ref() == Some(session),
-                }
-        }).take(2).count() == 1;
+        let unique_owner = self
+            .runs
+            .values()
+            .filter(|candidate| {
+                candidate.route == observation.route
+                    && candidate.provider == observation.provider
+                    && !candidate.activity.is_ended()
+                    && match &observation.owner {
+                        AgentSemanticOwner::ForegroundProcess(process) => {
+                            candidate.process == Some(*process)
+                        }
+                        AgentSemanticOwner::ProviderSession(session) => {
+                            candidate.provider_session_id.as_ref() == Some(session)
+                        }
+                    }
+            })
+            .take(2)
+            .count()
+            == 1;
         if state.route != observation.route
             || state.provider != observation.provider
             || !owns_identity
@@ -833,9 +907,9 @@ impl AgentRuntimeRegistry {
             .get(&observation.run_id)
             .is_none_or(|since| observation.observed_at_unix_ms < *since)
             || self
-            .semantic_observations
-            .get(&observation.run_id)
-            .is_some_and(|(prior, _)| observation.observed_at_unix_ms <= *prior)
+                .semantic_observations
+                .get(&observation.run_id)
+                .is_some_and(|(prior, _)| observation.observed_at_unix_ms <= *prior)
         {
             return AgentApplyOutcome::Ignored(AgentObservationIgnored::StaleSemanticObservation);
         }
@@ -856,14 +930,20 @@ impl AgentRuntimeRegistry {
             return AgentApplyOutcome::Ignored(reason);
         }
         self.accept_epoch(&observation.route, observation.connection_epoch);
-        let state = self.runs.get_mut(&observation.run_id).expect("owner exists");
+        let state = self
+            .runs
+            .get_mut(&observation.run_id)
+            .expect("owner exists");
         state.activity = observation.activity;
         state.last_event_id = observation.event_id.clone();
         state.last_sequence = observation.sequence;
         state.received_at_unix_ms = observation.received_at_unix_ms;
         self.semantic_observations.insert(
             observation.run_id.clone(),
-            (observation.observed_at_unix_ms, observation.connection_epoch),
+            (
+                observation.observed_at_unix_ms,
+                observation.connection_epoch,
+            ),
         );
         self.remember_event(observation.event_id);
         AgentApplyOutcome::Applied {
@@ -872,7 +952,11 @@ impl AgentRuntimeRegistry {
         }
     }
 
-    pub fn activity_freshness(&self, run_id: &AgentRunId, now_unix_ms: i64) -> AgentActivityFreshness {
+    pub fn activity_freshness(
+        &self,
+        run_id: &AgentRunId,
+        now_unix_ms: i64,
+    ) -> AgentActivityFreshness {
         let Some(state) = self.runs.get(run_id) else {
             return AgentActivityFreshness::Unknown;
         };
@@ -886,7 +970,11 @@ impl AgentRuntimeRegistry {
             Some((observed, epoch))
                 if semantic_timestamp_is_fresh(*observed, now_unix_ms)
                     && *epoch == state.connection_epoch
-                    && self.process_owner_since.get(run_id).is_some_and(|since| observed >= since) => {
+                    && self
+                        .process_owner_since
+                        .get(run_id)
+                        .is_some_and(|since| observed >= since) =>
+            {
                 AgentActivityFreshness::Fresh
             }
             Some(_) => AgentActivityFreshness::Stale,
@@ -954,10 +1042,7 @@ impl AgentRuntimeRegistry {
 
     /// Retained after the stronger run ends. All liveness and Agent projection
     /// consumers must exclude these audit-only fallback records.
-    pub fn fallback_supersession(
-        &self,
-        run_id: &AgentRunId,
-    ) -> Option<&AgentFallbackSupersession> {
+    pub fn fallback_supersession(&self, run_id: &AgentRunId) -> Option<&AgentFallbackSupersession> {
         self.fallback_supersessions.get(run_id)
     }
 
@@ -969,7 +1054,8 @@ impl AgentRuntimeRegistry {
         self.runs
             .values()
             .filter(|state| {
-                &state.route == route && !state.activity.is_ended()
+                &state.route == route
+                    && !state.activity.is_ended()
                     && !self.fallback_supersessions.contains_key(&state.run_id)
             })
             .max_by_key(|state| (state.received_at_unix_ms, state.last_sequence))
@@ -1054,9 +1140,10 @@ impl AgentRuntimeRegistry {
 
     fn supersede_unbound_fallbacks(&mut self, observation: &AgentObservation) {
         let strong_source = observation.evidence == AgentEvidence::Hook
-            || (observation.evidence == AgentEvidence::ProcessAttested && observation.process.is_some());
-        let new_weak_episode = is_unbound_weak_observation(observation)
-            && observation.weak_episode.is_some();
+            || (observation.evidence == AgentEvidence::ProcessAttested
+                && observation.process.is_some());
+        let new_weak_episode =
+            is_unbound_weak_observation(observation) && observation.weak_episode.is_some();
         if observation.confirmation != AgentConfirmation::LiveConfirmed
             || observation.connectivity != AgentConnectivity::Live
             || !(strong_source || new_weak_episode)
@@ -1065,11 +1152,15 @@ impl AgentRuntimeRegistry {
         }
         if new_weak_episode {
             let episode = observation.weak_episode.expect("source episode exists");
-            self.latest_weak_episodes.entry(observation.route.clone())
-                .and_modify(|latest| *latest = (*latest).max(episode)).or_insert(episode);
+            self.latest_weak_episodes
+                .entry(observation.route.clone())
+                .and_modify(|latest| *latest = (*latest).max(episode))
+                .or_insert(episode);
             if observation.activity.is_ended() {
-                self.superseded_weak_episodes.entry(observation.route.clone())
-                    .and_modify(|fence| *fence = (*fence).max(episode)).or_insert(episode);
+                self.superseded_weak_episodes
+                    .entry(observation.route.clone())
+                    .and_modify(|fence| *fence = (*fence).max(episode))
+                    .or_insert(episode);
                 self.legacy_weak_fences.insert(observation.route.clone());
             }
         }
@@ -1079,8 +1170,10 @@ impl AgentRuntimeRegistry {
         if strong_source {
             self.legacy_weak_fences.insert(observation.route.clone());
             if let Some(episode) = observation.weak_episode {
-                self.superseded_weak_episodes.entry(observation.route.clone())
-                    .and_modify(|fence| *fence = (*fence).max(episode)).or_insert(episode);
+                self.superseded_weak_episodes
+                    .entry(observation.route.clone())
+                    .and_modify(|fence| *fence = (*fence).max(episode))
+                    .or_insert(episode);
             }
         }
         for state in self.runs.values() {
@@ -1089,27 +1182,35 @@ impl AgentRuntimeRegistry {
                 && state.confirmation == AgentConfirmation::LiveConfirmed
                 && !state.activity.is_ended()
                 && match (state.weak_episode, observation.weak_episode) {
-                    (Some(prior), Some(source)) => prior < source || (strong_source && prior == source),
+                    (Some(prior), Some(source)) => {
+                        prior < source || (strong_source && prior == source)
+                    }
                     (None, Some(_)) => true,
-                    (None, None) => is_newer(state.connection_epoch, state.last_sequence,
-                        observation.connection_epoch, observation.sequence),
+                    (None, None) => is_newer(
+                        state.connection_epoch,
+                        state.last_sequence,
+                        observation.connection_epoch,
+                        observation.sequence,
+                    ),
                     (Some(_), None) => false,
                 }
             {
                 self.legacy_weak_fences.insert(state.route.clone());
                 if let Some(episode) = state.weak_episode {
-                    self.superseded_weak_episodes.entry(state.route.clone())
-                        .and_modify(|fence| *fence = (*fence).max(episode)).or_insert(episode);
+                    self.superseded_weak_episodes
+                        .entry(state.route.clone())
+                        .and_modify(|fence| *fence = (*fence).max(episode))
+                        .or_insert(episode);
                 }
-                self.fallback_supersessions.entry(state.run_id.clone()).or_insert_with(|| {
-                    AgentFallbackSupersession {
+                self.fallback_supersessions
+                    .entry(state.run_id.clone())
+                    .or_insert_with(|| AgentFallbackSupersession {
                         event_id: observation.event_id.clone(),
                         evidence: observation.evidence,
                         sequence: observation.sequence,
                         connection_epoch: observation.connection_epoch,
                         weak_episode: observation.weak_episode,
-                    }
-                });
+                    });
             }
         }
     }
@@ -1166,12 +1267,10 @@ impl AgentRuntimeRegistry {
         allow_weak_process_upgrade: bool,
     ) -> Option<AgentRunId> {
         let same_route = || {
-            self.runs
-                .values()
-                .filter(|state| {
-                    state.route == observation.route
-                        && !self.fallback_supersessions.contains_key(&state.run_id)
-                })
+            self.runs.values().filter(|state| {
+                state.route == observation.route
+                    && !self.fallback_supersessions.contains_key(&state.run_id)
+            })
         };
 
         if let Some(process) = observation.process
@@ -1180,23 +1279,23 @@ impl AgentRuntimeRegistry {
             return Some(state.run_id.clone());
         }
         if let Some(state) = same_route().find(|state| {
-                bound_provider_session_matches(state, observation)
-                    && (observation.process.is_none()
-                        || state.process.is_none()
-                        || state.process == observation.process)
-            })
-        {
+            bound_provider_session_matches(state, observation)
+                && (observation.process.is_none()
+                    || state.process.is_none()
+                    || state.process == observation.process)
+        }) {
             return Some(state.run_id.clone());
         }
-        let process_upgrade = observation.evidence == AgentEvidence::ProcessAttested
-            && observation.process.is_some();
+        let process_upgrade =
+            observation.evidence == AgentEvidence::ProcessAttested && observation.process.is_some();
         if process_upgrade
-            && (!allow_weak_process_upgrade || same_route().any(|state| {
-                state.provider == observation.provider
-                    && !state.activity.is_ended()
-                    && state.process.is_some()
-                    && state.process != observation.process
-            }))
+            && (!allow_weak_process_upgrade
+                || same_route().any(|state| {
+                    state.provider == observation.provider
+                        && !state.activity.is_ended()
+                        && state.process.is_some()
+                        && state.process != observation.process
+                }))
         {
             return None;
         }
@@ -1209,7 +1308,8 @@ impl AgentRuntimeRegistry {
                     || (state.evidence == AgentEvidence::PtyActivity
                         && state.confirmation == AgentConfirmation::LiveConfirmed
                         && state.process.is_none()
-                        && (state.weak_episode.is_none() || state.weak_episode == observation.weak_episode)))
+                        && (state.weak_episode.is_none()
+                            || state.weak_episode == observation.weak_episode)))
                 && !(is_unbound_weak_observation(observation)
                     && (observation.weak_episode.is_some() || is_unbound_weak_state(state))
                     && state.weak_episode != observation.weak_episode)
@@ -1282,17 +1382,20 @@ fn apply_observation(state: &mut AgentRuntimeState, observation: &AgentObservati
 fn process_owner_changed(state: &AgentRuntimeState, observation: &AgentObservation) -> bool {
     attests_bound_hook_process(state, observation)
         || (state.process.is_some() || observation.process.is_some())
-        && ((observation.connection_epoch.is_some()
-            && state.connection_epoch != observation.connection_epoch)
-            || (observation.evidence >= state.evidence
-                && ((observation.process.is_some() && state.process != observation.process)
-                    || state.provider != observation.provider)))
+            && ((observation.connection_epoch.is_some()
+                && state.connection_epoch != observation.connection_epoch)
+                || (observation.evidence >= state.evidence
+                    && ((observation.process.is_some() && state.process != observation.process)
+                        || state.provider != observation.provider)))
 }
 
 fn is_unbound_weak_observation(observation: &AgentObservation) -> bool {
     observation.evidence == AgentEvidence::PtyActivity
         && observation.process.is_none()
-        && observation.provider_session_id.as_deref().is_none_or(|session| session.trim().is_empty())
+        && observation
+            .provider_session_id
+            .as_deref()
+            .is_none_or(|session| session.trim().is_empty())
 }
 
 fn is_unbound_weak_state(state: &AgentRuntimeState) -> bool {
@@ -1301,14 +1404,20 @@ fn is_unbound_weak_state(state: &AgentRuntimeState) -> bool {
         && state.provider_session_id.is_none()
 }
 
-fn bound_provider_session_matches(state: &AgentRuntimeState, observation: &AgentObservation) -> bool {
+fn bound_provider_session_matches(
+    state: &AgentRuntimeState,
+    observation: &AgentObservation,
+) -> bool {
     state.provider == observation.provider
-        && observation.provider_session_id.as_deref().is_some_and(|session| {
-            !session.trim().is_empty()
-                && session.len() <= 512
-                && !session.chars().any(char::is_control)
-                && state.provider_session_id.as_deref() == Some(session)
-        })
+        && observation
+            .provider_session_id
+            .as_deref()
+            .is_some_and(|session| {
+                !session.trim().is_empty()
+                    && session.len() <= 512
+                    && !session.chars().any(char::is_control)
+                    && state.provider_session_id.as_deref() == Some(session)
+            })
 }
 
 fn attests_bound_hook_process(state: &AgentRuntimeState, observation: &AgentObservation) -> bool {
@@ -1398,14 +1507,21 @@ mod tests {
         explicit_start: bool,
         reason: AgentObservationIgnored,
     ) {
-        let snapshot = |registry: &AgentRuntimeRegistry| (
-            registry.runs.clone(), registry.hook_lifecycles.clone(),
-            registry.fallback_supersessions.clone(), registry.superseded_weak_episodes.clone(),
-            registry.latest_weak_episodes.clone(), registry.legacy_weak_fences.clone(),
-            registry.latest_epoch_by_route.clone(), registry.seen_event_ids.clone(),
-            registry.seen_event_order.clone(), registry.semantic_observations.clone(),
-            registry.process_owner_since.clone(),
-        );
+        let snapshot = |registry: &AgentRuntimeRegistry| {
+            (
+                registry.runs.clone(),
+                registry.hook_lifecycles.clone(),
+                registry.fallback_supersessions.clone(),
+                registry.superseded_weak_episodes.clone(),
+                registry.latest_weak_episodes.clone(),
+                registry.legacy_weak_fences.clone(),
+                registry.latest_epoch_by_route.clone(),
+                registry.seen_event_ids.clone(),
+                registry.seen_event_order.clone(),
+                registry.semantic_observations.clone(),
+                registry.process_owner_since.clone(),
+            )
+        };
         let before = snapshot(registry);
         let outcome = if explicit_start {
             registry.start_hook_lifecycle(observation, lifecycle_id)
@@ -1423,33 +1539,69 @@ mod tests {
         let mut start = observation(route.clone(), 1, AgentEvidence::Hook);
         start.provider_session_id = Some("same-session".into());
         let first_lifecycle = AgentHookLifecycleId::next().unwrap();
-        let AgentApplyOutcome::Applied { run_id: first, created: true } = registry.start_hook_lifecycle(start.clone(), first_lifecycle) else {
+        let AgentApplyOutcome::Applied {
+            run_id: first,
+            created: true,
+        } = registry.start_hook_lifecycle(start.clone(), first_lifecycle)
+        else {
             panic!("initial lifecycle must be accepted");
         };
-        assert_lifecycle_rejection_is_pure(&mut registry, start.clone(), first_lifecycle, true, AgentObservationIgnored::DuplicateEvent);
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            start.clone(),
+            first_lifecycle,
+            true,
+            AgentObservationIgnored::DuplicateEvent,
+        );
         let mut repeat = start.clone();
         repeat.event_id = AgentEventId::new();
         repeat.sequence = 2;
-        assert_eq!(registry.start_hook_lifecycle(repeat.clone(), first_lifecycle), AgentApplyOutcome::Applied {
-            run_id: first.clone(), created: false,
-        });
+        assert_eq!(
+            registry.start_hook_lifecycle(repeat.clone(), first_lifecycle),
+            AgentApplyOutcome::Applied {
+                run_id: first.clone(),
+                created: false,
+            }
+        );
         let mut end = repeat.clone();
         end.event_id = AgentEventId::new();
         end.sequence = 3;
         end.activity = AgentActivity::Exited;
-        assert!(matches!(registry.observe_hook_lifecycle(end.clone(), first_lifecycle), AgentApplyOutcome::Applied { .. }));
+        assert!(matches!(
+            registry.observe_hook_lifecycle(end.clone(), first_lifecycle),
+            AgentApplyOutcome::Applied { .. }
+        ));
         let ended = registry.run(&first).unwrap().clone();
 
         let mut resumed = start.clone();
         resumed.event_id = AgentEventId::new();
         resumed.sequence = 4;
         let second_lifecycle = AgentHookLifecycleId::next().unwrap();
-        assert_lifecycle_rejection_is_pure(&mut registry, resumed.clone(), second_lifecycle, false, AgentObservationIgnored::EndedRun);
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            resumed.clone(),
+            second_lifecycle,
+            false,
+            AgentObservationIgnored::EndedRun,
+        );
         let mut stale_start = resumed.clone();
         stale_start.sequence = 3;
-        assert_lifecycle_rejection_is_pure(&mut registry, stale_start, second_lifecycle, true, AgentObservationIgnored::OutOfOrder);
-        assert_eq!(registry.observe(resumed.clone()), AgentApplyOutcome::Ignored(AgentObservationIgnored::EndedRun));
-        let AgentApplyOutcome::Applied { run_id: second, created: true } = registry.start_hook_lifecycle(resumed.clone(), second_lifecycle) else {
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            stale_start,
+            second_lifecycle,
+            true,
+            AgentObservationIgnored::OutOfOrder,
+        );
+        assert_eq!(
+            registry.observe(resumed.clone()),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::EndedRun)
+        );
+        let AgentApplyOutcome::Applied {
+            run_id: second,
+            created: true,
+        } = registry.start_hook_lifecycle(resumed.clone(), second_lifecycle)
+        else {
             panic!("only explicit new lifecycle authority permits same-ID resume");
         };
         assert_ne!(second, first);
@@ -1457,36 +1609,71 @@ mod tests {
         competing.event_id = AgentEventId::new();
         competing.sequence = 99;
         competing.connection_epoch = Some(99);
-        assert_lifecycle_rejection_is_pure(&mut registry, competing, AgentHookLifecycleId::next().unwrap(), true, AgentObservationIgnored::AmbiguousRun);
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            competing,
+            AgentHookLifecycleId::next().unwrap(),
+            true,
+            AgentObservationIgnored::AmbiguousRun,
+        );
         for activity in [AgentActivity::Working, AgentActivity::Exited] {
             let mut queued = resumed.clone();
             queued.event_id = AgentEventId::new();
             queued.sequence = 99;
             queued.connection_epoch = Some(99);
             queued.activity = activity;
-            assert_lifecycle_rejection_is_pure(&mut registry, queued, first_lifecycle, false, AgentObservationIgnored::EndedRun);
+            assert_lifecycle_rejection_is_pure(
+                &mut registry,
+                queued,
+                first_lifecycle,
+                false,
+                AgentObservationIgnored::EndedRun,
+            );
         }
         let mut ordinary = resumed.clone();
         ordinary.event_id = AgentEventId::new();
         ordinary.sequence = 5;
-        assert_eq!(registry.observe(ordinary.clone()), AgentApplyOutcome::Ignored(AgentObservationIgnored::AmbiguousRun));
+        assert_eq!(
+            registry.observe(ordinary.clone()),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::AmbiguousRun)
+        );
         ordinary.activity = AgentActivity::Done;
-        assert_eq!(registry.observe_hook_lifecycle(ordinary.clone(), second_lifecycle), AgentApplyOutcome::Applied {
-            run_id: second.clone(), created: false,
-        });
+        assert_eq!(
+            registry.observe_hook_lifecycle(ordinary.clone(), second_lifecycle),
+            AgentApplyOutcome::Applied {
+                run_id: second.clone(),
+                created: false,
+            }
+        );
         assert!(!registry.run(&second).unwrap().activity.is_ended());
         end.event_id = AgentEventId::new();
         end.sequence = 6;
-        assert!(matches!(registry.observe_hook_lifecycle(end, second_lifecycle), AgentApplyOutcome::Applied { .. }));
+        assert!(matches!(
+            registry.observe_hook_lifecycle(end, second_lifecycle),
+            AgentApplyOutcome::Applied { .. }
+        ));
         resumed.event_id = AgentEventId::new();
         resumed.sequence = 7;
         let third_lifecycle = AgentHookLifecycleId::next().unwrap();
-        assert!(matches!(registry.start_hook_lifecycle(resumed, third_lifecycle), AgentApplyOutcome::Applied { created: true, .. }));
+        assert!(matches!(
+            registry.start_hook_lifecycle(resumed, third_lifecycle),
+            AgentApplyOutcome::Applied { created: true, .. }
+        ));
         assert_eq!(registry.runs.len(), 3);
         assert_eq!(registry.hook_lifecycles.len(), 3);
         assert_eq!(registry.run(&first), Some(&ended));
-        assert_eq!(registry.runs().filter(|run| !run.activity.is_ended()).count(), 1);
-        assert!(registry.runs().all(|run| run.provider_session_id.as_deref() == Some("same-session")));
+        assert_eq!(
+            registry
+                .runs()
+                .filter(|run| !run.activity.is_ended())
+                .count(),
+            1
+        );
+        assert!(
+            registry
+                .runs()
+                .all(|run| run.provider_session_id.as_deref() == Some("same-session"))
+        );
     }
 
     #[test]
@@ -1504,7 +1691,10 @@ mod tests {
         start.provider_session_id = Some("owned".into());
         start.weak_episode = weak.weak_episode;
         let owner = AgentHookLifecycleId::next().unwrap();
-        assert!(matches!(registry.start_hook_lifecycle(start.clone(), owner), AgentApplyOutcome::Applied { .. }));
+        assert!(matches!(
+            registry.start_hook_lifecycle(start.clone(), owner),
+            AgentApplyOutcome::Applied { .. }
+        ));
         let mut peer = observation(route.clone(), 3, AgentEvidence::ProcessAttested);
         peer.provider = "codex".parse().unwrap();
         peer.process = AgentProcessIdentity::new(40, 100);
@@ -1516,40 +1706,103 @@ mod tests {
         candidate.sequence = 99;
         candidate.connection_epoch = Some(99);
         for explicit in [false, true] {
-            assert_lifecycle_rejection_is_pure(&mut registry, candidate.clone(), other, explicit, AgentObservationIgnored::UnresolvedHookOwner);
+            assert_lifecycle_rejection_is_pure(
+                &mut registry,
+                candidate.clone(),
+                other,
+                explicit,
+                AgentObservationIgnored::UnresolvedHookOwner,
+            );
         }
         let mut mismatched = candidate.clone();
         mismatched.provider_session_id = Some("wrong-owner".into());
-        assert_lifecycle_rejection_is_pure(&mut registry, mismatched, owner, false, AgentObservationIgnored::UnresolvedHookOwner);
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            mismatched,
+            owner,
+            false,
+            AgentObservationIgnored::UnresolvedHookOwner,
+        );
         let mut duplicate = candidate.clone();
         duplicate.event_id = start.event_id.clone();
-        assert_lifecycle_rejection_is_pure(&mut registry, duplicate, owner, true, AgentObservationIgnored::DuplicateEvent);
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            duplicate,
+            owner,
+            true,
+            AgentObservationIgnored::DuplicateEvent,
+        );
         let mut zero_sequence = candidate.clone();
         zero_sequence.sequence = 0;
-        assert_lifecycle_rejection_is_pure(&mut registry, zero_sequence, owner, true, AgentObservationIgnored::InvalidSequence);
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            zero_sequence,
+            owner,
+            true,
+            AgentObservationIgnored::InvalidSequence,
+        );
         let mut zero_epoch = candidate.clone();
         zero_epoch.connection_epoch = Some(0);
-        assert_lifecycle_rejection_is_pure(&mut registry, zero_epoch, owner, true, AgentObservationIgnored::InvalidConnectionEpoch);
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            zero_epoch,
+            owner,
+            true,
+            AgentObservationIgnored::InvalidConnectionEpoch,
+        );
         let mut stale_epoch = candidate.clone();
         stale_epoch.connection_epoch = Some(1);
-        assert_lifecycle_rejection_is_pure(&mut registry, stale_epoch, owner, true, AgentObservationIgnored::StaleConnectionEpoch);
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            stale_epoch,
+            owner,
+            true,
+            AgentObservationIgnored::StaleConnectionEpoch,
+        );
         let mut old_sequence = candidate.clone();
         old_sequence.connection_epoch = Some(2);
         old_sequence.sequence = 1;
-        assert_lifecycle_rejection_is_pure(&mut registry, old_sequence, owner, true, AgentObservationIgnored::OutOfOrder);
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            old_sequence,
+            owner,
+            true,
+            AgentObservationIgnored::OutOfOrder,
+        );
         let mut unknown_exit = candidate.clone();
         unknown_exit.provider_session_id = Some("unknown".into());
         unknown_exit.activity = AgentActivity::Exited;
-        assert_lifecycle_rejection_is_pure(&mut registry, unknown_exit, other, false, AgentObservationIgnored::UnresolvedHookOwner);
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            unknown_exit,
+            other,
+            false,
+            AgentObservationIgnored::UnresolvedHookOwner,
+        );
         let mut ended_start = candidate.clone();
         ended_start.activity = AgentActivity::Exited;
-        assert_lifecycle_rejection_is_pure(&mut registry, ended_start, owner, true, AgentObservationIgnored::UnresolvedHookOwner);
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            ended_start,
+            owner,
+            true,
+            AgentObservationIgnored::UnresolvedHookOwner,
+        );
         let mut invalid_session = candidate.clone();
         invalid_session.provider_session_id = Some("bad\nsession".into());
-        assert_lifecycle_rejection_is_pure(&mut registry, invalid_session, owner, true, AgentObservationIgnored::UnresolvedHookOwner);
+        assert_lifecycle_rejection_is_pure(
+            &mut registry,
+            invalid_session,
+            owner,
+            true,
+            AgentObservationIgnored::UnresolvedHookOwner,
+        );
         candidate.connection_epoch = Some(2);
         candidate.sequence = 4;
-        assert!(matches!(registry.observe_hook_lifecycle(candidate, owner), AgentApplyOutcome::Applied { created: false, .. }));
+        assert!(matches!(
+            registry.observe_hook_lifecycle(candidate, owner),
+            AgentApplyOutcome::Applied { created: false, .. }
+        ));
     }
 
     #[test]
@@ -1559,22 +1812,33 @@ mod tests {
         let mut process = observation(route.clone(), 1, AgentEvidence::ProcessAttested);
         process.provider_session_id = Some("attested".into());
         process.process = AgentProcessIdentity::new(41, 100);
-        let AgentApplyOutcome::Applied { run_id: attested, .. } = registry.observe(process.clone()) else {
+        let AgentApplyOutcome::Applied {
+            run_id: attested, ..
+        } = registry.observe(process.clone())
+        else {
             panic!("process observation must be accepted");
         };
         let mut hook = observation(route.clone(), 2, AgentEvidence::Hook);
         hook.provider_session_id = Some("attested".into());
         let lifecycle_id = AgentHookLifecycleId::next().unwrap();
-        assert_eq!(registry.start_hook_lifecycle(hook.clone(), lifecycle_id), AgentApplyOutcome::Applied {
-            run_id: attested.clone(), created: false,
-        });
+        assert_eq!(
+            registry.start_hook_lifecycle(hook.clone(), lifecycle_id),
+            AgentApplyOutcome::Applied {
+                run_id: attested.clone(),
+                created: false,
+            }
+        );
         assert_eq!(registry.run(&attested).unwrap().process, process.process);
         hook.event_id = AgentEventId::new();
         hook.sequence = 3;
         hook.provider = "codex".parse().unwrap();
-        assert_eq!(registry.observe_hook_lifecycle(hook.clone(), lifecycle_id), AgentApplyOutcome::Applied {
-            run_id: attested.clone(), created: false,
-        });
+        assert_eq!(
+            registry.observe_hook_lifecycle(hook.clone(), lifecycle_id),
+            AgentApplyOutcome::Applied {
+                run_id: attested.clone(),
+                created: false,
+            }
+        );
         assert_eq!(registry.run(&attested).unwrap().provider.as_str(), "codex");
         let mut other_route = route.clone();
         other_route.terminal_incarnation_id = TerminalIncarnationId::new();
@@ -1582,10 +1846,17 @@ mod tests {
         other.event_id = AgentEventId::new();
         other.route = other_route.clone();
         let other_lifecycle = AgentHookLifecycleId::next().unwrap();
-        assert!(matches!(registry.start_hook_lifecycle(other, other_lifecycle), AgentApplyOutcome::Applied { created: true, .. }));
+        assert!(matches!(
+            registry.start_hook_lifecycle(other, other_lifecycle),
+            AgentApplyOutcome::Applied { created: true, .. }
+        ));
         registry.remove_route(&route);
         assert_eq!(registry.hook_lifecycles.len(), 1);
-        assert!(registry.hook_lifecycles.contains_key(&(other_route, other_lifecycle)));
+        assert!(
+            registry
+                .hook_lifecycles
+                .contains_key(&(other_route, other_lifecycle))
+        );
         assert!(registry.run(&attested).is_none());
 
         let mut ambiguous = AgentRuntimeRegistry::default();
@@ -1598,7 +1869,13 @@ mod tests {
         hook.provider = "claude".parse().unwrap();
         hook.sequence = 99;
         hook.connection_epoch = Some(99);
-        assert_lifecycle_rejection_is_pure(&mut ambiguous, hook, lifecycle_id, true, AgentObservationIgnored::AmbiguousRun);
+        assert_lifecycle_rejection_is_pure(
+            &mut ambiguous,
+            hook,
+            lifecycle_id,
+            true,
+            AgentObservationIgnored::AmbiguousRun,
+        );
     }
 
     #[test]
@@ -1681,8 +1958,14 @@ mod tests {
                     created: false
                 }
             );
-            assert_eq!(registry.run(&owner).unwrap().activity, AgentActivity::Exited);
-            assert_eq!(registry.run(&owner).unwrap().provider_session_id.as_deref(), session_id);
+            assert_eq!(
+                registry.run(&owner).unwrap().activity,
+                AgentActivity::Exited
+            );
+            assert_eq!(
+                registry.run(&owner).unwrap().provider_session_id.as_deref(),
+                session_id
+            );
             assert_eq!(registry.run(&peer), Some(&before));
         }
     }
@@ -1695,7 +1978,10 @@ mod tests {
             let mut hook = observation(route.clone(), sequence, AgentEvidence::Hook);
             hook.connection_epoch = Some(7);
             hook.provider_session_id = Some(session.into());
-            assert!(matches!(registry.observe(hook), AgentApplyOutcome::Applied { created: true, .. }));
+            assert!(matches!(
+                registry.observe(hook),
+                AgentApplyOutcome::Applied { created: true, .. }
+            ));
         }
         let before: Vec<_> = registry.runs().cloned().collect();
         assert_eq!(
@@ -1837,14 +2123,26 @@ mod tests {
         };
         let mut inventory = inventory_for(&route, 2, &[AgentProcessIdentity::new(42, 99).unwrap()]);
         inventory.weak_episode = episode;
-        assert_eq!(registry.apply_process_inventory(inventory).unwrap(), vec![run_id.clone()]);
+        assert_eq!(
+            registry.apply_process_inventory(inventory).unwrap(),
+            vec![run_id.clone()]
+        );
         assert!(!registry.is_superseded_weak_alias(&run_id));
-        assert_eq!(registry.run(&run_id).unwrap().evidence, AgentEvidence::ProcessAttested);
+        assert_eq!(
+            registry.run(&run_id).unwrap().evidence,
+            AgentEvidence::ProcessAttested
+        );
         weak.event_id = AgentEventId::new();
         weak.sequence = 3;
         weak.connection_epoch = Some(7);
-        assert_eq!(registry.observe(weak), AgentApplyOutcome::Ignored(AgentObservationIgnored::SupersededWeakEpisode));
-        assert_eq!(registry.active_run_for_route(&route).unwrap().run_id, run_id);
+        assert_eq!(
+            registry.observe(weak),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::SupersededWeakEpisode)
+        );
+        assert_eq!(
+            registry.active_run_for_route(&route).unwrap().run_id,
+            run_id
+        );
     }
 
     fn inventory_for(
@@ -1858,11 +2156,14 @@ mod tests {
             sequence,
             connection_epoch: 7,
             weak_episode: None,
-            processes: processes.iter().map(|process| AgentProcessObservation {
-                provider: "claude".parse().unwrap(),
-                process: *process,
-                activity: AgentActivity::Working,
-            }).collect(),
+            processes: processes
+                .iter()
+                .map(|process| AgentProcessObservation {
+                    provider: "claude".parse().unwrap(),
+                    process: *process,
+                    activity: AgentActivity::Working,
+                })
+                .collect(),
             received_at_unix_ms: 100 + sequence as i64,
         }
     }
@@ -1878,11 +2179,16 @@ mod tests {
                 let mut hook = observation(route.clone(), 1, AgentEvidence::Hook);
                 hook.connection_epoch = Some(7);
                 hook.provider_session_id = session.map(str::to_string);
-                let AgentApplyOutcome::Applied { run_id: hook_id, .. } = registry.observe(hook) else {
+                let AgentApplyOutcome::Applied {
+                    run_id: hook_id, ..
+                } = registry.observe(hook)
+                else {
                     panic!("expected Hook owner");
                 };
                 let before = registry.run(&hook_id).unwrap().clone();
-                let ids = registry.apply_process_inventory(inventory_for(&route, 2, &processes)).unwrap();
+                let ids = registry
+                    .apply_process_inventory(inventory_for(&route, 2, &processes))
+                    .unwrap();
                 assert_eq!(ids.len(), 2);
                 assert_ne!(ids[0], ids[1]);
                 assert!(!ids.contains(&hook_id));
@@ -1893,7 +2199,9 @@ mod tests {
                     assert_eq!(run.evidence, AgentEvidence::ProcessAttested);
                 }
                 let reversed = [processes[1], processes[0]];
-                let again = registry.apply_process_inventory(inventory_for(&route, 3, &reversed)).unwrap();
+                let again = registry
+                    .apply_process_inventory(inventory_for(&route, 3, &reversed))
+                    .unwrap();
                 assert_eq!(again, vec![ids[1].clone(), ids[0].clone()]);
                 assert_eq!(registry.run(&hook_id), Some(&before));
                 assert!(registry.fallback_supersession(&hook_id).is_none());
@@ -1909,13 +2217,15 @@ mod tests {
         for processes in [[p1, p2], [p2, p1]] {
             let route = route();
             let mut registry = AgentRuntimeRegistry::default();
-            let AgentApplyOutcome::Applied { run_id: weak, .. } = registry.observe(
-                observation(route.clone(), 1, AgentEvidence::PtyActivity),
-            ) else {
+            let AgentApplyOutcome::Applied { run_id: weak, .. } =
+                registry.observe(observation(route.clone(), 1, AgentEvidence::PtyActivity))
+            else {
                 panic!("expected weak alias");
             };
             let before = registry.run(&weak).unwrap().clone();
-            let ids = registry.apply_process_inventory(inventory_for(&route, 2, &processes)).unwrap();
+            let ids = registry
+                .apply_process_inventory(inventory_for(&route, 2, &processes))
+                .unwrap();
             assert_eq!(ids.len(), 2);
             assert!(!ids.contains(&weak));
             assert_ne!(ids[0], ids[1]);
@@ -1927,11 +2237,17 @@ mod tests {
                 assert_eq!(registry.run(id).unwrap().process, Some(process));
                 assert!(registry.fallback_supersession(id).is_none());
             }
-            registry.apply_process_inventory(inventory_for(&route, 3, &[p1])).unwrap();
+            registry
+                .apply_process_inventory(inventory_for(&route, 3, &[p1]))
+                .unwrap();
             let mut later = observation(route, 4, AgentEvidence::ProcessAttested);
             later.connection_epoch = Some(7);
             later.process = AgentProcessIdentity::new(44, 101);
-            let AgentApplyOutcome::Applied { run_id, created: true } = registry.observe(later) else {
+            let AgentApplyOutcome::Applied {
+                run_id,
+                created: true,
+            } = registry.observe(later)
+            else {
                 panic!("known process plus new process is not a singleton upgrade");
             };
             assert_ne!(run_id, weak);
@@ -1948,13 +2264,19 @@ mod tests {
         for (sequence, session) in [(1, "weak-a"), (2, "weak-b")] {
             let mut weak = observation(route.clone(), sequence, AgentEvidence::PtyActivity);
             weak.provider_session_id = Some(session.into());
-            let AgentApplyOutcome::Applied { run_id, created: true } = registry.observe(weak) else {
+            let AgentApplyOutcome::Applied {
+                run_id,
+                created: true,
+            } = registry.observe(weak)
+            else {
                 panic!("expected distinct weak session aliases");
             };
             aliases.push(registry.run(&run_id).unwrap().clone());
         }
         let process = AgentProcessIdentity::new(42, 99).unwrap();
-        let ids = registry.apply_process_inventory(inventory_for(&route, 3, &[process])).unwrap();
+        let ids = registry
+            .apply_process_inventory(inventory_for(&route, 3, &[process]))
+            .unwrap();
         assert_eq!(ids.len(), 1);
         assert_eq!(registry.run(&ids[0]).unwrap().process, Some(process));
         for alias in &aliases {
@@ -1974,15 +2296,23 @@ mod tests {
                 let mut registry = AgentRuntimeRegistry::default();
                 let mut initial = observation(route.clone(), 1, evidence);
                 initial.connection_epoch = Some(7);
-                let AgentApplyOutcome::Applied { run_id: initial_id, .. } = registry.observe(initial) else {
+                let AgentApplyOutcome::Applied {
+                    run_id: initial_id, ..
+                } = registry.observe(initial)
+                else {
                     panic!("expected initial owner");
                 };
                 let before = registry.run(&initial_id).unwrap().clone();
                 for (index, process) in processes.into_iter().enumerate() {
-                    let mut event = observation(route.clone(), index as u64 + 2, AgentEvidence::ProcessAttested);
+                    let mut event = observation(
+                        route.clone(),
+                        index as u64 + 2,
+                        AgentEvidence::ProcessAttested,
+                    );
                     event.connection_epoch = Some(7);
                     event.process = Some(process);
-                    let AgentApplyOutcome::Applied { run_id, created } = registry.observe(event) else {
+                    let AgentApplyOutcome::Applied { run_id, created } = registry.observe(event)
+                    else {
                         panic!("proved process must be retained");
                     };
                     let upgrade = evidence == AgentEvidence::PtyActivity && index == 0;
@@ -2006,10 +2336,19 @@ mod tests {
         let before = registry.run(&process_id).unwrap().clone();
         let mut unbound = observation(process_route, 2, AgentEvidence::Hook);
         unbound.connection_epoch = Some(7);
-        assert_eq!(registry.observe(unbound.clone()), AgentApplyOutcome::Ignored(AgentObservationIgnored::AmbiguousRun));
+        assert_eq!(
+            registry.observe(unbound.clone()),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::AmbiguousRun)
+        );
         assert_eq!(registry.run(&process_id), Some(&before));
         unbound.process = before.process;
-        assert_eq!(registry.observe(unbound), AgentApplyOutcome::Applied { run_id: process_id, created: false });
+        assert_eq!(
+            registry.observe(unbound),
+            AgentApplyOutcome::Applied {
+                run_id: process_id,
+                created: false
+            }
+        );
 
         let route = route();
         let mut registry = AgentRuntimeRegistry::default();
@@ -2024,7 +2363,13 @@ mod tests {
         process.connection_epoch = Some(7);
         process.provider_session_id = Some("proved-session".into());
         process.process = AgentProcessIdentity::new(42, 99);
-        assert_eq!(registry.observe(process), AgentApplyOutcome::Applied { run_id: run_id.clone(), created: false });
+        assert_eq!(
+            registry.observe(process),
+            AgentApplyOutcome::Applied {
+                run_id: run_id.clone(),
+                created: false
+            }
+        );
         let run = registry.run(&run_id).unwrap();
         assert_eq!(run.process, AgentProcessIdentity::new(42, 99));
         assert_eq!(run.evidence, AgentEvidence::Hook);
@@ -2045,8 +2390,16 @@ mod tests {
             hook.provider_session_id = Some("first-session".into());
             hook.weak_episode = tracker.weak_detection_episode(1);
             let mut registry = AgentRuntimeRegistry::default();
-            let first = if hook_first { hook.clone() } else { weak.clone() };
-            let AgentApplyOutcome::Applied { run_id: first_id, created: true } = registry.observe(first) else {
+            let first = if hook_first {
+                hook.clone()
+            } else {
+                weak.clone()
+            };
+            let AgentApplyOutcome::Applied {
+                run_id: first_id,
+                created: true,
+            } = registry.observe(first)
+            else {
                 panic!("expected first launch observation");
             };
             let before = registry.run(&first_id).unwrap().clone();
@@ -2054,20 +2407,33 @@ mod tests {
             second.sequence = 2;
             let outcome = registry.observe(second);
             let hook_id = if hook_first {
-                assert_eq!(outcome, AgentApplyOutcome::Ignored(AgentObservationIgnored::SupersededWeakEpisode));
+                assert_eq!(
+                    outcome,
+                    AgentApplyOutcome::Ignored(AgentObservationIgnored::SupersededWeakEpisode)
+                );
                 assert_eq!(registry.runs().count(), 1);
                 first_id.clone()
             } else {
-                let AgentApplyOutcome::Applied { run_id, created: true } = outcome else {
+                let AgentApplyOutcome::Applied {
+                    run_id,
+                    created: true,
+                } = outcome
+                else {
                     panic!("first Hook session cannot invent a weak alias binding");
                 };
                 assert_ne!(run_id, first_id);
                 assert_eq!(registry.runs().count(), 2);
-                assert_eq!(registry.run(&first_id).unwrap().activity, AgentActivity::Unknown);
+                assert_eq!(
+                    registry.run(&first_id).unwrap().activity,
+                    AgentActivity::Unknown
+                );
                 run_id
             };
             assert_eq!(registry.run(&first_id), Some(&before));
-            assert_eq!(registry.fallback_supersession(&first_id).is_some(), !hook_first);
+            assert_eq!(
+                registry.fallback_supersession(&first_id).is_some(),
+                !hook_first
+            );
             let hook = registry.run(&hook_id).unwrap();
             assert_eq!(hook.provider_session_id.as_deref(), Some("first-session"));
             assert_eq!(hook.process, None);
@@ -2075,9 +2441,15 @@ mod tests {
             assert_eq!(hook.activity, AgentActivity::Working);
             assert_eq!(
                 registry.observe_hook_exit(route, AgentEventId::new(), 3, None, 103),
-                AgentApplyOutcome::Applied { run_id: hook_id.clone(), created: false }
+                AgentApplyOutcome::Applied {
+                    run_id: hook_id.clone(),
+                    created: false
+                }
             );
-            assert_eq!(registry.run(&hook_id).unwrap().activity, AgentActivity::Exited);
+            assert_eq!(
+                registry.run(&hook_id).unwrap().activity,
+                AgentActivity::Exited
+            );
             assert!(registry.active_run_for_route(&before.route).is_none());
             if !hook_first {
                 // Supersession stays explicit; no process exit is invented.
@@ -2098,10 +2470,19 @@ mod tests {
         };
         let mut hook = observation(route, 2, AgentEvidence::Hook);
         hook.provider_session_id = Some("proved-session".into());
-        assert_eq!(registry.observe(hook), AgentApplyOutcome::Applied { run_id: run_id.clone(), created: false });
+        assert_eq!(
+            registry.observe(hook),
+            AgentApplyOutcome::Applied {
+                run_id: run_id.clone(),
+                created: false
+            }
+        );
         assert_eq!(registry.runs().count(), 1);
         assert_eq!(registry.run(&run_id).unwrap().evidence, AgentEvidence::Hook);
-        assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Working);
+        assert_eq!(
+            registry.run(&run_id).unwrap().activity,
+            AgentActivity::Working
+        );
         assert!(registry.fallback_supersession(&run_id).is_none());
     }
 
@@ -2114,12 +2495,19 @@ mod tests {
         let mut registry = AgentRuntimeRegistry::default();
         let mut weak = observation(route.clone(), 1, AgentEvidence::PtyActivity);
         weak.weak_episode = episode;
-        let AgentApplyOutcome::Applied { run_id: weak_id, .. } = registry.observe(weak) else {
+        let AgentApplyOutcome::Applied {
+            run_id: weak_id, ..
+        } = registry.observe(weak)
+        else {
             panic!("input fallback");
         };
         let mut hook = observation(route.clone(), 2, AgentEvidence::Hook);
         hook.weak_episode = episode;
-        let AgentApplyOutcome::Applied { run_id: hook_id, created: true } = registry.observe(hook) else {
+        let AgentApplyOutcome::Applied {
+            run_id: hook_id,
+            created: true,
+        } = registry.observe(hook)
+        else {
             panic!("source Hook creates a distinct run without a guessed weak binding");
         };
         assert_ne!(weak_id, hook_id);
@@ -2128,7 +2516,10 @@ mod tests {
         assert_eq!(registry.run(&hook_id).unwrap().process, None);
         registry.observe_hook_exit(route.clone(), AgentEventId::new(), 3, None, 100);
         assert!(registry.active_run_for_route(&route).is_none());
-        assert_eq!(registry.run(&weak_id).unwrap().activity, AgentActivity::Unknown);
+        assert_eq!(
+            registry.run(&weak_id).unwrap().activity,
+            AgentActivity::Unknown
+        );
     }
 
     #[test]
@@ -2136,9 +2527,9 @@ mod tests {
         for changed_field in 0..8 {
             let route = route();
             let mut registry = AgentRuntimeRegistry::default();
-            let AgentApplyOutcome::Applied { run_id: weak, .. } = registry.observe(
-                observation(route.clone(), 10, AgentEvidence::PtyActivity),
-            ) else {
+            let AgentApplyOutcome::Applied { run_id: weak, .. } =
+                registry.observe(observation(route.clone(), 10, AgentEvidence::PtyActivity))
+            else {
                 panic!("expected fallback");
             };
             let before = registry.run(&weak).unwrap().clone();
@@ -2147,8 +2538,17 @@ mod tests {
             // Supersession is exact-route evidence, not provider correlation.
             hook.provider = "codex".parse().unwrap();
             match changed_field {
-                0 => hook.route.execution_host_id = ExecutionHostId::derive("other", &HostInstallId::new()),
-                1 => hook.route.worktree_id = WorktreeId::derive(&RepoId::derive(&route.execution_host_id, "/other/.git"), "/other", None),
+                0 => {
+                    hook.route.execution_host_id =
+                        ExecutionHostId::derive("other", &HostInstallId::new())
+                }
+                1 => {
+                    hook.route.worktree_id = WorktreeId::derive(
+                        &RepoId::derive(&route.execution_host_id, "/other/.git"),
+                        "/other",
+                        None,
+                    )
+                }
                 2 => hook.route.tab_id = TabId::new(),
                 3 => hook.route.pane_key = PaneKey::new(),
                 4 => hook.route.terminal_session_id = TerminalSessionId::new(),
@@ -2164,11 +2564,20 @@ mod tests {
             accepted.provider = "codex".parse().unwrap();
             accepted.provider_session_id = Some("accepted".into());
             let event_id = accepted.event_id.clone();
-            assert!(matches!(registry.observe(accepted), AgentApplyOutcome::Applied { .. }));
-            assert_eq!(registry.fallback_supersession(&weak), Some(&AgentFallbackSupersession {
-                event_id, evidence: AgentEvidence::Hook, sequence: 12, connection_epoch: None,
-                weak_episode: None,
-            }));
+            assert!(matches!(
+                registry.observe(accepted),
+                AgentApplyOutcome::Applied { .. }
+            ));
+            assert_eq!(
+                registry.fallback_supersession(&weak),
+                Some(&AgentFallbackSupersession {
+                    event_id,
+                    evidence: AgentEvidence::Hook,
+                    sequence: 12,
+                    connection_epoch: None,
+                    weak_episode: None,
+                })
+            );
             assert_eq!(registry.run(&weak), Some(&before));
             registry.remove_route(&route);
             assert!(registry.fallback_supersession(&weak).is_none());
@@ -2180,7 +2589,10 @@ mod tests {
         let route = route();
         let mut registry = AgentRuntimeRegistry::default();
         let mut weak_ids = Vec::new();
-        for (index, binding) in [None, Some("session"), Some("process")].into_iter().enumerate() {
+        for (index, binding) in [None, Some("session"), Some("process")]
+            .into_iter()
+            .enumerate()
+        {
             let mut weak = observation(route.clone(), index as u64 + 1, AgentEvidence::PtyActivity);
             if binding == Some("session") {
                 weak.provider_session_id = Some("weak-session".into());
@@ -2189,31 +2601,57 @@ mod tests {
                 weak.process = AgentProcessIdentity::new(50, 150);
                 weak.provider = "pi".parse().unwrap();
             }
-            let AgentApplyOutcome::Applied { run_id, created: true } = registry.observe(weak) else {
+            let AgentApplyOutcome::Applied {
+                run_id,
+                created: true,
+            } = registry.observe(weak)
+            else {
                 panic!("expected separate fallback or bound alias");
             };
             weak_ids.push(run_id);
         }
         let p1 = AgentProcessIdentity::new(42, 99).unwrap();
         let p2 = AgentProcessIdentity::new(43, 100).unwrap();
-        let ids = registry.apply_process_inventory(inventory_for(&route, 4, &[p1, p2])).unwrap();
+        let ids = registry
+            .apply_process_inventory(inventory_for(&route, 4, &[p1, p2]))
+            .unwrap();
         assert_eq!(ids.len(), 2);
-        let supersession = registry.fallback_supersession(&weak_ids[0]).unwrap().clone();
+        let supersession = registry
+            .fallback_supersession(&weak_ids[0])
+            .unwrap()
+            .clone();
         for id in weak_ids[1..].iter().chain(ids.iter()) {
             assert!(registry.fallback_supersession(id).is_none());
         }
-        registry.apply_process_inventory(inventory_for(&route, 5, &[])).unwrap();
-        assert_eq!(registry.fallback_supersession(&weak_ids[0]), Some(&supersession));
-        assert_eq!(registry.run(&weak_ids[0]).unwrap().activity, AgentActivity::Unknown);
+        registry
+            .apply_process_inventory(inventory_for(&route, 5, &[]))
+            .unwrap();
+        assert_eq!(
+            registry.fallback_supersession(&weak_ids[0]),
+            Some(&supersession)
+        );
+        assert_eq!(
+            registry.run(&weak_ids[0]).unwrap().activity,
+            AgentActivity::Unknown
+        );
         for id in &ids {
             assert_eq!(registry.run(id).unwrap().activity, AgentActivity::Exited);
             assert!(registry.fallback_supersession(id).is_none());
         }
-        registry.mark_connectivity(AgentConnectivityObservation {
-            event_id: AgentEventId::new(), route, sequence: 6, connection_epoch: Some(8),
-            connectivity: AgentConnectivity::Disconnected, received_at_unix_ms: 500,
-        }).unwrap();
-        assert_eq!(registry.fallback_supersession(&weak_ids[0]), Some(&supersession));
+        registry
+            .mark_connectivity(AgentConnectivityObservation {
+                event_id: AgentEventId::new(),
+                route,
+                sequence: 6,
+                connection_epoch: Some(8),
+                connectivity: AgentConnectivity::Disconnected,
+                received_at_unix_ms: 500,
+            })
+            .unwrap();
+        assert_eq!(
+            registry.fallback_supersession(&weak_ids[0]),
+            Some(&supersession)
+        );
         assert_eq!(registry.run(&weak_ids[0]).unwrap().last_sequence, 1);
     }
 
@@ -2222,22 +2660,34 @@ mod tests {
         for reverse in [false, true] {
             let route = route();
             let mut registry = AgentRuntimeRegistry::default();
-            let AgentApplyOutcome::Applied { run_id: weak, .. } = registry.observe(
-                observation(route.clone(), 1, AgentEvidence::PtyActivity),
-            ) else {
+            let AgentApplyOutcome::Applied { run_id: weak, .. } =
+                registry.observe(observation(route.clone(), 1, AgentEvidence::PtyActivity))
+            else {
                 panic!("expected fallback");
             };
-            let mut inventory = inventory_for(&route, 2, &[
-                AgentProcessIdentity::new(42, 99).unwrap(),
-                AgentProcessIdentity::new(43, 100).unwrap(),
-            ]);
+            let mut inventory = inventory_for(
+                &route,
+                2,
+                &[
+                    AgentProcessIdentity::new(42, 99).unwrap(),
+                    AgentProcessIdentity::new(43, 100).unwrap(),
+                ],
+            );
             inventory.processes[1].provider = "codex".parse().unwrap();
-            if reverse { inventory.processes.reverse(); }
+            if reverse {
+                inventory.processes.reverse();
+            }
             let ids = registry.apply_process_inventory(inventory).unwrap();
             assert_eq!(ids.len(), 2);
             assert!(ids.contains(&weak));
-            assert_eq!(registry.run(&weak).unwrap().process, AgentProcessIdentity::new(42, 99));
-            assert!(ids.iter().all(|id| registry.fallback_supersession(id).is_none()));
+            assert_eq!(
+                registry.run(&weak).unwrap().process,
+                AgentProcessIdentity::new(42, 99)
+            );
+            assert!(
+                ids.iter()
+                    .all(|id| registry.fallback_supersession(id).is_none())
+            );
         }
     }
 
@@ -2258,18 +2708,30 @@ mod tests {
         let current = tracker.weak_detection_episode(1);
         let mut next = observation(route.clone(), 2, AgentEvidence::PtyActivity);
         next.weak_episode = current;
-        let AgentApplyOutcome::Applied { run_id: new, created: true } = registry.observe(next) else {
+        let AgentApplyOutcome::Applied {
+            run_id: new,
+            created: true,
+        } = registry.observe(next)
+        else {
             panic!("new episode must not reuse the old weak ID");
         };
         assert!(registry.is_superseded_weak_alias(&old));
         assert!(!registry.is_superseded_weak_alias(&new));
-        let mut inventory = inventory_for(&route, 3, &[
-            AgentProcessIdentity::new(42, 99).unwrap(), AgentProcessIdentity::new(43, 100).unwrap(),
-        ]);
+        let mut inventory = inventory_for(
+            &route,
+            3,
+            &[
+                AgentProcessIdentity::new(42, 99).unwrap(),
+                AgentProcessIdentity::new(43, 100).unwrap(),
+            ],
+        );
         inventory.weak_episode = captured;
         let ids = registry.apply_process_inventory(inventory.clone()).unwrap();
         assert_eq!(ids.len(), 2);
-        assert!(!registry.is_superseded_weak_alias(&new), "an older capture cannot invalidate new input");
+        assert!(
+            !registry.is_superseded_weak_alias(&new),
+            "an older capture cannot invalidate new input"
+        );
         assert!(!ids.contains(&new));
         inventory.event_id = AgentEventId::new();
         inventory.sequence = 4;
@@ -2353,16 +2815,24 @@ mod tests {
                 exit.event_id = AgentEventId::new();
                 exit.sequence = 2;
                 exit.activity = AgentActivity::Exited;
-                assert!(matches!(registry.observe(exit), AgentApplyOutcome::Applied { .. }));
+                assert!(matches!(
+                    registry.observe(exit),
+                    AgentApplyOutcome::Applied { .. }
+                ));
             }
             for episode in [Some(unseen_old), ended.then_some(latest)] {
-                let Some(episode) = episode else { continue; };
+                let Some(episode) = episode else {
+                    continue;
+                };
                 let mut late = weak.clone();
                 late.event_id = AgentEventId::new();
                 late.sequence = 99;
                 late.connection_epoch = Some(99);
                 late.weak_episode = Some(episode);
-                assert_eq!(registry.observe(late), AgentApplyOutcome::Ignored(AgentObservationIgnored::SupersededWeakEpisode));
+                assert_eq!(
+                    registry.observe(late),
+                    AgentApplyOutcome::Ignored(AgentObservationIgnored::SupersededWeakEpisode)
+                );
                 assert_eq!(registry.runs().count(), 1);
                 assert_eq!(registry.run(&run_id).unwrap().connection_epoch, None);
             }
@@ -2591,7 +3061,11 @@ mod tests {
         (registry, run_id, route)
     }
 
-    fn semantic(state: &AgentRuntimeState, sequence: u64, activity: AgentActivity) -> AgentSemanticObservation {
+    fn semantic(
+        state: &AgentRuntimeState,
+        sequence: u64,
+        activity: AgentActivity,
+    ) -> AgentSemanticObservation {
         AgentSemanticObservation {
             event_id: AgentEventId::new(),
             run_id: state.run_id.clone(),
@@ -2610,7 +3084,12 @@ mod tests {
     fn inventory_and_output_cannot_manufacture_task_semantics() {
         let (mut registry, run_id, route) = attested_registry();
         let tracker = crate::SessionTracker::new();
-        for output in ["shell output", "\x1b[2J\x1b[H", "done", "permission requested"] {
+        for output in [
+            "shell output",
+            "\x1b[2J\x1b[H",
+            "done",
+            "permission requested",
+        ] {
             tracker.note_output(1, output);
             assert!(!tracker.is_ai_session(1));
         }
@@ -2628,18 +3107,29 @@ mod tests {
             (5, AgentActivity::Done),
             (6, AgentActivity::Blocked),
         ] {
-            registry.apply_process_inventory(AgentProcessInventoryObservation {
-                event_id: AgentEventId::new(), route: route.clone(), sequence,
-                connection_epoch: 7,
-                weak_episode: None,
-                processes: vec![AgentProcessObservation {
-                    provider: "claude".parse().unwrap(),
-                    process: AgentProcessIdentity::new(42, 99).unwrap(), activity: claimed,
-                }],
-                received_at_unix_ms: 200,
-            }).unwrap();
-            assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Unknown);
-            assert_eq!(registry.activity_freshness(&run_id, 200), AgentActivityFreshness::Unknown);
+            registry
+                .apply_process_inventory(AgentProcessInventoryObservation {
+                    event_id: AgentEventId::new(),
+                    route: route.clone(),
+                    sequence,
+                    connection_epoch: 7,
+                    weak_episode: None,
+                    processes: vec![AgentProcessObservation {
+                        provider: "claude".parse().unwrap(),
+                        process: AgentProcessIdentity::new(42, 99).unwrap(),
+                        activity: claimed,
+                    }],
+                    received_at_unix_ms: 200,
+                })
+                .unwrap();
+            assert_eq!(
+                registry.run(&run_id).unwrap().activity,
+                AgentActivity::Unknown
+            );
+            assert_eq!(
+                registry.activity_freshness(&run_id, 200),
+                AgentActivityFreshness::Unknown
+            );
         }
         assert_eq!(registry.runs().count(), 1);
     }
@@ -2648,35 +3138,72 @@ mod tests {
     fn exact_semantics_survive_inventory_weak_output_and_expiry() {
         let tracker = crate::SessionTracker::new();
         tracker.track_input_with_line_snapshot(1, "claude\r", None);
-        for activity in [AgentActivity::Working, AgentActivity::Waiting, AgentActivity::Blocked,
-            AgentActivity::Done, AgentActivity::Failed] {
+        for activity in [
+            AgentActivity::Working,
+            AgentActivity::Waiting,
+            AgentActivity::Blocked,
+            AgentActivity::Done,
+            AgentActivity::Failed,
+        ] {
             let (mut registry, run_id, route) = attested_registry();
             let observed = semantic(registry.run(&run_id).unwrap(), 2, activity);
-            assert!(matches!(registry.observe_semantic(observed.clone()), AgentApplyOutcome::Applied { created: false, .. }));
-            registry.apply_process_inventory(AgentProcessInventoryObservation {
-                event_id: AgentEventId::new(), route: route.clone(), sequence: 3,
-                connection_epoch: 7,
-                weak_episode: tracker.weak_detection_episode(1),
-                processes: vec![AgentProcessObservation {
-                    provider: "claude".parse().unwrap(),
-                    process: AgentProcessIdentity::new(42, 99).unwrap(), activity: AgentActivity::Working,
-                }], received_at_unix_ms: 500,
-            }).unwrap();
+            assert!(matches!(
+                registry.observe_semantic(observed.clone()),
+                AgentApplyOutcome::Applied { created: false, .. }
+            ));
+            registry
+                .apply_process_inventory(AgentProcessInventoryObservation {
+                    event_id: AgentEventId::new(),
+                    route: route.clone(),
+                    sequence: 3,
+                    connection_epoch: 7,
+                    weak_episode: tracker.weak_detection_episode(1),
+                    processes: vec![AgentProcessObservation {
+                        provider: "claude".parse().unwrap(),
+                        process: AgentProcessIdentity::new(42, 99).unwrap(),
+                        activity: AgentActivity::Working,
+                    }],
+                    received_at_unix_ms: 500,
+                })
+                .unwrap();
             let weak = AgentObservation {
                 connection_epoch: Some(7),
                 ..observation(route, 4, AgentEvidence::PtyActivity)
             };
             registry.observe(weak);
             assert_eq!(registry.run(&run_id).unwrap().activity, activity);
-            assert_eq!(registry.run(&run_id).unwrap().last_event_id, observed.event_id);
-            assert_eq!(registry.run(&run_id).unwrap().received_at_unix_ms, observed.received_at_unix_ms);
+            assert_eq!(
+                registry.run(&run_id).unwrap().last_event_id,
+                observed.event_id
+            );
+            assert_eq!(
+                registry.run(&run_id).unwrap().received_at_unix_ms,
+                observed.received_at_unix_ms
+            );
             assert_eq!(registry.run(&run_id).unwrap().last_sequence, 4);
-            assert_eq!(registry.activity_freshness(&run_id, 500), AgentActivityFreshness::Fresh);
-            assert_eq!(registry.activity_freshness(&run_id, 20_000), AgentActivityFreshness::Stale);
-            assert_eq!(registry.run(&run_id).unwrap().connectivity, AgentConnectivity::Live);
+            assert_eq!(
+                registry.activity_freshness(&run_id, 500),
+                AgentActivityFreshness::Fresh
+            );
+            assert_eq!(
+                registry.activity_freshness(&run_id, 20_000),
+                AgentActivityFreshness::Stale
+            );
+            assert_eq!(
+                registry.run(&run_id).unwrap().connectivity,
+                AgentConnectivity::Live
+            );
             let before = registry.run(&run_id).unwrap().clone();
-            let repeated = AgentSemanticObservation { event_id: AgentEventId::new(), sequence: 5, received_at_unix_ms: 600, ..observed };
-            assert_eq!(registry.observe_semantic(repeated), AgentApplyOutcome::Ignored(AgentObservationIgnored::StaleSemanticObservation));
+            let repeated = AgentSemanticObservation {
+                event_id: AgentEventId::new(),
+                sequence: 5,
+                received_at_unix_ms: 600,
+                ..observed
+            };
+            assert_eq!(
+                registry.observe_semantic(repeated),
+                AgentApplyOutcome::Ignored(AgentObservationIgnored::StaleSemanticObservation)
+            );
             assert_eq!(registry.run(&run_id), Some(&before));
         }
     }
@@ -2692,10 +3219,23 @@ mod tests {
                 1 => event.route.pane_key = PaneKey::new(),
                 2 => event.route.tab_id = TabId::new(),
                 3 => event.route.terminal_session_id = TerminalSessionId::new(),
-                4 => event.route.execution_host_id = ExecutionHostId::derive("other", &HostInstallId::new()),
-                5 => event.route.worktree_id = WorktreeId::derive(&RepoId::derive(&event.route.execution_host_id, "/other/.git"), "/other", None),
+                4 => {
+                    event.route.execution_host_id =
+                        ExecutionHostId::derive("other", &HostInstallId::new())
+                }
+                5 => {
+                    event.route.worktree_id = WorktreeId::derive(
+                        &RepoId::derive(&event.route.execution_host_id, "/other/.git"),
+                        "/other",
+                        None,
+                    )
+                }
                 6 => event.provider = "codex".parse().unwrap(),
-                7 => event.owner = AgentSemanticOwner::ForegroundProcess(AgentProcessIdentity::new(42, 100).unwrap()),
+                7 => {
+                    event.owner = AgentSemanticOwner::ForegroundProcess(
+                        AgentProcessIdentity::new(42, 100).unwrap(),
+                    )
+                }
                 8 => event.owner = AgentSemanticOwner::ProviderSession("unbound-session".into()),
                 9 => event.connection_epoch = Some(8),
                 10 => event.sequence = 1,
@@ -2704,7 +3244,13 @@ mod tests {
                 13 => event.observed_at_unix_ms = 103,
                 _ => unreachable!(),
             }
-            assert!(matches!(registry.observe_semantic(event), AgentApplyOutcome::Ignored(_)), "field {field}");
+            assert!(
+                matches!(
+                    registry.observe_semantic(event),
+                    AgentApplyOutcome::Ignored(_)
+                ),
+                "field {field}"
+            );
             assert_eq!(registry.run(&run_id), Some(&before));
         }
         let mut bound = observation(before.route.clone(), 2, AgentEvidence::ProcessAttested);
@@ -2714,7 +3260,10 @@ mod tests {
         registry.observe(bound);
         let mut event = semantic(registry.run(&run_id).unwrap(), 3, AgentActivity::Blocked);
         event.owner = AgentSemanticOwner::ProviderSession("exact-session".into());
-        assert!(matches!(registry.observe_semantic(event), AgentApplyOutcome::Applied { created: false, .. }));
+        assert!(matches!(
+            registry.observe_semantic(event),
+            AgentApplyOutcome::Applied { created: false, .. }
+        ));
     }
 
     #[test]
@@ -2723,18 +3272,27 @@ mod tests {
         let mut independent = observation(route.clone(), 2, AgentEvidence::ProcessAttested);
         independent.process = AgentProcessIdentity::new(43, 100);
         independent.connection_epoch = Some(7);
-        assert!(matches!(registry.observe(independent), AgentApplyOutcome::Applied { created: true, .. }));
+        assert!(matches!(
+            registry.observe(independent),
+            AgentApplyOutcome::Applied { created: true, .. }
+        ));
         let before = registry.run(&first).unwrap().clone();
         let weak = AgentObservation {
             connection_epoch: Some(7),
             ..observation(route.clone(), 3, AgentEvidence::PtyActivity)
         };
-        assert_eq!(registry.observe(weak), AgentApplyOutcome::Ignored(AgentObservationIgnored::AmbiguousRun));
+        assert_eq!(
+            registry.observe(weak),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::AmbiguousRun)
+        );
         assert_eq!(registry.run(&first), Some(&before));
         let mut other_provider = observation(route, 4, AgentEvidence::Hook);
         other_provider.provider = "codex".parse().unwrap();
         other_provider.connection_epoch = Some(7);
-        assert!(matches!(registry.observe(other_provider), AgentApplyOutcome::Applied { created: true, .. }));
+        assert!(matches!(
+            registry.observe(other_provider),
+            AgentApplyOutcome::Applied { created: true, .. }
+        ));
         assert_eq!(registry.runs().count(), 3);
     }
 
@@ -2750,32 +3308,50 @@ mod tests {
         registry.observe(hook);
         let before = registry.run(&run_id).unwrap().clone();
         let event = semantic(&before, 4, AgentActivity::Done);
-        assert_eq!(registry.observe_semantic(event), AgentApplyOutcome::Ignored(AgentObservationIgnored::StrongerEvidence));
+        assert_eq!(
+            registry.observe_semantic(event),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::StrongerEvidence)
+        );
         assert_eq!(registry.run(&run_id), Some(&before));
-        assert_eq!(registry.activity_freshness(&run_id, 50_000), AgentActivityFreshness::Fresh);
+        assert_eq!(
+            registry.activity_freshness(&run_id, 50_000),
+            AgentActivityFreshness::Fresh
+        );
     }
 
     #[test]
     fn old_inventory_cannot_create_a_process_after_retirement() {
         let (mut registry, _, route) = attested_registry();
         let empty = AgentProcessInventoryObservation {
-            event_id: AgentEventId::new(), route: route.clone(), sequence: 3,
-            connection_epoch: 7, weak_episode: None, processes: vec![], received_at_unix_ms: 200,
+            event_id: AgentEventId::new(),
+            route: route.clone(),
+            sequence: 3,
+            connection_epoch: 7,
+            weak_episode: None,
+            processes: vec![],
+            received_at_unix_ms: 200,
         };
         registry.apply_process_inventory(empty.clone()).unwrap();
         let mut delayed = empty;
         delayed.event_id = AgentEventId::new();
         delayed.sequence = 2;
         delayed.processes.push(AgentProcessObservation {
-            provider: "claude".parse().unwrap(), process: AgentProcessIdentity::new(43, 200).unwrap(),
+            provider: "claude".parse().unwrap(),
+            process: AgentProcessIdentity::new(43, 200).unwrap(),
             activity: AgentActivity::Working,
         });
-        assert_eq!(registry.apply_process_inventory(delayed.clone()), Err(AgentObservationIgnored::OutOfOrder));
+        assert_eq!(
+            registry.apply_process_inventory(delayed.clone()),
+            Err(AgentObservationIgnored::OutOfOrder)
+        );
         assert!(registry.active_run_for_route(&route).is_none());
         delayed.sequence = 4;
         delayed.event_id = AgentEventId::new();
         assert_eq!(registry.apply_process_inventory(delayed).unwrap().len(), 1);
-        assert_eq!(registry.active_run_for_route(&route).unwrap().activity, AgentActivity::Unknown);
+        assert_eq!(
+            registry.active_run_for_route(&route).unwrap().activity,
+            AgentActivity::Unknown
+        );
     }
 
     #[test]
@@ -2783,63 +3359,117 @@ mod tests {
         let (mut registry, run_id, route) = attested_registry();
         let old = semantic(registry.run(&run_id).unwrap(), 2, AgentActivity::Waiting);
         registry.observe_semantic(old.clone());
-        registry.mark_connectivity(AgentConnectivityObservation {
-            event_id: AgentEventId::new(), route: route.clone(), sequence: 3,
-            connection_epoch: Some(8), connectivity: AgentConnectivity::Disconnected,
-            received_at_unix_ms: 500,
-        }).unwrap();
-        assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Waiting);
-        registry.apply_process_inventory(AgentProcessInventoryObservation {
-            event_id: AgentEventId::new(), route, sequence: 4, connection_epoch: 8, weak_episode: None,
-            processes: vec![AgentProcessObservation {
-                provider: "claude".parse().unwrap(), process: AgentProcessIdentity::new(42, 99).unwrap(),
-                activity: AgentActivity::Working,
-            }], received_at_unix_ms: 600,
-        }).unwrap();
-        assert_eq!(registry.activity_freshness(&run_id, 600), AgentActivityFreshness::Stale);
+        registry
+            .mark_connectivity(AgentConnectivityObservation {
+                event_id: AgentEventId::new(),
+                route: route.clone(),
+                sequence: 3,
+                connection_epoch: Some(8),
+                connectivity: AgentConnectivity::Disconnected,
+                received_at_unix_ms: 500,
+            })
+            .unwrap();
+        assert_eq!(
+            registry.run(&run_id).unwrap().activity,
+            AgentActivity::Waiting
+        );
+        registry
+            .apply_process_inventory(AgentProcessInventoryObservation {
+                event_id: AgentEventId::new(),
+                route,
+                sequence: 4,
+                connection_epoch: 8,
+                weak_episode: None,
+                processes: vec![AgentProcessObservation {
+                    provider: "claude".parse().unwrap(),
+                    process: AgentProcessIdentity::new(42, 99).unwrap(),
+                    activity: AgentActivity::Working,
+                }],
+                received_at_unix_ms: 600,
+            })
+            .unwrap();
+        assert_eq!(
+            registry.activity_freshness(&run_id, 600),
+            AgentActivityFreshness::Stale
+        );
         let stale = AgentSemanticObservation {
-            sequence: 5, connection_epoch: Some(8), received_at_unix_ms: 600,
-            observed_at_unix_ms: 400, ..old
+            sequence: 5,
+            connection_epoch: Some(8),
+            received_at_unix_ms: 600,
+            observed_at_unix_ms: 400,
+            ..old
         };
         let before = registry.run(&run_id).unwrap().clone();
-        assert_eq!(registry.observe_semantic(stale), AgentApplyOutcome::Ignored(AgentObservationIgnored::StaleSemanticObservation));
+        assert_eq!(
+            registry.observe_semantic(stale),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::StaleSemanticObservation)
+        );
         assert_eq!(registry.run(&run_id), Some(&before));
         let fresh = AgentSemanticObservation {
-            observed_at_unix_ms: 601, received_at_unix_ms: 601,
+            observed_at_unix_ms: 601,
+            received_at_unix_ms: 601,
             ..semantic(&before, 5, AgentActivity::Working)
         };
-        assert!(matches!(registry.observe_semantic(fresh), AgentApplyOutcome::Applied { .. }));
-        assert_eq!(registry.activity_freshness(&run_id, 602), AgentActivityFreshness::Fresh);
+        assert!(matches!(
+            registry.observe_semantic(fresh),
+            AgentApplyOutcome::Applied { .. }
+        ));
+        assert_eq!(
+            registry.activity_freshness(&run_id, 602),
+            AgentActivityFreshness::Fresh
+        );
     }
 
     #[test]
     fn weak_new_epoch_invalidates_semantics_without_borrowing_old_capture_time() {
         let (mut registry, run_id, route) = attested_registry();
-        registry.observe_semantic(semantic(registry.run(&run_id).unwrap(), 2, AgentActivity::Waiting));
+        registry.observe_semantic(semantic(
+            registry.run(&run_id).unwrap(),
+            2,
+            AgentActivity::Waiting,
+        ));
         let mut weak = observation(route.clone(), 3, AgentEvidence::PtyActivity);
         weak.connection_epoch = Some(8);
         weak.received_at_unix_ms = 500;
         let reconnect_event = weak.event_id.clone();
-        assert!(matches!(registry.observe(weak), AgentApplyOutcome::Applied { created: false, .. }));
+        assert!(matches!(
+            registry.observe(weak),
+            AgentApplyOutcome::Applied { created: false, .. }
+        ));
         let before = registry.run(&run_id).unwrap().clone();
         assert_eq!(before.activity, AgentActivity::Waiting);
         assert_eq!(before.last_event_id, reconnect_event);
-        assert_eq!(registry.activity_freshness(&run_id, 500), AgentActivityFreshness::Stale);
+        assert_eq!(
+            registry.activity_freshness(&run_id, 500),
+            AgentActivityFreshness::Stale
+        );
         let stale = AgentSemanticObservation {
             observed_at_unix_ms: 400,
             received_at_unix_ms: 501,
             ..semantic(&before, 4, AgentActivity::Working)
         };
-        assert_eq!(registry.observe_semantic(stale), AgentApplyOutcome::Ignored(AgentObservationIgnored::StaleSemanticObservation));
+        assert_eq!(
+            registry.observe_semantic(stale),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::StaleSemanticObservation)
+        );
         assert_eq!(registry.run(&run_id), Some(&before));
         let mut resumed = observation(route, 4, AgentEvidence::ProcessAttested);
         resumed.connection_epoch = Some(8);
         resumed.process = before.process;
         resumed.received_at_unix_ms = 600;
-        assert!(matches!(registry.observe(resumed), AgentApplyOutcome::Applied { created: false, .. }));
-        assert_eq!(registry.run(&run_id).unwrap().last_event_id, reconnect_event);
+        assert!(matches!(
+            registry.observe(resumed),
+            AgentApplyOutcome::Applied { created: false, .. }
+        ));
+        assert_eq!(
+            registry.run(&run_id).unwrap().last_event_id,
+            reconnect_event
+        );
         assert_eq!(registry.run(&run_id).unwrap().received_at_unix_ms, 500);
-        assert_eq!(registry.activity_freshness(&run_id, 600), AgentActivityFreshness::Stale);
+        assert_eq!(
+            registry.activity_freshness(&run_id, 600),
+            AgentActivityFreshness::Stale
+        );
     }
 
     #[test]
@@ -2851,20 +3481,38 @@ mod tests {
         let mut weak = observation(route, 3, AgentEvidence::PtyActivity);
         weak.connection_epoch = Some(8);
         weak.received_at_unix_ms = captured_at;
-        assert!(matches!(registry.observe(weak), AgentApplyOutcome::Applied { created: false, .. }));
-        assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Waiting);
-        assert_eq!(registry.activity_freshness(&run_id, captured_at), AgentActivityFreshness::Stale);
+        assert!(matches!(
+            registry.observe(weak),
+            AgentApplyOutcome::Applied { created: false, .. }
+        ));
+        assert_eq!(
+            registry.run(&run_id).unwrap().activity,
+            AgentActivity::Waiting
+        );
+        assert_eq!(
+            registry.activity_freshness(&run_id, captured_at),
+            AgentActivityFreshness::Stale
+        );
     }
 
     #[test]
     fn changed_liveness_facts_and_hook_semantics_still_publish_new_events() {
         let (mut registry, run_id, route) = attested_registry();
-        registry.observe_semantic(semantic(registry.run(&run_id).unwrap(), 2, AgentActivity::Done));
-        registry.mark_connectivity(AgentConnectivityObservation {
-            event_id: AgentEventId::new(), route: route.clone(), sequence: 3,
-            connection_epoch: Some(7), connectivity: AgentConnectivity::Disconnected,
-            received_at_unix_ms: 200,
-        }).unwrap();
+        registry.observe_semantic(semantic(
+            registry.run(&run_id).unwrap(),
+            2,
+            AgentActivity::Done,
+        ));
+        registry
+            .mark_connectivity(AgentConnectivityObservation {
+                event_id: AgentEventId::new(),
+                route: route.clone(),
+                sequence: 3,
+                connection_epoch: Some(7),
+                connectivity: AgentConnectivity::Disconnected,
+                received_at_unix_ms: 200,
+            })
+            .unwrap();
         let mut live = observation(route.clone(), 4, AgentEvidence::ProcessAttested);
         live.process = registry.run(&run_id).unwrap().process;
         live.connection_epoch = Some(7);
@@ -2897,7 +3545,11 @@ mod tests {
             let mut process = observation(route.clone(), sequence, AgentEvidence::ProcessAttested);
             process.process = AgentProcessIdentity::new(pid, 99);
             process.provider_session_id = Some("shared-session".into());
-            let AgentApplyOutcome::Applied { run_id, created: true } = registry.observe(process) else {
+            let AgentApplyOutcome::Applied {
+                run_id,
+                created: true,
+            } = registry.observe(process)
+            else {
                 panic!("independent identity");
             };
             runs.push(run_id);
@@ -2905,10 +3557,16 @@ mod tests {
         let before = registry.run(&runs[0]).unwrap().clone();
         let mut event = semantic(&before, 3, AgentActivity::Done);
         event.owner = AgentSemanticOwner::ProviderSession("shared-session".into());
-        assert_eq!(registry.observe_semantic(event), AgentApplyOutcome::Ignored(AgentObservationIgnored::UnresolvedSemanticOwner));
+        assert_eq!(
+            registry.observe_semantic(event),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::UnresolvedSemanticOwner)
+        );
         let mut hook = observation(route, 3, AgentEvidence::Hook);
         hook.provider_session_id = Some("shared-session".into());
-        assert_eq!(registry.observe(hook), AgentApplyOutcome::Ignored(AgentObservationIgnored::AmbiguousRun));
+        assert_eq!(
+            registry.observe(hook),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::AmbiguousRun)
+        );
         assert_eq!(registry.run(&runs[0]), Some(&before));
         assert_eq!(registry.runs().count(), 2);
     }
@@ -2919,7 +3577,10 @@ mod tests {
         let mut peer = observation(route.clone(), 2, AgentEvidence::ProcessAttested);
         peer.process = AgentProcessIdentity::new(43, 100);
         peer.connection_epoch = Some(7);
-        assert!(matches!(registry.observe(peer), AgentApplyOutcome::Applied { created: true, .. }));
+        assert!(matches!(
+            registry.observe(peer),
+            AgentApplyOutcome::Applied { created: true, .. }
+        ));
         let before = registry.runs.clone();
         let epochs_before = registry.latest_epoch_by_route.clone();
         let owners_before = registry.process_owner_since.clone();
@@ -2936,18 +3597,27 @@ mod tests {
         let mut valid = observation(route.clone(), 3, AgentEvidence::ProcessAttested);
         valid.process = before[&first].process;
         valid.connection_epoch = Some(7);
-        assert!(matches!(registry.observe(valid), AgentApplyOutcome::Applied { created: false, .. }));
+        assert!(matches!(
+            registry.observe(valid),
+            AgentApplyOutcome::Applied { created: false, .. }
+        ));
 
         let mut exit = observation(route.clone(), 4, AgentEvidence::Hook);
         exit.process = before[&first].process;
         exit.connection_epoch = Some(7);
         exit.activity = AgentActivity::Exited;
-        assert!(matches!(registry.observe(exit), AgentApplyOutcome::Applied { created: false, .. }));
+        assert!(matches!(
+            registry.observe(exit),
+            AgentApplyOutcome::Applied { created: false, .. }
+        ));
         let before = registry.runs.clone();
         let mut replay = observation(route.clone(), 1, AgentEvidence::ProcessAttested);
         replay.process = before[&first].process;
         replay.connection_epoch = Some(8);
-        assert_eq!(registry.observe(replay), AgentApplyOutcome::Ignored(AgentObservationIgnored::EndedRun));
+        assert_eq!(
+            registry.observe(replay),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::EndedRun)
+        );
         assert_eq!(registry.runs, before);
         assert_eq!(registry.latest_epoch_by_route, epochs_before);
     }
@@ -2956,10 +3626,17 @@ mod tests {
     fn semantic_rejections_do_not_consume_event_identity_or_mutate_state() {
         let (mut registry, run_id, _) = attested_registry();
         let before = registry.run(&run_id).unwrap().clone();
-        for activity in [AgentActivity::Unknown, AgentActivity::Exited, AgentActivity::Interrupted] {
+        for activity in [
+            AgentActivity::Unknown,
+            AgentActivity::Exited,
+            AgentActivity::Interrupted,
+        ] {
             let rejected = semantic(&before, 2, activity);
             let event_id = rejected.event_id.clone();
-            assert_eq!(registry.observe_semantic(rejected), AgentApplyOutcome::Ignored(AgentObservationIgnored::InvalidSemanticActivity));
+            assert_eq!(
+                registry.observe_semantic(rejected),
+                AgentApplyOutcome::Ignored(AgentObservationIgnored::InvalidSemanticActivity)
+            );
             assert!(!registry.seen_event_ids.contains(&event_id));
             assert_eq!(registry.run(&run_id), Some(&before));
         }
@@ -2967,19 +3644,29 @@ mod tests {
             let mut rejected = semantic(&before, 2, AgentActivity::Waiting);
             match field {
                 0 => rejected.run_id = AgentRunId::new(),
-                1 => rejected.owner = AgentSemanticOwner::ForegroundProcess(AgentProcessIdentity::new(43, 99).unwrap()),
+                1 => {
+                    rejected.owner = AgentSemanticOwner::ForegroundProcess(
+                        AgentProcessIdentity::new(43, 99).unwrap(),
+                    )
+                }
                 2 => rejected.sequence = 0,
                 3 => rejected.connection_epoch = None,
                 4 => rejected.observed_at_unix_ms = -1,
                 _ => unreachable!(),
             }
             let event_id = rejected.event_id.clone();
-            assert!(matches!(registry.observe_semantic(rejected), AgentApplyOutcome::Ignored(_)));
+            assert!(matches!(
+                registry.observe_semantic(rejected),
+                AgentApplyOutcome::Ignored(_)
+            ));
             assert!(!registry.seen_event_ids.contains(&event_id));
             assert_eq!(registry.run(&run_id), Some(&before));
         }
         let accepted = semantic(&before, 2, AgentActivity::Waiting);
-        assert!(matches!(registry.observe_semantic(accepted.clone()), AgentApplyOutcome::Applied { created: false, .. }));
+        assert!(matches!(
+            registry.observe_semantic(accepted.clone()),
+            AgentApplyOutcome::Applied { created: false, .. }
+        ));
         let before = registry.run(&run_id).unwrap().clone();
         let duplicate = AgentSemanticObservation {
             sequence: 3,
@@ -2987,7 +3674,10 @@ mod tests {
             received_at_unix_ms: 103,
             ..accepted
         };
-        assert_eq!(registry.observe_semantic(duplicate), AgentApplyOutcome::Ignored(AgentObservationIgnored::DuplicateEvent));
+        assert_eq!(
+            registry.observe_semantic(duplicate),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::DuplicateEvent)
+        );
         assert_eq!(registry.run(&run_id), Some(&before));
     }
 
@@ -2998,7 +3688,11 @@ mod tests {
         let mut registry = AgentRuntimeRegistry::default();
         let mut launch = observation(route(), 1, AgentEvidence::PtyActivity);
         launch.provider = tracker.ai_session_agent(1).unwrap().parse().unwrap();
-        let AgentApplyOutcome::Applied { run_id, created: true } = registry.observe(launch) else {
+        let AgentApplyOutcome::Applied {
+            run_id,
+            created: true,
+        } = registry.observe(launch)
+        else {
             panic!("input launch must retain weak liveness");
         };
         let run = registry.run(&run_id).unwrap();
@@ -3013,20 +3707,42 @@ mod tests {
     fn invalid_process_and_ended_semantic_observations_are_rejected() {
         let (mut registry, run_id, route) = attested_registry();
         for process in [
-            AgentProcessIdentity { pid: 0, start_ticks: 99 },
-            AgentProcessIdentity { pid: 42, start_ticks: 0 },
+            AgentProcessIdentity {
+                pid: 0,
+                start_ticks: 99,
+            },
+            AgentProcessIdentity {
+                pid: 42,
+                start_ticks: 0,
+            },
         ] {
             let mut invalid = observation(route.clone(), 2, AgentEvidence::ProcessAttested);
             invalid.process = Some(process);
             invalid.connection_epoch = Some(7);
-            assert_eq!(registry.observe(invalid), AgentApplyOutcome::Ignored(AgentObservationIgnored::InvalidProcess));
+            assert_eq!(
+                registry.observe(invalid),
+                AgentApplyOutcome::Ignored(AgentObservationIgnored::InvalidProcess)
+            );
         }
         let event = semantic(registry.run(&run_id).unwrap(), 3, AgentActivity::Done);
-        registry.apply_process_inventory(AgentProcessInventoryObservation {
-            event_id: AgentEventId::new(), route, sequence: 2, connection_epoch: 7, weak_episode: None,
-            processes: vec![], received_at_unix_ms: 102,
-        }).unwrap();
-        assert_eq!(registry.observe_semantic(event), AgentApplyOutcome::Ignored(AgentObservationIgnored::EndedRun));
-        assert_eq!(registry.run(&run_id).unwrap().activity, AgentActivity::Exited);
+        registry
+            .apply_process_inventory(AgentProcessInventoryObservation {
+                event_id: AgentEventId::new(),
+                route,
+                sequence: 2,
+                connection_epoch: 7,
+                weak_episode: None,
+                processes: vec![],
+                received_at_unix_ms: 102,
+            })
+            .unwrap();
+        assert_eq!(
+            registry.observe_semantic(event),
+            AgentApplyOutcome::Ignored(AgentObservationIgnored::EndedRun)
+        );
+        assert_eq!(
+            registry.run(&run_id).unwrap().activity,
+            AgentActivity::Exited
+        );
     }
 }

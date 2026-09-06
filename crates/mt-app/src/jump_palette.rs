@@ -502,7 +502,8 @@ fn build_candidates(
         let provider = agent.provider.as_str().to_string();
         let title = nonempty_label(&agent.pane_label, &provider);
         let activity = crate::agent_activity::activity_label_with_freshness(
-            agent_activity_label(agent.activity), agent.activity_freshness,
+            agent_activity_label(agent.activity),
+            agent.activity_freshness,
         );
         let subtitle = format!(
             "{} | {} | {} | {}",

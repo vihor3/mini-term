@@ -211,8 +211,12 @@ pub fn close_terminal_target(
     else {
         return;
     };
-    let label = store.read(cx).terminal_runtime_label(&target.project_id, &pane);
-    let has_ai = store.read(cx).pane_has_live_agent(&target.project_id, &pane);
+    let label = store
+        .read(cx)
+        .terminal_runtime_label(&target.project_id, &pane);
+    let has_ai = store
+        .read(cx)
+        .pane_has_live_agent(&target.project_id, &pane);
     let (title, message) = if has_ai {
         (
             t("paneGroup", "closeAiTitle"),
@@ -477,7 +481,10 @@ mod tests {
     /// 一个 AI 都没有时盘点为空 —— 调用方据此走「不带名字」的那套文案。
     #[test]
     fn 没有_ai_时盘点为空() {
-        let panes = vec![pane("bash", PaneStatus::Idle), pane("cmd", PaneStatus::Error)];
+        let panes = vec![
+            pane("bash", PaneStatus::Idle),
+            pane("cmd", PaneStatus::Error),
+        ];
         assert!(ai_session_labels(&panes).is_empty());
     }
 

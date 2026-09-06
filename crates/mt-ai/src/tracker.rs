@@ -14,9 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 use parking_lot::Mutex;
 
 use crate::agent_runtime::{AgentProvider, AgentWeakEpisode};
-use crate::detect::{
-    line_ai_command_name, output_ai_command_name, AI_EXIT_COMMANDS,
-};
+use crate::detect::{AI_EXIT_COMMANDS, line_ai_command_name, output_ai_command_name};
 
 /// 连续两次 Ctrl+C 退出的时间窗口
 const DOUBLE_CTRLC_WINDOW: Duration = Duration::from_millis(1000);
@@ -277,9 +275,7 @@ impl SessionTracker {
     /// (且受 TUI 重绘冷却窗口约束),单测里没法真起 PTY。
     #[cfg(test)]
     pub fn note_output_for_test(&self, pane_id: u32) {
-        self.last_output
-            .lock()
-            .insert(pane_id, Instant::now());
+        self.last_output.lock().insert(pane_id, Instant::now());
     }
 
     pub fn is_ai_session(&self, pane_id: u32) -> bool {
@@ -302,7 +298,10 @@ impl SessionTracker {
         pane_id: u32,
     ) -> (Option<String>, Option<AgentWeakEpisode>) {
         let sessions = self.ai_sessions.lock();
-        (sessions.get(&pane_id).cloned(), self.weak_detection_episode(pane_id))
+        (
+            sessions.get(&pane_id).cloned(),
+            self.weak_detection_episode(pane_id),
+        )
     }
 
     /// A first explicit, uncontested SessionStart can cover compatible input
@@ -359,12 +358,15 @@ impl SessionTracker {
         self.mark_ai_session_locked(pane_id, agent, &mut sessions);
     }
 
-    fn mark_ai_session_locked(&self, pane_id: u32, agent: &str, sessions: &mut HashMap<u32, String>) {
+    fn mark_ai_session_locked(
+        &self,
+        pane_id: u32,
+        agent: &str,
+        sessions: &mut HashMap<u32, String>,
+    ) {
         if !sessions.contains_key(&pane_id) {
             sessions.insert(pane_id, agent.to_string());
-            self.ai_started
-                .lock()
-                .insert(pane_id, SystemTime::now());
+            self.ai_started.lock().insert(pane_id, SystemTime::now());
         }
     }
 
@@ -397,9 +399,16 @@ impl SessionTracker {
     }
 
     // Call only under ai_sessions, shared with input, echo and purge.
-    fn matches_weak_episode_locked(&self, pane_id: u32, expected: Option<AgentWeakEpisode>) -> bool {
+    fn matches_weak_episode_locked(
+        &self,
+        pane_id: u32,
+        expected: Option<AgentWeakEpisode>,
+    ) -> bool {
         self.weak_detection_episode(pane_id) == expected
-            && self.pending_weak_episodes.lock().get(&pane_id)
+            && self
+                .pending_weak_episodes
+                .lock()
+                .get(&pane_id)
                 .is_none_or(|pending| Some(*pending) == expected)
     }
 
@@ -465,7 +474,9 @@ impl SessionTracker {
             if recently_entered {
                 if !sessions.contains_key(&pane_id) {
                     if let Some(agent) = output_ai_command_name(data) {
-                        if let Some(episode) = self.pending_weak_episodes.lock().get(&pane_id).copied() {
+                        if let Some(episode) =
+                            self.pending_weak_episodes.lock().get(&pane_id).copied()
+                        {
                             sessions.insert(pane_id, agent.to_string());
                             self.weak_episodes.lock().insert(pane_id, episode);
                         }
@@ -569,9 +580,7 @@ impl SessionTracker {
                         // 记录 Enter 时间，供输出扫描用。空回车不打开扫描窗口，
                         // 避免 shell autosuggestion 出现在重绘输出中时被当成命令 echo。
                         if !trimmed.is_empty() || snapshot_agent.is_some() {
-                            self.last_enter
-                                .lock()
-                                .insert(pane_id, Instant::now());
+                            self.last_enter.lock().insert(pane_id, Instant::now());
                             if !in_ai {
                                 if let Some(episode) = AgentWeakEpisode::next() {
                                     self.pending_weak_episodes.lock().insert(pane_id, episode);
@@ -618,9 +627,8 @@ impl SessionTracker {
                             // 非 AI 会话：检测 AI 命令启动。优先使用本地输入状态；
                             // 对上方向键历史、Tab 补全等 shell 改写行的场景，使用
                             // 前端在 Enter 前捕获的可见行快照补判。
-                            if let Some(agent) =
-                                crate::detect::interactive_ai_command_name(trimmed)
-                                    .or(snapshot_agent)
+                            if let Some(agent) = crate::detect::interactive_ai_command_name(trimmed)
+                                .or(snapshot_agent)
                             {
                                 enter_ai = Some(agent);
                             }
@@ -644,9 +652,7 @@ impl SessionTracker {
             if let Some(episode) = self.pending_weak_episodes.lock().get(&pane_id).copied() {
                 self.weak_episodes.lock().insert(pane_id, episode);
             }
-            self.ai_started
-                .lock()
-                .insert(pane_id, SystemTime::now());
+            self.ai_started.lock().insert(pane_id, SystemTime::now());
         } else if exit_ai {
             self.clear_ai_session_locked(pane_id, &mut sessions);
         }
@@ -759,7 +765,12 @@ mod tests {
             }
             let captured = tracker.weak_detection_episode(1);
             tracker.track_input_with_line_snapshot(1, "launcher\r", None);
-            let pending = tracker.pending_weak_episodes.lock().get(&1).copied().unwrap();
+            let pending = tracker
+                .pending_weak_episodes
+                .lock()
+                .get(&1)
+                .copied()
+                .unwrap();
             let entered = tracker.last_enter.lock().get(&1).copied();
             assert!(Some(pending) > captured);
             assert_eq!(tracker.weak_detection_episode(1), captured);
@@ -807,13 +818,18 @@ mod tests {
                 let gate = gate.clone();
                 std::thread::spawn(move || {
                     gate.wait();
-                    done.send(Some(tracker.clear_ai_session_if_episode(1, Some(old)))).unwrap();
+                    done.send(Some(tracker.clear_ai_session_if_episode(1, Some(old))))
+                        .unwrap();
                 })
             };
             gate.wait();
             let results = [
-                completed.recv_timeout(Duration::from_secs(5)).expect("tracker operation blocked"),
-                completed.recv_timeout(Duration::from_secs(5)).expect("tracker operation blocked"),
+                completed
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("tracker operation blocked"),
+                completed
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("tracker operation blocked"),
             ];
             producer.join().unwrap();
             retiring.join().unwrap();
@@ -831,8 +847,13 @@ mod tests {
         tracker.track_input_with_line_snapshot(1, "claude\r", None);
         let episode = tracker.weak_detection_episode(1);
         assert_eq!(tracker.capture_hook_detection(1, "codex", true), None);
-        assert_eq!(tracker.capture_hook_detection(1, "claude-code", false), None);
-        let receipt = tracker.capture_hook_detection(1, "claude-code", true).unwrap();
+        assert_eq!(
+            tracker.capture_hook_detection(1, "claude-code", false),
+            None
+        );
+        let receipt = tracker
+            .capture_hook_detection(1, "claude-code", true)
+            .unwrap();
         assert_eq!(receipt.episode, episode);
         tracker.track_input_with_line_snapshot(1, "\x04", None);
         assert!(tracker.mark_ai_session_if_receipt(1, "claude", receipt));
@@ -853,7 +874,18 @@ mod tests {
     fn episode_mutations_and_snapshot_share_the_outer_session_lock() {
         use std::sync::mpsc;
 
-        for operation in ["input", "echo", "conditional clear", "clear", "purge", "mark", "input exit", "snapshot", "hook capture", "conditional mark"] {
+        for operation in [
+            "input",
+            "echo",
+            "conditional clear",
+            "clear",
+            "purge",
+            "mark",
+            "input exit",
+            "snapshot",
+            "hook capture",
+            "conditional mark",
+        ] {
             let tracker = SessionTracker::new();
             tracker.track_input_with_line_snapshot(1, "codex\r", None);
             let expected = tracker.weak_detection_episode(1);
@@ -873,25 +905,42 @@ mod tests {
                 match operation {
                     "input" => worker_tracker.track_input_with_line_snapshot(1, "claude\r", None),
                     "echo" => worker_tracker.note_output(1, "PS D:\\project> claude\r\n"),
-                    "conditional clear" => assert!(worker_tracker.clear_ai_session_if_episode(1, expected)),
+                    "conditional clear" => {
+                        assert!(worker_tracker.clear_ai_session_if_episode(1, expected))
+                    }
                     "clear" => worker_tracker.clear_ai_session(1),
                     "purge" => worker_tracker.purge_pane(1),
                     "mark" => worker_tracker.mark_ai_session(1, "claude"),
                     "input exit" => worker_tracker.track_input_with_line_snapshot(1, "\x04", None),
-                    "snapshot" => assert_eq!(worker_tracker.weak_session_snapshot(1), (Some("codex".into()), expected)),
-                    "hook capture" => assert_eq!(worker_tracker.capture_hook_detection(1, "codex", true), Some(receipt)),
-                    "conditional mark" => assert!(worker_tracker.mark_ai_session_if_receipt(1, "codex", receipt)),
+                    "snapshot" => assert_eq!(
+                        worker_tracker.weak_session_snapshot(1),
+                        (Some("codex".into()), expected)
+                    ),
+                    "hook capture" => assert_eq!(
+                        worker_tracker.capture_hook_detection(1, "codex", true),
+                        Some(receipt)
+                    ),
+                    "conditional mark" => {
+                        assert!(worker_tracker.mark_ai_session_if_receipt(1, "codex", receipt))
+                    }
                     _ => unreachable!(),
                 }
                 done.send(()).unwrap();
             });
-            started.recv_timeout(Duration::from_secs(5)).expect("tracker worker did not start");
+            started
+                .recv_timeout(Duration::from_secs(5))
+                .expect("tracker worker did not start");
             assert!(
-                matches!(completed.recv_timeout(Duration::from_millis(100)), Err(mpsc::RecvTimeoutError::Timeout)),
+                matches!(
+                    completed.recv_timeout(Duration::from_millis(100)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ),
                 "{operation} bypassed the outer session guard",
             );
             drop(guard);
-            completed.recv_timeout(Duration::from_secs(5)).expect("tracker operation deadlocked after guard release");
+            completed
+                .recv_timeout(Duration::from_secs(5))
+                .expect("tracker operation deadlocked after guard release");
             worker.join().unwrap();
             match operation {
                 "input" | "echo" => {
@@ -999,7 +1048,9 @@ mod tests {
     fn mark_ai_session_idempotent_keeps_started_at() {
         let mgr = SessionTracker::new();
         mgr.track_input(1, "claude\r");
-        let started = mgr.ai_session_started_at(1).expect("进入会话应记录启动时刻");
+        let started = mgr
+            .ai_session_started_at(1)
+            .expect("进入会话应记录启动时刻");
         // 会话已标记时 mark 为 no-op,不得重置 ai_started(镜像按它过滤旧记录)
         mgr.mark_ai_session(1, "claude");
         assert_eq!(mgr.ai_session_started_at(1), Some(started));
@@ -1166,7 +1217,12 @@ mod tests {
 
     #[test]
     fn pi_non_interactive_flags_not_ai_session() {
-        for cmd in ["pi -p \"hello\"\r", "pi --print x\r", "pi -v\r", "pi --help\r"] {
+        for cmd in [
+            "pi -p \"hello\"\r",
+            "pi --print x\r",
+            "pi -v\r",
+            "pi --help\r",
+        ] {
             let mgr = SessionTracker::new();
             mgr.track_input(1, cmd);
             assert!(!mgr.is_ai_session(1), "{cmd} 不应进入 AI 会话");
@@ -1286,7 +1342,10 @@ mod tests {
         mgr.track_input(1, "fix the bug\r");
         let submits = mgr.drain_submits(1);
         assert_eq!(submits.len(), 1);
-        assert_eq!(submits[0].line, "fix the bug", "首字符被吞的话这里会少一个 f");
+        assert_eq!(
+            submits[0].line, "fix the bug",
+            "首字符被吞的话这里会少一个 f"
+        );
     }
 
     /// Esc 清空当前行(行编辑里 Esc 的本义),半截输入不会粘到下一条上。
@@ -1353,7 +1412,9 @@ mod tests {
 
         let before = SystemTime::now();
         mgr.track_input(1, "claude\r");
-        let started = mgr.ai_session_started_at(1).expect("进入会话应记录启动时刻");
+        let started = mgr
+            .ai_session_started_at(1)
+            .expect("进入会话应记录启动时刻");
         assert!(started >= before && started <= SystemTime::now());
 
         // Ctrl+D 退出:清除启动时刻(镜像不应再拿旧锚点)

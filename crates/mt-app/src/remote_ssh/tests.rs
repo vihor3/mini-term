@@ -266,9 +266,7 @@ fn local_download_targets_stay_inside_root() {
     assert!(checked_local_download_child(&root, &root, "a\\b").is_err());
     assert!(checked_local_download_child(&root, &outside, "safe.txt").is_err());
     assert!(ensure_local_download_target(&root, &outside).is_err());
-    assert!(
-        download_conflicts_for_files(&root, &[PathBuf::from("/remote/C:evil.exe")]).is_err()
-    );
+    assert!(download_conflicts_for_files(&root, &[PathBuf::from("/remote/C:evil.exe")]).is_err());
 }
 
 #[test]

@@ -683,7 +683,12 @@ mod tests {
         }
         assert!(parse_inventory(&[0xff]).is_err());
         assert!(parse_inventory(&vec![b'x'; AGENT_OUTPUT_CAP_BYTES + 1]).is_err());
-        let too_many = format!("{INVENTORY_HEADER}\ncapability=linux-proc\n{}end\n", (1..=65).map(|pid| format!("agent\tcodex\t{pid}\t1\tforeground\n")).collect::<String>());
+        let too_many = format!(
+            "{INVENTORY_HEADER}\ncapability=linux-proc\n{}end\n",
+            (1..=65)
+                .map(|pid| format!("agent\tcodex\t{pid}\t1\tforeground\n"))
+                .collect::<String>()
+        );
         assert!(parse_inventory(too_many.as_bytes()).is_err());
     }
 
@@ -719,31 +724,58 @@ mod tests {
 
         const TIMEOUT: Duration = Duration::from_secs(90);
 
-        fn fixture(scenario: &str, route: &RemoteAgentRoute, mismatches: &[String]) -> (RemoteAgentCapability, Vec<RemoteAgentProcess>) {
-            assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"), "process fixtures are Actions-only");
+        fn fixture(
+            scenario: &str,
+            route: &RemoteAgentRoute,
+            mismatches: &[String],
+        ) -> (RemoteAgentCapability, Vec<RemoteAgentProcess>) {
+            assert_eq!(
+                std::env::var("GITHUB_ACTIONS").as_deref(),
+                Ok("true"),
+                "process fixtures are Actions-only"
+            );
             let mut child = Command::new("python3")
-                    .args(["-c", include_str!("agent_probe_tests.py"), scenario, &build_probe_command(route)])
-                    .args(mismatches)
-                    .env_clear()
-                    .env("PATH", "/usr/bin:/bin")
-                    .env("GITHUB_ACTIONS", "true")
-                    .env("MINITERM_AGENT_PROTOCOL_VERSION", route.protocol_version.to_string())
-                    .env("MINITERM_EXECUTION_HOST_ID", route.execution_host_id.as_str())
-                    .env("MINITERM_WORKTREE_ID", route.worktree_id.as_str())
-                    .env("MINITERM_TAB_ID", route.tab_id.as_str())
-                    .env("MINITERM_PANE_KEY", route.pane_key.as_str())
-                    .env("MINITERM_TERMINAL_SESSION_ID", route.terminal_session_id.as_str())
-                    .env("MINITERM_TERMINAL_INCARNATION_ID", route.terminal_incarnation_id.as_str())
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::inherit())
-                    .spawn()
-                    .unwrap();
+                .args([
+                    "-c",
+                    include_str!("agent_probe_tests.py"),
+                    scenario,
+                    &build_probe_command(route),
+                ])
+                .args(mismatches)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("GITHUB_ACTIONS", "true")
+                .env(
+                    "MINITERM_AGENT_PROTOCOL_VERSION",
+                    route.protocol_version.to_string(),
+                )
+                .env(
+                    "MINITERM_EXECUTION_HOST_ID",
+                    route.execution_host_id.as_str(),
+                )
+                .env("MINITERM_WORKTREE_ID", route.worktree_id.as_str())
+                .env("MINITERM_TAB_ID", route.tab_id.as_str())
+                .env("MINITERM_PANE_KEY", route.pane_key.as_str())
+                .env(
+                    "MINITERM_TERMINAL_SESSION_ID",
+                    route.terminal_session_id.as_str(),
+                )
+                .env(
+                    "MINITERM_TERMINAL_INCARNATION_ID",
+                    route.terminal_incarnation_id.as_str(),
+                )
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
             let stdout = child.stdout.take().unwrap();
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
                 let mut bytes = Vec::new();
-                let result = stdout.take((AGENT_OUTPUT_CAP_BYTES + 1) as u64).read_to_end(&mut bytes);
+                let result = stdout
+                    .take((AGENT_OUTPUT_CAP_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes);
                 let _ = tx.send(result.map(|_| bytes));
             });
             let deadline = Instant::now() + TIMEOUT;
@@ -754,7 +786,9 @@ mod tests {
                 if Instant::now() >= deadline {
                     // The helper owns its session and cleans up on TERM; never
                     // send a signal to any process not created by this fixture.
-                    let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
+                    let _ = Command::new("kill")
+                        .args(["-TERM", &child.id().to_string()])
+                        .status();
                     let cleanup_deadline = Instant::now() + Duration::from_secs(30);
                     while child.try_wait().unwrap().is_none() {
                         if Instant::now() >= cleanup_deadline {
@@ -768,7 +802,10 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             };
-            assert!(status.success(), "generated probe fixture failed: {scenario}");
+            assert!(
+                status.success(),
+                "generated probe fixture failed: {scenario}"
+            );
             let bytes = rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
             parse_inventory(&bytes).unwrap()
         }
@@ -800,12 +837,21 @@ mod tests {
             let (capability, found) = fixture("owned", &route, &mismatches);
             assert_eq!(capability, RemoteAgentCapability::LinuxProc);
             assert_eq!(found.len(), 5);
-            assert!(found.iter().all(|process| process.foreground && process.start_ticks > 0));
+            assert!(
+                found
+                    .iter()
+                    .all(|process| process.foreground && process.start_ticks > 0)
+            );
         }
 
         #[test]
         fn generated_command_excludes_copied_routes_helpers_and_wildcard_arguments() {
-            for scenario in ["external-only", "helpers", "empty-argv-helper", "after-exit"] {
+            for scenario in [
+                "external-only",
+                "helpers",
+                "empty-argv-helper",
+                "after-exit",
+            ] {
                 let (capability, found) = fixture(scenario, &route(), &[]);
                 assert_eq!(capability, RemoteAgentCapability::LinuxProc);
                 assert!(found.is_empty());
@@ -822,7 +868,11 @@ mod tests {
 
         #[test]
         fn generated_command_collapses_only_positive_launcher_chains() {
-            for scenario in ["launcher", "independent-descendants", "multiple-launcher-children"] {
+            for scenario in [
+                "launcher",
+                "independent-descendants",
+                "multiple-launcher-children",
+            ] {
                 let (capability, found) = fixture(scenario, &route(), &[]);
                 assert_eq!(capability, RemoteAgentCapability::LinuxProc);
                 assert_eq!(found.len(), 2, "{scenario}");
@@ -849,9 +899,15 @@ mod tests {
         #[test]
         fn generated_command_rejects_incomplete_reads_and_raced_identity() {
             for scenario in [
-                "argv-read-error", "partial-env-read-error", "unterminated-argv",
-                "oversized-argv", "oversized-env", "exec-race", "pid-reuse",
-                "foreground-race", "exit-race",
+                "argv-read-error",
+                "partial-env-read-error",
+                "unterminated-argv",
+                "oversized-argv",
+                "oversized-env",
+                "exec-race",
+                "pid-reuse",
+                "foreground-race",
+                "exit-race",
             ] {
                 let (capability, found) = fixture(scenario, &route(), &[]);
                 assert_eq!(capability, RemoteAgentCapability::Unsupported, "{scenario}");

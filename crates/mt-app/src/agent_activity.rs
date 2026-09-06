@@ -130,11 +130,19 @@ mod tests {
     #[test]
     fn activity_labels_keep_semantic_freshness_separate_from_liveness() {
         for label in ["Working", "Waiting", "Needs you", "Done", "Failed"] {
-            assert_eq!(activity_label_with_freshness(label, AgentActivityFreshness::Fresh), label);
-            assert_eq!(activity_label_with_freshness(label, AgentActivityFreshness::Stale),
-                format!("{label} (last known)"));
+            assert_eq!(
+                activity_label_with_freshness(label, AgentActivityFreshness::Fresh),
+                label
+            );
+            assert_eq!(
+                activity_label_with_freshness(label, AgentActivityFreshness::Stale),
+                format!("{label} (last known)")
+            );
         }
-        assert_eq!(activity_label_with_freshness("Unknown", AgentActivityFreshness::Unknown), "Unknown");
+        assert_eq!(
+            activity_label_with_freshness("Unknown", AgentActivityFreshness::Unknown),
+            "Unknown"
+        );
     }
 
     fn run_id(value: u32) -> AgentRunId {
@@ -190,15 +198,33 @@ mod tests {
 
     #[test]
     fn stale_semantics_and_unknown_liveness_do_not_enter_the_working_section() {
-        let mut stale = target(1, "p", AgentActivity::Working, AgentConnectivity::Live, false, 1);
+        let mut stale = target(
+            1,
+            "p",
+            AgentActivity::Working,
+            AgentConnectivity::Live,
+            false,
+            1,
+        );
         stale.activity_freshness = AgentActivityFreshness::Stale;
-        let mut unknown = target(2, "p", AgentActivity::Unknown, AgentConnectivity::Live, false, 2);
+        let mut unknown = target(
+            2,
+            "p",
+            AgentActivity::Unknown,
+            AgentConnectivity::Live,
+            false,
+            2,
+        );
         unknown.activity_freshness = AgentActivityFreshness::Unknown;
         let feed = build_agent_activity_feed(vec![stale, unknown], AGENT_ACTIVITY_RECENT_LIMIT);
         assert!(feed.working.is_empty());
         assert!(feed.needs_you.is_empty());
         assert_eq!(feed.recent.len(), 2);
-        assert!(feed.recent.iter().all(|target| target.connectivity == AgentConnectivity::Live));
+        assert!(
+            feed.recent
+                .iter()
+                .all(|target| target.connectivity == AgentConnectivity::Live)
+        );
     }
 
     #[test]
