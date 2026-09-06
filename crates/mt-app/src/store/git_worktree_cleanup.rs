@@ -1,7 +1,7 @@
 //! Retained deletion authority for Git worktree cleanup, separate from Git effects.
 
 use futures::channel::oneshot;
-use gpui::{App, AppContext as _, Context, Task};
+use gpui::{App, Context, Task};
 use mt_layout::ProjectWorktreeBinding;
 use serde_json::Value;
 

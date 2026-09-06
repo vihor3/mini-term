@@ -12,9 +12,8 @@ use super::transfer::FileSessionPin;
 
 use super::{
     DEFAULT_REMOTE_PASTE_DIR, GITIGNORE_MAX_BYTES, expand_tilde, join_posix, lock,
-    open_sftp_with_session, posix_relative, remote_home, split_posix_leaf, state,
-    valid_remote_name, valid_sftp_child_name, validate_remote_dir_under_root,
-    validate_remote_leaf_under_root,
+    open_sftp_with_session, posix_relative, split_posix_leaf, state, valid_remote_name,
+    valid_sftp_child_name, validate_remote_dir_under_root, validate_remote_leaf_under_root,
 };
 
 #[derive(Debug, Clone)]

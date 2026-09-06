@@ -33,4 +33,4 @@ pub use runtime::{
     REMOTE_RUNTIME_PROTOCOL_VERSION, RemoteRuntimeCapabilities, RemoteRuntimeError,
     RemoteRuntimeIdentity, RemoteRuntimeSnapshot, inspect_remote_runtime, remote_runtime_heartbeat,
 };
-pub use sftp::{SftpDirEntry, SftpHandle, SftpNodeKind};
+pub use sftp::{SftpBoundedFileRead, SftpDirEntry, SftpHandle, SftpNodeKind};

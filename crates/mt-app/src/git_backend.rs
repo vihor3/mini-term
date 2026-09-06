@@ -32,8 +32,8 @@ use crate::remote_ssh;
 
 use host::{ExecutionGitHost, Host, NodeKind};
 pub use write::{
-    GitBusy, GitPostcondition, GitReconciliation, GitWrite, GitWriteOutcome, GitWritePhase,
-    GitWriteState, PreparedGitWrite, UncertainReview,
+    GitPostcondition, GitWrite, GitWriteOutcome, GitWritePhase, GitWriteState, PreparedGitWrite,
+    UncertainReview,
 };
 
 pub type GitResult<T> = Result<T, GitError>;

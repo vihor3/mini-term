@@ -2692,8 +2692,9 @@ mod tests {
     use super::{
         CreateMode, FormContextOwner, HostSignature, HostStatus, OnboardingPage, OnboardingState,
         PendingOperation, PendingRegistration, PickerOwner, ProjectHostSelection,
-        operation_with_registration_retry, picker_request_is_current, ssh_failure_epoch_is_current,
-        ssh_host_probe_epoch_is_current, ssh_operation_authority_is_current,
+        operation_with_registration_retry, picker_open_is_current, picker_request_is_current,
+        ssh_failure_epoch_is_current, ssh_host_probe_epoch_is_current,
+        ssh_operation_authority_is_current,
     };
 
     #[test]

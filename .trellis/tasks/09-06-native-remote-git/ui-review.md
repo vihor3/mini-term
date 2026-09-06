@@ -212,3 +212,39 @@ this report. Lint/type-check/build/tests/format/metadata/whitespace/codegen/
 fixtures/probes/app/automated UI remain UNRUN and Actions-only. No child agents
 or Git writes. Source release is not transport or native acceptance; main owns
 exact-SHA Actions and matching artifact verification.
+
+## Compiler Integration Follow-Up
+
+Status: bounded SOURCE CORRECTION COMPLETE; the five source paths below and
+this report are RELEASED to main. Input was main's actual Linux/Windows failure
+report for HEAD `4660367`, run `34005271807`, jobs `101411287139` and
+`101411287151`. This is not a claim that the next Actions compilation passes.
+
+- `crates/mt-ssh/src/lib.rs`: re-export the existing public
+  `sftp::SftpBoundedFileRead` at the crate root used by Git SSH consumers. Read
+  the existing enum/variants/method signatures first; `sftp.rs` is unchanged.
+  No new type, transport behavior or consumer rewrite was introduced.
+- `crates/mt-app/src/project_onboarding/view.rs`: import the existing
+  `picker_open_is_current` into its test module. Retain the correct helper name,
+  production implementation and all seven assertions; do not substitute the
+  similarly named request helper suggested by the compiler.
+- `crates/mt-app/src/git_backend.rs`: remove only the unused binary-module
+  `GitBusy` and `GitReconciliation` re-exports. Their definitions and returned
+  values/signatures in `write.rs` remain unchanged; no source consumer names
+  these re-exports.
+- `crates/mt-app/src/remote_ssh/dirs.rs`: remove the unused `remote_home` import.
+  Authenticated canonical-home resolution, epoch checks and fixtures unchanged.
+- `crates/mt-app/src/store/git_worktree_cleanup.rs`: remove only the reported
+  unused `AppContext` trait import. Cleanup ownership/mutations unchanged.
+
+No new tests are needed for these name-resolution/import corrections. Existing
+focused regression to execute in Actions:
+`project_onboarding::view::tests::browser_open_button_retains_its_form_context_before_allocating_a_request`.
+Both platform app/test builds must be rerun to establish that the missing root
+export and all seven missing test-name errors are resolved. Source inspection
+and main's prior failing logs are not passing compiler evidence for this patch.
+
+Lint/type-check/build/tests/format/metadata/whitespace/codegen/fixtures/probes/
+syntax/app verification: UNRUN locally, Actions-only. No child agents, staging,
+commits, shared index edits, Agent core/probe edits or changes outside the five
+listed source files and this report. No source policy or mutation behavior changed.

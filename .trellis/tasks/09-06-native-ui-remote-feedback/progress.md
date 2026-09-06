@@ -644,3 +644,19 @@ mapping/clean skipping, retaining unreadable rejection and adding one direct
 production-helper regression. Its backend-review addendum records primary
 pinned-version evidence. Main is committing that narrow fix with the next push;
 no local execution gate ran. Agent producer work remains separate and unstaged.
+
+Candidate `4660367306d29590b39f142104acfcf84b382e56` ran CI `34005271807`
+and package `34005271799`. Linux `101411287139` passed format/dictionary/locked
+graph gates, then failed application compilation on a missing existing SFTP
+type root export. Windows `101411287151` reported the same three binary errors;
+both test builds additionally reported seven missing-import references to the
+correct picker_open_is_current helper. Pauli's bounded compiler addendum fixes
+those two names and three proven unused imports, with no behavior change.
+Main reviewed the exact diff and is committing only those source/report paths.
+
+Actual WSL `101411433835` successfully prepared/imported its same-run fixture,
+but test discovery/build failed on the same app compile errors, before account
+assertions ran. The only-owned distro cleanup succeeded. The earlier cancelled
+WSL job `101409668656` also completed its cleanup successfully. Setup/cleanup
+evidence is not a passing account transport test. All new feature tests remain
+blocked by compilation, and Agent producer/lifecycle changes remain unstaged.
