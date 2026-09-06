@@ -1269,7 +1269,10 @@ impl WslFixture {
                     output.exit_code.is_some_and(|code| code != 0),
                     "invalid WSL cwd did not fail"
                 );
-                assert!(!case.exists(marker), "invalid WSL cwd dispatched its target");
+                assert!(
+                    !case.exists(marker),
+                    "invalid WSL cwd dispatched its target"
+                );
             }
         }
         captured
@@ -1616,7 +1619,10 @@ fn tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host() {
     let result = execute_selected_account(&missing, &selected("github.com", "Alice"), &bounded);
     assert!(result.observed_connection_epoch.is_none());
     assert!(
-        matches!(result.result, Err(AccountExecutionError::Account(AccountError::CommandFailed))),
+        matches!(
+            result.result,
+            Err(AccountExecutionError::Account(AccountError::CommandFailed))
+        ),
         "missing WSL cwd did not fail before account execution"
     );
 

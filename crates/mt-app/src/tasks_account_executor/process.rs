@@ -611,12 +611,23 @@ mod tests {
         let args = command.get_args().collect::<Vec<_>>();
         assert_eq!(
             args[..6],
-            ["--distribution", "mt-tasks-12345-2", "--cd", "/", "--exec", "python3"]
-                .map(std::ffi::OsStr::new)
+            [
+                "--distribution",
+                "mt-tasks-12345-2",
+                "--cd",
+                "/",
+                "--exec",
+                "python3"
+            ]
+            .map(std::ffi::OsStr::new)
         );
         assert_eq!(
             args[6..],
-            envelope.args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>()
+            envelope
+                .args
+                .iter()
+                .map(std::ffi::OsStr::new)
+                .collect::<Vec<_>>()
         );
         assert!(command.get_current_dir().is_none());
     }

@@ -876,3 +876,12 @@ to Git/Tasks/onboarding/release specs. The existing broad Windows
 tasks_account_executor filter includes the new process builder test, so no
 workflow change is necessary. This bounded follow-up is ready for scoped push;
 only matching new Actions results can validate the correction.
+
+The WSL correction is committed/pushed as
+`45fc0bb8c84bcb3825856369008f636135f0b142`: CI `34010736167`, package
+`34010736172`. Linux `101425984038` stopped at five changed-format hunks in
+the three correction source files. Main downloaded artifact `9982373396` and
+applied its complete `full-rustfmt.patch` to index and source without local
+formatter/checks. Windows `101425983973` and actual WSL `101426095403` were
+still compiling/setup at this point, not passing regression evidence. The
+immediate format follow-up restarts the gate before expensive test builds.

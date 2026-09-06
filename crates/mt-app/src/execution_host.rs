@@ -366,7 +366,9 @@ pub fn plan_host_command(
             args: plan.args.clone(),
             cwd: Some(PathBuf::from(&snapshot.canonical_path)),
         }),
-        ExecutionBackend::Wsl { distro } => plan_wsl_command(distro, &snapshot.canonical_path, plan),
+        ExecutionBackend::Wsl { distro } => {
+            plan_wsl_command(distro, &snapshot.canonical_path, plan)
+        }
         ExecutionBackend::Ssh { .. } => {
             let cwd = posix_quote(&snapshot.canonical_path)?;
             let argv = serialize_posix_argv(
