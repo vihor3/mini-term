@@ -1006,3 +1006,13 @@ expectations are updated. Actual WSL now also checks `$#` plus NUL-separated
 values for one empty argument and consecutive/leading/trailing empty arguments,
 on both project/pre-project routes. All original cases and failure-only
 diagnostic rules remain. New verification is UNRUN until matching Actions.
+
+Main accepted Noether's written source release, froze/closed that owner and
+committed/pushed the eight-file correction as
+`26180f948845770ae1481ad775abe07d74d9a8b4`: CI `34013667988`, package
+`34013667980`. Linux `101433676291` stopped at seven changed-format hunks
+across the three source files. Main downloaded artifact `9983242413`, read and
+applied its complete `full-rustfmt.patch` to source/index without local tools
+or checks. Windows `101433676281` and actual WSL `101433777054` were still
+in compile/setup, not current passing evidence. The immediate format-only
+follow-up restarts the same full gates; no assertion or production policy changed.

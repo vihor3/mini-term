@@ -1475,9 +1475,13 @@ impl WslFixture {
             for (stage, data, expected) in cardinality_cases {
                 let command = CommandPlan::new(
                     "/bin/sh",
-                    ["-c", r#"exec /usr/bin/printf '%s\0' "$#" "$@""#, "mini-term-argv"]
-                        .into_iter()
-                        .chain(data.iter().copied()),
+                    [
+                        "-c",
+                        r#"exec /usr/bin/printf '%s\0' "$#" "$@""#,
+                        "mini-term-argv",
+                    ]
+                    .into_iter()
+                    .chain(data.iter().copied()),
                 );
                 let output = run(&captured.source, &command, stage, WslCwdProgram::Absolute);
                 assert!(

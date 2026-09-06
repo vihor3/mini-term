@@ -301,7 +301,16 @@ fn wsl_command(distro: &str, envelope: &CommandPlan) -> Result<Command, AccountE
         .map_err(|_| AccountExecutionError::InvalidContext)?;
     let script = format!("exec {argv}");
     let mut command = Command::new("wsl.exe");
-    command.args(["--distribution", distro, "--cd", "/", "--exec", "/bin/sh", "-c", &script]);
+    command.args([
+        "--distribution",
+        distro,
+        "--cd",
+        "/",
+        "--exec",
+        "/bin/sh",
+        "-c",
+        &script,
+    ]);
     Ok(command)
 }
 
@@ -618,10 +627,21 @@ mod tests {
             assert!(args.iter().all(|arg| !arg.is_empty()));
             assert_eq!(
                 args[..7],
-                ["--distribution", "mt-tasks-12345-2", "--cd", "/", "--exec", "/bin/sh", "-c"]
-                    .map(std::ffi::OsStr::new)
+                [
+                    "--distribution",
+                    "mt-tasks-12345-2",
+                    "--cd",
+                    "/",
+                    "--exec",
+                    "/bin/sh",
+                    "-c"
+                ]
+                .map(std::ffi::OsStr::new)
             );
-            let expected = format!("exec {}", serialize_posix_argv(envelope.display_argv()).unwrap());
+            let expected = format!(
+                "exec {}",
+                serialize_posix_argv(envelope.display_argv()).unwrap()
+            );
             assert_eq!(args[7], std::ffi::OsStr::new(&expected));
             assert!(command.get_current_dir().is_none());
             assert_eq!(envelope.args[3], path);

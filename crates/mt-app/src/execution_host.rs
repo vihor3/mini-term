@@ -303,10 +303,19 @@ fn plan_wsl_command(
     let cwd = posix_quote(cwd)?;
     let argv = serialize_posix_argv(plan.display_argv())?;
     let command = format!("CDPATH= cd -P {cwd} && exec {argv}");
-    let args = ["--distribution", distro, "--cd", "/", "--exec", "/bin/sh", "-c", &command]
-        .into_iter()
-        .map(str::to_string)
-        .collect();
+    let args = [
+        "--distribution",
+        distro,
+        "--cd",
+        "/",
+        "--exec",
+        "/bin/sh",
+        "-c",
+        &command,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
     Ok(PlannedHostCommand::Process {
         program: "wsl.exe".into(),
         args,
@@ -1621,7 +1630,9 @@ mod tests {
     #[test]
     fn wsl_plans_encode_empty_cardinality_without_empty_windows_arguments() {
         let source = snapshot(
-            ExecutionBackend::Wsl { distro: "Ubuntu".into() },
+            ExecutionBackend::Wsl {
+                distro: "Ubuntu".into(),
+            },
             "/srv/repo",
         );
         let context = PreProjectLocalContext::Wsl {
@@ -1630,7 +1641,10 @@ mod tests {
         };
         let cases: [(&[&str], &str); 3] = [
             (&[], "CDPATH= cd -P '/srv/repo' && exec '/usr/bin/printf'"),
-            (&[""], "CDPATH= cd -P '/srv/repo' && exec '/usr/bin/printf' ''"),
+            (
+                &[""],
+                "CDPATH= cd -P '/srv/repo' && exec '/usr/bin/printf' ''",
+            ),
             (
                 &["", "", "middle", ""],
                 "CDPATH= cd -P '/srv/repo' && exec '/usr/bin/printf' '' '' 'middle' ''",
