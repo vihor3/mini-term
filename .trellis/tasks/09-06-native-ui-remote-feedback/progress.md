@@ -1471,3 +1471,86 @@ assumed transitively available to the app. Main reviewed the delta and updated
 the release contract. This correction is UNRUN and being prepared for its next
 Actions push; a7b8b11's incomplete Linux/package gates will not count as passes
 if superseded. Its actual WSL import/cleanup are already complete.
+
+The SDK-mask correction was committed/pushed as
+682ac331308bc8d49278845ff9f2f0020f953062. New CI34023590512 and
+Package34023590504 are running; Linux101460555838 passed format/i18n and
+entered compilation, rootfs101460557128 passed, Windows101460557398 and
+actualWSL101460683298 are active. Package job101460534858 is active.
+Superseded a7b8b11 CI34022945645 is cancelled overall: its rootfs passed,
+Windows/WSL failed compilation, Linux101458780225 and package34022945647 were
+cancelled before completion. No new renderer or actual WSL pass is claimed.
+
+At682ac33, Windows compilation and Linux compilation/Clippy passed. Actual
+WSL101460683298 executed exactly one test and FAILED20.26s at DataCancel,
+so the SDK correction removed the build blocker but did not solve early exit.
+First readiness174-144815us retired144718-144751us Count(5), Private
+NotInJob/Alive and Readiness InJob/Exited. Private attached2675us, exited
+155335us(-1), retired155403us, drained163928us ackfalse/stdout118/stderr0,
+returned163959us with cancelled=false. Native output remains Unknown with the
+corrected max-width rendering. Second probe195067-297505us became ready,
+retired297455-297477us Count(2), both roots Exited/private NotInJob; cancellation
+297506us. The failed case's descendant assertion was not reached. Exact owned
+mt-tasks-34023590512-1 cleanup succeeded09:16:24Z. Ordinary tests/package
+remain running; no full gate or production-cause correction is claimed.
+
+Main resumed Noether READ-ONLY for one constrained proposal for a separate
+fixed public/non-credential WSL command pair in a fresh same-run-owned case.
+Potential failure-only comparison must preserve the original private failure,
+never read/report private account streams, invoke no gh/account/user-data input,
+keep existing guarded runners and strict bounds, and treat public success as
+inconclusive. No code/logging is authorized before ownership/privacy review.
+No further private catalogue/resource expansion, raw private output, member
+inventory, Job retention, cancellation remapping or guard relaxation is allowed.
+
+Noether proposed a bounded failure-only public command comparison with existing
+fallible WslFixture/host APIs and no implementation blocker. Main authorized
+only tests.rs and the Tasks report: after captured/joined unexpected pre-cancel
+HostHelperUnavailable, one fresh UUID directory, immutable marker/sleep producer
+and concurrent own-marker probes, 5s/4096bytes percommand and existing50ms/10s
+readiness policy plus bounded final-probe/cleanup grace. No account/helper/input
+reads or original-test order/cadence changes. Setup/probe errors stay metadata;
+readiness joins on ordinary returns and all original failures remain failing.
+Pre-auth placement was considered but NOT selected; post-failure conditions and
+null-versus-private-piped stdin remain explicit inference limits.
+
+Only this public producer's bounded streams may supply strictly decoded, JSON-
+escaped previews (256characters each, total diagnostic4096). Undecodable,
+truncated or failed-read streams stay metadata-only. Full BOTH streams are
+checked for fixture_credential_ in UTF8/UTF16LE/UTF16BE before any prefix removal
+or cropping; any hit suppresses ALL previews. Private buffers never enter this
+formatter. The exact fixed ASCII start marker may be separated from subsequent
+native UTF16 output with marker-presence metadata; arbitrary framing is not
+normalized. No raw controls/bytes, generic error messages, argv, environment,
+Job/PID/member inventory, new private classifier or production change. Source
+and focused privacy/trigger/bounds regressions are still being authored, UNRUN.
+
+At682ac33, all ordinary jobs and packaging completed SUCCESS: Linux101460555838
+mt-ai244, mt-app1219, all five individual actual SSH fixtures, sidecars and
+whitespace. Windows101460557398 passed onboarding82/3, Files49/14/5/1,
+execution-host19, Tasks executor32 plus1ignored actualWSL, app/config/domain
+24/2/31, Git24/6/124 and terminal-host31. The new exact WSL rendering-flag
+regression explicitly passed. CI34023590512 failed only actualWSL.
+Main updated validation.md to this exact completed candidate, excluding the
+new unrun public comparison. Artifact9986696965 from Package34023590504 is
+Mini-Term_1.2.2-ci.62_windows-x64, downloaded only to
+`/home/leo/.cache/mini-term/artifacts/682ac33-integration`.
+Its passed Actions manifest records installer18,850,572 bytes and SHA256
+`df14bd324bb9a27a21630f4ed4241ffb204a4ed48737423c0f1991587431e3ac`.
+No local verification/hash/app/installer launch occurred. Main offered ci.62
+for native/SSH pre-acceptance only; no user observations or full WSL pass exist.
+
+Noether released/froze the post-failure public comparison and eight focused
+Windows tests in tests.rs plus its review report. Main source-reviewed the
+exact trigger/attestation/fixed plans, bounded fallible runner and readiness
+join, whole-stream sentinel suppression, strict public-only decoding, Unicode
+escaping and unchanged baseline assertions. The review added escaping for
+U+061C, U+200E/U+200F and U+2028/U+2029; the focused test covers those scalars.
+Main added the seven-part release contract. This slice remains UNRUN until
+its own exact-SHA Actions jobs execute; no production guard change is included.
+
+Read-only upstream source inspection found Microsoft WSL master
+LxssConsoleManager.cpp uses ConsoleId zero for clients without a console handle
+and keys session leaders by ConsoleId/elevation. This is only a hypothesis lead:
+it does not establish the Actions inbox WSL1 implementation or shared-Job cause.
+No creation flags, Job ownership, process inventory or cleanup policy changed.

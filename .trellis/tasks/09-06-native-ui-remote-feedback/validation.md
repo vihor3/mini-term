@@ -2,10 +2,10 @@
 
 ## Latest Completed Candidate
 
-- Product commit: `a98473ee81e78d5a5b0c448f7e905e3aeb108038`.
-- CI: https://github.com/vihor3/mini-term/actions/runs/34021441260
-- Windows Package: https://github.com/vihor3/mini-term/actions/runs/34021441294
-- State: Linux/Windows/package SUCCESS; actual WSL FAILED at LookupCancel
+- Product commit: `682ac331308bc8d49278845ff9f2f0020f953062`.
+- CI: https://github.com/vihor3/mini-term/actions/runs/34023590512
+- Windows Package: https://github.com/vihor3/mini-term/actions/runs/34023590504
+- State: Linux/Windows/package SUCCESS; actual WSL FAILED at DataCancel
   after early transport exit. No full WSL correction is validated.
 - All five implementation slices are independently source-reviewed. All
   execution, including diagnostics, formatting and fixtures, remains Actions-only.
@@ -13,31 +13,32 @@
 Subsequent parser/diagnostic follow-ups are tracked in `progress.md`; their
 unrun/running/failed gates do not inherit a pass from this completed candidate.
 
-Current WSL job101454796139 discovered and executed exactly one test in 28.96 s.
+Current WSL job101460683298 discovered and executed exactly one test in 20.26 s.
 It passed marker/shim/hash, hostile captured cwd, literal/empty argument counts
 on project/pre-project routes, account enumeration/selected identity/secret
-rejection and error cases by source order. DataCancel and LookupTimeout passed
-their result and descendant assertions. LookupCancel then returned
-HostHelperUnavailable at154039us before cancellation. First readiness retirement
-135426-135451us had Count(5), Private NotInJob/Alive and Readiness InJob/Exited.
-Private exit-1 was observed144475us with no latched stop or cleanup acknowledgement;
-the bounded native classification remained Unknown. The second probe became
-ready and cancelled at298343us. The failed case's descendant assertion did not
+rejection and error cases by source order. DataTimeout passed its result and
+descendant assertions. DataCancel then returned HostHelperUnavailable at163959us
+before cancellation. First readiness retirement144718-144751us had Count(5),
+Private NotInJob/Alive and Readiness InJob/Exited. Private exit-1 was observed
+155335us with no latched stop or cleanup acknowledgement. Classification remained
+Unknown with the corrected max-width renderer. The second probe became ready
+and cancelled at297506us. The failed case's descendant assertion did not
 run; exact owned distro cleanup succeeded. Root nonmembership at observation
 time does not rule out indirect transport effects or establish an OS cause.
-Linux job101454684308 is entirely SUCCESS, including mt-ai244, mt-app1219,
+Linux job101460555838 is entirely SUCCESS, including mt-ai244, mt-app1219,
 both new object-only protocol tests, malformed-array acknowledgement, all five
 individually executed actual SSH fixtures, sidecars and whitespace.
-Windows job101454684440 is entirely SUCCESS: onboarding 82/3, Files 49/14/5/1,
-execution-host 19, Tasks executor 31 (one separate WSL test ignored), Tasks
+Windows job101460557398 is entirely SUCCESS: onboarding 82/3, Files 49/14/5/1,
+execution-host 19, Tasks executor 32 (one separate WSL test ignored), Tasks
 app/config/domain 24/2/31, Git domain/app 24/6/124, terminal-host library 31.
-All five new object-only/root-observer/catalogue tests explicitly passed where
-enabled. The later MAX_WIDTH_MASK renderer correction and its new test are
-not validated by this run. Native acceptance remains open.
+Object-only/root-observer/catalogue tests and the new exact rendering-flag
+regression explicitly passed where enabled. The later public WSL comparison
+is still being authored and is not validated by this run. Native acceptance
+remains open; previous runs passing a later lifecycle do not make this run pass.
 
-Package job101454669916 is SUCCESS. Artifact9985930270 is
-`Mini-Term_1.2.2-ci.59_windows-x64`; no local launch or verification occurred.
-Artifact: https://github.com/vihor3/mini-term/actions/runs/34021441294/artifacts/9985930270
+Package job101460534858 is SUCCESS. Artifact9986696965 is
+`Mini-Term_1.2.2-ci.62_windows-x64`; no local launch or verification occurred.
+Artifact: https://github.com/vihor3/mini-term/actions/runs/34023590504/artifacts/9986696965
 This artifact does not establish successful actual WSL or native UI acceptance.
 
 ## Proven Predecessor

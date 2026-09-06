@@ -2,9 +2,121 @@
 
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
 pointer still identifies the Git child. Source review and explicitly authorized
-Actions log inspection only. The current SDK-mask compiler correction is UNRUN.
+Actions log inspection only. The current public-comparison slice is UNRUN.
 No local build, test, lint, formatting, syntax, whitespace, transport or native
-acceptance is claimed. The a7b8b11 Windows failure does not validate this fix.
+acceptance is claimed. WSL early-exit causality remains unresolved.
+
+## Post-Failure Public Comparison: Source Released To Main
+
+The bounded test-only slice is authored and source-reviewed, with no remaining
+source/API blocker identified. Ownership is released to Main and source writes
+are frozen. Only `crates/mt-app/src/tasks_account_executor/tests.rs` and this
+report changed. No production, shared runner, private capture, classifier,
+fixture executable, dependency, workflow or spec changes. Main owns formatter
+artifacts, Git, integration and exact-SHA Actions validation.
+
+### Trigger, Ownership And Result Preservation
+
+The one-attempt gate requires DataCancel or LookupCancel, the original typed
+HostHelperUnavailable error, and false cancellation-at-return. It runs only
+after the original private result, timestamps and readiness join are captured.
+The public entry accepts an attested fixture and typed metadata, never private
+output buffers. Expected success, timeout, other errors and already-cancelled
+returns cannot dispatch it. Public success, setup/probe/thread failure or output
+never replaces the original readiness/result/descendant assertions, which remain
+unchanged. No pre-auth/account reordering or original cadence/deadline changes.
+
+WslFixture records its exact distro receipt only after the existing same-run
+owner, resolved executable, synthetic ELF hash and cases-directory checks.
+Those preflight commands resolve gh/Python but do not invoke an account helper.
+The public comparison also requires the exact attested distro and both root
+paths `/mini-term-fixture`; a private-case cwd or different backend is rejected.
+Each comparison uses a new UUID under `/mini-term-fixture/cases`, with guarded
+`/bin/mkdir -- <own-path>` and no `-p` or reuse. Setup errors are typed metadata.
+
+The immutable producer is `/bin/sh -c` with this literal script:
+
+```sh
+printf '%s\n' mt-public-start && : > ready && /usr/bin/sleep 1 && printf '%s\n' mt-public-end
+```
+
+Its concurrent probe is only `/usr/bin/test -f ready` in that same fresh cwd.
+Neither command reads gh/Python/accounts, user environment values, private
+streams or sibling files. Both use the existing guarded host runner with a
+5-second/4096-byte command bound. Probe cadence remains 50 ms with a 10-second
+budget; a final in-progress probe and existing runner drain/cleanup grace can
+extend the join beyond that budget. Readiness stores only saturating count,
+first/final same-clock timestamps and typed metadata. All ordinary producer
+result paths join readiness; thread creation/join errors remain static metadata.
+No additional kill, Job handle, barrier or producer retry is introduced. Final
+owned-distro cleanup remains authoritative, not proof of per-command Linux
+descendant cleanup.
+
+### Public Output Boundary
+
+Only the nested comparison module's fixed producer can retain preview bytes.
+Setup/probe replies, dispatch/read errors, unexpected epochs, incomplete or
+over-bound output cannot supply them. The formatter has no exported arbitrary
+buffer input. Both full bounded streams are scanned for the fixture sentinel
+`fixture_credential_` in UTF8/UTF16LE/UTF16BE before any prefix separation or
+cropping; a hit in either stream suppresses ALL previews. This is a fixture-only
+sentinel guard, not a general secret sanitizer.
+
+Only the exact ASCII `mt-public-start\n` stdout prefix may be separated. Its
+presence is metadata, and the remaining public bytes are strictly decoded,
+including native UTF16LE/BE after that prefix or without a prefix. Unsupported
+framing/encoding is metadata-only; no lossy decoding or private normalization.
+Each preview is at most 256 Unicode scalars before structured JSON escaping.
+C0/C1 controls, U+061C, U+200E/U+200F, U+2028-U+202E and U+2066-U+2069 cannot be
+emitted literally. The complete public diagnostic is capped at 4096 bytes,
+dropping previews or returning fixed cap metadata if needed. Error messages,
+argv, environment, process identifiers and private streams are never formatted.
+
+### Eight New Tests: Authored UNRUN
+
+All names below are under
+`tasks_account_executor::tests::wsl_public_comparison::`:
+
+- `public_comparison_plans_are_fixed_and_require_the_attested_root`
+- `public_comparison_attempt_is_exact_once_and_never_replaces_private_failure`
+- `public_comparison_joins_readiness_on_producer_and_thread_errors`
+- `public_comparison_readiness_retains_own_probe_timing_and_stops_on_errors`
+- `public_previews_reject_nonproducer_incomplete_and_undecodable_sources`
+- `public_previews_scan_full_both_streams_all_encodings_before_cropping`
+- `public_previews_decode_only_exact_start_prefix_and_native_error_framing`
+- `public_previews_and_total_json_are_bounded_and_escape_controls`
+
+These exercise structured fixed plans and ownership denial, exact trigger and
+one-attempt behavior, real test-thread joining/error paths, bounded readiness
+storage, both-stream suppression across all three encodings and beyond the
+preview cutoff, malformed input, ASCII-start plus UTF16 body, native no-marker
+errors, and JSON roundtrip/control/cap assertions. The source pass corrected a
+test comparison against ExecutionBackend, which intentionally has no PartialEq,
+by matching the exact WSL distro instead. The existing actual ignored test
+`tasks_account_executor::tests::tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host`
+retains all original cwd/literal/account/concurrent-readiness/strict-ack/final
+descendant assertions. No local execution or automated verification occurred.
+
+### Evidence And Limits
+
+The previously authorized
+[682ac33 log, run 34023590512 / job 101460683298](https://github.com/vihor3/mini-term/actions/runs/34023590512/job/101460683298)
+executed exactly one actual WSL test and failed in 20.26 seconds at DataCancel.
+The private process exited before cancellation with HostHelperUnavailable,
+false acknowledgement and Unknown native classification despite the width
+mask. At the first readiness retirement the private root was NotInJob and Alive.
+Its final descendant assertion was not reached; owned distro cleanup succeeded.
+No inference is made from private output length. Main subsequently confirmed
+all ordinary/package jobs succeeded for 682ac33; that completed candidate does
+not validate this newly authored diagnostic.
+
+The comparison runs in the post-failure disposable distro, not a clean-room
+state. Its ordinary runner uses null stdin, unlike the private piped control
+channel. A public reproduction would not establish Job causality, and public
+success is inconclusive, never a passing fix. Actual WSL early-exit cause, full
+transport acceptance and separate native hardware acceptance remain unresolved.
+No children, local checks or Git writes occurred. The SDK/compiler handoff below
+is historical and does not describe the current two-path release.
 
 ## SDK Width Mask Compiler Fix: Source Released To Main
 

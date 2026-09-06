@@ -545,9 +545,90 @@ every catalogue ID through a whole-catalogue scan or cache private payloads.
 Pin the exact trusted rendering flags and independently compare representative
 system messages using those flags, without assuming every locale has soft
 line breaks. This renderer parity does not establish an actual transport cause.
+Review new SDK names against the locked Rust binding and directly enabled
+features, not only the native API documentation. Linux checks exclude these
+Windows-only definitions; a prior Windows pass cannot validate a later import.
+Require fresh Windows all-target compilation in Actions before claiming parity.
 
 ### 7. Wrong vs Correct
 
 Wrong: infer a cancellation race from elapsed time and accept absent cleanup.
 Correct: retain the failure, record bounded ordering evidence, then review a
 specific production correction and require fresh exact-SHA Actions evidence.
+
+## Scenario: Public WSL Failure Comparison
+
+### 1. Scope / Trigger
+
+The owned actual WSL fixture may run one fixed non-credential comparison after
+DataCancel or LookupCancel unexpectedly returns HostHelperUnavailable before
+cancellation. Capture the private result, timestamps and readiness join first.
+Expected success, timeout, other errors and already-cancelled returns do not
+dispatch it. A public result never replaces any original assertion.
+
+### 2. Signatures
+
+The Windows test-only `wsl_public_comparison::Attempt::after_failure` accepts
+only an attested WslFixture and typed lifecycle/error/cancellation metadata.
+Its opaque Report exposes a bounded `describe()` string, not arbitrary buffer
+input. Only its own fixed producer can supply preview bytes.
+
+### 3. Contracts
+
+- Require the exact distro attested by the existing same-run owner, executable,
+  hash and cases-directory preflight, with both source paths at the fixture
+  root. Create a fresh UUID case using guarded mkdir without `-p` or reuse.
+- Run only `/bin/sh -c` with the immutable start-marker, ready-file, absolute
+  one-second sleep and end-marker script. Concurrent probes only test that
+  case's ready file. Do not read accounts, private buffers or sibling files.
+- Use existing guarded execution with 5-second/4096-byte per-command bounds,
+  50-ms probe cadence and 10-second readiness budget plus bounded final-probe
+  and runner cleanup grace. Join readiness on all ordinary producer returns.
+  Setup, dispatch, read and thread errors retain static typed metadata only.
+- Preserve existing private control, original order/deadlines, Job policy and
+  result/readiness/descendant assertions. No retries, barriers or extra kills.
+- Preview only complete, current fixed-producer captures. Scan BOTH full raw
+  streams for fixture_credential_ in UTF8/UTF16LE/UTF16BE before prefix removal
+  or cropping; any match suppresses all previews. This is not a general secret
+  sanitizer. Error messages and setup/probe bodies never supply preview text.
+- Separate only the exact immutable ASCII start prefix, retain its presence
+  as metadata and strictly decode the remaining public UTF8/UTF16. Unknown
+  framing stays metadata-only. Limit each preview to 256 Unicode scalars and
+  structured-escape controls, bidi marks and line/paragraph separators. Limit
+  the whole public JSON to 4096 bytes, dropping previews before fixed fallback.
+- Post-failure distro state and null versus private piped stdin limit inference.
+  A public reproduction does not establish Job causality; public success is
+  inconclusive. Owned-distro cleanup is not per-command descendant proof.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Matching unexpected private failure | One public attempt; original failure retained |
+| Success, timeout, other failure or second attempt | No public dispatch |
+| Wrong/unattested source or failed fresh mkdir | Typed failure; no producer |
+| Producer dispatch/read failure | Join existing readiness; no error text |
+| Incomplete, stale, malformed or truncated capture | No preview for that capture |
+| Fixture credential sentinel in either full stream | Suppress BOTH previews |
+| Public success or independently reproduced failure | Preserve baseline failure and causal uncertainty |
+
+### 5. Good / Base / Bad
+
+Good: bounded output comes only from an immutable public producer. Base: unknown
+encoding remains metadata-only. Bad: accept private output in a generic preview
+function or infer a production fix from successful diagnostic commands.
+
+### 6. Tests Required
+
+Actions Windows tests cover fixed plans/ownership, exact-once trigger, result
+preservation, thread join/error paths, bounded readiness timing, both-stream
+sentinel suppression across three encodings and beyond the crop boundary,
+strict mixed ASCII-prefix/UTF16 framing and escaped bounded JSON. Keep the actual
+ignored WSL scenario nonempty and explicitly executed, with original assertions
+and exact owned cleanup. Ordinary unit passes do not validate its transport.
+
+### 7. Wrong vs Correct
+
+Wrong: expose private account bytes because an isolated fixture is in use.
+Correct: create a separate fixed public command boundary, retain the original
+failure and require separately reviewed source changes with fresh Actions proof.
