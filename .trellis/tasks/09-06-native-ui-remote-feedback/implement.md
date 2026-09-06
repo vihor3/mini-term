@@ -57,7 +57,7 @@ turn a failure green. No workflows are dispatched during this planning turn.
 
 ## Evidence and Finish
 
-- [ ] Implement/check sub-agents perform only allowed local source review;
+- [x] Implement/check sub-agents perform only allowed local source review;
   execution gates are Actions-only. No recursive implement/check dispatch.
 - [ ] Record each exact product SHA, run/job result, and regression coverage;
   a follow-up source fix requires fresh matching Actions evidence.
@@ -66,8 +66,15 @@ turn a failure green. No workflows are dispatched during this planning turn.
   do not launch a local build/probe as an acceptance substitute.
 - [ ] Acceptance covers background Agents, old terminal layouts, worktree/tool
   switches, file scrolling/menus/dragging, remote Git, and independent gh accounts.
-- [ ] Main updates affected specs with the implemented contracts and caveats.
-- [ ] Stage only explicitly owned paths. Do not include unrelated dirty Trellis,
+- [x] Main updates affected specs with the implemented contracts and caveats.
+- [x] Stage only explicitly owned paths. Do not include unrelated dirty Trellis,
   hooks, config, keys, or source files; no blanket staging or destructive resets.
 - [ ] Leave tasks open when native acceptance is outstanding and distinguish
   code/CI completion from observed resolution of the user's screenshots.
+
+All five implementation slices are now source-complete and independently
+reviewed. The integrated Agent candidate first reached Actions at `0b28475`;
+the formatting-only follow-up is `aec1c72`. Prior navigation/CLI passes and
+the non-Agent Windows fixture/package results are scoped in `progress.md` and
+do not close the full-source or native gates above. Source reviews and scoped
+commits continue to follow the same ownership rule during CI corrections.

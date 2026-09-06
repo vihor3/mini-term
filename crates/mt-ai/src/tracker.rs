@@ -4,7 +4,7 @@
 //! 行编辑状态机、Ctrl+C 双击窗口、Enter 后的输出扫描窗口、TUI 重绘冷却、
 //! 最近输出时刻。PTY 只管字节进出,这些全是 AI 感知的私产,随迁移整块搬来。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -364,8 +364,8 @@ impl SessionTracker {
         agent: &str,
         sessions: &mut HashMap<u32, String>,
     ) {
-        if !sessions.contains_key(&pane_id) {
-            sessions.insert(pane_id, agent.to_string());
+        if let Entry::Vacant(entry) = sessions.entry(pane_id) {
+            entry.insert(agent.to_string());
             self.ai_started.lock().insert(pane_id, SystemTime::now());
         }
     }
@@ -471,17 +471,13 @@ impl SessionTracker {
                 .get(&pane_id)
                 .map(|t| t.elapsed() < AI_ENTER_SCAN_WINDOW)
                 .unwrap_or(false);
-            if recently_entered {
-                if !sessions.contains_key(&pane_id) {
-                    if let Some(agent) = output_ai_command_name(data) {
-                        if let Some(episode) =
-                            self.pending_weak_episodes.lock().get(&pane_id).copied()
-                        {
-                            sessions.insert(pane_id, agent.to_string());
-                            self.weak_episodes.lock().insert(pane_id, episode);
-                        }
-                    }
-                }
+            if recently_entered
+                && let Entry::Vacant(entry) = sessions.entry(pane_id)
+                && let Some(agent) = output_ai_command_name(data)
+                && let Some(episode) = self.pending_weak_episodes.lock().get(&pane_id).copied()
+            {
+                entry.insert(agent.to_string());
+                self.weak_episodes.lock().insert(pane_id, episode);
             }
         }
 

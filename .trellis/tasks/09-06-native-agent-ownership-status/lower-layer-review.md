@@ -1,5 +1,38 @@
 # Agent Lower-Layer Review
 
+## Clippy Style Follow-Up (2026-09-06)
+
+Status: SOURCE COMPLETE / RELEASED to main for integration. Narrow style-only
+response to [CI 34007899647, Linux job 101418401826](https://github.com/vihor3/mini-term/actions/runs/34007899647/job/101418401826).
+The authorized log excerpt reports 169 baseline warnings ignored outside changed
+lines and six changed-line warnings: two map-entry, three collapsible-if and one
+test-only type-complexity warning. The baseline is not changed or suppressed.
+
+Base is main's Actions-rustfmt commit
+`aec1c720f551bcd9f054553bc096c7991449aae8`, following Agent `8ab8c27` and integration
+`0b28475`. Main reports Linux and Windows all-target compile success for that
+candidate; that result does not validate this subsequent style delta. The earlier
+same-ID resume limitation below was resolved by the independently completed
+[producer review](producer-review.md), not reopened or changed in this follow-up.
+
+- `crates/mt-ai/src/tracker.rs`: use vacant entries for conditional insertion;
+  collapse echo detection into a let-chain. Preserve short-circuit order:
+  recent Enter, absent session, recognized command, captured pending episode.
+  The outer `ai_sessions` guard and its block remain unchanged. Marking still
+  sets `ai_started` only on insertion; echo still publishes only the captured
+  pending episode. No new inference, reset, removal or receipt behavior.
+- `crates/mt-ai/src/hook_server.rs`: remove only the redundant collection type
+  annotation in `note_user_interrupt_latches_and_emits_once`; the typed
+  `StatusChange` callback determines the same tuple element type.
+- This addendum is the only other edit. No runtime/API, Bohr lifecycle,
+  app/WSL diagnostic, spec, metadata, staging, commit or push changes.
+
+Source/diff review only. Builds, Cargo metadata, tests, fixtures/probes,
+Clippy, rustfmt, syntax and whitespace checks are UNRUN for this patch and remain
+Actions-only. No new tests are needed for this style-only delta; retain existing
+tracker receipt/locking/echo and Hook interrupt regression gates. Main owns the
+exact integrated-SHA Actions rerun. No API or spec refresh is requested.
+
 ## Conditional-Clear Independent Follow-Up
 
 Current pass: SOURCE COMPLETE for the approved conditional-clear and Hook

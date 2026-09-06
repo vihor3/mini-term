@@ -1650,8 +1650,7 @@ mod tests {
         use crate::monitor::{StatusChange, StatusEmitter};
         use std::sync::Mutex as StdMutex;
 
-        let seen: Arc<StdMutex<Vec<(String, Option<String>)>>> =
-            Arc::new(StdMutex::new(Vec::new()));
+        let seen = Arc::new(StdMutex::new(Vec::new()));
         let sink_seen = seen.clone();
         let emitter = StatusEmitter::new(Arc::new(move |c: StatusChange| {
             sink_seen.lock().unwrap().push((c.status, c.cause));

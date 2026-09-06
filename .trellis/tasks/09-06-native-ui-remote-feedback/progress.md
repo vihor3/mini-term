@@ -726,3 +726,29 @@ and applied the complete exact-run `full-rustfmt.patch` to index and working
 source (23 product files), with no local formatter or checker. Windows
 `101416803507` compilation and actual WSL `101416918481` continue; the format
 follow-up is held from push until their useful compile/diagnostic evidence.
+
+The format follow-up `aec1c720f551bcd9f054553bc096c7991449aae8` is now
+pushed: CI `34007899647`, package `34007899592`. Linux `101418401826`
+passed format/dictionary/staging/locked graphs and is compiling all targets.
+Windows `101418401984` and the new isolated WSL producer also continue.
+
+At `0b28475`, full Windows application/test-target checking passed. Its job
+`101416803507` was later CANCELLED by this push while still compiling the
+onboarding test binary, so none of its focused regressions are passing evidence.
+Actual WSL `101416918481` completed before the push and executed exactly one
+test: FAILED in 0.10 seconds, stage ReadOwner, exit -1/0xffffffff, stdout 90
+bytes classified unclassified, empty stderr, no timeout or truncation. Only-
+owned distro cleanup passed. No account API was reached. Noether now traces
+the precise Windows/WSL startup difference and proposes bounded pre-auth
+diagnostics; no cause is guessed from output length and no production Job or
+credential safeguard has been bypassed. The exact-run diagnostic report is
+the Tasks child's `review.md`.
+
+Linux `101418401826` at `aec1c72` now passed all-target root compilation and
+sidecar check, then stopped at six changed-line Clippy warnings (169 baseline
+warnings ignored). All earlier 28 non-Agent warnings are resolved. The six
+remaining findings are tracker map-entry/equivalent nested-if style and one
+Hook test type annotation. Resumed Leibniz owns only those two mt-ai source
+locations and its lower-layer-review addendum; runtime/lifecycle semantics and
+mutex ordering remain fixed. Root tests and authenticated SSH are still blocked
+by this lint gate. Windows full compilation also passed at this exact SHA.
