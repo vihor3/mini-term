@@ -8,8 +8,13 @@
   and preserve live right-sidebar resizing and per-worktree state.
 - [x] Apply compact tab geometry, readable titles and existing native controls.
 - [x] Independently review the source and add focused Actions regressions.
-- [ ] Commit only owned files and validate the exact commit in GitHub Actions.
-- [ ] Produce/download the matching Windows installer for native acceptance.
+- [x] Commit only owned implementation and CI files.
+- [x] Validate the corrected exact commit in GitHub Actions.
+- [x] Produce/download the matching Windows installer for native acceptance.
+
+Validated candidate: `f90993afce7c04f3d6a359fdf5bee0a9016d4de9`, CI34046725805
+and WindowsPackage34046725815, both SUCCESS. Installer `1.2.2-ci.70` is downloaded;
+native visual/pointer acceptance remains open as detailed in `validation.md`.
 
 Earlier completed implementation steps below remain historical evidence, not
 validation of this newly approved visual correction.

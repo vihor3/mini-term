@@ -22,8 +22,92 @@ independently approved the source for Actions validation on 2026-09-07.
 - Nonblocking coverage gap: new title tests exercise the owned projection and
   existing target-resolution tests, not the complete `terminal_tab_title()`
   entry point with provider fallback mapping.
-- Exact-commit CI, packaging and native artifact acceptance are pending. The
-  historical candidates below do not validate this new native source.
+- Exact-commit CI and packaging passed; the installer is downloaded. Native
+  visual/pointer acceptance remains open. Earlier candidates below are historical.
+
+### Validated Candidate
+
+- Product commit: `f90993afce7c04f3d6a359fdf5bee0a9016d4de9`.
+- CI: https://github.com/vihor3/mini-term/actions/runs/34046725805
+  All five jobs completed SUCCESS on this exact commit.
+- Linux job `101523006968` passed formatting/dictionary/staging/locked-graph
+  checks, workspace/sidecar compilation, Clippy, full workspace and sidecar tests,
+  authenticated loopback SSH fixtures and whitespace. Completed `17:12:43Z`.
+- Windows job `101523007135` passed compilation and all regression steps.
+  The four nonempty native navigation suites were discovered and executed;
+  that step passed at `17:11:08Z`. Onboarding, Files, Tasks, Git and terminal-host
+  regressions also passed. The job completed `17:17:08Z`.
+- Same-run rootfs job `101523007104` passed. Actual WSL1 job `101523147769`
+  and WSL2 job `101523147759` passed transport execution and owned cleanup,
+  completing at `17:05:14Z` and `17:06:18Z` respectively. All times here are UTC
+  on 2026-09-06 (2026-09-07 in the developer's timezone).
+- Windows Package: https://github.com/vihor3/mini-term/actions/runs/34046725815
+  Job `101522992431` completed SUCCESS at `17:16:21Z` on the same commit.
+  Artifact `9993700175`: `Mini-Term_1.2.2-ci.70_windows-x64`.
+  https://github.com/vihor3/mini-term/actions/runs/34046725815/artifacts/9993700175
+- Downloaded installer and `windows-package-validation.json` to
+  `/home/leo/Downloads/mini-term-1.2.2-ci.70/`. The Actions manifest reports
+  `status=passed`, the exact commit/run, and all eight staged/extracted payloads
+  matching. Installer size: 18,874,602 bytes; Actions SHA-256:
+  `ef0a4abfdea9831db38ec0151c6d5dfaad41b13c878aa3ae41fe5b48ceb8b523`.
+- Final evidence is the GitHub job/step API and downloaded Actions manifest.
+  Raw job-log downloads remained intermittent, so no new per-test totals or
+  guest-kernel values are inferred from older runs. No local hash check, build,
+  test, formatter, installer execution or application launch was performed.
+- Native acceptance remains OPEN for caption/body alignment during resize,
+  collapse/overlays, actual window hitboxes, keyboard/pointer focus, tooltips,
+  terminal activation/close/reorder and retained worktree tool content. Source
+  review and pure tests do not establish native screenshot/interaction acceptance.
+
+### Actions Iterations
+
+Chronological intermediate observations below are superseded by the validated
+candidate above, not separate claims of final status.
+
+- Native source commit: `80245911fadb7c3ace75aa61d93875ac188ef9bb`.
+  CI34044489937 failed changed-line formatting; Windows affected-package
+  compilation passed before its running navigation tests were superseded.
+  Both WSL imports completed before the replacement push, and both cancelled
+  jobs completed their owned-distro cleanup successfully. No full test pass is
+  claimed for this cancelled run.
+- Repeated TLS failures prevented artifact and job-log downloads from GitHub's
+  backing storage, while the GitHub API remained available. CI-only commit
+  `dad94854b63adfcb767fd459de700742febb641e` publishes the whole existing
+  formatting artifact as a bounded base64 check annotation, without truncating
+  or selecting hunks. The original artifacts remain unchanged. CI34045003168
+  is the diagnostic follow-up, not a source correction or acceptance result.
+- That run demonstrated a runner-side 4096-character annotation limit. No
+  partial patch was applied. `5ea48da36c5358acdd8df7685b561688645a98f0` changed
+  only the transport: gzip the whole artifact, number JSON-framed base64 chunks
+  below 4096 characters, and publish all parts or none. Pasteur approved this
+  bounded source change. CI34045191525 delivered the complete 7011-byte patch
+  in one annotation. Main downloaded/decompressed that API payload and applied
+  the whole contextual patch to three owned Rust files, with no local formatter.
+  The prior diagnostic run was cancelled only after both imports completed;
+  both owned WSL cleanups succeeded.
+- Formatting-only source correction: `e3463c7c2a15aeb83b8d3a90a2005e62197e11ef`.
+  CI34045396180 passed formatting, dictionary/staging/locked-graph gates and
+  Linux/Windows affected compilation, then failed the changed-line Clippy gate.
+  Tests were not complete. Both superseded WSL jobs cleaned their owned distro.
+  CI-only `a8708a1ba326444ddbbece4d605c99fc0de625a4` adds standard source/line
+  annotations to the unchanged warning matcher and exit-status gate, since
+  backing-storage job-log downloads still failed. Pasteur approved the scoped
+  diagnostic source change; CI34046038785 will identify the warnings. The
+  corresponding WindowsPackage34045396159 is still running, not yet validated.
+- The diagnostic iteration identified exactly one changed-line warning:
+  `clippy::assertions_on_constants` in the new collapsed-footer regression at
+  `orca_sidebar.rs:1381`. Euclid is converting that width invariant to an
+  inline const assertion, preserving the check without a suppression or UI
+  behavior change. The standard annotation reached the GitHub API as intended.
+- Euclid completed that one-line test-only correction and Pasteur approved it.
+  Candidate `f90993afce7c04f3d6a359fdf5bee0a9016d4de9` starts CI34046725805
+  and WindowsPackage34046725815 (package run70). Formatting is already passing;
+  full checks/tests/package remain pending. Both superseded diagnostic WSL jobs
+  completed their owned cleanup after their imports had finished.
+- On `f90993a`, both compilation gates and Clippy passed. Actual WSL2 job
+  `101523147759` and WSL1 job `101523147769` both completed SUCCESS, including
+  exact transport execution and owned cleanup. Linux full tests, Windows
+  navigation/regression suites and installer validation are still pending.
 
 ## Historical Candidate
 
@@ -38,7 +122,7 @@ This is the navigation candidate only. Agent, full folder-browser, remote Git
 and Tasks account feature changes remain outside this committed candidate.
 Passing old baseline tests in those modules does not validate their new slices.
 
-## Executed Gates
+## Historical Gates
 
 - Linux: all four real formatting-artifact fixtures, changed-line rustfmt,
   generated i18n, staging tests, locked graphs, workspace/sidecar compilation,
@@ -51,7 +135,7 @@ Passing old baseline tests in those modules does not validate their new slices.
   Actions repositories and compared against full formatter output. No local
   formatter, code generator, test, fixture or automated verification ran.
 
-## Package And Native Acceptance
+## Historical Package
 
 - Windows Package: https://github.com/vihor3/mini-term/actions/runs/33997336860
 - Packaging job: `101390058223`, SUCCESS at `2026-09-05T23:21:50Z`.

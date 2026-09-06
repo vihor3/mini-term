@@ -1,5 +1,36 @@
 # Integrated Feedback Validation
 
+## Approved Native Layout
+
+- Latest product commit: `f90993afce7c04f3d6a359fdf5bee0a9016d4de9`.
+- CI: https://github.com/vihor3/mini-term/actions/runs/34046725805
+  All five jobs completed SUCCESS: Linux `101523006968`, Windows `101523007135`,
+  rootfs `101523007104`, actual WSL1 `101523147769` and WSL2 `101523147759`.
+- The four native navigation suites were each discovered nonempty and executed
+  on Windows. Full Linux/SSH/sidecar and existing Windows regression gates also
+  passed. Both actual WSL jobs passed their owned-distro cleanup.
+- Windows Package: https://github.com/vihor3/mini-term/actions/runs/34046725815
+  Job `101522992431` completed SUCCESS on the same exact commit. Artifact
+  `9993700175` is `Mini-Term_1.2.2-ci.70_windows-x64`:
+  https://github.com/vihor3/mini-term/actions/runs/34046725815/artifacts/9993700175
+- Installer and Actions manifest were downloaded to
+  `/home/leo/Downloads/mini-term-1.2.2-ci.70/`. The manifest reports `passed`,
+  all eight payloads matching, installer size 18,874,602 bytes and SHA-256
+  `ef0a4abfdea9831db38ec0151c6d5dfaad41b13c878aa3ae41fe5b48ceb8b523`.
+
+The approved preview is now implemented in the native shell: shared caption/body
+boundaries, retained live sidebar widths and visibility, compact 42px caption,
+200px terminal tabs and readable titles without generated identity suffixes.
+No WSL/backend/Agent behavior was added or changed in this visual follow-up.
+Evidence comes from exact-commit job/step conclusions and the Actions manifest;
+intermittent raw-log download failures do not justify copying old per-test totals.
+No local automated validation, hash check or app/installer launch occurred.
+
+The native acceptance checklist at the end remains OPEN. Use this new installer
+for layout feedback; the older candidates below cannot validate the new visuals.
+See the navigation child's validation record for source review, diagnostic
+iterations and remaining native interaction coverage.
+
 ## WSL Generation Extension
 
 - CI-only commit: `30dce5371fcbdd4936d174c12adfe7dd196807c3`.
@@ -38,7 +69,7 @@ the separate actual WSL gate, Tasks app/config/domain24/2/31, Git24/6/126 and
 terminal-host31. The Job policy and WSL uncertain-write regressions passed;
 empty binary targets are not counted as tests. All evidence is from Actions.
 
-## Latest Completed Candidate
+## Earlier Integrated Candidate
 
 - Product commit: `f4ee0f9aa954142a7552e458760d9254e17701b7`.
 - CI: https://github.com/vihor3/mini-term/actions/runs/34032734882

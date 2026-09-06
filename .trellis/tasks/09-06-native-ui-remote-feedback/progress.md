@@ -1882,3 +1882,79 @@ attestation failure analysis and corrected executable spec. All agents and
 owned execution sessions are closed. The broader native-feedback parent and
 children remain open for user-observed acceptance, so finish-work does not
 archive them or sweep the original unrelated dirty journals/files into commits.
+
+## Approved Native Layout Follow-up
+
+The user approved the corrected navigation HTML and requested immediate native
+implementation. Euclid changed only the native geometry/titlebar/sidebar/store
+presentation boundary; Pasteur independently approved it for Actions. Shared
+caption/body columns now retain live right-sidebar width, confine tabs to the
+terminal area, and expose collapsible sidebars without changing per-worktree
+ownership. Caption height is 42px and tab width 200px. Tab fallbacks omit generated
+identity suffixes; diagnostic labels and exact target validation remain intact.
+Main corrected three source-review findings with the implementer: narrow-overlay
+caption branding, minimum separator width and tab-versus-drag flex allocation.
+Eleven new regressions were authored; Windows explicitly discovers and executes
+all four native navigation suites. No WSL/backend/Agent behavior was changed.
+
+Native source 8024591 started CI34044489937 and WindowsPackage34044489987.
+The Linux job failed formatting; Windows affected-package compilation passed
+before the diagnostic replacement superseded its running tests. Both WSL imports
+were already complete and both cancelled jobs cleaned their owned distro.
+GitHub backing-storage downloads repeatedly failed TLS, so CI-only dad9485 adds
+a bounded whole-artifact base64 annotation readable through the functioning API.
+Its CI34045003168 is a diagnostic iteration, not passing verification. Main kept
+all 97 original unrelated dirty paths and performed no local automated checks.
+Exact corrected-source CI/package evidence and native acceptance remain pending.
+
+The first annotation was truncated to 4096 characters by the runner; no partial
+patch was used. CI-only 5ea48da changed the transport to gzip and bounded numbered
+JSON/base64 notices, with all-or-none publication and unchanged primary artifacts.
+Pasteur approved the source correction. CI34045191525 delivered the entire
+7011-byte contextual patch in one notice. Main downloaded/decompressed it via
+the GitHub API and applied it whole to shell_geometry.rs, store/context.rs and
+title_bar.rs, producing formatting-only e3463c7. The intermediate diagnostic run
+was superseded after both imports finished, and both owned cleanups succeeded.
+This is artifact retrieval/application, not local rustfmt or app verification.
+
+On e3463c7, CI34045396180 passed formatting, dictionary/staging/locked graphs
+and Linux/Windows compilation. Its changed-line Clippy gate failed; no complete
+test pass is claimed. Superseding it after both imports finished preserved both
+successful owned cleanups. Backing-storage log downloads still returned TLS EOF,
+so CI-only a8708a1 adds escaped GitHub source/line warning annotations to the
+existing changed-line Clippy matcher, without changing matching or exit status.
+Pasteur approved this focused diagnostic addition. CI34046038785 is running to
+identify the warning; WindowsPackage34045396159 remains in progress on e3463c7.
+
+The diagnostic API now exposes the exact sole warning: assertions_on_constants
+at orca_sidebar.rs:1381 in the new collapsed-footer regression. Euclid owns a
+bounded inline-const correction that retains the width invariant without
+suppression or native behavior change. No other Clippy warning was reported by
+the unchanged changed-line matcher in CI34046038785.
+
+Euclid made the one-line inline-const correction and Pasteur approved it.
+Candidate f90993afce7c04f3d6a359fdf5bee0a9016d4de9 now runs CI34046725805
+and WindowsPackage34046725815 (run 70). Formatting passed; the remaining gates
+are still pending. Both preceding diagnostic WSL imports completed before
+supersession, and both owned cleanups succeeded. App layout behavior is unchanged
+by this regression-only correction; do not deliver cancelled package 69 as the
+new candidate. No local automated validation ran.
+
+Final result on f90993a: CI34046725805 completed SUCCESS in all five jobs.
+Linux 101523006968 passed all checks, full tests and authenticated SSH fixtures;
+Windows 101523007135 passed all four nonempty native navigation suites plus the
+existing onboarding, Files, Tasks, Git and terminal-host gates. Rootfs 101523007104
+and actual WSL1/WSL2 jobs 101523147769/101523147759 passed, including owned cleanup.
+WindowsPackage34046725815 job 101522992431 also completed SUCCESS on f90993a.
+
+Artifact 9993700175 (`Mini-Term_1.2.2-ci.70_windows-x64`) was downloaded to
+`/home/leo/Downloads/mini-term-1.2.2-ci.70/`. Its Actions manifest reports `passed`,
+the exact commit/run, all eight payloads matching, installer size 18,874,602 bytes
+and SHA-256 `ef0a4abfdea9831db38ec0151c6d5dfaad41b13c878aa3ae41fe5b48ceb8b523`.
+Raw-log transfers remained intermittent; final evidence is the job/step API and
+Actions manifest, not guessed totals or older runtime logs. No local hash check,
+build, test, formatter, installer execution or app launch was performed.
+
+The source/Actions/package follow-up is complete. Native screenshot, resize,
+hit-testing and interaction acceptance remains open; parent/children are not
+archived and unrelated dirty journals/files are not included in the final commit.

@@ -89,6 +89,8 @@ nonempty suite and then execute it; compilation alone is not a geometry gate.
 Cover docked/hidden/overlaid columns, resize bounds, saved preferences, native
 control reserves, title precedence and unchanged diagnostic fallback. Review
 the actual render consumers as well as the pure geometry helper.
+Use inline const assertions for fixed caption/rail/control-width invariants;
+keep viewport-derived geometry and command behavior in runtime regression tests.
 
 All compilation, formatting, lint, tests and UI harnesses are Actions-only.
 Native hit testing, visual alignment and real pointer/focus behavior still need
