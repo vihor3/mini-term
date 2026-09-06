@@ -1438,3 +1438,36 @@ only process.rs is affected. No local formatter/check ran. Rootfs101458357097
 passed; Windows101458357237 remains compiling and actualWSL101458492666 is
 importing. Main is preparing the formatting successor and will not supersede
 the currently active import. No new renderer test or actual WSL pass exists.
+
+Main observed the7bbbd4b import SUCCESS and active exact-test build before
+pushing complete-format successor a7b8b11ef366c1a8dff6727ba2ac4ba8b0d0f6c1.
+Superseded WSL101458492666 logs confirm import08:49:12Z and successful exact
+owned cleanup08:49:53Z for mt-tasks-34022799075-1; no actual test pass occurred.
+Successor CI34022945645 and Package34022945647 started. Its Linux101458780225
+format gate passed; rootfs101458780123 and Windows101458780310 are running.
+All renderer/actual transport outcomes remain pending. No local checks ran.
+
+At a7b8b11 Windows101458780310 failed compilation with E0432 at process.rs139
+and1004: FORMAT_MESSAGE_MAX_WIDTH_MASK is not exported from Diagnostics::Debug
+by the locked windows0.61.3 bindings. No new Windows regression ran. Linux
+format/i18n/compile/Clippy passed and tests are running; actualWSL101458919571
+is still in its exact-test build step. Main resumed Noether only for the minimal
+binding/SDK-mask correction in process.rs and the Tasks report, with no feature
+or dependency expansion, removed test/flag, production/Job change or local
+execution. The previous complete a98473e/ci.59 evidence stays separately scoped.
+
+ActualWSL101458919571 also failed discovery/build on the same two E0432 imports;
+NO actual test executed. Exact owned mt-tasks-34022945645-1 cleanup succeeded
+09:00:51Z. No updated renderer/cancellation outcome can be inferred from this
+compile failure, and the previous LookupCancel cause remains unconfirmed.
+
+Noether released/froze the minimal process.rs/Tasks-report correction and closed.
+The private SDK_FORMAT_MESSAGE_MAX_WIDTH_MASK uses the documented WinBase.h
+0x000000ff value; the independent regression constructs FORMAT_MESSAGE_OPTIONS
+from that literal without reusing the private constant. Existing flags, caps,
+matching/gating and all original assertions remain unchanged. No dependency or
+feature was added; the current published WindowsProgramming namespace is not
+assumed transitively available to the app. Main reviewed the delta and updated
+the release contract. This correction is UNRUN and being prepared for its next
+Actions push; a7b8b11's incomplete Linux/package gates will not count as passes
+if superseded. Its actual WSL import/cleanup are already complete.

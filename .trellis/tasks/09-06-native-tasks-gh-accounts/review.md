@@ -2,12 +2,56 @@
 
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
 pointer still identifies the Git child. Source review and explicitly authorized
-Actions log inspection only. The current trusted-renderer flag correction and
-one new test are UNRUN. No local build, test, lint, formatting, syntax,
-whitespace, transport or native acceptance is claimed. The a98473e Actions
-run predates this correction and cannot validate it.
+Actions log inspection only. The current SDK-mask compiler correction is UNRUN.
+No local build, test, lint, formatting, syntax, whitespace, transport or native
+acceptance is claimed. The a7b8b11 Windows failure does not validate this fix.
 
-## WSL System Rendering Flags: Source Released To Main
+## SDK Width Mask Compiler Fix: Source Released To Main
+
+The narrow compiler correction is authored and source-reviewed, with no
+remaining source blocker identified. Ownership is released to Main and source
+writes are frozen. Only `crates/mt-app/src/tasks_account_executor/process.rs`
+and this report changed. No dependency, feature, other source, CI or spec edits.
+
+Main reports a7b8b11 run 34022945645 / Windows job 101458780310 failed E0432 at
+process.rs:139 and :1004: the locked windows 0.61.3 Debug namespace does not
+export FORMAT_MESSAGE_MAX_WIDTH_MASK. This was an invalid binding import in
+both renderer and regression, not evidence against the width-mask behavior.
+No actual WSL execution is claimed for that head; Main owns the pending WSL,
+ordinary and package conclusions. Earlier a98473e ordinary/package success
+does not validate the newer renderer or this correction.
+
+The lockfile still selects windows 0.61.3 for this dependency. Microsoft's
+[SDK WinBase.h declaration](https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/WinBase.h#L2390)
+defines FORMAT_MESSAGE_MAX_WIDTH_MASK as 0x000000FF, consistent with the
+[FormatMessageW flag documentation](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-formatmessagew).
+Published current bindings place this numeric mask under
+[WindowsProgramming](https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/System/WindowsProgramming/constant.FORMAT_MESSAGE_MAX_WIDTH_MASK.html),
+not Debug; mt-app does not directly enable that namespace. No reliance on
+transitive feature enablement or new feature is needed for this SDK value.
+
+The invalid imports are replaced with the clearly named private test/Windows
+SDK_FORMAT_MESSAGE_MAX_WIDTH_MASK = 0x000000ff, with inline provenance. The
+renderer retains the exact FROM_SYSTEM | IGNORE_INSERTS | max-width bits. The
+existing independent regression constructs its expected mask from the literal
+SDK value via the already-used FORMAT_MESSAGE_OPTIONS type; it does not reuse
+the renderer's private mask constant. Its exact-flags assertion and three fixed
+trusted-system-message comparisons are retained. No test was removed and no
+new test function or diagnostic behavior was added.
+
+The 512-u16 buffer, 4096-byte input/candidate caps, 3015-ID catalogue, full-message
+matching, privacy, false-ack/nonzero/trace gates and production results remain
+unchanged. No Job, cancellation, private-input or resource-wrapper changes.
+The correction and existing renderer regression remain UNRUN pending exact-SHA
+Windows Actions. No local execution, automated checks, Git writes or child
+agents occurred. WSL early-exit causality remains unconfirmed. Main owns the
+remaining Actions, formatter, integration and release gates.
+
+## Earlier WSL System Rendering Flags Handoff
+
+Historical handoff below predates the a7b8b11 compiler failure. The SDK constant
+correction above supersedes its binding-readiness statement, not its intended
+rendering behavior or privacy boundary.
 
 The narrow test-renderer correction is authored and source-reviewed, with no
 unresolved implementation blocker. Ownership is released to Main and source

@@ -132,18 +132,22 @@ const WINDOWS_TRANSPORT_ERROR_CODES: &[u32] = {
     ]
 };
 
+// WinBase.h defines FORMAT_MESSAGE_MAX_WIDTH_MASK as 0x000000ff.
+// https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-formatmessagew
+#[cfg(all(test, windows))]
+const SDK_FORMAT_MESSAGE_MAX_WIDTH_MASK: u32 = 0x0000_00ff;
+
 #[cfg(all(test, windows))]
 const WINDOWS_SYSTEM_MESSAGE_FLAGS:
     windows::Win32::System::Diagnostics::Debug::FORMAT_MESSAGE_OPTIONS = {
     use windows::Win32::System::Diagnostics::Debug::{
-        FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FORMAT_MESSAGE_MAX_WIDTH_MASK,
-        FORMAT_MESSAGE_OPTIONS,
+        FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FORMAT_MESSAGE_OPTIONS,
     };
 
     FORMAT_MESSAGE_OPTIONS(
         FORMAT_MESSAGE_FROM_SYSTEM.0
             | FORMAT_MESSAGE_IGNORE_INSERTS.0
-            | FORMAT_MESSAGE_MAX_WIDTH_MASK.0,
+            | SDK_FORMAT_MESSAGE_MAX_WIDTH_MASK,
     )
 };
 
@@ -1000,13 +1004,13 @@ mod tests {
             ERROR_BAD_EXE_FORMAT, ERROR_BROKEN_PIPE, ERROR_EXE_MACHINE_TYPE_MISMATCH,
         };
         use windows::Win32::System::Diagnostics::Debug::{
-            FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS,
-            FORMAT_MESSAGE_MAX_WIDTH_MASK, FormatMessageW,
+            FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FORMAT_MESSAGE_OPTIONS,
+            FormatMessageW,
         };
 
         let expected_flags = FORMAT_MESSAGE_FROM_SYSTEM
             | FORMAT_MESSAGE_IGNORE_INSERTS
-            | FORMAT_MESSAGE_MAX_WIDTH_MASK;
+            | FORMAT_MESSAGE_OPTIONS(0x0000_00ff);
         assert_eq!(WINDOWS_SYSTEM_MESSAGE_FLAGS.0, expected_flags.0);
         for code in [
             ERROR_BAD_EXE_FORMAT.0,

@@ -472,6 +472,10 @@ typed membership/liveness, never the underlying process references.
   512-unit buffer. Match WSL's trusted resource rendering flags; outer CR/LF
   trimming does not replace its treatment of embedded regular line breaks.
   Do not adopt ALLOCATE_BUFFER or normalize the private input to force a match.
+  The locked windows 0.61.3 Debug module does not export the width-mask macro.
+  Use the private SDK_FORMAT_MESSAGE_MAX_WIDTH_MASK value 0x000000ff from
+  WinBase.h; the independent flag regression pins the same literal value.
+  Do not add a broad binding feature or rely on transitive feature unification.
   Retain Unknown or SystemMessageId with the matched numeric identifier only;
   no substrings, output-derived labels, guessed codes from length or raw text.
   A matching message identifier is not an independently observed OS return code.
