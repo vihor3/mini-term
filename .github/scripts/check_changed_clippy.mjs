@@ -79,8 +79,24 @@ console.log(
   `Clippy baseline ignored outside changed lines: ${ignoredBaseline}; changed-line warnings: ${matched.size}`,
 );
 if (matched.size > 0) {
+  const escapeData = (value) => String(value)
+    .replaceAll("%", "%25")
+    .replaceAll("\r", "%0D")
+    .replaceAll("\n", "%0A");
+  const escapeProperty = (value) => escapeData(value)
+    .replaceAll(":", "%3A")
+    .replaceAll(",", "%2C");
   for (const message of matched.values()) {
     console.error(message.rendered ?? message.message);
+    const primary = (message.spans ?? []).find((span) => span.is_primary);
+    if (process.env.GITHUB_ACTIONS === "true" && primary) {
+      console.log(
+        `::warning file=${escapeProperty(normalize(primary.file_name))},` +
+        `line=${primary.line_start},endLine=${primary.line_end},` +
+        `title=${escapeProperty(message.code?.code ?? "Clippy")}::` +
+        escapeData(message.rendered ?? message.message),
+      );
+    }
   }
   process.exit(1);
 }
