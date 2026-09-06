@@ -1785,3 +1785,22 @@ latest completed validation candidate and recorded the post-fix analysis in
 the Git-child research note. The WSL1 background-command issue is validated;
 WSL2/interop/nested Jobs/shared clients and all user-observed native UI acceptance
 remain open. Parent/children are not archived or broadly marked complete.
+
+## Explicit WSL2 Actions Request
+
+The user explicitly requested a WSL2 run after receiving the accurate status
+that only WSL1 had passed. Main resumed the current Git child and delegated a
+small workflow/fixture-only change to Newton; Rust production and test bodies
+remain out of the write scope. The current Windows 2025 hosted-image manifest
+(20260830.247.1) lists WSLv2 2.7.12.0, while Windows 2022 lists WSLv1 only.
+GitHub documents nested virtualization as experimental, so the manifest is a
+reason to attempt the owned WSL2 import, not proof of guest startup or passing
+tests. Keep both explicit matrix rows, disable sibling fail-fast cancellation,
+verify actual distro generation and guest kernel, and preserve exact cleanup
+on any import/test failure. No fallback or silent skip is allowed. All existing
+same-run hash/provenance checks and unchanged exact ignored test assertions are
+required in both rows. No new WSL2 execution evidence exists at this point.
+
+Setup references, not runtime evidence:
+[Windows 2025 image](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md),
+[hosted-runner virtualization limits](https://docs.github.com/en/actions/concepts/runners/github-hosted-runners).

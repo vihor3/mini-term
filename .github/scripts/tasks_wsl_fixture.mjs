@@ -75,8 +75,69 @@ function listDistros() {
   return text.replace(/^\uFEFF/, "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
-function wsl(args) {
-  return run("wsl.exe", ["--distribution", distro, "--user", "root", "--cd", "/", "--exec", ...args]);
+function wsl(args, options) {
+  return run("wsl.exe", ["--distribution", distro, "--user", "root", "--cd", "/", "--exec", ...args], options);
+}
+
+function requestedWslVersion() {
+  requireCondition(process.platform === "win32" && ["1", "2"].includes(env.MT_TEST_WSL_VERSION), "Windows fixture requires MT_TEST_WSL_VERSION=1 or 2");
+  return Number(env.MT_TEST_WSL_VERSION);
+}
+
+function readImportState() {
+  const state = readJson(statePath);
+  requireCondition(sameOwner(state.owner) && state.distro === distro && state.installPath === installPath
+    && [1, 2].includes(state.version), "Refusing foreign WSL cleanup state");
+  return state;
+}
+
+function validateWslVersion(expected) {
+  const raw = run("pwsh", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", String.raw`
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class TasksWslVersion {
+    [DllImport("wslapi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static extern int WslGetDistributionConfiguration(
+        string name, out uint version, out uint uid, out uint flags,
+        out IntPtr environment, out uint count);
+    public static int Read(string name, out uint version) {
+        uint uid, flags, count = 0;
+        IntPtr environment = IntPtr.Zero;
+        try {
+            return WslGetDistributionConfiguration(name, out version, out uid,
+                out flags, out environment, out count);
+        } finally {
+            if (environment != IntPtr.Zero) {
+                for (uint i = 0; i < count; i++) {
+                    Marshal.FreeCoTaskMem(Marshal.ReadIntPtr(environment, checked((int)i * IntPtr.Size)));
+                }
+                Marshal.FreeCoTaskMem(environment);
+            }
+        }
+    }
+}
+'@
+[uint32]$version = 0
+$status = [TasksWslVersion]::Read($env:MT_TEST_WSL_DISTRO, [ref]$version)
+@{ hresult = $status; version = $version } | ConvertTo-Json -Compress
+`], { timeout: 60_000, maxBuffer: 8192, env: { ...env, MT_TEST_WSL_DISTRO: distro } });
+  const result = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+  requireCondition(result && Object.keys(result).length === 2
+    && Number.isInteger(result.hresult) && Number.isInteger(result.version), "Invalid WSL version API response");
+  requireCondition(result.hresult === 0, `WSL version API failed (HRESULT ${result.hresult})`);
+  requireCondition(result.version === expected, `Imported WSL version mismatch: expected ${expected}, actual ${result.version}`);
+  if (expected === 2) {
+    const kernel = new TextDecoder("utf-8", { fatal: true })
+      .decode(wsl(["/usr/bin/uname", "-r"], { maxBuffer: 1024 })).replace(/\r?\n$/, "");
+    requireCondition(/^[A-Za-z0-9._+-]{1,128}$/.test(kernel)
+      && /-microsoft-standard-WSL2$/i.test(kernel), "Owned distro did not boot a WSL2 guest kernel");
+    console.log(`Attested WSL 2 guest kernel ${kernel}`);
+  }
+  console.log(`Attested exact owned distro WSL version ${result.version}`);
 }
 
 function validateImportedOwner() {
@@ -121,7 +182,7 @@ async function prepare() {
       fs.writeFileSync(source, value, { flag: "wx", mode: 0o600 });
       run("sudo", ["install", "-m", "0644", source, destination]);
     }
-    for (const file of ["usr/bin/python3", "usr/bin/head", "usr/bin/sha256sum", "usr/bin/test", "usr/bin/touch", "bin/sh", "bin/cat", "bin/mkdir"]) {
+    for (const file of ["usr/bin/python3", "usr/bin/head", "usr/bin/sha256sum", "usr/bin/test", "usr/bin/touch", "usr/bin/uname", "bin/sh", "bin/cat", "bin/mkdir"]) {
       run("sudo", ["test", "-e", path.join(root, file)]);
     }
     const rootfs = path.join(artifacts, "rootfs.tar");
@@ -143,6 +204,7 @@ async function prepare() {
 
 async function importFixture() {
   requireCondition(process.platform === "win32", "WSL transport gate requires Windows");
+  const version = requestedWslVersion();
   const manifest = readJson(path.join(artifacts, "manifest.json"));
   const { source_rootfs_url, source_rootfs_sha256, rootfs_sha256, gh_sha256, ...provenance } = manifest;
   requireCondition(sameOwner({ ...provenance, kind: "mini-term-tasks-wsl" }) && provenance.kind === "mini-term-tasks-wsl-artifact", "Artifact is not from this exact Actions run and commit");
@@ -155,16 +217,19 @@ async function importFixture() {
   fs.mkdirSync(installPath);
   // Record ownership before dispatch so an interrupted import can be cleaned
   // without inspecting or unregistering any pre-existing distro.
-  fs.writeFileSync(statePath, JSON.stringify({ owner, distro, installPath }), { flag: "wx" });
-  run("wsl.exe", ["--import", distro, installPath, rootfs, "--version", "1"], { timeout: 600_000 });
+  fs.writeFileSync(statePath, JSON.stringify({ owner, distro, installPath, version }), { flag: "wx" });
+  run("wsl.exe", ["--import", distro, installPath, rootfs, "--version", String(version)], { timeout: 600_000 });
+  validateWslVersion(version);
   validateImportedOwner();
   requireCondition(env.GITHUB_ENV, "Missing Actions environment output");
   fs.appendFileSync(env.GITHUB_ENV, `MT_TEST_WSL_DISTRO=${distro}\nMT_TEST_WSL_MARKER=/mini-term-fixture/owner.json\nMT_TEST_WSL_GH_SHA256=${gh_sha256}\n`);
-  console.log(`Imported isolated WSL 1 fixture ${distro}`);
+  console.log(`Imported isolated WSL ${version} fixture ${distro}`);
 }
 
 function testFixture() {
   requireCondition(process.platform === "win32" && env.MT_TEST_WSL_DISTRO === distro, "Missing owned WSL test environment");
+  const version = requestedWslVersion();
+  requireCondition(readImportState().version === version, "WSL test version differs from the owned import");
   validateImportedOwner();
   const args = ["test", "--locked", "--target", "x86_64-pc-windows-msvc", "-p", "mt-app", "--bin", "mini-term", TEST, "--"];
   const listing = spawnSync("cargo", [...args, "--list", "--ignored", "--exact"], {
@@ -179,14 +244,14 @@ function testFixture() {
   requireCondition(!listing.error && listing.status === 0, "WSL test discovery/build failed");
   const tests = listing.stdout.split(/\r?\n/).filter((line) => line.endsWith(": test"));
   requireCondition(tests.length === 1 && tests[0] === `${TEST}: test`, "Exact WSL transport test was not discovered once");
+  validateWslVersion(version);
   run("cargo", [...args, "--ignored", "--exact", "--test-threads=1"], { timeout: 15 * 60_000, stdio: "inherit" });
 }
 
 function cleanup() {
   requireCondition(process.platform === "win32", "WSL cleanup requires Windows");
   if (!fs.existsSync(statePath)) return;
-  const state = readJson(statePath);
-  requireCondition(sameOwner(state.owner) && state.distro === distro && state.installPath === installPath, "Refusing foreign WSL cleanup state");
+  readImportState();
   if (listDistros().some((name) => name.toLowerCase() === distro.toLowerCase())) {
     // This exact name was proven absent before the recorded import. Cleanup
     // remains valid after a partial import, where no guest marker is readable.

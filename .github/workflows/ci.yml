@@ -385,11 +385,21 @@ jobs:
           retention-days: 1
 
   tasks-wsl:
-    name: Tasks actual WSL transport
+    name: Tasks actual WSL${{ matrix.wsl_version }} transport
     needs: tasks-wsl-rootfs
-    # This image explicitly provides WSL 1. Do not silently replace this gate
-    # with a POSIX-envelope test or a distro belonging to the runner image.
-    runs-on: windows-2022
+    # Separate runners keep the same attested distro name isolated per row.
+    # Import and guest attestation, not the image label, establish WSL2 support.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            wsl_version: '1'
+          - runner: windows-2025
+            wsl_version: '2'
+    runs-on: ${{ matrix.runner }}
+    env:
+      MT_TEST_WSL_VERSION: ${{ matrix.wsl_version }}
     timeout-minutes: 100
     steps:
       - uses: actions/checkout@v5
@@ -407,6 +417,15 @@ jobs:
         with:
           name: tasks-wsl-rootfs-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mt-tasks-rootfs-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Report public WSL2 host capability
+        if: ${{ matrix.wsl_version == '2' }}
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          wsl.exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'WSL package version query failed' }
+          Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction Stop |
+            Select-Object FeatureName, State | ConvertTo-Json -Compress
       - name: Import only the same-run isolated WSL fixture
         run: node .github/scripts/tasks_wsl_fixture.mjs import
       - name: Discover and run the exact actual WSL transport test

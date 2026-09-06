@@ -196,3 +196,13 @@ correct only the affected execution/cleanup behavior. Preserve SSH/native
 semantics, private credential boundaries, truthful cancellation/cleanup results
 and all original lifecycle assertions. Do not infer WSL2 or real-device impact
 from the Windows Server 2022 WSL1 fixture. Native UI acceptance remains separate.
+
+After the WSL1 correction passed, the user explicitly requested running WSL2
+tests in GitHub Actions on 2026-09-06. Extend the existing actual transport gate
+with a separate Windows 2025 / WSL2 job while retaining Windows 2022 / WSL1.
+Reuse the same-run isolated rootfs and unchanged account/lifecycle/concurrent
+peer tests. Verify the imported distro's actual WSL generation and WSL2 guest
+kernel; an unavailable runner capability, wrong generation, missing test or
+failed assertion must fail, never skip or fall back to WSL1. This request does
+not authorize unrelated production/UI changes, real device fixtures or local
+verification. Report the exact job result separately from native acceptance.

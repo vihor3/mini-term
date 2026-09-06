@@ -233,6 +233,7 @@ an actual Windows-to-WSL or authenticated SSH pipeline.
 node .github/scripts/tasks_wsl_fixture.mjs prepare|import|test|cleanup
 
 MT_TEST_SSH_ROOT, MT_TEST_SSH_PORT, MT_TEST_SSH_USER, MT_TEST_SSH_KEY
+MT_TEST_WSL_VERSION=1|2
 MT_TEST_WSL_DISTRO=mt-tasks-<GITHUB_RUN_ID>-<GITHUB_RUN_ATTEMPT>
 MT_TEST_WSL_MARKER=/mini-term-fixture/owner.json
 MT_TEST_WSL_GH_SHA256=<same-run Linux synthetic gh ELF SHA-256>
@@ -243,6 +244,17 @@ WSL guest owner JSON contains exactly numeric `schema: 1`,
 `sha`. The artifact manifest changes kind to `mini-term-tasks-wsl-artifact` and
 adds `source_rootfs_url`, `source_rootfs_sha256`, `rootfs_sha256`, `gh_sha256`.
 Credentials are not fields of either object.
+
+Windows import ownership state is `{ owner, distro, installPath, version }`,
+with numeric `version: 1 | 2`. The read-only `WslGetDistributionConfiguration`
+probe emits only `{ hresult: integer, version: integer }`; require `hresult: 0`
+and the requested generation. Load `wslapi.dll` from System32 and free every
+returned environment string and the pointer array with `CoTaskMemFree`, without
+decoding or emitting any of them. Probe execution is bounded to 60 seconds and
+8192 output bytes. For WSL2, the exact guest's `/usr/bin/uname -r` must be a
+single 1-128 character ASCII kernel release ending in `-microsoft-standard-WSL2`
+(case-insensitive), within a 1024-byte capture. This pins the hosted stock-kernel
+test environment; it is not a production restriction on custom WSL kernels.
 
 ### 3. Contracts
 
@@ -258,10 +270,26 @@ Credentials are not fields of either object.
   validates run/attempt/repository/commit, source pin and downloaded hash before
   import. Guest tests also check bounded marker output, exact gh/Python lookup
   and ELF hash before invoking any account API.
-- Use a unique run/attempt-owned distro on the Windows 2022 WSL 1 runner.
+- Run explicit Windows 2022 / WSL1 and Windows 2025 / WSL2 matrix rows on
+  separate runners, with `fail-fast: false`. The Windows fixture requires
+  `MT_TEST_WSL_VERSION` to be exactly `1` or `2`; rootfs preparation remains
+  generation-independent. Import with the explicit `--version` value, never
+  infer the generation from an installed WSL package or runner label.
+- Use a unique run/attempt-owned distro in each isolated Windows job.
   Refuse a pre-existing name or import ownership state. Persist fixture import
   ownership before dispatch so interrupted imports still have guarded cleanup.
   Never set a default distro/version or issue global `wsl --shutdown`.
+- Before account execution, require the exact imported distro's configured WSL
+  generation to match the requested one and, for WSL2, require guest-kernel
+  evidence from that same distro. Use a structured Windows API, not localized
+  `wsl --list --verbose` table parsing. Do not output returned environment values.
+  A missing capability, API failure, generation mismatch or non-WSL2 kernel
+  fails the job; it cannot silently choose WSL1 or the runner's default guest.
+  Repeat attestation during import and after discovery/build, just before exact
+  test execution; test mode
+  also compares the requested version to the saved import version. Cleanup
+  validates saved ownership independently of current requested-version input
+  and does not need a running guest or successful generation attestation.
 - Imported guest automount and Windows interop/PATH append are disabled.
   Synthetic cases and HOME live below `/mini-term-fixture`; account fixtures
   explicitly seed conflicting synthetic auth/debug variables so sanitation is
@@ -287,8 +315,13 @@ Credentials are not fields of either object.
 Source references for setup, not runtime proof:
 [Canonical checksum](https://cloud-images.ubuntu.com/wsl/jammy/current/SHA256SUMS),
 [Windows 2022 WSL feature](https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md),
+[Windows 2025 WSL features](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md),
+[distribution configuration API](https://learn.microsoft.com/en-us/windows/win32/api/wslapi/nf-wslapi-wslgetdistributionconfiguration),
 [Microsoft import/cleanup commands](https://learn.microsoft.com/en-us/windows/wsl/basic-commands),
 [same-run artifact download](https://github.com/actions/download-artifact).
+Hosted image manifests describe installed components, not successful guest
+startup. [Nested virtualization is experimental on hosted runners](https://docs.github.com/en/actions/concepts/runners/github-hosted-runners);
+report actual per-generation job evidence rather than assuming availability.
 
 ### 4. Validation & Error Matrix
 
@@ -297,6 +330,7 @@ Source references for setup, not runtime proof:
 | Wrong run, commit, marker, rootfs or ELF checksum | Fail before account requests |
 | Existing distro or foreign cleanup state | Refuse import/destruction |
 | WSL capability absent or exact test missing | Fail explicitly, no silent skip |
+| Requested generation absent/invalid, wrong actual version or WSL2 kernel absent | Fail; no generation fallback |
 | Test cancellation/timeout or partial import | Preserve failure and run owned cleanup |
 | Another distro exists/runs | Leave it untouched |
 | SSH key/root/home escapes RUNNER_TEMP fixture | Refuse fixture configuration |
@@ -308,7 +342,8 @@ Source references for setup, not runtime proof:
   run through production `wsl.exe`, and the owned distro alone is unregistered.
 - Base: a missing WSL component fails setup without touching another distro.
 - Bad: run a Linux shell envelope and mark Windows cancellation coverage passed,
-  or use the runner's default distro because import is inconvenient.
+  use the runner's default distro because import is inconvenient, or label a
+  passing WSL1 run as WSL2 based only on `wsl --version` package output.
 
 ### 6. Tests Required
 
@@ -319,13 +354,19 @@ SSH epoch replacement, and no global account change. Fixture setup itself must
 execute in the exact-SHA workflow and complete guarded cleanup. Native Windows
 process ownership, pure account/config tests and ordinary Linux tests remain
 separate gates, not replacements for actual transport execution.
+Both WSL generations run the same unchanged exact test, including all original
+account/lifecycle assertions and the eight client-first concurrent-peer rows.
+Record requested/actual generation, WSL2 kernel evidence, exact nonempty test
+execution and owned cleanup for each job. A failed row remains failed even if
+its sibling passes; native UI and enabled-interop acceptance remain separate.
 
 ### 7. Wrong vs Correct
 
 Wrong: accept any available WSL distro and infer a test ran from Cargo exit zero.
 
 Correct: validate same-run ownership and fixture bytes, import a unique guest,
-require exact test discovery and execution, then clean only that recorded guest.
+attest its actual generation, require exact test discovery and execution, then
+clean only that recorded guest.
 
 ## Scenario: WSL Marker Launch Diagnostics
 
