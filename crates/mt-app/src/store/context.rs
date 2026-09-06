@@ -2103,7 +2103,12 @@ mod tests {
     #[test]
     fn caption_fallback_omits_generated_identity_but_diagnostics_keep_it() {
         for fallback in [
-            "bash", "PowerShell", "186", "Codex", "ssh", "\u{7ec8}\u{7aef}",
+            "bash",
+            "PowerShell",
+            "186",
+            "Codex",
+            "ssh",
+            "\u{7ec8}\u{7aef}",
         ] {
             let first = RuntimeTitleProjection {
                 custom_title: None,
@@ -2133,17 +2138,17 @@ mod tests {
             source: source.clone(),
             title: "Owned task".into(),
         };
-        let projection =
-            |candidate: &AgentRuntimeState, candidate_source: &ExecutionSourceSignature| {
-                RuntimeTitleProjection {
-                    custom_title: None,
-                    session_title: metadata.for_run(candidate, Some(candidate_source)),
-                    live_title: None,
-                    fallback: "Codex".into(),
-                    identity: "diagnostic-only",
-                }
-                .readable_label()
-            };
+        let projection = |candidate: &AgentRuntimeState,
+                          candidate_source: &ExecutionSourceSignature| {
+            RuntimeTitleProjection {
+                custom_title: None,
+                session_title: metadata.for_run(candidate, Some(candidate_source)),
+                live_title: None,
+                fallback: "Codex".into(),
+                identity: "diagnostic-only",
+            }
+            .readable_label()
+        };
         assert_eq!(projection(&run, &source), "Owned task");
         let mut replacement = run.clone();
         replacement.route.terminal_incarnation_id = TerminalIncarnationId::new();

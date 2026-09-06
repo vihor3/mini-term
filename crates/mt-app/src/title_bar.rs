@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, App, AppContext, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Render,
-    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Window,
+    AnyElement, App, AppContext, Bounds, ClickEvent, Context, Div, Entity, EventEmitter,
+    FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
+    Render, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, Window,
     WindowControlArea, canvas, div, point, prelude::FluentBuilder, px,
 };
 use mt_identity::{PaneKey, WorktreeId};
@@ -325,8 +325,8 @@ fn revealed_offset(current: f32, viewport: f32, index: usize, tab_width: f32) ->
 }
 
 fn terminal_tabs_width(center_width: f32, has_project: bool, count: usize) -> f32 {
-    let tools = if has_project { TOOL_WIDTH } else { 0.0 }
-        + if count > 0 { TOOL_WIDTH } else { 0.0 };
+    let tools =
+        if has_project { TOOL_WIDTH } else { 0.0 } + if count > 0 { TOOL_WIDTH } else { 0.0 };
     (center_width - tools - CAPTION_DRAG_WIDTH)
         .max(0.0)
         .min(count as f32 * TAB_WIDTH)
@@ -539,18 +539,14 @@ impl TitleBar {
                 let store = self.store.clone();
                 let titlebar = titlebar.clone();
                 let title = self.tab_title(&view.target, cx);
-                menu::item(
-                    title,
-                    move |window, cx| {
-                        if AppStore::activate_terminal_jump_target(&store, &view.target, window, cx)
-                        {
-                            titlebar.update(cx, |bar, cx| {
-                                bar.reveal_selected = true;
-                                cx.notify();
-                            });
-                        }
-                    },
-                )
+                menu::item(title, move |window, cx| {
+                    if AppStore::activate_terminal_jump_target(&store, &view.target, window, cx) {
+                        titlebar.update(cx, |bar, cx| {
+                            bar.reveal_selected = true;
+                            cx.notify();
+                        });
+                    }
+                })
             })
             .collect();
         let position = self

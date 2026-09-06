@@ -80,11 +80,7 @@ impl ShellGeometry {
         context: ContextVisibility,
         preferred_context_width: Option<f64>,
     ) -> Self {
-        let traffic_light_width = if is_mac {
-            MAC_TRAFFIC_LIGHT_WIDTH
-        } else {
-            0.0
-        };
+        let traffic_light_width = if is_mac { MAC_TRAFFIC_LIGHT_WIDTH } else { 0.0 };
         let projects_narrow = viewport_width < PROJECT_OVERLAY_BREAKPOINT;
         let projects_overlay = projects_narrow && projects_overlay_open;
         let left_width = if projects_expanded && !projects_narrow {
@@ -130,11 +126,7 @@ impl ShellGeometry {
     }
 
     pub fn legacy(viewport_width: f32, is_mac: bool) -> Self {
-        let traffic_light_width = if is_mac {
-            MAC_TRAFFIC_LIGHT_WIDTH
-        } else {
-            0.0
-        };
+        let traffic_light_width = if is_mac { MAC_TRAFFIC_LIGHT_WIDTH } else { 0.0 };
         let left_width = traffic_light_width + if viewport_width > 760.0 { 120.0 } else { 38.0 };
         let titlebar_right_width = Self::window_controls_width(is_mac);
         Self {
@@ -234,7 +226,10 @@ mod tests {
             let wide = layout(1920.0, true, Some(saved));
             assert_eq!(wide.context_width, saved as f32);
         }
-        assert_eq!(ShellGeometry::preferred_context_width(Some(f64::NAN)), 284.0);
+        assert_eq!(
+            ShellGeometry::preferred_context_width(Some(f64::NAN)),
+            284.0
+        );
     }
 
     #[test]
@@ -273,7 +268,8 @@ mod tests {
                 );
                 assert!(geometry.titlebar_center_width >= TOOL_WIDTH * 2.0 + CAPTION_DRAG_WIDTH);
                 assert_eq!(
-                    geometry.left_width + geometry.titlebar_center_width
+                    geometry.left_width
+                        + geometry.titlebar_center_width
                         + geometry.titlebar_right_width,
                     viewport
                 );
@@ -308,10 +304,14 @@ mod tests {
             for viewport in [480.0, 1280.0] {
                 let geometry = ShellGeometry::legacy(viewport, is_mac);
                 assert!(!geometry.orca);
-                assert_eq!(geometry.titlebar_right_width, if is_mac { 0.0 } else { 138.0 });
+                assert_eq!(
+                    geometry.titlebar_right_width,
+                    if is_mac { 0.0 } else { 138.0 }
+                );
                 assert!(geometry.left_width >= geometry.traffic_light_width);
                 assert_eq!(
-                    geometry.left_width + geometry.titlebar_center_width
+                    geometry.left_width
+                        + geometry.titlebar_center_width
                         + geometry.titlebar_right_width,
                     viewport
                 );
