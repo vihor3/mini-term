@@ -1491,8 +1491,7 @@ mod actions_fixtures {
                 )
                 .unwrap();
             let tip = ObjectId::parse(&commit.to_string()).unwrap();
-            let actual =
-                parse_log(&fixture.run(&log_plan(&[tip], 1).unwrap().unwrap())).unwrap();
+            let actual = parse_log(&fixture.run(&log_plan(&[tip], 1).unwrap().unwrap())).unwrap();
             let local = crate::git::get_git_log(&fixture.repo, None, Some(1), None).unwrap();
             assert_eq!(
                 serde_json::to_value(actual).unwrap(),
