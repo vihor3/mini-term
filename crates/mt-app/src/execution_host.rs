@@ -710,10 +710,7 @@ pub(crate) fn tasks_wsl_retirement_trace<T>(
 }
 
 #[cfg(all(test, windows))]
-fn observe_tasks_wsl_retirement(
-    before: Option<(u128, TasksWslActiveProcesses)>,
-    succeeded: bool,
-) {
+fn observe_tasks_wsl_retirement(before: Option<(u128, TasksWslActiveProcesses)>, succeeded: bool) {
     let Some((before_us, active_processes)) = before else {
         return;
     };
@@ -1430,7 +1427,10 @@ mod tests {
         let (result, absent) = tasks_wsl_retirement_trace(Instant::now(), || Err::<(), _>(23));
         assert_eq!(result, Err(23));
         assert_eq!(absent, TasksWslRetirementTrace::default());
-        for active in [TasksWslActiveProcesses::Count(0), TasksWslActiveProcesses::QueryFailed] {
+        for active in [
+            TasksWslActiveProcesses::Count(0),
+            TasksWslActiveProcesses::QueryFailed,
+        ] {
             let (result, trace) = tasks_wsl_retirement_trace(Instant::now(), || {
                 observe_tasks_wsl_retirement(Some((0, active)), false);
                 Err::<(), _>(23)
@@ -1450,23 +1450,37 @@ mod tests {
             observe_tasks_wsl_retirement(Some((0, TasksWslActiveProcesses::QueryFailed)), false);
         });
         assert_eq!(trace.calls, u32::MAX);
-        assert_eq!(trace.first.unwrap().active_processes, TasksWslActiveProcesses::Count(1));
-        assert_eq!(trace.last.unwrap().active_processes, TasksWslActiveProcesses::QueryFailed);
+        assert_eq!(
+            trace.first.unwrap().active_processes,
+            TasksWslActiveProcesses::Count(1)
+        );
+        assert_eq!(
+            trace.last.unwrap().active_processes,
+            TasksWslActiveProcesses::QueryFailed
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn tasks_wsl_retirement_observer_resets_on_unwind_and_is_thread_local() {
-        assert!(std::panic::catch_unwind(|| {
-            tasks_wsl_retirement_trace(Instant::now(), || {
-                observe_tasks_wsl_retirement(Some((0, TasksWslActiveProcesses::QueryFailed)), false);
-                panic!("synthetic retirement scope failure");
-            });
-        }).is_err());
+        assert!(
+            std::panic::catch_unwind(|| {
+                tasks_wsl_retirement_trace(Instant::now(), || {
+                    observe_tasks_wsl_retirement(
+                        Some((0, TasksWslActiveProcesses::QueryFailed)),
+                        false,
+                    );
+                    panic!("synthetic retirement scope failure");
+                });
+            })
+            .is_err()
+        );
         let ((), trace) = tasks_wsl_retirement_trace(Instant::now(), || {
             std::thread::spawn(|| {
                 observe_tasks_wsl_retirement(Some((0, TasksWslActiveProcesses::Count(1))), true);
-            }).join().unwrap();
+            })
+            .join()
+            .unwrap();
         });
         assert_eq!(trace, TasksWslRetirementTrace::default());
     }
@@ -1474,7 +1488,11 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn tasks_wsl_retirement_observer_records_the_existing_guarded_termination() {
-        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"), "Actions-only fixture");
+        assert_eq!(
+            std::env::var("GITHUB_ACTIONS").as_deref(),
+            Ok("true"),
+            "Actions-only fixture"
+        );
         let (result, trace) = tasks_wsl_retirement_trace(Instant::now(), || {
             run_process(
                 "cmd.exe",
@@ -1491,7 +1509,10 @@ mod tests {
         let observation = trace.first.unwrap();
         assert!(observation.before_us <= observation.after_us);
         assert!(observation.succeeded);
-        assert!(matches!(observation.active_processes, TasksWslActiveProcesses::Count(_)));
+        assert!(matches!(
+            observation.active_processes,
+            TasksWslActiveProcesses::Count(_)
+        ));
         assert!(format!("{trace:?}").len() < 1024);
     }
 

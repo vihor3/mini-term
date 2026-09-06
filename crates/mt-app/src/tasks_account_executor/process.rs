@@ -955,7 +955,9 @@ mod tests {
         for &code in WINDOWS_TRANSPORT_ERROR_CODES {
             let message = windows_system_message(code)
                 .unwrap_or_else(|| panic!("allowlisted system message unavailable: code={code}"));
-            let utf16 = std::iter::once(0xfeff).chain(message.encode_utf16()).collect::<Vec<_>>();
+            let utf16 = std::iter::once(0xfeff)
+                .chain(message.encode_utf16())
+                .collect::<Vec<_>>();
             for bytes in [
                 message.as_bytes().to_vec(),
                 format!("\u{feff}{message}").into_bytes(),
@@ -963,7 +965,10 @@ mod tests {
                 utf16.iter().flat_map(|unit| unit.to_be_bytes()).collect(),
                 message.encode_utf16().flat_map(u16::to_le_bytes).collect(),
             ] {
-                assert_eq!(native_windows_message(&bytes), NativeWindowsMessage::Win32(code));
+                assert_eq!(
+                    native_windows_message(&bytes),
+                    NativeWindowsMessage::Win32(code)
+                );
             }
         }
     }
@@ -975,7 +980,10 @@ mod tests {
         for bytes in [
             format!("fixture_credential_prefix{message}").into_bytes(),
             format!("{message}fixture_credential_suffix").into_bytes(),
-            serde_json::to_vec(&serde_json::json!({"token": "fixture_credential_nested", "error": message})).unwrap(),
+            serde_json::to_vec(
+                &serde_json::json!({"token": "fixture_credential_nested", "error": message}),
+            )
+            .unwrap(),
             b"fixture_credential_unknown".to_vec(),
             Vec::new(),
             vec![b'x'; 4097],
@@ -993,14 +1001,33 @@ mod tests {
     #[test]
     fn native_windows_message_observation_is_failure_only_without_result_remapping() {
         let message = windows_system_message(109).expect("pipe system message unavailable");
-        assert_eq!(failing_native_messages(message.as_bytes(), b"", Some(-1), Some(false)), None);
+        assert_eq!(
+            failing_native_messages(message.as_bytes(), b"", Some(-1), Some(false)),
+            None
+        );
         let (result, _) = trace_capture(Instant::now(), || {
-            for (exit, ack) in [(Some(0), Some(false)), (None, Some(false)), (Some(-1), Some(true)), (Some(-1), None)] {
-                assert_eq!(failing_native_messages(message.as_bytes(), b"", exit, ack), None);
+            for (exit, ack) in [
+                (Some(0), Some(false)),
+                (None, Some(false)),
+                (Some(-1), Some(true)),
+                (Some(-1), None),
+            ] {
+                assert_eq!(
+                    failing_native_messages(message.as_bytes(), b"", exit, ack),
+                    None
+                );
             }
             assert_eq!(
-                failing_native_messages(message.as_bytes(), b"fixture_credential_stderr", Some(-1), Some(false)),
-                Some((NativeWindowsMessage::Win32(109), NativeWindowsMessage::Unknown))
+                failing_native_messages(
+                    message.as_bytes(),
+                    b"fixture_credential_stderr",
+                    Some(-1),
+                    Some(false)
+                ),
+                Some((
+                    NativeWindowsMessage::Win32(109),
+                    NativeWindowsMessage::Unknown
+                ))
             );
             Err::<(), _>(AccountExecutionError::HostHelperUnavailable)
         });

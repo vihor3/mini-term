@@ -1192,3 +1192,13 @@ For any formatter-only successor, Main will avoid cancelling while WSL import
 is in progress: wait until its import has completed and the exact test step is
 active before superseding, then observe owned cleanup. This is coordinator
 sequencing, not a workflow change or a guarantee against runner termination.
+
+The released correction/diagnostics are committed/pushed as
+`f6240b537445d3688ab22286da4db4870f756f73`: CI34017786246 and
+package34017786259. Linux101444578831 stopped on26 changed-format hunks in
+execution_host.rs/process.rs/tests.rs; i18n generation passed. Main downloaded
+artifact9984464727, read and applied its complete full-rustfmt.patch to source/
+index, without local formatting/checks. WSL101444696095 had completed import
+and entered its exact test build step before the successor push; no test pass
+is claimed. Windows101444578823 was still compiling. The formatting successor
+restarts unchanged full gates and same-run fixtures.

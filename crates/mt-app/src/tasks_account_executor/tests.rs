@@ -685,7 +685,10 @@ fn assert_invalid_host_reply(bytes: &[u8]) {
         Some(AccountExecutionError::Protocol),
         "invalid host reply was accepted"
     );
-    assert!(!host_reply_confirms_cleanup(bytes), "invalid cleanup acknowledgement");
+    assert!(
+        !host_reply_confirms_cleanup(bytes),
+        "invalid cleanup acknowledgement"
+    );
 }
 
 #[test]
@@ -693,11 +696,23 @@ fn host_reply_statuses_keep_valid_mappings_and_reject_unknown_or_duplicate_field
     for (status, expected) in [
         ("cancelled", AccountExecutionError::Cancelled),
         ("timed-out", AccountExecutionError::TimedOut),
-        ("helper-unavailable", AccountExecutionError::HostHelperUnavailable),
+        (
+            "helper-unavailable",
+            AccountExecutionError::HostHelperUnavailable,
+        ),
         ("client-missing", AccountError::ClientMissing.into()),
-        ("credential-lookup-failed", AccountError::CredentialLookupFailed.into()),
-        ("credential-store-unavailable", AccountError::CredentialStoreUnavailable.into()),
-        ("named-account-unsupported", AccountError::UnsupportedNamedAccountLookup.into()),
+        (
+            "credential-lookup-failed",
+            AccountError::CredentialLookupFailed.into(),
+        ),
+        (
+            "credential-store-unavailable",
+            AccountError::CredentialStoreUnavailable.into(),
+        ),
+        (
+            "named-account-unsupported",
+            AccountError::UnsupportedNamedAccountLookup.into(),
+        ),
         ("identity-mismatch", AccountError::WrongHostOrAccount.into()),
         ("cleanup-failed", AccountExecutionError::CleanupFailed),
         ("unsafe-output", AccountExecutionError::SecretOutputRejected),
@@ -707,11 +722,20 @@ fn host_reply_statuses_keep_valid_mappings_and_reject_unknown_or_duplicate_field
         let valid = serde_json::json!({"status": status});
         let bytes = serde_json::to_vec(&valid).unwrap();
         assert_eq!(decode_host_reply(&bytes, 64).err(), Some(expected));
-        assert_eq!(host_reply_confirms_cleanup(&bytes), status != "cleanup-failed");
+        assert_eq!(
+            host_reply_confirms_cleanup(&bytes),
+            status != "cleanup-failed"
+        );
         for (key, value) in [
             ("token", serde_json::json!("fixture_credential_extra")),
-            ("extra", serde_json::json!({"nested": {"token": "fixture_credential_nested"}})),
-            ("stdout", serde_json::json!("fixture_credential_wrong_shape")),
+            (
+                "extra",
+                serde_json::json!({"nested": {"token": "fixture_credential_nested"}}),
+            ),
+            (
+                "stdout",
+                serde_json::json!("fixture_credential_wrong_shape"),
+            ),
             ("exit_code", serde_json::json!(0)),
         ] {
             let mut invalid = valid.clone();
@@ -737,7 +761,8 @@ fn host_reply_statuses_keep_valid_mappings_and_reject_unknown_or_duplicate_field
 
 #[test]
 fn host_reply_output_requires_typed_unique_closed_fields() {
-    let valid = serde_json::json!({"status": "output", "stdout": "ok", "stderr": "", "exit_code": 0});
+    let valid =
+        serde_json::json!({"status": "output", "stdout": "ok", "stderr": "", "exit_code": 0});
     let bytes = serde_json::to_vec(&valid).unwrap();
     let output = decode_host_reply(&bytes, 64).unwrap();
     assert_eq!(output.stdout, b"ok");
@@ -766,15 +791,24 @@ fn host_reply_output_requires_typed_unique_closed_fields() {
         ("exit_code", serde_json::json!(0.5)),
         ("exit_code", serde_json::json!(2147483648_i64)),
         ("token", serde_json::json!("fixture_credential_extra")),
-        ("extra", serde_json::json!({"token": "fixture_credential_nested"})),
+        (
+            "extra",
+            serde_json::json!({"token": "fixture_credential_nested"}),
+        ),
     ] {
         let mut invalid = valid.clone();
         invalid[key] = value;
         assert_invalid_host_reply(&serde_json::to_vec(&invalid).unwrap());
     }
-    for extra in [r#""status":"output""#, r#""stdout":"ok""#, r#""stderr":"""#, r#""exit_code":0"#] {
+    for extra in [
+        r#""status":"output""#,
+        r#""stdout":"ok""#,
+        r#""stderr":"""#,
+        r#""exit_code":0"#,
+    ] {
         assert_invalid_host_reply(
-            format!(r#"{{"status":"output","stdout":"ok","stderr":"","exit_code":0,{extra}}}"#).as_bytes(),
+            format!(r#"{{"status":"output","stdout":"ok","stderr":"","exit_code":0,{extra}}}"#)
+                .as_bytes(),
         );
     }
     for invalid in [b"null".as_slice(), b"true", b"42", br#""output""#, b"{}"] {
@@ -1793,7 +1827,8 @@ impl WslFixture {
             let mut observation = WslReadinessObservation::default();
             loop {
                 let probe_started_us = started.elapsed().as_micros();
-                let (ready, retirement) = tasks_wsl_retirement_trace(started, || fixture.exists("ready"));
+                let (ready, retirement) =
+                    tasks_wsl_retirement_trace(started, || fixture.exists("ready"));
                 let probe_returned_us = started.elapsed().as_micros();
                 observation.record_probe(ready, probe_started_us, probe_returned_us, retirement);
                 if ready || Instant::now() >= deadline {
@@ -1831,7 +1866,11 @@ fn wsl_readiness_diagnostics_retain_earlier_false_probes_in_fixed_storage() {
         active_processes: TasksWslActiveProcesses::Count(1),
         succeeded: true,
     };
-    let retirement = TasksWslRetirementTrace { calls: 1, first: Some(first), last: Some(first) };
+    let retirement = TasksWslRetirementTrace {
+        calls: 1,
+        first: Some(first),
+        last: Some(first),
+    };
     let mut observation = WslReadinessObservation::default();
     observation.record_probe(false, 0, 5, retirement);
     observation.record_probe(false, 10, 15, TasksWslRetirementTrace::default());
@@ -1844,12 +1883,25 @@ fn wsl_readiness_diagnostics_retain_earlier_false_probes_in_fixed_storage() {
     observation.cancel_us = 30;
     assert_eq!(observation.first_retirement, retirement);
     assert_eq!(observation.retirement, TasksWslRetirementTrace::default());
-    assert!(observation.describe().contains("ready=true probe_count=3 first_probe_started_us=0 first_probe_returned_us=5"));
-    assert!(observation.describe().contains("probe_started_us=20 probe_returned_us=25"));
+    assert!(
+        observation.describe().contains(
+            "ready=true probe_count=3 first_probe_started_us=0 first_probe_returned_us=5"
+        )
+    );
+    assert!(
+        observation
+            .describe()
+            .contains("probe_started_us=20 probe_returned_us=25")
+    );
     assert!(observation.describe().contains("cancel_us=30"));
 
     observation.probe_count = u32::MAX;
-    observation.record_probe(false, u128::MAX - 1, u128::MAX, TasksWslRetirementTrace::default());
+    observation.record_probe(
+        false,
+        u128::MAX - 1,
+        u128::MAX,
+        TasksWslRetirementTrace::default(),
+    );
     assert_eq!(observation.probe_count, u32::MAX);
     assert_eq!(observation.first_probe_started_us, 0);
     assert_eq!(observation.first_probe_returned_us, 5);
