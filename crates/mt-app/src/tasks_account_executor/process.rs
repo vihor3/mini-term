@@ -133,7 +133,8 @@ const WINDOWS_TRANSPORT_ERROR_CODES: &[u32] = {
 };
 
 #[cfg(all(test, windows))]
-const WINDOWS_SYSTEM_MESSAGE_FLAGS: windows::Win32::System::Diagnostics::Debug::FORMAT_MESSAGE_OPTIONS = {
+const WINDOWS_SYSTEM_MESSAGE_FLAGS:
+    windows::Win32::System::Diagnostics::Debug::FORMAT_MESSAGE_OPTIONS = {
     use windows::Win32::System::Diagnostics::Debug::{
         FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FORMAT_MESSAGE_MAX_WIDTH_MASK,
         FORMAT_MESSAGE_OPTIONS,
@@ -999,8 +1000,8 @@ mod tests {
             ERROR_BAD_EXE_FORMAT, ERROR_BROKEN_PIPE, ERROR_EXE_MACHINE_TYPE_MISMATCH,
         };
         use windows::Win32::System::Diagnostics::Debug::{
-            FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FORMAT_MESSAGE_MAX_WIDTH_MASK,
-            FormatMessageW,
+            FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS,
+            FORMAT_MESSAGE_MAX_WIDTH_MASK, FormatMessageW,
         };
 
         let expected_flags = FORMAT_MESSAGE_FROM_SYSTEM
@@ -1025,8 +1026,12 @@ mod tests {
                     None,
                 )
             } as usize;
-            assert!(length > 0 && length < buffer.len(), "trusted system message unavailable: code={code}");
-            let expected = String::from_utf16(&buffer[..length]).expect("invalid system message UTF-16");
+            assert!(
+                length > 0 && length < buffer.len(),
+                "trusted system message unavailable: code={code}"
+            );
+            let expected =
+                String::from_utf16(&buffer[..length]).expect("invalid system message UTF-16");
             assert!(
                 windows_system_message(code).as_deref() == Some(expected.as_str()),
                 "WSL system rendering flags mismatch: code={code}"
