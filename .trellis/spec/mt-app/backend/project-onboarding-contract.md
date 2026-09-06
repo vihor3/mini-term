@@ -380,8 +380,12 @@ and fingerprint; it is not an unqualified entries vector.
 - Local uses native filesystem rules; WSL keeps case-sensitive POSIX locations
   and converts to its owning distribution's host-visible UNC only at the
   selection/native-I/O boundary. Drive/UNC roots cannot be normalized as SSH.
-  WSL home lookup uses the structured execution-host command API. SSH uses only
-  the home returned by its authenticated host probe, never the client home.
+  WSL home lookup uses the structured execution-host command API and its
+  [captured-directory contract](./git-host-contract.md#scenario-wsl-captured-directory).
+  Pre-project and registered-project WSL commands share fixed-root launch plus
+  Linux-side exact-directory entry; missing directories do not permit fallback.
+  SSH uses only the home returned by its authenticated host probe, never the
+  client home.
 - WSL mapping validates the distro and each POSIX component before native I/O;
   do not Path::join unchecked text onto a Windows UNC root. Prefix injection,
   literal backslash/colon and components the existing registration boundary

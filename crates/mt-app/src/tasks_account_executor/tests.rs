@@ -1173,6 +1173,108 @@ impl WslFixture {
         Self { source }
     }
 
+    fn assert_cwd_routing(&self) -> Self {
+        let case = self.case();
+        let path = format!(
+            "{}/cwd space '\";$(printf injected) [literal]\nnext",
+            case.source.canonical_path
+        );
+        let output = case.command("/bin/mkdir", &["--", &path]);
+        case.require_success("create-literal-cwd", &output);
+        let relative = "./-relative '\";$(printf injected)";
+        let executable = format!("{path}/{}", &relative[2..]);
+        let output = case.command("/bin/ln", &["-s", "--", "/usr/bin/printf", &executable]);
+        case.require_success("create-relative-executable", &output);
+        case.touch("not-directory");
+        let mut captured = case.clone();
+        captured.source.canonical_path = path;
+
+        for pre_project in [false, true] {
+            let run = |source: &ProjectExecutionSnapshot, plan: &CommandPlan| {
+                let output = if pre_project {
+                    let ExecutionBackend::Wsl { distro } = &source.backend else {
+                        panic!("expected the owned WSL fixture")
+                    };
+                    crate::execution_host::execute_pre_project_local_command(
+                        &crate::execution_host::PreProjectLocalContext::Wsl {
+                            distro: distro.clone(),
+                            cwd: source.canonical_path.clone(),
+                        },
+                        plan,
+                        Duration::from_secs(5),
+                        WSL_FIXTURE_OUTPUT_CAP,
+                    )
+                } else {
+                    crate::execution_host::execute_host_command(
+                        source,
+                        plan,
+                        Duration::from_secs(5),
+                        WSL_FIXTURE_OUTPUT_CAP,
+                    )
+                    .map(|result| {
+                        assert!(result.observed_connection_epoch.is_none());
+                        result.output
+                    })
+                }
+                .unwrap_or_else(|_| panic!("WSL cwd assertion could not dispatch"));
+                assert!(
+                    !output.timed_out && !output.stdout_truncated && !output.stderr_truncated,
+                    "WSL cwd assertion output was incomplete"
+                );
+                output
+            };
+            let output = run(&captured.source, &CommandPlan::new("/bin/pwd", ["-P"]));
+            captured.require_success("captured-cwd", &output);
+            assert!(
+                output.stdout == format!("{}\n", captured.source.canonical_path).as_bytes(),
+                "WSL command did not enter its exact captured directory"
+            );
+            let args = [
+                r"%s\0",
+                "literal '\";$(printf injected)",
+                "-n",
+                "--",
+                "",
+                "NAME=value",
+                "*",
+                "line one\nline two",
+            ];
+            let mut expected = Vec::new();
+            for arg in &args[1..] {
+                expected.extend_from_slice(arg.as_bytes());
+                expected.push(0);
+            }
+            for program in ["/usr/bin/printf", "printf", relative] {
+                let output = run(&captured.source, &CommandPlan::new(program, args));
+                captured.require_success("literal-argv", &output);
+                assert!(output.stdout == expected, "WSL argv was not literal");
+            }
+            let marker = if pre_project {
+                "preproject-dispatched"
+            } else {
+                "project-dispatched"
+            };
+            for path in [
+                format!("{}/missing", captured.source.canonical_path),
+                case.path("not-directory"),
+            ] {
+                let mut invalid = captured.source.clone();
+                invalid.canonical_path = path;
+                let marker_path = case.path(marker);
+                let output = run(
+                    &invalid,
+                    &CommandPlan::new("/usr/bin/touch", ["--", &marker_path]),
+                );
+                assert!(
+                    output.exit_code.is_some_and(|code| code != 0),
+                    "invalid WSL cwd did not fail"
+                );
+                assert!(!case.exists(marker), "invalid WSL cwd dispatched its target");
+            }
+        }
+        captured
+    }
+
     fn path(&self, name: &str) -> String {
         assert!(
             name.bytes()
@@ -1477,7 +1579,8 @@ fn wsl_marker_matrix_rejects_unowned_incomplete_and_dispatch_failures() {
 #[ignore = "requires the same-run Actions-owned WSL distro/rootfs/marker and Linux gh fixture"]
 fn tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host() {
     let fixture = WslFixture::open();
-    let source = fixture.case().source;
+    let cwd_case = fixture.assert_cwd_routing();
+    let source = cwd_case.source.clone();
     let bounded = control(Duration::from_secs(30));
     for capability in [
         AccountCapability::AuthStatusJson,
@@ -1496,6 +1599,26 @@ fn tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host() {
         Some(AccountError::AuthenticationFailed)
     );
     assert!(!format!("{discovered:?}").contains("fixture_credential_"));
+
+    let [plan, _] = selected_reads("github.com", "Rotate");
+    let result = execute_selected_account(&source, &plan, &bounded);
+    assert!(result.observed_connection_epoch.is_none());
+    let output = result
+        .result
+        .unwrap_or_else(|error| panic!("WSL captured-cwd account request failed: {error:?}"));
+    assert_selected_data(&output, &plan, "Rotate");
+    assert!(
+        cwd_case.exists("data-seen"),
+        "WSL account envelope did not use its captured directory"
+    );
+    let mut missing = source.clone();
+    missing.canonical_path.push_str("/missing");
+    let result = execute_selected_account(&missing, &selected("github.com", "Alice"), &bounded);
+    assert!(result.observed_connection_epoch.is_none());
+    assert!(
+        matches!(result.result, Err(AccountExecutionError::Account(AccountError::CommandFailed))),
+        "missing WSL cwd did not fail before account execution"
+    );
 
     for host in ["github.com", "org.ghe.com", "github.example.com"] {
         for login in ["Alice", "Bob", "Rotate"] {

@@ -276,6 +276,54 @@ impl PreProjectLocalContext {
     }
 }
 
+fn plan_wsl_command(
+    distro: &str,
+    cwd: &str,
+    plan: &CommandPlan,
+) -> Result<PlannedHostCommand, CommandExecutionError> {
+    if distro.is_empty() || distro.contains('\0') {
+        return Err(command_error(
+            CommandExecutionErrorKind::Io,
+            "WSL distribution identity is invalid",
+        ));
+    }
+    if !cwd.starts_with('/') || cwd.contains('\0') {
+        return Err(command_error(
+            CommandExecutionErrorKind::Io,
+            "WSL working directory must be an absolute POSIX path",
+        ));
+    }
+    if plan.program.starts_with('-') {
+        return Err(command_error(
+            CommandExecutionErrorKind::Rejected,
+            "WSL executable must not be an exec option; use an explicit path",
+        ));
+    }
+    // Enter the captured directory in Linux; no path or argv is shell source.
+    let mut args = [
+        "--distribution",
+        distro,
+        "--cd",
+        "/",
+        "--exec",
+        "/bin/sh",
+        "-c",
+        r#"CDPATH= cd -P "$1" && shift && exec "$@""#,
+        "mini-term-wsl",
+        cwd,
+        &plan.program,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    args.extend(plan.args.clone());
+    Ok(PlannedHostCommand::Process {
+        program: "wsl.exe".into(),
+        args,
+        cwd: None,
+    })
+}
+
 pub fn plan_pre_project_local_command(
     context: &PreProjectLocalContext,
     plan: &CommandPlan,
@@ -287,22 +335,7 @@ pub fn plan_pre_project_local_command(
             args: plan.args.clone(),
             cwd: Some(cwd.clone()),
         }),
-        PreProjectLocalContext::Wsl { distro, cwd } => {
-            let mut args = vec![
-                "--distribution".to_string(),
-                distro.clone(),
-                "--cd".to_string(),
-                cwd.clone(),
-                "--exec".to_string(),
-                plan.program.clone(),
-            ];
-            args.extend(plan.args.clone());
-            Ok(PlannedHostCommand::Process {
-                program: "wsl.exe".into(),
-                args,
-                cwd: None,
-            })
-        }
+        PreProjectLocalContext::Wsl { distro, cwd } => plan_wsl_command(distro, cwd, plan),
     }
 }
 
@@ -333,28 +366,7 @@ pub fn plan_host_command(
             args: plan.args.clone(),
             cwd: Some(PathBuf::from(&snapshot.canonical_path)),
         }),
-        ExecutionBackend::Wsl { distro } => {
-            if distro.is_empty() || distro.contains('\0') {
-                return Err(command_error(
-                    CommandExecutionErrorKind::Io,
-                    "WSL distribution identity is invalid",
-                ));
-            }
-            let mut args = vec![
-                "--distribution".to_string(),
-                distro.clone(),
-                "--cd".to_string(),
-                snapshot.canonical_path.clone(),
-                "--exec".to_string(),
-                plan.program.clone(),
-            ];
-            args.extend(plan.args.clone());
-            Ok(PlannedHostCommand::Process {
-                program: "wsl.exe".into(),
-                args,
-                cwd: None,
-            })
-        }
+        ExecutionBackend::Wsl { distro } => plan_wsl_command(distro, &snapshot.canonical_path, plan),
         ExecutionBackend::Ssh { .. } => {
             let cwd = posix_quote(&snapshot.canonical_path)?;
             let argv = serialize_posix_argv(
@@ -1284,8 +1296,13 @@ mod tests {
                     "--distribution",
                     "Ubuntu",
                     "--cd",
-                    "/home/u/repo",
+                    "/",
                     "--exec",
+                    "/bin/sh",
+                    "-c",
+                    r#"CDPATH= cd -P "$1" && shift && exec "$@""#,
+                    "mini-term-wsl",
+                    "/home/u/repo",
                     "gh",
                     "issue",
                     "list",
@@ -1354,12 +1371,17 @@ mod tests {
                     }
                     args.extend([
                         "--cd",
+                        "/",
+                        "--exec",
+                        "/bin/sh",
+                        "-c",
+                        r#"CDPATH= cd -P "$1" && shift && exec "$@""#,
+                        "mini-term-wsl",
                         if cwd == TasksWslProbeCwd::Captured {
                             "/mini-term-fixture"
                         } else {
                             "/"
                         },
-                        "--exec",
                         "/bin/cat",
                         "/mini-term-fixture/owner.json",
                     ]);
@@ -1480,8 +1502,13 @@ mod tests {
                     "--distribution",
                     "Ubuntu",
                     "--cd",
-                    "/home/u/repo with spaces",
+                    "/",
                     "--exec",
+                    "/bin/sh",
+                    "-c",
+                    r#"CDPATH= cd -P "$1" && shift && exec "$@""#,
+                    "mini-term-wsl",
+                    "/home/u/repo with spaces",
                     "git",
                     "status",
                     "--short",
@@ -1492,6 +1519,124 @@ mod tests {
                 cwd: None,
             }
         );
+    }
+
+    #[test]
+    fn wsl_project_and_preproject_plans_keep_cwd_and_relative_argv_literal() {
+        let path = "/srv/space '\";$(printf injected) [literal]\nnext";
+        let source = snapshot(
+            ExecutionBackend::Wsl {
+                distro: "Ubuntu".into(),
+            },
+            path,
+        );
+        let signature = source.source_signature();
+        let context = PreProjectLocalContext::Wsl {
+            distro: "Ubuntu".into(),
+            cwd: path.into(),
+        };
+        let command = CommandPlan::new(
+            "./relative '\";$(printf injected)",
+            ["", "--", "-n", "NAME=value", "*", "a\nb", "'; exit 91; #"],
+        );
+        let mut args = vec![
+            "--distribution",
+            "Ubuntu",
+            "--cd",
+            "/",
+            "--exec",
+            "/bin/sh",
+            "-c",
+            r#"CDPATH= cd -P "$1" && shift && exec "$@""#,
+            "mini-term-wsl",
+            path,
+            &command.program,
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        args.extend(command.args.clone());
+        let expected = PlannedHostCommand::Process {
+            program: "wsl.exe".into(),
+            args,
+            cwd: None,
+        };
+        assert_eq!(plan_host_command(&source, &command).unwrap(), expected);
+        assert_eq!(
+            plan_pre_project_local_command(&context, &command).unwrap(),
+            expected
+        );
+        assert_eq!(source.source_signature(), signature);
+    }
+
+    #[test]
+    fn wsl_project_and_preproject_reject_invalid_launch_context() {
+        for (distro, path) in [
+            ("", "/srv/repo"),
+            ("Ubuntu\0other", "/srv/repo"),
+            ("Ubuntu", ""),
+            ("Ubuntu", "relative"),
+            ("Ubuntu", "-P"),
+            ("Ubuntu", "/srv/repo\0other"),
+        ] {
+            let source = snapshot(
+                ExecutionBackend::Wsl {
+                    distro: distro.into(),
+                },
+                path,
+            );
+            let context = PreProjectLocalContext::Wsl {
+                distro: distro.into(),
+                cwd: path.into(),
+            };
+            assert_eq!(
+                plan_host_command(&source, &command()).unwrap_err().kind,
+                CommandExecutionErrorKind::Io
+            );
+            assert_eq!(
+                plan_pre_project_local_command(&context, &command())
+                    .unwrap_err()
+                    .kind,
+                CommandExecutionErrorKind::Io
+            );
+        }
+    }
+
+    #[test]
+    fn wsl_rejects_exec_options_without_rejecting_literal_paths_or_arguments() {
+        let source = snapshot(
+            ExecutionBackend::Wsl {
+                distro: "Ubuntu".into(),
+            },
+            "/srv/repo",
+        );
+        let context = PreProjectLocalContext::Wsl {
+            distro: "Ubuntu".into(),
+            cwd: source.canonical_path.clone(),
+        };
+        for program in ["-c", "-a", "--", "-relative/tool"] {
+            let plan = CommandPlan::new(program, ["--", "literal"]);
+            assert_eq!(
+                plan_host_command(&source, &plan).unwrap_err().kind,
+                CommandExecutionErrorKind::Rejected
+            );
+            assert_eq!(
+                plan_pre_project_local_command(&context, &plan)
+                    .unwrap_err()
+                    .kind,
+                CommandExecutionErrorKind::Rejected
+            );
+        }
+        for program in ["git", "./-relative/tool", "/srv/-literal"] {
+            let plan = CommandPlan::new(program, ["-c", "--", "NAME=value", ""]);
+            let PlannedHostCommand::Process { args, .. } =
+                plan_host_command(&source, &plan).unwrap()
+            else {
+                panic!("expected WSL process plan")
+            };
+            assert_eq!(args[10], program);
+            assert_eq!(args[11..], plan.args);
+        }
     }
 
     #[test]

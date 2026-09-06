@@ -350,6 +350,11 @@ production ClosedPipe variant.
   distro, exact marker path and captured `/mini-term-fixture` source. The helper
   runs only `/bin/cat /mini-term-fixture/owner.json`; it accepts no arbitrary
   command, environment map, credential or alternate marker.
+- The helper must match current production planning. After the reviewed
+  fixed-root correction, Captured/Root select the requested Linux directory
+  inside the positional wrapper, not different Windows-side `--cd` values.
+  Every row launches with `--cd /`; source identity remains captured and the
+  original baseline still uses the ordinary production command path.
 - Keep suspended creation, strict Job attachment, no-window, bounded output,
   timeouts and cleanup paths. A diagnostic pipe writer closes after attachment;
   no Job bypass or breakaway flag is permitted.
@@ -384,6 +389,12 @@ combinations and rejection before launch. Tasks matrix tests assert baseline
 reuse, seven unique alternatives, no fallback, zero probes after success, exact
 owner/completeness checks and secret-safe diagnostics. Preserve native process
 cleanup and actual WSL gates; all execution remains Actions-only.
+The actual owned WSL test also executes registered/pre-project commands in a
+directory containing spaces, quotes and shell metacharacters, checks literal
+argv and relative/PATH/absolute executables, and proves missing/non-directory
+cwd cannot dispatch a marker command. The private account envelope must prove
+its own captured cwd through fixture evidence and reject a missing cwd before
+account access. Passing matrix units alone is not this transport evidence.
 
 ### 7. Wrong vs Correct
 

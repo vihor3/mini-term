@@ -251,3 +251,77 @@ all their terminals/configuration from whichever UI context is now active.
 Correct: capture host-qualified repository and complete cleanup guard before
 confirmation, retain exact close ownership, verify normal Git postconditions,
 and finalize only the still-current empty captured group.
+
+## Scenario: WSL Captured Directory
+
+### 1. Scope / Trigger
+
+Noninteractive registered-project and pre-project WSL commands must enter the
+captured Linux directory without depending on Windows WSL launcher path mapping.
+The actual Actions marker matrix isolated that launch boundary; it did not
+prove a deeper operating-system cause. Interactive PTY launch is a separate
+contract and is not changed by this fix.
+
+### 2. Signatures
+
+`plan_host_command` and `plan_pre_project_local_command` retain their public
+signatures and share private `plan_wsl_command(distro, cwd, &CommandPlan)`.
+The resulting structured argv is:
+
+```text
+wsl.exe --distribution <distro> --cd / --exec /bin/sh -c <fixed-script>
+  mini-term-wsl <captured-cwd> <program> <args...>
+```
+
+The script is exactly `CDPATH= cd -P "$1" && shift && exec "$@"`.
+Neither the path, program nor arguments are interpolated into shell source.
+
+### 3. Contracts
+
+- Keep the source snapshot, distro identity and Windows `current_dir: None`.
+  `/` is the launcher location only, never fallback project authority.
+- Validate nonempty/NUL-free distro, absolute/NUL-free Linux cwd and existing
+  program/argv constraints before dispatch. Reject a program beginning with
+  `-` as `Rejected`; explicit `./-name` or `/path/-name` remains literal.
+- `CDPATH=` and physical `cd -P` prevent inherited lookup/output or logical-PWD
+  state from altering directory entry. Failed entry must stop before `exec`.
+  Resolve PATH and relative executables only after successful captured `cd`.
+- Keep ordinary Null stdin, suspended/no-window creation, strict Job attachment,
+  bounded capture, deadlines and process-tree cleanup. No user/default-distro,
+  interop, automount, global environment or credential-policy change.
+- Tasks uses its private Python envelope directly from the same fixed launch
+  root. Its existing `os.chdir(cwd)` occurs before all account operations;
+  never route credential capture through this ordinary public-result runner.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required result |
+| --- | --- |
+| Empty/NUL distro or nonabsolute/NUL cwd | Planning `Io`; no dispatch |
+| Program begins with an exec option prefix | Planning `Rejected`; require explicit path |
+| Missing/non-directory Linux cwd | Nonzero command result; target command never runs |
+| Literal quotes, whitespace, newline or metacharacters | Preserve exact argument bytes |
+| Relative executable | Resolve inside captured directory, not launcher root |
+| WSL unavailable or directory entry fails | No Windows/local/root-directory fallback |
+
+### 5. Good / Base / Bad
+
+Good: pass a quoted-name worktree as a positional argument, enter it in Linux,
+then execute the original argv. Base: a deleted directory stays unavailable.
+Bad: replace the snapshot path with `/` or retry its Git write from another cwd.
+
+### 6. Tests Required
+
+Actions planner tests assert registered/pre-project parity, unchanged source
+identity, invalid-context and exec-option rejection, and literal paths/argv.
+The actual owned WSL fixture must prove exact `pwd -P`, absolute/PATH/relative
+executable behavior, byte-exact arguments and zero target dispatch for missing
+and non-directory cwd. Independently prove the private Tasks envelope's captured
+directory through fixture evidence and missing-directory rejection. Retain all
+existing account secrecy, cancellation, descendant cleanup and marker guards.
+
+### 7. Wrong vs Correct
+
+Wrong: `--cd <project>` failure leads to executing the command from `/`.
+Correct: always launch at `/`, then require exact Linux directory entry before
+the original command, without changing captured request authority.

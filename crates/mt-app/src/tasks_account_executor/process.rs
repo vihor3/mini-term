@@ -286,6 +286,21 @@ fn public_data(
     })
 }
 
+fn wsl_command(distro: &str, envelope: &CommandPlan) -> Command {
+    let mut command = Command::new("wsl.exe");
+    command
+        .args([
+            "--distribution",
+            distro,
+            "--cd",
+            "/",
+            "--exec",
+            &envelope.program,
+        ])
+        .args(&envelope.args);
+    command
+}
+
 pub(super) fn run_wsl(
     snapshot: &ProjectExecutionSnapshot,
     envelope: &CommandPlan,
@@ -295,17 +310,8 @@ pub(super) fn run_wsl(
     let ExecutionBackend::Wsl { distro } = &snapshot.backend else {
         return Err(AccountExecutionError::InvalidContext);
     };
-    let mut command = Command::new("wsl.exe");
-    command
-        .args([
-            "--distribution",
-            distro,
-            "--cd",
-            &snapshot.canonical_path,
-            "--exec",
-            &envelope.program,
-        ])
-        .args(&envelope.args);
+    // The private envelope enters its captured cwd before any account lookup.
+    let mut command = wsl_command(distro, envelope);
     sanitize(&mut command);
     let mut captured = capture(
         command,
@@ -575,4 +581,43 @@ pub(super) fn envelope_fixture(
     }
     assert!(!String::from_utf8_lossy(&result.stderr.0).contains("fixture_credential_"));
     Ok(std::mem::take(&mut result.stdout.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wsl_launcher_preserves_private_envelope_argv_with_root_cwd() {
+        let path = "/mini-term-fixture/cases/space '\";$(printf injected)\nnext";
+        let envelope = CommandPlan::new(
+            "python3",
+            [
+                "-I",
+                "-c",
+                super::super::HOST_ENVELOPE,
+                path,
+                "3000",
+                "4096",
+                "github.com",
+                "Alice",
+                "alice",
+                r#"["api","user","--hostname","github.com"]"#,
+                "[]",
+            ],
+        );
+        let command = wsl_command("mt-tasks-12345-2", &envelope);
+        assert_eq!(command.get_program(), std::ffi::OsStr::new("wsl.exe"));
+        let args = command.get_args().collect::<Vec<_>>();
+        assert_eq!(
+            args[..6],
+            ["--distribution", "mt-tasks-12345-2", "--cd", "/", "--exec", "python3"]
+                .map(std::ffi::OsStr::new)
+        );
+        assert_eq!(
+            args[6..],
+            envelope.args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>()
+        );
+        assert!(command.get_current_dir().is_none());
+    }
 }

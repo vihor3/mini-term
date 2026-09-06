@@ -95,7 +95,7 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
 
 - Git and `gh` always execute on the active project's execution host. Native
   projects use a local process with `current_dir`; WSL uses `wsl.exe` with an
-  explicit distro, `--cd`, and `--exec`; SSH uses the existing authenticated
+  explicit distro, fixed `--cd /`, and `--exec`; SSH uses the existing authenticated
   pooled session. WSL or SSH failure never falls back to local commands or
   credentials.
 - Local and WSL preserve program and argv as separate values. SSH serialization
@@ -123,6 +123,12 @@ MINI_TERM_GITHUB_PROJECT_TASKS=0
   inside a Python 3.8+ isolated stdlib envelope on that host. The token never
   returns over SSH or enters shell/client argv, a temporary script, or a file.
   Missing host Python is `HostHelperUnavailable`, not a local fallback/install.
+- The private WSL envelope performs `os.chdir(captured_cwd)` before capability,
+  discovery or credential lookup; the launcher root is not request authority.
+  Keep its private pipes, sanitation and cancellation protocol. Ordinary WSL
+  origin/Git commands use the shared positional-argv directory wrapper in
+  [the Git host contract](./git-host-contract.md#scenario-wsl-captured-directory).
+  A missing project directory must never dispatch an account request from `/`.
 - Remove inherited auth/debug/host/repo and shell-startup overrides; set only
   the applicable request auth variable (`GH_TOKEN` for github.com and its
   supported ghe.com subdomains, `GH_ENTERPRISE_TOKEN` for other GHES hosts).

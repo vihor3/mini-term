@@ -16,10 +16,10 @@
 | Child | State | Evidence |
 | --- | --- | --- |
 | native-terminal-navigation | CI/package passed / Native pending | Full CI33997336854 and package33997336860 passed for `f7b8a7e`; ci.36 artifact accepted, native interaction remains open |
-| native-agent-ownership-status | Source reviewed / Actions pending | Full Agent slice committed in `8ab8c27`; producer receipts and explicit lifecycle resume independently reviewed, not yet executed |
-| native-file-browser | Windows regressions passed / Remote pending | Source reviewed; onboarding and Files steps passed at `37b4ef9`; actual SSH and native acceptance remain open |
-| native-remote-git | Source reviewed / CI repair | CLI parity passed; integrated Windows Git filter has 123 passes and one incomplete fake-command failure; Linux Clippy follow-up released |
-| native-tasks-gh-accounts | Native Windows tests passed / WSL failing | Account isolation steps passed at `37b4ef9`; actual WSL executed once and failed in its prelude, secret-safe diagnostics authored |
+| native-agent-ownership-status | Linux full tests passed / Native pending | At `0e141f0`, mt-ai 244 and mt-app 1205 passes include producer/lifecycle/ownership regressions; full Linux job101422396717 passed |
+| native-file-browser | Linux/Windows/SSH passed / Native pending | Windows onboarding and Files steps passed at `0e141f0`; actual authenticated SSH Files/browser fixtures each ran and passed |
+| native-remote-git | Linux/Windows/SSH passed / Native pending | At `0e141f0`, Windows Git app 124 passed, full Linux suite and both actual SSH Git fixtures passed |
+| native-tasks-gh-accounts | Native/SSH passed / WSL cwd repair | At `0e141f0`, Windows executor 12 and execution-host 10 passed, actual SSH account pipeline passed; actual WSL matrix isolates launcher cwd before authentication |
 
 ## Current Dispatch
 
@@ -794,3 +794,85 @@ stopped at formatting in only the two new diagnostic source files. Main read
 and applied its complete exact-run `full-rustfmt.patch` to index and source,
 without local tools/checks. The immediate format follow-up restarts the gate
 before waiting for more expensive test builds; this run is not transport proof.
+
+The two-file Actions format follow-up is committed/pushed as
+`0e141f01596787b66e3a9c90f5c94ff3e1708236`: CI `34009374061`, package
+`34009374064`. The superseded `5a03fa6` Windows check was cancelled while
+compiling; WSL `101422269400` was cancelled during cache setup, before import,
+and its always-cleanup step succeeded. No marker matrix executed in that run.
+
+At `0e141f0`, Linux `101422396717` has passed format, dictionary, staging,
+locked graphs, all-target root/sidecar checks and the complete changed-line
+Clippy gate. Full workspace tests are now running. Windows `101422396483`
+passed full compilation and is running focused tests. Actual WSL
+`101422518970` has imported its owned fixture and is in the exact test step;
+package `101422381779` is building the GPUI app. All source owners are released
+and closed pending concrete new Actions findings, not performing broad re-audits.
+
+Actual WSL `101422518970` at `0e141f0` has now FAILED after exactly one
+test in 0.51 seconds. Its guarded eight-way matrix is decisive at the tested
+boundary: all four `--cd /mini-term-fixture` rows fail with exit -1, 90 stdout
+bytes classified windows-file-not-found, empty stderr and no matching marker;
+all four `--cd /` rows succeed with exit zero and the exact typed owner marker.
+Default versus explicit-root user and Null versus ClosedPipe stdin do not
+change either result. Every row retains suspended/no-window/Job-tree guards;
+none times out or truncates. The original baseline is still rejected despite
+alternative successes, and only-owned distro cleanup passed. No account API
+was reached; the deeper Windows/WSL cause is not asserted.
+
+Main resumed Noether `01a07400-eef7-7f23-a583-3d13a4121f25` for a bounded
+production correction: fixed-root WSL launch, followed by fail-closed entry
+into the exact captured Linux directory before the command/account lookup.
+Scope is execution_host WSL planning, Tasks run_wsl, their focused tests and
+the Tasks review report. Preserve literal argv/relative executable semantics,
+all identity/cancellation/Job/secret guards, and all existing public APIs.
+Interactive PTY launch, distro/global configuration, user defaults, credential
+policy and native/SSH backends remain out of scope. Actual owned-WSL cwd and
+missing-directory non-dispatch regressions must be added, never run locally.
+Linux full tests and the Windows/package jobs continue at `0e141f0`; retain
+their useful first integrated test evidence before superseding the run.
+
+Linux job `101422396717` at `0e141f0` is now entirely SUCCESS: full root
+workspace tests, authenticated loopback SSH, sidecar tests and whitespace all
+passed after the already passing compile/Clippy/format/dictionary/staging gates.
+The full suite includes mt-ai 244 passes and mt-app 1205 passes with five
+explicitly ignored host fixtures. The separate authenticated SSH step discovered
+and executed each of those five exact fixtures once, each with one pass and
+zero ignored: Git read/write/epoch/containment (22.76 s), Git uncertain-dispatch
+review (5.10 s), Tasks private account/cleanup/epoch pipeline (12.50 s), pinned
+Files mutations/containment (0.52 s), and browser source/epoch (0.37 s).
+This is the first complete integrated Agent and actual-SSH passing evidence,
+not native UI acceptance or WSL coverage. Windows onboarding/Files also passed
+at this SHA; its Tasks/Git/sidecar/terminal-host steps and package continue.
+
+Windows job `101422396483` at `0e141f0` is now entirely SUCCESS. Onboarding
+passed 82/3; Files 49/14/5/1; the nonempty execution_host filter passed 10;
+Tasks executor passed 12 with the separately executed actual WSL test ignored;
+Tasks app/config/domain passed 24/2/31; Git domain/app passed 24/6/124; terminal
+host library passed 31. Both new Windows marker planner tests and all four new
+Tasks diagnostic matrix/classifier tests explicitly passed. Sidecar check also
+passed; terminal-host binary targets had zero tests, not additional regression
+passes. CI `34009374061` completed FAILED solely on actual WSL.
+
+Package `34009374064`, job `101422381779`, at the same exact SHA is SUCCESS.
+Artifact `9982270369`, `Mini-Term_1.2.2-ci.47_windows-x64`, contains the installer
+and passing Actions validation manifest. It was downloaded only, never launched
+or checked locally, to `/home/leo/.cache/mini-term/artifacts/0e141f0-integration`.
+The manifest records installer size 18,846,845 bytes and SHA-256
+`8a441529dd2bcbe44e0caf56b290314ee17e63fb5453a5997a5adfbf74448301`.
+Main shared this bounded Windows/SSH native-acceptance candidate with the user,
+explicitly excluding the in-progress WSL fix and any completed native UI claim.
+
+Noether released the reviewed three-file WSL correction and closed. Registered
+and pre-project planning now share a private fixed-root/positional-argv helper,
+requiring physical entry into the captured absolute Linux cwd before exec.
+Leading-dash executable names fail closed unless requested by an explicit path.
+Tasks launches its unchanged private envelope from `/`; the envelope already
+enters captured cwd before account operations. Job/stdin/cancellation/credential
+policy and public APIs are unchanged. Four ordinary tests and expanded actual
+owned-WSL cwd/argv/relative-executable/non-dispatch/account-directory assertions
+are authored, UNRUN. Main reviewed the exact diff and added concrete contracts
+to Git/Tasks/onboarding/release specs. The existing broad Windows
+tasks_account_executor filter includes the new process builder test, so no
+workflow change is necessary. This bounded follow-up is ready for scoped push;
+only matching new Actions results can validate the correction.

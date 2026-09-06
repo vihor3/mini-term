@@ -3,9 +3,130 @@
 Date: 2026-09-06. Assigned child: `09-06-native-tasks-gh-accounts`; the active
 pointer still identifies the Git child. Source review and explicitly authorized
 Actions log inspection. No passing build, lint, type-check, formatting, test,
-transport, or native acceptance is claimed for the current diagnostic patch.
+transport, or native acceptance is claimed for the current cwd correction.
 
-## WSL Launch Matrix: Source Released To Main
+## WSL Cwd Correction: Source Released To Main
+
+The authorized production correction and focused regressions are authored and
+source-reviewed; ownership is released to Main. Scope is `execution_host.rs`,
+`tasks_account_executor/process.rs`, `tasks_account_executor/tests.rs`, and this
+review only. No public API, interactive terminal/PTY, Agent, SSH, account receipt,
+CI/workflow, spec, fixture launcher or ELF shim changes. No implementation blocker.
+All new/modified verification is UNRUN, Actions-only; no local execution or Git
+writes were performed.
+
+### Evidenced Boundary
+
+Read the authorized log for
+[0e141f0 run 34009374061, job 101422518970](https://github.com/vihor3/mini-term/actions/runs/34009374061/job/101422518970).
+Exactly one actual WSL test failed in 0.51 seconds, retaining its original failed
+baseline despite successful alternatives. Owned-distro cleanup succeeded.
+
+- All four launcher `Captured` cwd rows: exit -1 / `0xffffffff`, 90 stdout bytes,
+  exact `windows-file-not-found` class, `marker_matches=false`.
+- All four launcher `Root` cwd rows: exit 0, 164 stdout bytes,
+  `marker_matches=true` for the exact typed same-run owner.
+- Default versus explicit root user and null versus closed-pipe stdin made no
+  difference. Every row used the same guarded runner and `/bin/cat` marker read.
+  No timeout, truncation or epoch occurred; stderr was empty.
+
+This isolates the observed failure to launcher-level cwd handling, before
+credentials/Python/gh. It is not evidence for changing stdin, Job guards or
+authentication. The underlying WSL implementation detail is not inferred from
+the message alone. Main reports the `0e141f0` Linux workspace, five actual SSH
+fixtures, sidecars, whitespace and Windows gates succeeded, with package
+`ci.47` successful; only the original actual WSL baseline failed. These results
+precede this correction and are not a pass claim for its new source.
+
+### Correction And Shell Review
+
+Project and pre-project WSL branches now share private
+`plan_wsl_command(distro, cwd, plan)`. The unchanged public planners validate
+command argv; the helper validates distro and absolute, NUL-free cwd without
+normalizing or rewriting the captured source identity. Its fixed launch is:
+
+```text
+wsl.exe --distribution <distro> --cd / --exec /bin/sh -c <static-script> mini-term-wsl <captured-cwd> <program> <args...>
+```
+
+The complete static script is:
+
+```sh
+CDPATH= cd -P "$1" && shift && exec "$@"
+```
+
+Directory, program and arguments are separate argv, never shell source. Empty
+CDPATH prevents directory-search/output behavior; absolute-only cwd validation
+prevents `cd` option/default-directory interpretation. Physical `cd -P` occurs
+before `shift` and `exec`, and failure cannot dispatch the target in `/` or any
+other directory. Bare executable names use the Linux shell's external PATH
+lookup; relative executable paths are resolved after the directory change.
+No eval, manual PATH search or command-name rewrite was added. Empty arguments,
+quotes, substitutions, wildcard/assignment-looking data and newlines stay data.
+
+Quoted argv does not prevent the `exec` builtin from interpreting a leading `-`
+program as an option. The WSL-only helper therefore explicitly rejects such a
+program with a static `Rejected` error. A literal filename can still be requested
+as `./-name` or an absolute path; leading-dash arguments remain valid. This is
+intentional fail-closed handling, not a change to shared `validate_argv`, Local
+or SSH planning, or the existing fixed executable call sites.
+
+Tasks uses private `wsl_command` with the fixed launcher cwd `/`, retaining its
+original envelope argv. `host_envelope.py` already calls `os.chdir(cwd)` before
+any gh discovery or credential lookup, so no shell wrapper or Python change is
+needed there. Sanitization, private pipes, same-token proofs, cancellation,
+deadlines, read bounds, suspended/no-window Job guards and cleanup are unchanged.
+
+The diagnostic helper now follows corrected production planning. Its `Captured`
+and `Root` labels select the Linux-side cwd; both launchers use `--cd /`.
+Baseline plan expectations were updated, but failed-baseline rejection,
+seven-alternate-only-on-failure behavior and static secret-safe output remain.
+
+### Focused Tests And Fixture Needs
+
+New ordinary tests, all authored UNRUN:
+
+- `execution_host::tests::wsl_project_and_preproject_plans_keep_cwd_and_relative_argv_literal`
+- `execution_host::tests::wsl_project_and_preproject_reject_invalid_launch_context`
+- `execution_host::tests::wsl_rejects_exec_options_without_rejecting_literal_paths_or_arguments`
+- `tasks_account_executor::process::tests::wsl_launcher_preserves_private_envelope_argv_with_root_cwd`
+
+Existing project/pre-project and eight-row marker planner expectations are
+updated. The new process test inspects the actual private command builder and
+is platform-independent; the workspace gate includes it. A narrow Windows
+`tasks_account_executor::tests::` filter alone does not select this process test.
+No source-string-only regression was added.
+
+The same exact ignored
+`tasks_account_executor::tests::tasks_account_executor_wsl_sentinels_cleanup_and_foreground_host`
+now calls `WslFixture::assert_cwd_routing` after owner/shim/hash validation. It
+executes both public project and pre-project APIs inside the same owned distro:
+exact cwd with spaces, quotes, shell-looking data and newline; absolute/PATH
+lookup plus a hostile `./-relative...` executable; exact NUL-separated argument
+bytes; and missing/non-directory cwd where the absolute target marker must never
+be created. It then proves the private account envelope writes `data-seen` in
+that hostile cwd and returns `CommandFailed` for a missing cwd. Existing selected
+account, secret rejection and descendant/cancel tests remain, and the test must
+still discover/run exactly once with no skip/fallback.
+
+The same rootfs additionally needs `/bin/pwd`, `/bin/ln` and `/usr/bin/printf`
+(coreutils) for these assertions. All temporary paths/symlinks stay beneath the
+owned `/mini-term-fixture/cases/<UUID>`; no distro setup/config change or new
+fixture framework is requested. The three env vars, owner schema, ELF hash,
+wrapper, exact ignored filter and guarded distro cleanup remain unchanged.
+
+### Remaining Gates
+
+The cwd correction has not been executed or formatted. Main owns exact-SHA
+Linux/Windows compile, lint, ordinary tests and the actual WSL rerun. A passing
+matrix/root marker from `0e141f0` does not validate the new shell or account path.
+Native hardware/secure-store acceptance remains separate from synthetic fixture
+coverage. No additional production issue is claimed in this bounded source pass.
+
+## Earlier WSL Matrix Handoff (Superseded)
+
+Historical status below describes the diagnostic slice before `0e141f0`; the
+evidence, production correction and pending validation above supersede it.
 
 The approved diagnostic slice and regressions are authored and source-reviewed;
 ownership is released to Main. No implementation blocker remains. Scope is only
@@ -124,18 +245,19 @@ Main has added/released the Windows `execution_host::` filter, retaining native
 lifecycle tests; the Linux workspace gate retains generic cleanup regressions.
 All current tests, build/type-check, lint, formatting and probes remain UNRUN.
 
-### Not Fixed: Startup Cause Still Unconfirmed
+### Historical Limit Before 0e141f0
 
-The source already supplies `--cd /mini-term-fixture`; no redundant cwd fix is
-justified. Node's successful marker guard uses explicit root and `/`, with a
+Before the matrix ran, the source already supplied `--cd /mini-term-fixture`;
+simply adding another cwd argument was not justified. Node's successful marker
+guard used explicit root and `/`, with a
 different stdin/spawn path. Node/libuv can itself use no-window and Job guards;
 it is not an unguarded control. Previously inspected primary sources:
 [Node 22 Windows process spawning](https://github.com/nodejs/node/blob/v22.x/deps/uv/src/win/process.c)
 and [synchronous stdin shutdown](https://github.com/nodejs/node/blob/v22.x/src/spawn_sync.cc).
-The matrix varies only the approved parameters while keeping production guards.
-If all rows fail it cannot rule out every executable-resolution, WSL-version or
-Job/handle difference. No production behavior fix is claimed or attempted.
-Main needs Actions matrix/classifier evidence before any production/setup fix.
+The matrix varied only the approved parameters while keeping production guards.
+That diagnostic slice made no production behavior fix pending Actions evidence.
+The `0e141f0` result and current correction above resolve this former source
+decision blocker; successful execution of the correction is still required.
 Native hardware/secure-store acceptance remains separate from these fixtures.
 
 Verification for this patch: lint, type-check/build, unit/WSL tests, formatter
