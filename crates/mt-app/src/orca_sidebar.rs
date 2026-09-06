@@ -132,6 +132,7 @@ fn group_agent_targets_by_project(
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum SidebarActivity {
     Idle,
+    Unknown,
     LastKnownWork,
     Done,
     Waiting,
@@ -167,6 +168,7 @@ impl SidebarIndicator {
                 }
                 AgentActivity::Waiting => SidebarActivity::Waiting,
                 AgentActivity::Done => SidebarActivity::Done,
+                AgentActivity::Unknown => SidebarActivity::Unknown,
                 _ => SidebarActivity::Idle,
             }
         };
@@ -174,6 +176,16 @@ impl SidebarIndicator {
             activity,
             connectivity: Some(connectivity),
         }
+    }
+
+    fn from_target(agent: &AgentTargetView) -> Self {
+        let mut indicator = Self::from_agent(agent.activity, agent.connectivity, agent.attention);
+        if indicator.activity == SidebarActivity::Working
+            && agent.activity_freshness != mt_ai::AgentActivityFreshness::Fresh
+        {
+            indicator.activity = SidebarActivity::LastKnownWork;
+        }
+        indicator
     }
 
     fn merge(&mut self, other: Self) {
@@ -192,6 +204,7 @@ impl SidebarIndicator {
     fn label(self) -> &'static str {
         match self.activity {
             SidebarActivity::Idle => "Idle",
+            SidebarActivity::Unknown => "Unknown",
             SidebarActivity::LastKnownWork => "Working (last known)",
             SidebarActivity::Done => "Done",
             SidebarActivity::Waiting => "Waiting",
@@ -247,11 +260,7 @@ fn worktree_agent_indicator(agents: &[AgentTargetView], panes: &[&PaneState]) ->
     for agent in agents.iter().filter(|agent| {
         !agent.activity.is_ended() && agent.evidence != AgentEvidence::RestoredHistory
     }) {
-        indicator.merge(SidebarIndicator::from_agent(
-            agent.activity,
-            agent.connectivity,
-            agent.attention,
-        ));
+        indicator.merge(SidebarIndicator::from_target(agent));
     }
     indicator
 }
@@ -1005,6 +1014,9 @@ impl OrcaProjectSidebar {
             AgentActivity::Exited => "Exited",
             AgentActivity::Unknown => "Unknown",
         };
+        let activity = crate::agent_activity::activity_label_with_freshness(
+            activity, agent.activity_freshness,
+        );
         let activity_color = if agent.attention
             || matches!(
                 agent.activity,
@@ -1342,7 +1354,9 @@ mod status_tests {
             provider: "codex".parse().unwrap(),
             provider_session_id: None,
             activity,
+            activity_freshness: mt_ai::AgentActivityFreshness::Fresh,
             connectivity,
+            connection_epoch: None,
             evidence: AgentEvidence::ProcessAttested,
             received_at_unix_ms: 1,
             attention: false,
@@ -1530,6 +1544,23 @@ mod status_tests {
             assert_eq!(indicator.activity, expected);
             assert_eq!(indicator.connectivity, None);
         }
+    }
+
+    #[test]
+    fn unknown_liveness_and_expired_semantics_remain_steady() {
+        let mut agent = target(AgentActivity::Unknown, AgentConnectivity::Live);
+        agent.activity_freshness = mt_ai::AgentActivityFreshness::Unknown;
+        let pane = pane_for_target(&agent, PaneStatus::Idle);
+        let indicator = worktree_agent_indicator(&[agent.clone()], &[&pane]);
+        assert_eq!(indicator.activity, SidebarActivity::Unknown);
+        assert_eq!(indicator.connectivity, Some(AgentConnectivity::Live));
+        agent.activity = AgentActivity::Working;
+        agent.activity_freshness = mt_ai::AgentActivityFreshness::Stale;
+        let indicator = worktree_agent_indicator(&[agent.clone()], &[&pane]);
+        assert_eq!(indicator.activity, SidebarActivity::LastKnownWork);
+        assert_eq!(indicator.connectivity, Some(AgentConnectivity::Live));
+        agent.activity_freshness = mt_ai::AgentActivityFreshness::Fresh;
+        assert_eq!(SidebarIndicator::from_target(&agent).activity, SidebarActivity::Working);
     }
 
     #[test]

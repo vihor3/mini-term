@@ -150,7 +150,27 @@ pub fn build_remote_login_command_with_env(
         command.push('=');
         command.push_str(&shell_single_quote(&value));
     }
-    command.push_str(" \"$SHELL\" -l");
+    // Capture the remote shell's own Linux identity before exec preserves it.
+    // These public facts are only useful together with verified /proc ancestry.
+    let managed_login = r#"set -f
+login_shell=$1
+root_start=''
+root_tty=''
+if IFS= read -r root_stat 2>/dev/null < /proc/$$/stat; then
+  root_tail=${root_stat##*) }
+  if [ "$root_tail" != "$root_stat" ]; then
+    set -- $root_tail
+    if [ "$#" -ge 20 ]; then
+      root_tty=$5
+      shift 19
+      root_start=$1
+    fi
+  fi
+fi
+exec env MINITERM_MANAGED_ROOT_PID="$$" MINITERM_MANAGED_ROOT_START_TICKS="$root_start" MINITERM_MANAGED_ROOT_TTY="$root_tty" "$login_shell" -l"#;
+    command.push_str(" sh -c ");
+    command.push_str(&shell_single_quote(managed_login));
+    command.push_str(" mini-term-login \"$SHELL\"");
     command
 }
 
@@ -339,7 +359,11 @@ mod tests {
         };
         let command = build_remote_login_command_with_env("/srv/project", Some(&route));
         assert!(command.starts_with("cd '/srv/project' 2>/dev/null; exec env "));
-        assert!(command.ends_with(" \"$SHELL\" -l"));
+        assert!(command.ends_with(" mini-term-login \"$SHELL\""));
+        assert!(command.contains("/proc/$$/stat"));
+        assert!(command.contains("MINITERM_MANAGED_ROOT_PID=\"$$\""));
+        assert!(command.contains("MINITERM_MANAGED_ROOT_START_TICKS=\"$root_start\""));
+        assert!(command.contains("MINITERM_MANAGED_ROOT_TTY=\"$root_tty\""));
         for key in [
             "MINITERM_AGENT_PROTOCOL_VERSION='1'",
             "MINITERM_WORKTREE_ID='worktree-v1:w'",
@@ -353,6 +377,63 @@ mod tests {
         assert!(command.contains(r"MINITERM_EXECUTION_HOST_ID='host-v1:abc'\''def'"));
         assert!(!command.contains("MINITERM_PTY_ID"));
         assert!(!command.contains("MINITERM_HOOK_PORT"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn generated_login_preserves_owned_root_and_exact_route_through_exec() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        let route = RemoteTerminalEnv {
+            protocol_version: 1,
+            execution_host_id: "host-v1:abc'def;$(printf route-leak)".into(),
+            worktree_id: "worktree-v1:w".into(),
+            tab_id: "tab-v1:t".into(),
+            pane_key: "pane-v1:p".into(),
+            terminal_session_id: "terminal-v1:s".into(),
+            terminal_incarnation_id: "incarnation-v1:i".into(),
+        };
+        let remote_path = "project 'one' $(printf path-leak)";
+        let command = build_remote_login_command_with_env(remote_path, Some(&route));
+        let mut fixture = Command::new("python3");
+        fixture.args(["-c", include_str!("ssh_login_tests.py"), &command, remote_path]);
+        for (key, value) in route.pairs() {
+            fixture.arg(key).arg(value);
+        }
+        let mut child = fixture
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GITHUB_ACTIONS", "true")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(40);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "production login fixture failed");
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = Command::new("/bin/kill")
+                    .args(["-TERM", &child.id().to_string()])
+                    .status();
+                let cleanup_deadline = Instant::now() + Duration::from_secs(10);
+                while child.try_wait().unwrap().is_none() {
+                    if Instant::now() >= cleanup_deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                panic!("production login fixture timed out");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

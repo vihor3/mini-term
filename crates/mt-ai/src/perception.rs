@@ -161,6 +161,7 @@ mod tests {
     use super::*;
     use crate::monitor::StatusChange;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     fn perception() -> (AiPerception, Arc<Mutex<Vec<StatusChange>>>) {
         let seen: Arc<Mutex<Vec<StatusChange>>> = Arc::new(Mutex::new(Vec::new()));
@@ -180,13 +181,14 @@ mod tests {
         assert_eq!(p.status_of(1), "ai-idle");
     }
 
-    /// 输出旁路:降级路径下近期有输出即 ai-working(3 秒窗口内)。
+    /// Output is tracked without inventing task activity for an unhooked run.
     #[test]
-    fn observe_output_feeds_activity_fallback() {
+    fn observe_output_preserves_unknown_compatibility_liveness() {
         let (p, _) = perception();
         p.observe_input(1, b"claude\r");
         p.observe_output(1, b"thinking...");
-        assert_eq!(p.status_of(1), "ai-working");
+        assert_eq!(p.status_of(1), "ai-idle");
+        assert!(p.tracker().has_recent_output(1, Duration::from_secs(3)));
     }
 
     /// 打断收敛必须经由 observe_input 生效,且结论落盘(第二次不再重复发射)。

@@ -105,6 +105,21 @@ fn allocate_event_sequence(counter: &AtomicU64) -> Option<u64> {
         .and_then(|previous| previous.checked_add(1))
 }
 
+#[cfg(test)]
+pub(crate) fn hook_channel_fixture(
+    pty_id: u32,
+    route: AgentRoute,
+) -> (AiPerception, mpsc::UnboundedReceiver<AiEvent>) {
+    let (tx, rx) = mpsc::unbounded();
+    let perception = AiPerception::new(Arc::new(ChannelSink {
+        tx,
+        routes: Arc::new(Mutex::new(HashMap::from([(pty_id, route)]))),
+        live_panes: Arc::new(Mutex::new(vec![pty_id])),
+        next_sequence: Arc::new(AtomicU64::new(0)),
+    }));
+    (perception, rx)
+}
+
 fn remote_agent_status_enabled_value(value: Option<&OsStr>) -> bool {
     value != Some(OsStr::new("0"))
 }
@@ -250,6 +265,49 @@ mod tests {
     }
 
     #[test]
+    fn queued_bridge_events_keep_the_source_episode_after_a_later_input() {
+        let (tx, mut rx) = mpsc::unbounded();
+        let sink = ChannelSink {
+            tx,
+            routes: Arc::new(Mutex::new(HashMap::new())),
+            live_panes: Arc::new(Mutex::new(vec![7])),
+            next_sequence: Arc::new(AtomicU64::new(0)),
+        };
+        let tracker = mt_ai::SessionTracker::new();
+        tracker.track_input_with_line_snapshot(7, "codex\r", None);
+        let captured = tracker.weak_detection_episode(7);
+        assert!(captured.is_some());
+        let hooks = mt_ai::HookState::new();
+        let emitter = mt_ai::StatusEmitter::new(Arc::new(sink));
+        mt_ai::hook_server::handle_hook_payload(&hooks, &emitter, &tracker,
+            serde_json::from_value(serde_json::json!({
+                "pty_id": 7, "event": "SessionStart", "agent": "codex", "session_id": "source-session",
+            })).unwrap());
+        tracker.clear_ai_session(7);
+        tracker.track_input_with_line_snapshot(7, "claude\r", None);
+        assert!(tracker.weak_detection_episode(7) > captured);
+        let AiEvent::Session { identity, .. } = rx.try_recv().unwrap() else { panic!("missing identity"); };
+        assert_eq!(identity.weak_episode, captured);
+        assert_eq!(identity.agent.as_deref(), Some("codex"));
+        let Some(mt_ai::HookLifecycleEvent::Started(lifecycle_id)) = identity.hook_lifecycle else {
+            panic!("source start authority must survive queued delivery");
+        };
+        let mut compatibility_identity = identity.clone();
+        compatibility_identity.hook_lifecycle = None;
+        assert_eq!(serde_json::to_value(&identity).unwrap(), serde_json::to_value(compatibility_identity).unwrap());
+        let AiEvent::Status { change, .. } = rx.try_recv().unwrap() else { panic!("missing status"); };
+        assert_eq!(change.weak_episode, captured);
+        assert_eq!(change.agent.as_deref(), Some("codex"));
+        assert_eq!(change.hook_session.as_ref().unwrap().session_id, "source-session");
+        assert_eq!(change.hook_session.as_ref().unwrap().agent.as_deref(), Some("codex"));
+        assert_eq!(change.hook_session.as_ref().unwrap().lifecycle_id, Some(lifecycle_id));
+        let mut compatibility_change = change.clone();
+        compatibility_change.hook_session = None;
+        assert_eq!(serde_json::to_value(&change).unwrap(), serde_json::to_value(compatibility_change).unwrap());
+        assert!(serde_json::to_value(change).unwrap().get("hookSession").is_none());
+    }
+
+    #[test]
     fn observer_teardown_is_idempotent_and_suppresses_delayed_events() {
         let (tx, mut rx) = mpsc::unbounded();
         let sink = Arc::new(ChannelSink {
@@ -283,6 +341,8 @@ mod tests {
             status: "ai-working".into(),
             cause: None,
             agent: Some("codex".into()),
+            weak_episode: bridge.perception().tracker().weak_detection_episode(7),
+            hook_session: None,
         };
         sink.status_changed(change.clone());
         bridge.remove_pane(7);
@@ -297,15 +357,19 @@ mod tests {
             agent: Some("codex".into()),
             session_id: "delayed".into(),
             cwd: None,
+            weak_episode: change.weak_episode,
+            hook_lifecycle: None,
         });
         assert_eq!(sink.next_sequence.load(Ordering::Relaxed), 1);
         let AiEvent::Status {
-            route: captured, ..
+            route: captured, change: queued, ..
         } = rx.try_recv().unwrap()
         else {
             panic!("expected the event queued before exit");
         };
         assert_eq!(captured, Some(route));
+        assert_eq!(queued.weak_episode, change.weak_episode);
+        assert!(queued.weak_episode.is_some());
         assert!(rx.try_recv().is_err());
 
         bridge.add_pane(7, None);

@@ -48,7 +48,7 @@ use crate::session_branch::{
     BranchMenuSegment, build_session_tree, find_family_root, flatten_session_tree,
     merge_lineage_edges,
 };
-use crate::session_panel::jump_to_session;
+use crate::session_panel::{SessionHistoryOwner, jump_to_session};
 use crate::store::AppStore;
 use crate::ui;
 
@@ -189,6 +189,7 @@ pub fn branch_menu_entries(
 
 pub struct BranchFamilyPanel {
     store: Entity<AppStore>,
+    owner: Option<SessionHistoryOwner>,
     /// 当前 pane 的会话 id:高亮「← 当前」,点击禁用。
     session_id: String,
     /// `None` = 还在拉;`Some(空)` = 这个会话没有分支记录。
@@ -203,14 +204,24 @@ impl BranchFamilyPanel {
     /// 建面板并**当场开始拉数据**(原版是 `useEffect` 在首帧后拉)。
     ///
     /// `project_path` 只在取数时用一次,不存字段 —— 面板活不过一次菜单开合。
-    /// 不收 `project_id`:节点点击走 [`jump_to_session`],它取的是**活动项目**
-    /// (能右键到的 pane 必然在活动项目里,与树视图同一条口径)。
+    /// Capture the source before scanning; deferred jumps retain that owner.
     pub fn new(
         store: Entity<AppStore>,
         project_path: String,
         session_id: String,
         cx: &mut Context<Self>,
     ) -> Self {
+        let owner = SessionHistoryOwner::capture(store.read(cx))
+            .filter(|owner| owner.matches_local_path(&project_path));
+        if owner.is_none() {
+            return Self {
+                store,
+                owner,
+                session_id,
+                rows: Some(Vec::new()),
+                _tasks: Vec::new(),
+            };
+        }
         // 自记账边:mini-term 自己发起的 fork 当场记下的 child→parent。
         // **必须传给 mt-ai** —— Claude 的 CLI fork 不写磁盘指针,这些边的
         // 「分叉后第一问」标题只能由它拿父子文件比对补出。
@@ -251,6 +262,11 @@ impl BranchFamilyPanel {
                 })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
+                if this.owner.as_ref().is_none_or(|owner| !owner.is_current(this.store.read(cx))) {
+                    this.rows = Some(Vec::new());
+                    cx.notify();
+                    return;
+                }
                 // 会话列表取不到 = 按「没有分支记录」处理(原版 catch → setRows([]));
                 // 分支边扫描内部逐文件容错,永远给得出一个 Vec
                 let (sessions, disk) = result;
@@ -263,6 +279,7 @@ impl BranchFamilyPanel {
 
         Self {
             store,
+            owner,
             session_id,
             rows: None,
             _tasks: vec![task],
@@ -322,8 +339,15 @@ impl BranchFamilyPanel {
     fn render_row(&self, row: FamilyRow, cx: &mut Context<Self>) -> impl IntoElement {
         let session = row.session;
         let is_current = session.id == self.session_id;
-        // 在跑徽章:三条件齐备才算(见 `AppStore::find_live_session_pane`)
-        let live = self.store.read(cx).find_live_session_pane(&session.id);
+        let live = self.owner.as_ref()
+            .and_then(|owner| owner.exact_target(&session, self.store.read(cx)))
+            .and_then(|target| {
+                if target.activity_freshness == mt_ai::AgentActivityFreshness::Stale {
+                    Some(crate::tree::PaneStatus::Idle)
+                } else {
+                    crate::tree::PaneStatus::from_str(target.activity.legacy_status())
+                }
+            });
         let vendor = AiVendor::for_session(&session.session_type, session.model.as_deref());
         let tip: SharedString = row.title.clone().into();
         let clicked = session.clone();
@@ -356,8 +380,9 @@ impl BranchFamilyPanel {
                         // 挂回 `self._tasks` 会随面板一起被取消。
                         let store = this.store.clone();
                         let session = clicked.clone();
+                        let Some(owner) = this.owner.clone() else { return; };
                         window.defer(cx, move |window, cx| {
-                            jump_to_session(&store, session, window, cx).detach();
+                            jump_to_session(&store, owner, session, window, cx).detach();
                         });
                         crate::menu::close(window, cx);
                     }))
@@ -374,7 +399,7 @@ impl BranchFamilyPanel {
                         .child(row.prefix.clone()),
                 )
             })
-            .when_some(live, |el, (_, _, status)| el.child(ui::status_dot(status)))
+            .when_some(live, |el, status| el.child(ui::status_dot(status)))
             .child(
                 div()
                     .flex_none()

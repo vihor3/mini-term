@@ -17,12 +17,10 @@
 //!
 //! # 搬运时的红线(仍然生效)
 //!
-//! - **降级结论必须落盘**:用户打断([`hook_server::note_user_interrupt`])与停摆
-//!   兜底(`monitor::stall_settle_target`,10s 双静默)得出的结论要写回 hook 状态,
-//!   触发一次即收敛。v0.9.3 那版无记忆兜底会让假完成每 20~50s 重复播报 —— 这条
-//!   铁律不能丢失。
-//! - **正等用户批准的 pane 豁免停摆兜底**(上次 cause 属 attention 类,如 Codex 的
-//!   `PermissionRequest`),否则黄灯会被抹掉。
+//! - Hook state changes only through genuine Hook, user-interrupt or lifecycle
+//!   events. Silence never writes a Waiting/Exit conclusion into Hook state.
+//!   Monitor output recency is not task-semantic evidence; unhooked input
+//!   detection remains available as weak liveness with Unknown task activity.
 //! - **Grok 的两处结构性差异**见 [`hook_registry`] 的模块注释:
 //!   ① Claude 兼容层导致同一事件来两趟,靠 `GROK_SESSION_ID` + 有无 argv 丢弃
 //!   (只注册了 Claude 的用户必须放行);② 注册进 `~/.grok/hooks/` 的必须是
@@ -45,6 +43,7 @@
 //! - 原先经 Tauri 解析的路径(`app_data_dir` 下的端口文件)改为显式参数传入。
 
 pub mod agent_runtime;
+mod agent_semantics;
 pub mod detect;
 pub mod hook_registry;
 pub mod hook_server;
@@ -55,15 +54,19 @@ pub mod tracker;
 mod util;
 
 pub use agent_runtime::{
-    AGENT_RUNTIME_PROTOCOL_VERSION, AgentActivity, AgentApplyOutcome, AgentConfirmation,
+    AGENT_RUNTIME_PROTOCOL_VERSION, AGENT_SEMANTIC_MAX_AGE_MS, AgentActivity,
+    AgentActivityFreshness, AgentApplyOutcome, AgentConfirmation,
     AgentConnectivity, AgentConnectivityObservation, AgentEvidence, AgentObservation,
+    AgentFallbackSupersession, AgentHookLifecycleId, AgentWeakEpisode,
     AgentObservationIgnored, AgentProcessIdentity, AgentProcessInventoryObservation,
     AgentProcessObservation, AgentProvider, AgentRoute, AgentRuntimeRegistry, AgentRuntimeState,
+    AgentSemanticObservation, AgentSemanticOwner,
     activity_from_legacy_status,
 };
+pub use agent_semantics::activity_from_owned_title;
 pub use detect::{AI_COMMANDS, interactive_ai_command_name, is_interactive_ai_command};
 pub use hook_server::{HookState, HookStatusInfo, is_attention_cause};
-pub use monitor::{SessionIdentity, StatusChange, StatusEmitter, StatusSink};
+pub use monitor::{HookLifecycleEvent, SessionIdentity, StatusChange, StatusEmitter, StatusSink};
 pub use perception::AiPerception;
 pub use sessions::{AiSession, AiSessionMessage, LineageEdge, agent_has_session_log};
 pub use tracker::{SessionTracker, UserSubmit};

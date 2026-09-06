@@ -1152,6 +1152,11 @@ impl AppStore {
             match event {
                 PaneEvent::Exited(code) => store.on_pty_exit(pty_id, *code, cx),
                 PaneEvent::UserInput => store.clear_pane_attention_by_pty(pty_id, cx),
+                PaneEvent::TitleChanged { title, observed_at_unix_ms } => {
+                    if let Some(route) = expected_route.as_ref() {
+                        store.observe_terminal_title(pty_id, route, title, *observed_at_unix_ms, cx);
+                    }
+                }
                 // AI 任务标记。**必须走事件而不是在 write 里直接 update store** ——
                 // `write_to_pane` 是在 `store.update` 里调 `pane.write` 的,那里再去
                 // `AppStore::global(cx).update` 就是同一实体的嵌套 update(gpui 直接 panic)。

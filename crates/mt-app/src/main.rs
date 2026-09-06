@@ -1291,7 +1291,9 @@ impl Workspace {
             for target in targets {
                 let run_id = target.run_id.clone();
                 let title = agent_project_worktree_label(&target);
-                let activity = agent_activity_label(target.activity);
+                let activity = crate::agent_activity::activity_label_with_freshness(
+                    agent_activity_label(target.activity), target.activity_freshness,
+                );
                 let activity_color = agent_activity_color(&target);
                 let connectivity = agent_connectivity_label(target.connectivity);
                 let connectivity_color = agent_connectivity_color(target.connectivity);

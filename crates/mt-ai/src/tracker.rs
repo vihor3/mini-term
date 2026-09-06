@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 // lock 全部跟着 panic。parking_lot 没有中毒概念,与 mt-pty/mt-terminal 同款。
 use parking_lot::Mutex;
 
+use crate::agent_runtime::{AgentProvider, AgentWeakEpisode};
 use crate::detect::{
     line_ai_command_name, output_ai_command_name, AI_EXIT_COMMANDS,
 };
@@ -197,15 +198,26 @@ impl InputState {
     }
 }
 
+/// A source boundary captured once for a Hook lifecycle. An absent receipt is
+/// unknown ownership, unlike a receipt whose source had no published episode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HookDetectionReceipt {
+    pub(crate) episode: Option<AgentWeakEpisode>,
+}
+
 /// 每个 pane 的 AI 旁路状态。内部全是 `Arc<Mutex<…>>`,Clone 即共享同一份。
 #[derive(Clone)]
 pub struct SessionTracker {
     /// pane → 会话内 AI 命令名("claude"/"codex"/"opencode";hook 扶正时取 hook 的 agent)。
     /// 有键即视为处于 AI 会话,值供前端品牌图标兜底(无 hook 时的唯一 agent 来源)。
+    // Outermost mutation lock: input/echo episode publication, clear and purge
+    // take this before auxiliary tables. Never reacquire it while held.
     ai_sessions: Arc<Mutex<HashMap<u32, String>>>,
     /// pane → 本轮 AI 会话的启动时刻(enter_ai 时记录)。对话镜像用它过滤
     /// 早于本轮会话的旧记录文件,避免新会话未落盘时错绑上一次会话。
     ai_started: Arc<Mutex<HashMap<u32, SystemTime>>>,
+    weak_episodes: Arc<Mutex<HashMap<u32, AgentWeakEpisode>>>,
+    pending_weak_episodes: Arc<Mutex<HashMap<u32, AgentWeakEpisode>>>,
     input_states: Arc<Mutex<HashMap<u32, InputState>>>,
     last_ctrlc: Arc<Mutex<HashMap<u32, Instant>>>,
     last_enter: Arc<Mutex<HashMap<u32, Instant>>>,
@@ -226,6 +238,8 @@ impl SessionTracker {
         Self {
             ai_sessions: Arc::new(Mutex::new(HashMap::new())),
             ai_started: Arc::new(Mutex::new(HashMap::new())),
+            weak_episodes: Arc::new(Mutex::new(HashMap::new())),
+            pending_weak_episodes: Arc::new(Mutex::new(HashMap::new())),
             input_states: Arc::new(Mutex::new(HashMap::new())),
             last_ctrlc: Arc::new(Mutex::new(HashMap::new())),
             last_enter: Arc::new(Mutex::new(HashMap::new())),
@@ -241,8 +255,11 @@ impl SessionTracker {
     /// 用户敲 `exit` 后把 pane 开着不动,这些条目就一直留到手动关 pane 才被回收。
     /// 抽成一处后新增字段不会再漏掉其中一条路径。
     pub fn purge_pane(&self, pane_id: u32) {
-        self.ai_sessions.lock().remove(&pane_id);
+        let mut sessions = self.ai_sessions.lock();
+        sessions.remove(&pane_id);
         self.ai_started.lock().remove(&pane_id);
+        self.weak_episodes.lock().remove(&pane_id);
+        self.pending_weak_episodes.lock().remove(&pane_id);
         self.input_states.lock().remove(&pane_id);
         self.last_ctrlc.lock().remove(&pane_id);
         self.last_enter.lock().remove(&pane_id);
@@ -274,6 +291,60 @@ impl SessionTracker {
         self.ai_sessions.lock().get(&pane_id).cloned()
     }
 
+    /// Latest real-input detection episode, retained after clear so queued
+    /// events cannot borrow a later launch. Hook marking never advances it.
+    pub fn weak_detection_episode(&self, pane_id: u32) -> Option<AgentWeakEpisode> {
+        self.weak_episodes.lock().get(&pane_id).copied()
+    }
+
+    pub(crate) fn weak_session_snapshot(
+        &self,
+        pane_id: u32,
+    ) -> (Option<String>, Option<AgentWeakEpisode>) {
+        let sessions = self.ai_sessions.lock();
+        (sessions.get(&pane_id).cloned(), self.weak_detection_episode(pane_id))
+    }
+
+    /// A first explicit, uncontested SessionStart can cover compatible input
+    /// detection. Unseen mid-session events cannot claim an existing launch.
+    pub(crate) fn capture_hook_detection(
+        &self,
+        pane_id: u32,
+        agent: &str,
+        can_cover_detected_launch: bool,
+    ) -> Option<HookDetectionReceipt> {
+        let sessions = self.ai_sessions.lock();
+        let episode = self.weak_detection_episode(pane_id);
+        if !self.matches_weak_episode_locked(pane_id, episode) {
+            return None;
+        }
+        if let Some(detected_agent) = sessions.get(&pane_id) {
+            let provider = agent.parse::<AgentProvider>().ok()?;
+            if !can_cover_detected_launch
+                || detected_agent.parse::<AgentProvider>().ok().as_ref() != Some(&provider)
+            {
+                return None;
+            }
+        }
+        Some(HookDetectionReceipt { episode })
+    }
+
+    /// Heal only the original source boundary; a delayed Hook must not occupy
+    /// the detection latch while a newer input is awaiting its command echo.
+    pub(crate) fn mark_ai_session_if_receipt(
+        &self,
+        pane_id: u32,
+        agent: &str,
+        receipt: HookDetectionReceipt,
+    ) -> bool {
+        let mut sessions = self.ai_sessions.lock();
+        if !self.matches_weak_episode_locked(pane_id, receipt.episode) {
+            return false;
+        }
+        self.mark_ai_session_locked(pane_id, agent, &mut sessions);
+        true
+    }
+
     /// 本轮 AI 会话的启动时刻;不在 AI 会话中返回 None。
     pub fn ai_session_started_at(&self, pane_id: u32) -> Option<SystemTime> {
         self.ai_started.lock().get(&pane_id).copied()
@@ -285,6 +356,10 @@ impl SessionTracker {
     /// 不重置 ai_started（对话镜像按它过滤旧记录，中途重置会错绑）。
     pub fn mark_ai_session(&self, pane_id: u32, agent: &str) {
         let mut sessions = self.ai_sessions.lock();
+        self.mark_ai_session_locked(pane_id, agent, &mut sessions);
+    }
+
+    fn mark_ai_session_locked(&self, pane_id: u32, agent: &str, sessions: &mut HashMap<u32, String>) {
         if !sessions.contains_key(&pane_id) {
             sessions.insert(pane_id, agent.to_string());
             self.ai_started
@@ -300,8 +375,38 @@ impl SessionTracker {
     /// 否则退出瞬间 ConPTY 重绘把 scrollback 里的 "PS ..> claude" 再吐出来,
     /// 会被扫描误判成命令 echo 又把会话标回去。
     pub fn clear_ai_session(&self, pane_id: u32) {
-        self.ai_sessions.lock().remove(&pane_id);
+        let mut sessions = self.ai_sessions.lock();
+        self.clear_ai_session_locked(pane_id, &mut sessions);
+    }
+
+    /// Clear detection only if the captured episode still owns it. A different
+    /// published or pending input episode is preserved with all associated state.
+    /// None matches only a source with neither published nor pending episodes.
+    /// Returns true when the guard matched, including an already-cleared source.
+    pub fn clear_ai_session_if_episode(
+        &self,
+        pane_id: u32,
+        expected: Option<AgentWeakEpisode>,
+    ) -> bool {
+        let mut sessions = self.ai_sessions.lock();
+        if !self.matches_weak_episode_locked(pane_id, expected) {
+            return false;
+        }
+        self.clear_ai_session_locked(pane_id, &mut sessions);
+        true
+    }
+
+    // Call only under ai_sessions, shared with input, echo and purge.
+    fn matches_weak_episode_locked(&self, pane_id: u32, expected: Option<AgentWeakEpisode>) -> bool {
+        self.weak_detection_episode(pane_id) == expected
+            && self.pending_weak_episodes.lock().get(&pane_id)
+                .is_none_or(|pending| Some(*pending) == expected)
+    }
+
+    fn clear_ai_session_locked(&self, pane_id: u32, sessions: &mut HashMap<u32, String>) {
+        sessions.remove(&pane_id);
         self.ai_started.lock().remove(&pane_id);
+        self.pending_weak_episodes.lock().remove(&pane_id);
         self.last_ctrlc.lock().remove(&pane_id);
         self.last_enter.lock().remove(&pane_id);
     }
@@ -344,12 +449,13 @@ impl SessionTracker {
     /// PTY 输出旁路:Enter 后 2 秒窗口内扫描命令 echo 补判 AI 会话,
     /// 并（冷却窗口外）刷新最近输出时刻。
     ///
-    /// 两件事都只服务于 AI 感知:前者补偿上箭头历史调用 / PSReadLine 补全导致的
-    /// 输入检测漏判,后者是无 hook 降级路径与停摆兜底唯一的「活体证据」。
+    /// Echo detection reuses an episode captured at real input. Output recency
+    /// cannot create a launch generation or authoritative task activity.
     pub fn note_output(&self, pane_id: u32, data: &str) {
         // 基于输出扫描检测 AI 会话（补偿上箭头历史调用 / PSReadLine 补全）：
         // 若在 Enter 后 2 秒内收到包含 AI 命令 echo 的输出，自动标记为 AI 会话
         {
+            let mut sessions = self.ai_sessions.lock();
             let recently_entered = self
                 .last_enter
                 .lock()
@@ -357,10 +463,12 @@ impl SessionTracker {
                 .map(|t| t.elapsed() < AI_ENTER_SCAN_WINDOW)
                 .unwrap_or(false);
             if recently_entered {
-                let mut sessions = self.ai_sessions.lock();
                 if !sessions.contains_key(&pane_id) {
                     if let Some(agent) = output_ai_command_name(data) {
-                        sessions.insert(pane_id, agent.to_string());
+                        if let Some(episode) = self.pending_weak_episodes.lock().get(&pane_id).copied() {
+                            sessions.insert(pane_id, agent.to_string());
+                            self.weak_episodes.lock().insert(pane_id, episode);
+                        }
                     }
                 }
             }
@@ -386,7 +494,8 @@ impl SessionTracker {
         data: &str,
         line_snapshot: Option<&str>,
     ) {
-        let in_ai = self.is_ai_session(pane_id);
+        let mut sessions = self.ai_sessions.lock();
+        let in_ai = sessions.contains_key(&pane_id);
         let mut enter_ai: Option<&'static str> = None;
         let mut exit_ai = false;
         {
@@ -463,8 +572,15 @@ impl SessionTracker {
                             self.last_enter
                                 .lock()
                                 .insert(pane_id, Instant::now());
+                            if !in_ai {
+                                if let Some(episode) = AgentWeakEpisode::next() {
+                                    self.pending_weak_episodes.lock().insert(pane_id, episode);
+                                } else {
+                                    self.pending_weak_episodes.lock().remove(&pane_id);
+                                }
+                            }
                         }
-                        if self.is_ai_session(pane_id) {
+                        if in_ai {
                             // 缓冲是空的但 pane 在 AI 会话里:内容多半在 TUI 自己
                             // 手上(Esc 撤回重发 / ↑ 召回历史 / 菜单选中),终端这边
                             // 只看得见一个裸 Enter —— 拿可见行当候选,标成「猜的」
@@ -524,14 +640,15 @@ impl SessionTracker {
             }
         }
         if let Some(agent) = enter_ai {
-            self.ai_sessions
-                .lock()
-                .insert(pane_id, agent.to_string());
+            sessions.insert(pane_id, agent.to_string());
+            if let Some(episode) = self.pending_weak_episodes.lock().get(&pane_id).copied() {
+                self.weak_episodes.lock().insert(pane_id, episode);
+            }
             self.ai_started
                 .lock()
                 .insert(pane_id, SystemTime::now());
         } else if exit_ai {
-            self.clear_ai_session(pane_id);
+            self.clear_ai_session_locked(pane_id, &mut sessions);
         }
     }
 }
@@ -552,6 +669,256 @@ mod tests {
         let mgr = SessionTracker::new();
         mgr.track_input(1, "codex\r");
         assert!(mgr.is_ai_session(1));
+    }
+
+    #[test]
+    fn detection_episode_is_source_owned_and_survives_clear_until_next_input() {
+        let tracker = SessionTracker::new();
+        tracker.note_output(1, "claude working done");
+        assert_eq!(tracker.weak_detection_episode(1), None);
+        tracker.track_input_with_line_snapshot(1, "claude\r", None);
+        let first = tracker.weak_detection_episode(1).unwrap();
+        for output in ["shell output", "\x1b[2Jredraw", "working", "done"] {
+            tracker.note_output(1, output);
+            assert_eq!(tracker.weak_detection_episode(1), Some(first));
+        }
+        tracker.track_input_with_line_snapshot(1, "a task\r", None);
+        tracker.mark_ai_session(1, "claude");
+        assert_eq!(tracker.weak_detection_episode(1), Some(first));
+        tracker.clear_ai_session(1);
+        assert_eq!(tracker.weak_detection_episode(1), Some(first));
+        tracker.note_output(1, "PS D:\\project> claude\r\n");
+        assert!(!tracker.is_ai_session(1));
+        tracker.mark_ai_session(1, "claude");
+        assert_eq!(tracker.weak_detection_episode(1), Some(first));
+        tracker.clear_ai_session(1);
+        tracker.track_input_with_line_snapshot(1, "claude\r", None);
+        let second = tracker.weak_detection_episode(1).unwrap();
+        assert!(second > first);
+        tracker.purge_pane(1);
+        assert_eq!(tracker.weak_detection_episode(1), None);
+        tracker.track_input_with_line_snapshot(1, "codex\r", None);
+        assert!(tracker.weak_detection_episode(1).unwrap() > second);
+    }
+
+    #[test]
+    fn conditional_clear_matches_owned_episode_and_preserves_legacy_none() {
+        let tracker = SessionTracker::new();
+        tracker.mark_ai_session(1, "codex");
+        assert!(tracker.clear_ai_session_if_episode(1, None));
+        assert!(!tracker.is_ai_session(1));
+        assert_eq!(tracker.ai_session_started_at(1), None);
+        assert!(tracker.clear_ai_session_if_episode(1, None));
+
+        tracker.track_input_with_line_snapshot(1, "codex\r", None);
+        let episode = tracker.weak_detection_episode(1).unwrap();
+        assert!(!tracker.clear_ai_session_if_episode(1, None));
+        assert_eq!(tracker.ai_session_agent(1).as_deref(), Some("codex"));
+        assert!(tracker.clear_ai_session_if_episode(1, Some(episode)));
+        assert!(!tracker.is_ai_session(1));
+        assert_eq!(tracker.weak_detection_episode(1), Some(episode));
+        assert!(!tracker.pending_weak_episodes.lock().contains_key(&1));
+        assert!(!tracker.last_enter.lock().contains_key(&1));
+        assert!(tracker.clear_ai_session_if_episode(1, Some(episode)));
+        tracker.note_output(1, "PS D:\\project> codex\r\n");
+        assert!(!tracker.is_ai_session(1));
+        tracker.purge_pane(1);
+        assert!(!tracker.clear_ai_session_if_episode(1, Some(episode)));
+        assert!(tracker.clear_ai_session_if_episode(1, None));
+    }
+
+    #[test]
+    fn conditional_clear_preserves_a_later_recognized_input_episode() {
+        let tracker = SessionTracker::new();
+        tracker.track_input_with_line_snapshot(1, "codex\r", None);
+        let old = tracker.weak_detection_episode(1).unwrap();
+        tracker.track_input_with_line_snapshot(1, "\x04", None);
+        tracker.track_input_with_line_snapshot(1, "claude\r", None);
+        tracker.track_input_with_line_snapshot(1, "\x03", None);
+        let current = tracker.weak_detection_episode(1).unwrap();
+        let started = tracker.ai_session_started_at(1);
+        let entered = tracker.last_enter.lock().get(&1).copied();
+        let interrupted = tracker.last_ctrlc.lock().get(&1).copied();
+        assert!(current > old);
+        assert!(!tracker.clear_ai_session_if_episode(1, Some(old)));
+        assert_eq!(tracker.ai_session_agent(1).as_deref(), Some("claude"));
+        assert_eq!(tracker.weak_detection_episode(1), Some(current));
+        assert_eq!(tracker.ai_session_started_at(1), started);
+        assert_eq!(tracker.pending_weak_episodes.lock().get(&1), Some(&current));
+        assert_eq!(tracker.last_enter.lock().get(&1).copied(), entered);
+        assert_eq!(tracker.last_ctrlc.lock().get(&1).copied(), interrupted);
+    }
+
+    #[test]
+    fn conditional_clear_preserves_pending_input_before_echo_publication() {
+        for detected_before in [false, true] {
+            let tracker = SessionTracker::new();
+            if detected_before {
+                tracker.track_input_with_line_snapshot(1, "codex\r", None);
+                tracker.track_input_with_line_snapshot(1, "\x04", None);
+            }
+            let captured = tracker.weak_detection_episode(1);
+            tracker.track_input_with_line_snapshot(1, "launcher\r", None);
+            let pending = tracker.pending_weak_episodes.lock().get(&1).copied().unwrap();
+            let entered = tracker.last_enter.lock().get(&1).copied();
+            assert!(Some(pending) > captured);
+            assert_eq!(tracker.weak_detection_episode(1), captured);
+            assert!(!tracker.clear_ai_session_if_episode(1, captured));
+            assert_eq!(tracker.last_enter.lock().get(&1).copied(), entered);
+            assert_eq!(tracker.pending_weak_episodes.lock().get(&1), Some(&pending));
+            tracker.note_output(1, "PS D:\\project> claude\r\n");
+            assert_eq!(tracker.ai_session_agent(1).as_deref(), Some("claude"));
+            assert_eq!(tracker.weak_detection_episode(1), Some(pending));
+            assert!(!tracker.clear_ai_session_if_episode(1, captured));
+            assert!(tracker.clear_ai_session_if_episode(1, Some(pending)));
+        }
+    }
+
+    #[test]
+    fn conditional_clear_serializes_with_input_and_echo_promotion() {
+        use std::sync::{Barrier, mpsc};
+
+        for echo in [false, true] {
+            let tracker = SessionTracker::new();
+            tracker.track_input_with_line_snapshot(1, "codex\r", None);
+            let old = tracker.weak_detection_episode(1).unwrap();
+            tracker.track_input_with_line_snapshot(1, "\x04", None);
+            if echo {
+                tracker.track_input_with_line_snapshot(1, "launcher\r", None);
+            }
+            let gate = Arc::new(Barrier::new(3));
+            let (done, completed) = mpsc::channel();
+            let producer = {
+                let tracker = tracker.clone();
+                let gate = gate.clone();
+                let done = done.clone();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    if echo {
+                        tracker.note_output(1, "PS D:\\project> claude\r\n");
+                    } else {
+                        tracker.track_input_with_line_snapshot(1, "claude\r", None);
+                    }
+                    done.send(None).unwrap();
+                })
+            };
+            let retiring = {
+                let tracker = tracker.clone();
+                let gate = gate.clone();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    done.send(Some(tracker.clear_ai_session_if_episode(1, Some(old)))).unwrap();
+                })
+            };
+            gate.wait();
+            let results = [
+                completed.recv_timeout(Duration::from_secs(5)).expect("tracker operation blocked"),
+                completed.recv_timeout(Duration::from_secs(5)).expect("tracker operation blocked"),
+            ];
+            producer.join().unwrap();
+            retiring.join().unwrap();
+            if echo {
+                assert_eq!(results.into_iter().flatten().next(), Some(false));
+            }
+            assert_eq!(tracker.ai_session_agent(1).as_deref(), Some("claude"));
+            assert!(tracker.weak_detection_episode(1).unwrap() > old);
+        }
+    }
+
+    #[test]
+    fn hook_receipt_capture_and_mark_refuse_unowned_or_later_detection() {
+        let tracker = SessionTracker::new();
+        tracker.track_input_with_line_snapshot(1, "claude\r", None);
+        let episode = tracker.weak_detection_episode(1);
+        assert_eq!(tracker.capture_hook_detection(1, "codex", true), None);
+        assert_eq!(tracker.capture_hook_detection(1, "claude-code", false), None);
+        let receipt = tracker.capture_hook_detection(1, "claude-code", true).unwrap();
+        assert_eq!(receipt.episode, episode);
+        tracker.track_input_with_line_snapshot(1, "\x04", None);
+        assert!(tracker.mark_ai_session_if_receipt(1, "claude", receipt));
+        assert_eq!(tracker.weak_detection_episode(1), episode);
+        tracker.track_input_with_line_snapshot(1, "\x04", None);
+        tracker.track_input_with_line_snapshot(1, "launcher\r", None);
+        assert_eq!(tracker.capture_hook_detection(1, "claude", true), None);
+        assert!(!tracker.mark_ai_session_if_receipt(1, "claude", receipt));
+        assert!(!tracker.is_ai_session(1));
+        tracker.note_output(1, "PS D:\\project> codex\r\n");
+        let current = tracker.weak_session_snapshot(1);
+        assert!(current.1 > episode);
+        assert!(!tracker.mark_ai_session_if_receipt(1, "claude", receipt));
+        assert_eq!(tracker.weak_session_snapshot(1), current);
+    }
+
+    #[test]
+    fn episode_mutations_and_snapshot_share_the_outer_session_lock() {
+        use std::sync::mpsc;
+
+        for operation in ["input", "echo", "conditional clear", "clear", "purge", "mark", "input exit", "snapshot", "hook capture", "conditional mark"] {
+            let tracker = SessionTracker::new();
+            tracker.track_input_with_line_snapshot(1, "codex\r", None);
+            let expected = tracker.weak_detection_episode(1);
+            let receipt = tracker.capture_hook_detection(1, "codex", true).unwrap();
+            if matches!(operation, "input" | "echo" | "mark" | "conditional mark") {
+                tracker.clear_ai_session(1);
+            }
+            if operation == "echo" {
+                tracker.track_input_with_line_snapshot(1, "launcher\r", None);
+            }
+            let (starting, started) = mpsc::channel();
+            let (done, completed) = mpsc::channel();
+            let guard = tracker.ai_sessions.lock();
+            let worker_tracker = tracker.clone();
+            let worker = std::thread::spawn(move || {
+                starting.send(()).unwrap();
+                match operation {
+                    "input" => worker_tracker.track_input_with_line_snapshot(1, "claude\r", None),
+                    "echo" => worker_tracker.note_output(1, "PS D:\\project> claude\r\n"),
+                    "conditional clear" => assert!(worker_tracker.clear_ai_session_if_episode(1, expected)),
+                    "clear" => worker_tracker.clear_ai_session(1),
+                    "purge" => worker_tracker.purge_pane(1),
+                    "mark" => worker_tracker.mark_ai_session(1, "claude"),
+                    "input exit" => worker_tracker.track_input_with_line_snapshot(1, "\x04", None),
+                    "snapshot" => assert_eq!(worker_tracker.weak_session_snapshot(1), (Some("codex".into()), expected)),
+                    "hook capture" => assert_eq!(worker_tracker.capture_hook_detection(1, "codex", true), Some(receipt)),
+                    "conditional mark" => assert!(worker_tracker.mark_ai_session_if_receipt(1, "codex", receipt)),
+                    _ => unreachable!(),
+                }
+                done.send(()).unwrap();
+            });
+            started.recv_timeout(Duration::from_secs(5)).expect("tracker worker did not start");
+            assert!(
+                matches!(completed.recv_timeout(Duration::from_millis(100)), Err(mpsc::RecvTimeoutError::Timeout)),
+                "{operation} bypassed the outer session guard",
+            );
+            drop(guard);
+            completed.recv_timeout(Duration::from_secs(5)).expect("tracker operation deadlocked after guard release");
+            worker.join().unwrap();
+            match operation {
+                "input" | "echo" => {
+                    assert_eq!(tracker.ai_session_agent(1).as_deref(), Some("claude"));
+                    assert!(tracker.weak_detection_episode(1) > expected);
+                }
+                "mark" => {
+                    assert_eq!(tracker.ai_session_agent(1).as_deref(), Some("claude"));
+                    assert_eq!(tracker.weak_detection_episode(1), expected);
+                }
+                "snapshot" | "hook capture" | "conditional mark" => {
+                    assert_eq!(tracker.ai_session_agent(1).as_deref(), Some("codex"));
+                    assert_eq!(tracker.weak_detection_episode(1), expected);
+                }
+                "purge" => {
+                    assert!(!tracker.is_ai_session(1));
+                    assert_eq!(tracker.weak_detection_episode(1), None);
+                    assert!(!tracker.pending_weak_episodes.lock().contains_key(&1));
+                }
+                _ => {
+                    assert!(!tracker.is_ai_session(1));
+                    assert_eq!(tracker.weak_detection_episode(1), expected);
+                    assert!(!tracker.pending_weak_episodes.lock().contains_key(&1));
+                    assert!(!tracker.last_enter.lock().contains_key(&1));
+                }
+            }
+        }
     }
 
     #[test]

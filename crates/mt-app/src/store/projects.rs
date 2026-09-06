@@ -1165,6 +1165,8 @@ mod project_onboarding_tests {
             pending_terminal_closes: Default::default(),
             terminal_routes: HashMap::new(),
             agent_runtime: Default::default(),
+            runtime_session_titles: HashMap::new(),
+            runtime_live_titles: HashMap::new(),
             agent_feed_acknowledged: HashMap::new(),
             pane_subs: HashMap::new(),
             focused_pane_id: None,

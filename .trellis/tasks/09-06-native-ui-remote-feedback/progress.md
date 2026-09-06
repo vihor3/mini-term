@@ -660,3 +660,21 @@ assertions ran. The only-owned distro cleanup succeeded. The earlier cancelled
 WSL job `101409668656` also completed its cleanup successfully. Setup/cleanup
 evidence is not a passing account transport test. All new feature tests remain
 blocked by compilation, and Agent producer/lifecycle changes remain unstaged.
+
+Main committed/pushed Pauli's five-file compiler wiring fix plus reports as
+`37b4ef9cebcd20dc0f90170321f35799a16f1d6d`: CI `34005933974`, package
+`34005933967`. Linux `101412980006` and Windows `101412979902` now pass app
+and test-target compilation. Linux stopped at 28 changed-line Clippy warnings;
+177 baseline warnings were correctly ignored. Windows focused tests and actual
+WSL `101413098858` continue. McClintock owns only backend dead API/DTO and
+equivalent let-chain diagnostics; Pauli owns other obsolete wrappers and the
+reported Git/Tasks/browser style changes. Preserve pinned behavior and proof
+data; no broad lint suppression or fake reads.
+
+Bohr released the completed Agent producer/resume review and closed. It fixes
+same-ID rich resume, first explicit-start promotion with unchanged token/receipt,
+and duplicate active starts resetting state/age. Nine new and two expanded
+source-backed tests are authored, all UNRUN. Main reviewed producer-review.md
+and recorded final lifecycle APIs/limitations in mt-ai and mt-app specs. Agent
+source is ready for its separate scoped commit; the ongoing non-Agent tests
+are not Agent validation. Matching full-source Actions/native gates remain open.

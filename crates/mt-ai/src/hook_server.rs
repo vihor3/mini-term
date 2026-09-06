@@ -6,14 +6,16 @@
 //! **端口 / 协议 / 路由一个字都不能改**:三家 CLI 里已注册在用户机器上的 hook
 //! 命令按当前形态 POST 过来,改了等于让存量用户的 AI 感知集体失灵。
 
-use crate::monitor::{SessionIdentity, StatusEmitter};
-use crate::tracker::SessionTracker;
+use crate::monitor::{SessionIdentity, StatusChange, StatusEmitter};
+use crate::tracker::{HookDetectionReceipt, SessionTracker};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 // hook HTTP 线程与 GPUI 主线程、500ms 轮询线程共享这几张表:std::sync::Mutex 一旦
 // 有持锁者 panic 就整把锁中毒,主线程下一次 lock 跟着 panic 整个进程就没了。
@@ -77,11 +79,26 @@ pub struct HookStatusInfo {
 
 /// pane 内 AI 会话的精确身份（hook 上报）。对话镜像用它把 pane 绑到
 /// 确切的会话记录文件，避免同项目多 pane 串台。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookSessionId {
     /// 来源 agent（claude-code / codex），缺省按 Claude 处理
     pub agent: Option<String>,
     pub session_id: String,
+    /// Internal identity retained unchanged for this source lifecycle.
+    pub lifecycle_id: Option<crate::AgentHookLifecycleId>,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveHookSession {
+    identity: HookSessionId,
+    receipt: Option<HookDetectionReceipt>,
+    explicit_start_seen: bool,
+}
+
+struct EndedHookSession {
+    session: ActiveHookSession,
+    was_last: bool,
+    can_clear_receipt: bool,
 }
 
 /// Hook 状态管理器，记录每个 PTY 的最后 hook 事件时间和状态
@@ -102,7 +119,7 @@ pub struct HookState {
     /// 集合为空时才执行销毁动作：嵌套非交互实例（Bash 工具里跑 `claude -p` /
     /// `codex exec`，继承 MINITERM_PTY_ID）与"退出后立刻重开"的乱序场景下，
     /// pane 上还有别的活跃会话，误销毁会把正在工作的外层会话打回 idle。
-    active_sessions: Arc<Mutex<HashMap<u32, VecDeque<String>>>>,
+    active_sessions: Arc<Mutex<HashMap<u32, VecDeque<ActiveHookSession>>>>,
     port: Arc<Mutex<u16>>,
     /// 保存 server 实例，供运行时停止（Arc 共享给监听线程）
     server: Arc<Mutex<Option<Arc<tiny_http::Server>>>>,
@@ -140,9 +157,8 @@ impl HookState {
         self.last_hook_status.lock().get(&pty_id).cloned()
     }
 
-    /// 距上一次 hook 事件（或上一次状态落盘）的时长；从未收到过事件返回 None。
-    /// 停摆兜底（`monitor::stall_settle_target`）用它确认「状态本身也
-    /// 已经静置足够久」，而不只是 PTY 没输出。
+    /// Test-only observation of Hook age; polling must not renew this timestamp.
+    #[cfg(test)]
     pub(crate) fn status_age(&self, pty_id: u32) -> Option<Duration> {
         self.last_hook_time
             .lock()
@@ -159,12 +175,12 @@ impl HookState {
     /// 返回身份是否发生变化(新 pane/换会话/agent 修正),变化时调用方通知上层。
     /// agent 也参与比较:codex 的 SessionStart 不带 turn_id 会被 hook 二进制
     /// 误推断为 claude-code,靠后续带 turn_id 的事件在这里纠正并重新通知。
-    fn record_session(&self, pty_id: u32, agent: Option<String>, session_id: String) -> bool {
+    fn record_session(&self, pty_id: u32, identity: HookSessionId) -> bool {
         let mut map = self.last_session.lock();
         let changed = map
             .get(&pty_id)
-            .is_none_or(|prev| prev.session_id != session_id || prev.agent != agent);
-        map.insert(pty_id, HookSessionId { agent, session_id });
+            .is_none_or(|prev| prev != &identity);
+        map.insert(pty_id, identity);
         changed
     }
 
@@ -193,38 +209,60 @@ impl HookState {
         self.active_sessions.lock().remove(&pty_id);
     }
 
-    /// 记录会话为活跃。任意非 SessionEnd 事件都调（不只 SessionStart：
-    /// hook server 中途启用时首个事件可能是 Stop/PreToolUse）。
-    /// 有序去重；超容量挤掉最老的——正常情况集合里只有 1 个。
-    fn note_session_active(&self, pty_id: u32, session_id: &str) {
+    /// Capture once per active sid. Repeated events may correct the provider,
+    /// but cannot restamp the original receipt from a later input episode.
+    fn recognize_session(
+        &self,
+        pty_id: u32,
+        agent: Option<String>,
+        session_id: &str,
+        explicit_start: bool,
+        tracker: &SessionTracker,
+    ) -> (ActiveHookSession, bool) {
         let mut map = self.active_sessions.lock();
         let queue = map.entry(pty_id).or_default();
-        if queue.iter().any(|s| s == session_id) {
-            return;
+        if let Some(session) = queue.iter_mut().find(|s| s.identity.session_id == session_id) {
+            if agent.is_some() {
+                session.identity.agent = agent;
+            }
+            let started = explicit_start && !session.explicit_start_seen;
+            session.explicit_start_seen |= explicit_start;
+            return (session.clone(), started);
         }
+        let receipt = tracker.capture_hook_detection(
+            pty_id,
+            agent.as_deref().unwrap_or("claude"),
+            explicit_start && queue.is_empty(),
+        );
+        let session = ActiveHookSession {
+            identity: HookSessionId {
+                agent,
+                session_id: session_id.to_string(),
+                lifecycle_id: crate::AgentHookLifecycleId::next(),
+            },
+            receipt,
+            explicit_start_seen: explicit_start,
+        };
         if queue.len() >= ACTIVE_SESSIONS_CAP {
             queue.pop_front();
         }
-        queue.push_back(session_id.to_string());
+        queue.push_back(session.clone());
+        (session, explicit_start)
     }
 
-    /// SessionEnd：把该会话移出活跃集，返回移除后活跃集是否已空。
-    /// 为空 → 这是 pane 上最后一个会话，调用方执行销毁动作；
-    /// 非空 → pane 上还有别的活跃会话（嵌套 `claude -p` / 退出后立刻重开的
-    /// 乱序），只打墓碑不销毁。payload 无 session_id 时不移除，仅报告空否。
-    fn end_session(&self, pty_id: u32, session_id: Option<&str>) -> bool {
+    /// Unknown/evicted/duplicate ends have no authority over the remaining pane.
+    fn end_session(&self, pty_id: u32, session_id: &str) -> Option<EndedHookSession> {
         let mut map = self.active_sessions.lock();
-        let Some(queue) = map.get_mut(&pty_id) else {
-            return true;
-        };
-        if let Some(sid) = session_id {
-            queue.retain(|s| s != sid);
-        }
+        let queue = map.get_mut(&pty_id)?;
+        let index = queue.iter().position(|s| s.identity.session_id == session_id)?;
+        let session = queue.remove(index)?;
         let empty = queue.is_empty();
+        let can_clear_receipt = session.receipt.is_some()
+            && !queue.iter().any(|other| other.receipt == session.receipt);
         if empty {
             map.remove(&pty_id);
         }
-        empty
+        Some(EndedHookSession { session, was_last: empty, can_clear_receipt })
     }
 
     /// 给已结束的会话 id 打墓碑
@@ -278,11 +316,8 @@ impl HookState {
 
     /// 与 server 启停串行化地执行回调。
     ///
-    /// **刻意不检查 server 是否在运行**:调用方(停摆兜底)的判据建立在 pane 自己
-    /// 的 hook 记录上,与 server 活着与否无关。曾在这里 gate 过 `server.as_ref()?`,
-    /// 后果是 AI 正跑着时去设置里关掉 hook 开关,该 pane 的 `is_hook_enabled` 仍为
-    /// true、`resolve_status` 仍认 hook 状态权威,而唯一能把它从 ai-working 拉回来
-    /// 的收敛路径被挡在门外——黄灯从此永久卡死。
+    /// Runs the callback even when the server is stopped. This compatibility
+    /// helper does not infer Hook activity or permit silence-driven changes.
     pub fn with_server_lock<T>(&self, callback: impl FnOnce() -> T) -> T {
         let _guard = self.server.lock();
         callback()
@@ -502,6 +537,113 @@ pub fn note_user_interrupt(
     eprintln!("[hook-server] pty_id={} 用户打断 -> ai-idle", pty_id);
 }
 
+/// Process a decoded Hook payload at the production source boundary. Kept
+/// separate from HTTP so native bridge tests exercise the real lifecycle path.
+pub fn handle_hook_payload(
+    hook_state: &HookState,
+    emitter: &StatusEmitter,
+    tracker: &SessionTracker,
+    payload: HookPayload,
+) {
+    let Some(pty_id) = payload.pty_id else { return };
+    let Some(event) = payload.event.as_deref().or(payload.hook_event_name.as_deref()) else { return };
+    let sid = payload.session_id.as_deref().filter(|sid| {
+        !sid.trim().is_empty() && sid.len() <= 512 && !sid.chars().any(char::is_control)
+    });
+    if event == "SessionEnd" {
+        // Never fall back to the current pane identity or capture on an end.
+        let Some(sid) = sid else { return };
+        hook_state.mark_session_ended(pty_id, sid.to_string());
+        let Some(ended) = hook_state.end_session(pty_id, sid) else { return };
+        let session = ended.session;
+        if payload.reason.as_deref() != Some("clear") {
+            if ended.was_last {
+                hook_state.remove(pty_id);
+            }
+            if let Some(receipt) = session.receipt.filter(|_| ended.can_clear_receipt) {
+                tracker.clear_ai_session_if_episode(pty_id, receipt.episode);
+            }
+        }
+        // Even a nonlast or /clear end retires this exact rich run. It must not
+        // fall through the app's legacy unique-Hook-owner exit fallback.
+        emitter.emit_hook_status(StatusChange {
+            pty_id,
+            status: "idle".to_string(),
+            cause: Some("SessionEnd".to_string()),
+            agent: None,
+            weak_episode: session.receipt.and_then(|receipt| receipt.episode),
+            hook_session: Some(session.identity),
+        });
+        return;
+    }
+
+    let (session, started) = if let Some(sid) = sid {
+        if event == "SessionStart" {
+            hook_state.revive_session(pty_id, sid);
+        }
+        if hook_state.is_session_ended(pty_id, sid) {
+            return;
+        }
+        let (session, started) = hook_state.recognize_session(
+            pty_id, payload.agent.clone(), sid, event == "SessionStart", tracker,
+        );
+        (Some(session), started)
+    } else {
+        (None, false)
+    };
+    let weak_episode = session.as_ref().and_then(|session| session.receipt)
+        .and_then(|receipt| receipt.episode);
+    if let Some(session) = &session {
+        let identity = &session.identity;
+        if hook_state.record_session(pty_id, identity.clone()) || started {
+            let cwd = payload.cwd.clone().filter(|p| Path::new(p).is_dir());
+            // Publish the captured start before this lifecycle's first status,
+            // even when a nonlast same-ID resume leaves last_session unchanged.
+            emitter.notify_session_identity(SessionIdentity {
+                pty_id,
+                agent: identity.agent.clone(),
+                session_id: identity.session_id.clone(),
+                cwd,
+                weak_episode,
+                hook_lifecycle: identity.lifecycle_id.map(|id| {
+                    if started { crate::HookLifecycleEvent::Started(id) }
+                    else { crate::HookLifecycleEvent::Observed(id) }
+                }),
+            });
+        }
+    }
+    if event == "SessionStart" && session.is_some() && !started {
+        // An already recognized start cannot reset current task semantics.
+        // Any provider correction above still travels as an identity event.
+        return;
+    }
+    let agent = session.as_ref().and_then(|session| session.identity.agent.clone())
+        .or(payload.agent.clone());
+    let Some(status) = map_event_to_status(
+        event,
+        agent.as_deref(),
+        payload.notification_type.as_deref(),
+        payload.message.as_deref(),
+        payload.reason.as_deref(),
+    ) else {
+        eprintln!("[hook-server] pty_id={pty_id} event={event} has no status mapping");
+        return;
+    };
+    if let Some(receipt) = session.as_ref().and_then(|session| session.receipt) {
+        tracker.mark_ai_session_if_receipt(pty_id, agent.as_deref().unwrap_or("claude"), receipt);
+    }
+    hook_state.update(pty_id, status.to_string());
+    let cause = event_cause(event, payload.notification_type.as_deref(), payload.message.as_deref());
+    emitter.emit_hook_status(StatusChange {
+        pty_id,
+        status: status.to_string(),
+        cause: Some(cause.to_string()),
+        agent,
+        weak_episode,
+        hook_session: session.map(|session| session.identity),
+    });
+}
+
 /// 启动 hook HTTP 服务器
 ///
 /// 在后台线程监听，接收 hook 事件后通过 `emitter` 通知上层。
@@ -627,141 +769,7 @@ pub fn start_hook_server(
             let response = tiny_http::Response::from_string("OK").with_status_code(200);
             let _ = request.respond(response);
 
-            // 处理事件。事件名优先取 sidecar 从 argv 注入的 `event`；缺失时回落
-            // payload 自带的 `hook_event_name`（用户手改配置漏写命令行参数的兜底，
-            // 否则整条事件会因无事件名被静默丢弃）。
-            let resolved_event = payload
-                .event
-                .clone()
-                .or_else(|| payload.hook_event_name.clone());
-            if let (Some(pty_id), Some(event)) = (payload.pty_id, resolved_event.as_deref()) {
-                if event == "SessionEnd" {
-                    // 只用 payload 自带的 session_id 打墓碑。不要退回 session_of:
-                    // 新会话的 SessionStart 若先到,session_of 已是新会话,兜底会
-                    // 把新会话误打进墓碑,冻结其全部后续事件。
-                    if let Some(sid) = payload.session_id.clone() {
-                        hook_state.mark_session_ended(pty_id, sid);
-                    }
-                    let was_last =
-                        hook_state.end_session(pty_id, payload.session_id.as_deref());
-                    if payload.reason.as_deref() == Some("clear") {
-                        // /clear 换会话不是退出：紧随其后的 SessionStart 会带新
-                        // session id 刷新状态，这里只靠墓碑挡住旧会话的迟到事件
-                        eprintln!(
-                            "[hook-server] pty_id={} event=SessionEnd(clear) -> 仅记录墓碑",
-                            pty_id
-                        );
-                    } else if !was_last {
-                        // pane 上还有别的活跃会话:嵌套非交互实例(Bash 工具里跑
-                        // `claude -p` / `codex exec`,继承 MINITERM_PTY_ID)结束,
-                        // 或退出后立刻重开、新 SessionStart 先到的乱序。此时清
-                        // hook 状态 / AI 会话标记会误杀仍在跑的会话,只留墓碑。
-                        eprintln!(
-                            "[hook-server] pty_id={} event=SessionEnd 非最后活跃会话,仅记录墓碑",
-                            pty_id
-                        );
-                    } else {
-                        // 最后一个活跃会话结束 → 权威退出信号：清 hook 状态回退
-                        // 到轮询，同时清输入检测的 AI 会话标记——双击 Ctrl+C
-                        // 间隔超窗漏检时靠这里自愈
-                        hook_state.remove(pty_id);
-                        tracker.clear_ai_session(pty_id);
-                        emitter.emit_if_changed(pty_id, "idle", Some("SessionEnd"), None);
-                        eprintln!(
-                            "[hook-server] pty_id={} event=SessionEnd(reason={:?}) -> hook 已清除，回退到 idle",
-                            pty_id, payload.reason
-                        );
-                    }
-                } else {
-                    // 已结束会话的迟到事件直接丢弃：hook 脚本是独立进程，
-                    // POST 到达顺序无保证，放行会把退出后的 pane 推回 ai-idle。
-                    // 例外:SessionStart 是会话再次存活的肯定证据(退出后 claude -c /
-                    // --resume 同 id 重开),复活墓碑走正常记录,否则该会话被永久忽略
-                    if let Some(sid) = payload.session_id.as_deref() {
-                        if event == "SessionStart" {
-                            hook_state.revive_session(pty_id, sid);
-                        } else if hook_state.is_session_ended(pty_id, sid) {
-                            eprintln!(
-                                "[hook-server] pty_id={} event={} 来自已结束会话 {}，忽略",
-                                pty_id, event, sid
-                            );
-                            continue;
-                        }
-                    }
-                    // 会话身份先于状态映射记录:即使事件不映射状态(如未知事件),
-                    // session_id 也是有效信息;/clear 换会话时靠这里自动刷新
-                    if let Some(sid) = payload.session_id.clone() {
-                        hook_state.note_session_active(pty_id, &sid);
-                        if hook_state.record_session(pty_id, payload.agent.clone(), sid.clone()) {
-                            // hook 端点无鉴权,cwd 是任何本地进程都能塞的字段,而上层会
-                            // 把它持久化成「未来某次 PTY 的启动目录」。只放行确实存在的
-                            // 目录:构造出来的假路径与已被删掉的 worktree 一并挡在这里,
-                            // 续接时回落 pane 自己的 cwd,而不是让 create_pty 直接失败。
-                            let cwd = payload
-                                .cwd
-                                .clone()
-                                .filter(|p| std::path::Path::new(p).is_dir());
-                            // 会话身份变化(新会话/换会话)时通知上层,供布局持久化
-                            // 记录「退出时该 pane 正跑着哪个 AI 会话」以便重启续接
-                            emitter.notify_session_identity(SessionIdentity {
-                                pty_id,
-                                agent: payload.agent.clone(),
-                                session_id: sid,
-                                cwd,
-                            });
-                        }
-                    }
-                    let mapped = map_event_to_status(
-                        event,
-                        payload.agent.as_deref(),
-                        payload.notification_type.as_deref(),
-                        payload.message.as_deref(),
-                        payload.reason.as_deref(),
-                    );
-                    if let Some(status) = mapped {
-                        // hook 事件是 AI 进程存活的直接证据:输入检测漏判启动
-                        // (别名/包装脚本)或误判退出(任务中双击 Ctrl+C)时,
-                        // 靠这里把 AI 会话标记扶正,保住后续 marker/移动端语义
-                        tracker.mark_ai_session(
-                            pty_id,
-                            payload.agent.as_deref().unwrap_or("claude"),
-                        );
-                        hook_state.update(pty_id, status.to_string());
-
-                        // 通知上层（与 monitor 共享同一份去重表）。cause 带
-                        // 归一化后的事件名:Stop/PermissionRequest/Notification 都落
-                        // ai-idle,但只有 Stop 是「任务做完了」,UI 据此决定播报与
-                        // 托盘黄绿灯（见 utils/aiCompletion.ts 与 store 的 attention 判定）
-                        let cause = event_cause(
-                            event,
-                            payload.notification_type.as_deref(),
-                            payload.message.as_deref(),
-                        );
-                        emitter.emit_if_changed(pty_id, status, Some(cause), payload.agent.clone());
-
-                        eprintln!(
-                            "[hook-server] pty_id={} event={} agent={:?} -> status={} cause={}{}",
-                            pty_id,
-                            event,
-                            payload.agent,
-                            status,
-                            cause,
-                            payload
-                                .error_type
-                                .as_deref()
-                                .map(|e| format!(" error_type={}", e))
-                                .unwrap_or_default()
-                        );
-                    } else {
-                        // 未映射事件：新版 Claude Code / Codex 加了事件而这里还没跟上时
-                        // 的可见信号（注册列表是白名单，正常不会有陌生事件抵达）
-                        eprintln!(
-                            "[hook-server] pty_id={} event={} 无状态映射，已忽略",
-                            pty_id, event
-                        );
-                    }
-                }
-            }
+            handle_hook_payload(&hook_state, &emitter, &tracker, payload);
         }
     });
 
@@ -841,13 +849,315 @@ fn delete_port_file(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::monitor::StatusSink;
     use std::thread;
+
+    #[derive(Default)]
+    struct CapturedHooks {
+        statuses: Mutex<Vec<StatusChange>>,
+        identities: Mutex<Vec<SessionIdentity>>,
+    }
+
+    impl StatusSink for CapturedHooks {
+        fn status_changed(&self, change: StatusChange) {
+            self.statuses.lock().push(change);
+        }
+
+        fn session_identified(&self, identity: SessionIdentity) {
+            self.identities.lock().push(identity);
+        }
+    }
+
+    fn hook_payload(event: &str, sid: Option<&str>, agent: &str, reason: Option<&str>) -> HookPayload {
+        serde_json::from_value(serde_json::json!({
+            "pty_id": 1, "event": event, "session_id": sid, "agent": agent, "reason": reason,
+        })).unwrap()
+    }
+
+    fn produce(
+        hooks: &HookState,
+        tracker: &SessionTracker,
+        emitter: &StatusEmitter,
+        event: &str,
+        sid: &str,
+    ) {
+        handle_hook_payload(hooks, emitter, tracker, hook_payload(event, Some(sid), "codex", None));
+    }
+
+    #[test]
+    fn producer_old_hook_status_and_exit_preserve_recognized_or_pending_input() {
+        for pending in [false, true] {
+            let hooks = HookState::new();
+            let tracker = SessionTracker::new();
+            let captured = Arc::new(CapturedHooks::default());
+            let emitter = StatusEmitter::new(captured.clone());
+            tracker.track_input_with_line_snapshot(1, "codex\r", None);
+            let original = tracker.weak_detection_episode(1);
+            assert!(original.is_some());
+            produce(&hooks, &tracker, &emitter, "SessionStart", "old");
+            produce(&hooks, &tracker, &emitter, "UserPromptSubmit", "old");
+            tracker.track_input_with_line_snapshot(1, "\x04", None);
+            tracker.track_input_with_line_snapshot(1, if pending { "launcher\r" } else { "claude\r" }, None);
+            let later = tracker.weak_session_snapshot(1);
+            let started = tracker.ai_session_started_at(1);
+            for event in ["SessionStart", "Stop", "UserPromptSubmit", "UnknownEvent"] {
+                produce(&hooks, &tracker, &emitter, event, "old");
+                assert_eq!(tracker.weak_session_snapshot(1), later);
+                assert_eq!(tracker.ai_session_started_at(1), started);
+            }
+            produce(&hooks, &tracker, &emitter, "SessionEnd", "old");
+            assert_eq!(tracker.weak_session_snapshot(1), later);
+            assert_eq!(tracker.ai_session_started_at(1), started);
+            assert!(!hooks.is_hook_enabled(1));
+            assert!(hooks.is_session_ended(1, "old"));
+            let before = captured.statuses.lock().len();
+            for event in ["Stop", "SessionEnd", "UserPromptSubmit"] {
+                produce(&hooks, &tracker, &emitter, event, "old");
+            }
+            assert_eq!(captured.statuses.lock().len(), before);
+            let statuses = captured.statuses.lock();
+            assert!(statuses.iter().all(|status| status.weak_episode == original));
+            let exit = statuses.last().unwrap();
+            assert_eq!(exit.cause.as_deref(), Some("SessionEnd"));
+            assert_eq!(exit.hook_session.as_ref().unwrap().session_id, "old");
+            assert_eq!(exit.hook_session.as_ref().unwrap().agent.as_deref(), Some("codex"));
+            assert!(captured.identities.lock().iter().all(|identity| identity.weak_episode == original));
+            tracker.note_output(1, "PS D:\\project> claude\r\n");
+            assert_eq!(tracker.ai_session_agent(1).as_deref(), Some("claude"));
+            assert!(tracker.weak_detection_episode(1) > original);
+        }
+    }
+
+    #[test]
+    fn producer_sole_exit_and_same_id_resume_keep_distinct_receipts() {
+        for detected in [false, true] {
+            let hooks = HookState::new();
+            let tracker = SessionTracker::new();
+            let captured = Arc::new(CapturedHooks::default());
+            let emitter = StatusEmitter::new(captured.clone());
+            if detected {
+                tracker.track_input_with_line_snapshot(1, "codex\r", None);
+            }
+            let first = tracker.weak_detection_episode(1);
+            produce(&hooks, &tracker, &emitter, "SessionStart", "resumed");
+            let first_lifecycle = hooks.session_of(1).unwrap().lifecycle_id;
+            assert!(first_lifecycle.is_some());
+            assert_eq!(captured.identities.lock().last().unwrap().hook_lifecycle,
+                first_lifecycle.map(crate::HookLifecycleEvent::Started));
+            produce(&hooks, &tracker, &emitter, "SessionStart", "resumed");
+            assert_eq!(captured.identities.lock().len(), 1);
+            assert_eq!(hooks.session_of(1).unwrap().lifecycle_id, first_lifecycle);
+            assert!(tracker.is_ai_session(1));
+            produce(&hooks, &tracker, &emitter, "UserPromptSubmit", "resumed");
+            let status_count = captured.statuses.lock().len();
+            produce(&hooks, &tracker, &emitter, "SessionStart", "resumed");
+            assert_eq!(captured.statuses.lock().len(), status_count);
+            assert_eq!(hooks.get_status(1).as_deref(), Some("ai-working"));
+            produce(&hooks, &tracker, &emitter, "SessionEnd", "resumed");
+            assert!(!tracker.is_ai_session(1));
+            assert_eq!(tracker.ai_session_started_at(1), None);
+            assert!(!hooks.is_hook_enabled(1));
+            assert_eq!(captured.statuses.lock().last().unwrap().weak_episode, first);
+            tracker.track_input_with_line_snapshot(1, "codex\r", None);
+            let second = tracker.weak_detection_episode(1);
+            assert!(second > first);
+            produce(&hooks, &tracker, &emitter, "SessionStart", "resumed");
+            assert!(!hooks.is_session_ended(1, "resumed"));
+            let second_lifecycle = hooks.session_of(1).unwrap().lifecycle_id;
+            assert_ne!(second_lifecycle, first_lifecycle);
+            assert_eq!(captured.identities.lock().last().unwrap().hook_lifecycle,
+                second_lifecycle.map(crate::HookLifecycleEvent::Started));
+            assert_eq!(captured.identities.lock().last().unwrap().weak_episode, second);
+            produce(&hooks, &tracker, &emitter, "SessionEnd", "resumed");
+            assert_eq!(captured.statuses.lock().last().unwrap().weak_episode, second);
+            assert_eq!(captured.statuses.lock().last().unwrap().hook_session.as_ref().unwrap().lifecycle_id, second_lifecycle);
+            assert!(!tracker.is_ai_session(1));
+        }
+    }
+
+    #[test]
+    fn producer_first_explicit_start_keeps_mid_session_token_and_unknown_receipt() {
+        let hooks = HookState::new();
+        let tracker = SessionTracker::new();
+        let captured = Arc::new(CapturedHooks::default());
+        let emitter = StatusEmitter::new(captured.clone());
+        tracker.track_input_with_line_snapshot(1, "launcher\r", None);
+        produce(&hooks, &tracker, &emitter, "UserPromptSubmit", "session");
+        let lifecycle = hooks.session_of(1).unwrap().lifecycle_id.unwrap();
+        assert_eq!(captured.identities.lock().last().unwrap().hook_lifecycle,
+            Some(crate::HookLifecycleEvent::Observed(lifecycle)));
+        tracker.note_output(1, "PS D:\\project> claude\r\n");
+        let later = tracker.weak_session_snapshot(1);
+        produce(&hooks, &tracker, &emitter, "SessionStart", "session");
+        assert_eq!(captured.identities.lock().len(), 2);
+        assert_eq!(captured.identities.lock().last().unwrap().hook_lifecycle,
+            Some(crate::HookLifecycleEvent::Started(lifecycle)));
+        assert_eq!(captured.identities.lock().last().unwrap().weak_episode, None);
+        assert_eq!(tracker.weak_session_snapshot(1), later);
+        produce(&hooks, &tracker, &emitter, "SessionStart", "session");
+        assert_eq!(captured.identities.lock().len(), 2);
+        produce(&hooks, &tracker, &emitter, "SessionEnd", "session");
+        assert_eq!(tracker.weak_session_snapshot(1), later);
+        assert_eq!(captured.statuses.lock().last().unwrap().hook_session.as_ref().unwrap().lifecycle_id, Some(lifecycle));
+    }
+
+    #[test]
+    fn producer_nonlast_and_clear_end_emit_exact_exits_without_pane_teardown() {
+        for clear in [false, true] {
+            let hooks = HookState::new();
+            let tracker = SessionTracker::new();
+            let captured = Arc::new(CapturedHooks::default());
+            let emitter = StatusEmitter::new(captured.clone());
+            tracker.track_input_with_line_snapshot(1, "codex\r", None);
+            let episode = tracker.weak_detection_episode(1);
+            produce(&hooks, &tracker, &emitter, "SessionStart", "outer");
+            let ending = if clear { "outer" } else { "inner" };
+            if !clear {
+                produce(&hooks, &tracker, &emitter, "SessionStart", "inner");
+            }
+            let status = hooks.get_status(1);
+            handle_hook_payload(&hooks, &emitter, &tracker,
+                hook_payload("SessionEnd", Some(ending), "codex", clear.then_some("clear")));
+            assert!(tracker.is_ai_session(1));
+            assert_eq!(tracker.weak_detection_episode(1), episode);
+            assert!(hooks.is_hook_enabled(1));
+            assert_eq!(hooks.get_status(1), status);
+            assert!(hooks.is_session_ended(1, ending));
+            assert_eq!(captured.statuses.lock().last().unwrap().hook_session.as_ref().unwrap().session_id, ending);
+            assert_eq!(captured.statuses.lock().last().unwrap().status, "idle");
+            if clear {
+                produce(&hooks, &tracker, &emitter, "SessionStart", "after-clear");
+            }
+            produce(&hooks, &tracker, &emitter, "SessionEnd", if clear { "after-clear" } else { "outer" });
+            assert!(!hooks.is_hook_enabled(1));
+            assert!(!tracker.is_ai_session(1));
+            assert_eq!(captured.statuses.lock().iter().filter(|status| status.cause.as_deref() == Some("SessionEnd")).count(), 2);
+        }
+    }
+
+    #[test]
+    fn producer_unknown_missing_and_mismatched_first_session_never_borrow_input() {
+        for event in ["Stop", "SessionStart"] {
+            for pending in [false, true] {
+                let hooks = HookState::new();
+                let tracker = SessionTracker::new();
+                let captured = Arc::new(CapturedHooks::default());
+                let emitter = StatusEmitter::new(captured.clone());
+                tracker.track_input_with_line_snapshot(1, if pending { "launcher\r" } else { "claude\r" }, None);
+                let source = tracker.weak_session_snapshot(1);
+                for sid in [None, Some("never-seen"), Some("")] {
+                    handle_hook_payload(&hooks, &emitter, &tracker, hook_payload("SessionEnd", sid, "codex", None));
+                }
+                assert!(captured.statuses.lock().is_empty());
+                assert_eq!(tracker.weak_session_snapshot(1), source);
+                produce(&hooks, &tracker, &emitter, event, "unknown-owner");
+                assert_eq!(tracker.weak_session_snapshot(1), source);
+                assert_eq!(captured.statuses.lock().last().unwrap().weak_episode, None);
+                assert_eq!(captured.identities.lock().last().unwrap().weak_episode, None);
+                tracker.note_output(1, "PS D:\\project> claude\r\n");
+                let published = tracker.weak_session_snapshot(1);
+                assert_eq!(published.0.as_deref(), Some("claude"));
+                // Neither a repeated start nor a provider correction upgrades
+                // a previously unknown receipt to the now-published source.
+                handle_hook_payload(&hooks, &emitter, &tracker,
+                    hook_payload("SessionStart", Some("unknown-owner"), "claude", None));
+                produce(&hooks, &tracker, &emitter, "SessionEnd", "unknown-owner");
+                assert_eq!(tracker.weak_session_snapshot(1), published);
+                assert_eq!(captured.statuses.lock().last().unwrap().weak_episode, None);
+            }
+        }
+    }
+
+    #[test]
+    fn producer_internal_session_identity_does_not_change_serialized_status() {
+        let hooks = HookState::new();
+        let tracker = SessionTracker::new();
+        let captured = Arc::new(CapturedHooks::default());
+        let emitter = StatusEmitter::new(captured.clone());
+        tracker.track_input_with_line_snapshot(1, "codex\r", None);
+        produce(&hooks, &tracker, &emitter, "SessionStart", "source");
+        produce(&hooks, &tracker, &emitter, "SessionEnd", "source");
+        for status in captured.statuses.lock().iter() {
+            assert_eq!(status.hook_session.as_ref().unwrap().session_id, "source");
+            let serialized = serde_json::to_value(status).unwrap();
+            let mut compatibility = status.clone();
+            compatibility.hook_session = None;
+            assert_eq!(serialized, serde_json::to_value(compatibility).unwrap());
+            assert!(serialized.get("hookSession").is_none());
+            assert!(serialized.get("hook_session").is_none());
+        }
+    }
+
+    #[test]
+    fn producer_unknown_ends_cannot_tombstone_or_clear_the_current_session() {
+        let hooks = HookState::new();
+        let tracker = SessionTracker::new();
+        let captured = Arc::new(CapturedHooks::default());
+        let emitter = StatusEmitter::new(captured.clone());
+        tracker.track_input_with_line_snapshot(1, "codex\r", None);
+        produce(&hooks, &tracker, &emitter, "SessionStart", "current");
+        produce(&hooks, &tracker, &emitter, "UserPromptSubmit", "current");
+        let before = captured.statuses.lock().len();
+        let source = tracker.weak_session_snapshot(1);
+        for sid in [None, Some("late-unseen"), Some("")] {
+            handle_hook_payload(&hooks, &emitter, &tracker, hook_payload("SessionEnd", sid, "codex", None));
+        }
+        assert_eq!(captured.statuses.lock().len(), before);
+        assert_eq!(hooks.get_status(1).as_deref(), Some("ai-working"));
+        assert_eq!(hooks.session_of(1).unwrap().session_id, "current");
+        assert!(!hooks.is_session_ended(1, "current"));
+        assert_eq!(tracker.weak_session_snapshot(1), source);
+        produce(&hooks, &tracker, &emitter, "SessionEnd", "current");
+        assert!(!tracker.is_ai_session(1));
+    }
+
+    #[test]
+    fn producer_unseen_mid_session_event_cannot_claim_a_same_provider_launch() {
+        let hooks = HookState::new();
+        let tracker = SessionTracker::new();
+        let captured = Arc::new(CapturedHooks::default());
+        let emitter = StatusEmitter::new(captured.clone());
+        tracker.track_input_with_line_snapshot(1, "codex\r", None);
+        tracker.track_input_with_line_snapshot(1, "\x04", None);
+        tracker.track_input_with_line_snapshot(1, "codex\r", None);
+        let source = tracker.weak_session_snapshot(1);
+        for event in ["UserPromptSubmit", "SessionStart", "Stop", "SessionEnd"] {
+            produce(&hooks, &tracker, &emitter, event, "unseen");
+            assert_eq!(tracker.weak_session_snapshot(1), source);
+        }
+        assert!(captured.statuses.lock().iter().all(|status| status.weak_episode.is_none()));
+        assert!(captured.identities.lock().iter().all(|identity| identity.weak_episode.is_none()));
+    }
+
+    #[test]
+    fn producer_outer_end_clears_only_its_unshared_receipt() {
+        for shared_receipt in [false, true] {
+            let hooks = HookState::new();
+            let tracker = SessionTracker::new();
+            let emitter = StatusEmitter::new(Arc::new(|_: StatusChange| {}));
+            tracker.track_input_with_line_snapshot(1, "codex\r", None);
+            let episode = tracker.weak_detection_episode(1);
+            produce(&hooks, &tracker, &emitter, "SessionStart", "outer");
+            if shared_receipt {
+                tracker.track_input_with_line_snapshot(1, "\x04", None);
+            }
+            produce(&hooks, &tracker, &emitter, "SessionStart", "inner");
+            produce(&hooks, &tracker, &emitter, "SessionEnd", "outer");
+            assert!(hooks.is_hook_enabled(1));
+            assert_eq!(tracker.is_ai_session(1), shared_receipt);
+            assert_eq!(tracker.weak_detection_episode(1), episode);
+            produce(&hooks, &tracker, &emitter, "SessionEnd", "inner");
+            assert!(!hooks.is_hook_enabled(1));
+            assert!(!tracker.is_ai_session(1));
+            tracker.track_input_with_line_snapshot(1, "claude\r", None);
+            assert_eq!(tracker.ai_session_agent(1).as_deref(), Some("claude"));
+            assert!(tracker.weak_detection_episode(1) > episode);
+        }
+    }
 
     /// 回归测试:server 没运行时回调**照样执行**。
     ///
-    /// 唯一的调用方是停摆兜底,它的判据是 pane 自己的 hook 记录。此前这里 gate 了
-    /// `server.as_ref()?`,于是 AI 跑着时关掉 hook 开关 → `is_hook_enabled` 仍为
-    /// true、`resolve_status` 仍认 hook 状态权威、收敛却被跳过 → 黄灯永久卡死。
+    /// Preserve the callback contract independently of server availability.
     #[test]
     fn server_lock_runs_callback_even_when_server_stopped() {
         let state = HookState::new();
@@ -895,13 +1205,17 @@ mod tests {
         let state = HookState::new();
         assert!(state.session_of(1).is_none());
 
-        state.record_session(1, Some("claude-code".into()), "sid-a".into());
+        state.record_session(1, HookSessionId {
+            agent: Some("claude-code".into()), session_id: "sid-a".into(), lifecycle_id: None,
+        });
         let s = state.session_of(1).unwrap();
         assert_eq!(s.session_id, "sid-a");
         assert_eq!(s.agent.as_deref(), Some("claude-code"));
 
         // /clear 换会话:同 pty 覆盖为新 id
-        state.record_session(1, Some("claude-code".into()), "sid-b".into());
+        state.record_session(1, HookSessionId {
+            agent: Some("claude-code".into()), session_id: "sid-b".into(), lifecycle_id: None,
+        });
         assert_eq!(state.session_of(1).unwrap().session_id, "sid-b");
 
         // SessionEnd / PTY 关闭走 remove:会话身份一并清除
@@ -912,69 +1226,71 @@ mod tests {
     #[test]
     fn end_session_last_active_triggers_teardown() {
         let state = HookState::new();
-        // 从未见过任何会话:保守按"最后一个"处理(执行销毁,对齐旧行为)
-        assert!(state.end_session(1, Some("sid-a")));
+        let tracker = SessionTracker::new();
+        assert!(state.end_session(1, "sid-a").is_none());
 
         // 正常生命周期:唯一活跃会话结束 -> 销毁
-        state.note_session_active(1, "sid-a");
-        assert!(state.end_session(1, Some("sid-a")));
+        state.recognize_session(1, None, "sid-a", true, &tracker);
+        assert!(state.end_session(1, "sid-a").unwrap().was_last);
     }
 
     #[test]
     fn nested_session_end_keeps_outer_alive() {
         let state = HookState::new();
+        let tracker = SessionTracker::new();
         // 外层交互会话 A 活跃中,嵌套非交互实例 B(claude -p)启动又结束
-        state.note_session_active(1, "sid-outer");
-        state.note_session_active(1, "sid-nested");
-        assert!(!state.end_session(1, Some("sid-nested"))); // 不销毁:A 还在
-        assert!(state.end_session(1, Some("sid-outer"))); // A 退出才销毁
+        state.recognize_session(1, None, "sid-outer", true, &tracker);
+        state.recognize_session(1, None, "sid-nested", true, &tracker);
+        assert!(!state.end_session(1, "sid-nested").unwrap().was_last);
+        assert!(state.end_session(1, "sid-outer").unwrap().was_last);
     }
 
     #[test]
     fn exit_restart_race_skips_teardown() {
         let state = HookState::new();
+        let tracker = SessionTracker::new();
         // 退出后立刻重开:新会话 B 的 SessionStart 先到,旧会话 A 的 SessionEnd 迟到
-        state.note_session_active(1, "sid-a");
-        state.note_session_active(1, "sid-b");
-        assert!(!state.end_session(1, Some("sid-a"))); // B 活跃,不销毁
+        state.recognize_session(1, None, "sid-a", true, &tracker);
+        state.recognize_session(1, None, "sid-b", true, &tracker);
+        assert!(!state.end_session(1, "sid-a").unwrap().was_last);
     }
 
     #[test]
     fn end_session_unknown_sid_respects_remaining_active() {
         let state = HookState::new();
-        state.note_session_active(1, "sid-a");
+        let tracker = SessionTracker::new();
+        state.recognize_session(1, None, "sid-a", true, &tracker);
         // 未知会话结束(其 Start 早于 hook server 启用):A 仍活跃,不销毁
-        assert!(!state.end_session(1, Some("sid-x")));
-        // payload 无 session_id:按剩余活跃集判断
-        assert!(!state.end_session(1, None));
-        assert!(state.end_session(1, Some("sid-a")));
+        assert!(state.end_session(1, "sid-x").is_none());
+        assert!(state.end_session(1, "sid-a").unwrap().was_last);
     }
 
     #[test]
     fn note_session_active_dedup_and_cap() {
         let state = HookState::new();
+        let tracker = SessionTracker::new();
         // 重复 note 去重,不占额外容量
-        state.note_session_active(1, "sid-0");
-        state.note_session_active(1, "sid-0");
+        state.recognize_session(1, None, "sid-0", true, &tracker);
+        state.recognize_session(1, None, "sid-0", true, &tracker);
         // 再 note sid-1..sid-CAP,溢出一格 → 最老的 sid-0 被挤出
         for i in 1..ACTIVE_SESSIONS_CAP + 1 {
-            state.note_session_active(1, &format!("sid-{}", i));
+            state.recognize_session(1, None, &format!("sid-{}", i), true, &tracker);
         }
+        assert!(state.end_session(1, "sid-0").is_none());
         // 结束 sid-1..sid-(CAP-1):每次集合都还非空
         for i in 1..ACTIVE_SESSIONS_CAP {
-            assert!(!state.end_session(1, Some(&format!("sid-{}", i))));
+            assert!(!state.end_session(1, &format!("sid-{}", i)).unwrap().was_last);
         }
         // 结束最后一个成员即空——证明 sid-0 确实已被挤出(否则此处非空)
-        assert!(state.end_session(1, Some(&format!("sid-{}", ACTIVE_SESSIONS_CAP))));
+        assert!(state.end_session(1, &format!("sid-{}", ACTIVE_SESSIONS_CAP)).unwrap().was_last);
     }
 
     #[test]
     fn purge_clears_active_sessions() {
         let state = HookState::new();
-        state.note_session_active(1, "sid-a");
+        state.recognize_session(1, None, "sid-a", true, &SessionTracker::new());
         state.purge(1);
-        // purge 后无残留:未知 sid 结束按空集处理
-        assert!(state.end_session(1, Some("sid-b")));
+        assert!(state.end_session(1, "sid-b").is_none());
     }
 
     #[test]

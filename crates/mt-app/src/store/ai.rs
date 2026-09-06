@@ -44,6 +44,7 @@ fn captured_route_matches(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct AgentPaneProjection {
     pub status: PaneStatus,
+    pub live: bool,
     pub attention: bool,
     pub provider: Option<String>,
     pub evidence: AgentEvidence,
@@ -51,23 +52,45 @@ pub(super) struct AgentPaneProjection {
 
 impl AgentPaneProjection {
     pub(super) fn apply_to_layout(&self, layout: &mut SplitNode, pty_id: u32) -> bool {
-        if !layout.update_status_by_pty(
-            pty_id,
-            self.status,
-            self.attention,
-            self.provider.as_deref(),
-        ) {
+        if !self.live {
+            return layout.update_status_by_pty(
+                pty_id,
+                self.status,
+                self.attention,
+                self.provider.as_deref(),
+            );
+        }
+        let Some(pane) = layout.pane_by_pty_mut(pty_id) else {
             return false;
-        }
-        // Unlike an unspecified legacy update, an accepted projection with no
-        // single provider must clear the previous inferred provider.
-        if matches!(self.status, PaneStatus::AiWorking | PaneStatus::AiIdle)
-            && let Some(pane) = layout.pane_by_pty_mut(pty_id)
-        {
-            pane.detected_agent.clone_from(&self.provider);
-        }
+        };
+        // Unknown maps to legacy Idle, but does not mean the Agent exited.
+        pane.status = self.status;
+        pane.attention = self.attention;
+        pane.detected_agent.clone_from(&self.provider);
         true
     }
+}
+
+pub(super) fn live_agent_runs_for_route<'a>(
+    registry: &'a AgentRuntimeRegistry,
+    route: &'a TerminalRoute,
+) -> impl Iterator<Item = &'a mt_ai::AgentRuntimeState> {
+    registry.runs().filter(move |state| {
+        &state.route == route
+            && !state.activity.is_ended()
+            && state.confirmation == AgentConfirmation::LiveConfirmed
+            && state.evidence != AgentEvidence::RestoredHistory
+            && !registry.is_superseded_weak_alias(&state.run_id)
+    })
+}
+
+pub(super) fn single_live_agent_for_route<'a>(
+    registry: &'a AgentRuntimeRegistry,
+    route: &'a TerminalRoute,
+) -> Option<&'a mt_ai::AgentRuntimeState> {
+    let mut runs = live_agent_runs_for_route(registry, route);
+    let run = runs.next()?;
+    runs.next().is_none().then_some(run)
 }
 
 pub(super) fn accepted_agent_projection(
@@ -75,20 +98,14 @@ pub(super) fn accepted_agent_projection(
     route: &TerminalRoute,
     retained_attention: bool,
 ) -> AgentPaneProjection {
-    let active = || {
-        registry.runs().filter(|state| {
-            &state.route == route
-                && !state.activity.is_ended()
-                && state.confirmation == AgentConfirmation::LiveConfirmed
-                && state.evidence != AgentEvidence::RestoredHistory
-        })
-    };
+    let active = || live_agent_runs_for_route(registry, route);
     let evidence = active()
         .map(|state| state.evidence)
         .max()
         .unwrap_or(AgentEvidence::RestoredHistory);
     let mut projection = AgentPaneProjection {
         status: PaneStatus::Idle,
+        live: false,
         attention: evidence == AgentEvidence::Hook && retained_attention,
         provider: None,
         evidence,
@@ -97,6 +114,7 @@ pub(super) fn accepted_agent_projection(
     // The registry has already reconciled evidence within each run. Independent
     // accepted runs all contribute; receipt order must not pick a pane owner.
     for state in active() {
+        projection.live = true;
         let status = PaneStatus::from_str(state.activity.legacy_status())
             .expect("agent activity has a legacy projection");
         if status.priority() > projection.status.priority() {
@@ -109,6 +127,25 @@ pub(super) fn accepted_agent_projection(
         projection.provider = providers.into_iter().next().map(str::to_string);
     }
     projection
+}
+
+pub(super) fn agent_display_status(
+    registry: &AgentRuntimeRegistry,
+    route: &TerminalRoute,
+    now_unix_ms: i64,
+) -> Option<PaneStatus> {
+    live_agent_runs_for_route(registry, route).map(|run| {
+        if matches!(run.activity, AgentActivity::Starting | AgentActivity::Working)
+            && (run.connectivity != AgentConnectivity::Live
+                || registry.activity_freshness(&run.run_id, now_unix_ms)
+                    != mt_ai::AgentActivityFreshness::Fresh)
+        {
+            PaneStatus::Idle
+        } else {
+            PaneStatus::from_str(run.activity.legacy_status())
+                .expect("agent activity has a legacy projection")
+        }
+    }).max_by_key(|status| status.priority())
 }
 
 fn project_status_observation(
@@ -136,10 +173,164 @@ fn project_status_observation(
         )),
         None => Some(AgentPaneProjection {
             status: PaneStatus::from_str(&change.status)?,
+            live: matches!(change.status.as_str(), "ai-working" | "ai-idle"),
             attention: incoming_attention,
             provider: change.agent.clone(),
             evidence: AgentEvidence::PtyActivity,
         }),
+    }
+}
+
+fn activity_for_session_identity(
+    registry: &AgentRuntimeRegistry,
+    route: &TerminalRoute,
+    provider: &AgentProvider,
+    session_id: &str,
+) -> AgentActivity {
+    let eligible = |run: &&mt_ai::AgentRuntimeState| {
+        &run.route == route && &run.provider == provider && !run.activity.is_ended()
+            && run.confirmation == AgentConfirmation::LiveConfirmed
+            && !registry.is_superseded_weak_alias(&run.run_id)
+    };
+    let unique_activity = |mut runs: Vec<&mt_ai::AgentRuntimeState>| {
+        if runs.len() == 1 { runs.pop().map(|run| run.activity) } else { None }
+    };
+    let exact = registry.runs().filter(eligible)
+        .filter(|run| run.provider_session_id.as_deref() == Some(session_id)).collect::<Vec<_>>();
+    if !exact.is_empty() {
+        return unique_activity(exact).unwrap_or(AgentActivity::Unknown);
+    }
+    unique_activity(registry.runs().filter(eligible)
+        .filter(|run| run.evidence == AgentEvidence::Hook && run.provider_session_id.is_none())
+        .collect())
+        .unwrap_or(AgentActivity::Unknown)
+}
+
+fn is_hook_observation(cause: Option<&str>) -> bool {
+    cause.is_some_and(|cause| !matches!(cause, "Stall" | "StallExit"))
+}
+
+fn unique_route_provider(registry: &AgentRuntimeRegistry, route: &TerminalRoute) -> Option<AgentProvider> {
+    let mut providers = registry.runs()
+        .filter(|run| &run.route == route && !run.activity.is_ended()
+            && !registry.is_superseded_weak_alias(&run.run_id))
+        .map(|run| &run.provider);
+    let provider = providers.next()?;
+    providers.all(|other| other == provider).then(|| provider.clone())
+}
+
+pub(crate) fn record_runtime_status_change(
+    registry: &mut AgentRuntimeRegistry,
+    route: TerminalRoute,
+    event_id: AgentEventId,
+    sequence: u64,
+    connection_epoch: Option<u64>,
+    received_at_unix_ms: i64,
+    change: &mt_ai::StatusChange,
+) -> Option<AgentApplyOutcome> {
+    let activity = mt_ai::activity_from_legacy_status(&change.status, change.cause.as_deref())?;
+    let hook_event = is_hook_observation(change.cause.as_deref());
+    let exact_session = change.hook_session.as_ref().filter(|_| hook_event);
+    if let Some(session) = exact_session {
+        let provider = session.agent.as_deref().unwrap_or("claude").parse::<AgentProvider>().ok();
+        let valid_session = !session.session_id.trim().is_empty()
+            && session.session_id.len() <= 512
+            && !session.session_id.chars().any(char::is_control);
+        let Some(provider) = provider.filter(|_| valid_session) else {
+            return Some(AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::UnresolvedHookOwner));
+        };
+        // An exact end cannot create a new ended run or attach to an unbound
+        // same-provider Hook. Only the already recognized session may end.
+        if session.lifecycle_id.is_none() && activity.is_ended() && registry.runs().filter(|run| {
+            run.route == route && run.provider == provider
+                && run.provider_session_id.as_deref() == Some(session.session_id.as_str())
+                && run.evidence == AgentEvidence::Hook && !run.activity.is_ended()
+                && run.confirmation == AgentConfirmation::LiveConfirmed
+        }).take(2).count() != 1 {
+            return Some(AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::UnresolvedHookOwner));
+        }
+        let observation = AgentObservation {
+            event_id, route, sequence, connection_epoch, received_at_unix_ms,
+            weak_episode: change.weak_episode,
+            provider,
+            provider_session_id: Some(session.session_id.clone()),
+            process: None,
+            activity,
+            connectivity: AgentConnectivity::Live,
+            confirmation: AgentConfirmation::LiveConfirmed,
+            evidence: AgentEvidence::Hook,
+        };
+        return Some(match session.lifecycle_id {
+            Some(lifecycle_id) => registry.observe_hook_lifecycle(observation, lifecycle_id),
+            None => registry.observe(observation),
+        });
+    }
+    if change.agent.is_none() && hook_event && activity.is_ended() {
+        return Some(registry.observe_hook_exit(
+            route, event_id, sequence, connection_epoch, received_at_unix_ms,
+        ));
+    }
+    let provider = change.agent.as_deref()
+        .and_then(|provider| provider.parse::<AgentProvider>().ok())
+        .or_else(|| unique_route_provider(registry, &route));
+    let Some(provider) = provider else {
+        return registry.runs().any(|run| run.route == route && !run.activity.is_ended()
+            && !registry.is_superseded_weak_alias(&run.run_id))
+            .then_some(AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::AmbiguousRun));
+    };
+    if !hook_event && registry.runs().filter(|run| {
+        run.route == route && run.provider == provider && !run.activity.is_ended()
+            && run.evidence >= AgentEvidence::ProcessAttested
+            && !registry.is_superseded_weak_alias(&run.run_id)
+    }).take(2).count() > 1 {
+        return Some(AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::AmbiguousRun));
+    }
+    // Queued monitor events stay weak even if Hook enabled before delivery.
+    Some(registry.observe(AgentObservation {
+        event_id, route, sequence, connection_epoch, received_at_unix_ms,
+        weak_episode: change.weak_episode,
+        provider,
+        provider_session_id: None,
+        process: None,
+        activity,
+        connectivity: AgentConnectivity::Live,
+        confirmation: AgentConfirmation::LiveConfirmed,
+        evidence: if hook_event { AgentEvidence::Hook } else { AgentEvidence::PtyActivity },
+    }))
+}
+
+fn record_runtime_session_identity(
+    registry: &mut AgentRuntimeRegistry,
+    route: TerminalRoute,
+    event_id: AgentEventId,
+    sequence: u64,
+    connection_epoch: Option<u64>,
+    received_at_unix_ms: i64,
+    identity: &mt_ai::SessionIdentity,
+) -> AgentApplyOutcome {
+    let provider = match identity.agent.as_deref().unwrap_or("claude").parse::<AgentProvider>() {
+        Ok(provider) => provider,
+        Err(_) if identity.hook_lifecycle.is_some() => {
+            return AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::UnresolvedHookOwner);
+        }
+        Err(_) => AgentProvider::CLAUDE.parse().expect("known provider"),
+    };
+    let activity = activity_for_session_identity(registry, &route, &provider, &identity.session_id);
+    let observation = AgentObservation {
+        event_id, route, sequence, connection_epoch, received_at_unix_ms,
+        weak_episode: identity.weak_episode,
+        provider,
+        provider_session_id: Some(identity.session_id.clone()),
+        process: None,
+        activity,
+        connectivity: AgentConnectivity::Live,
+        confirmation: AgentConfirmation::LiveConfirmed,
+        evidence: AgentEvidence::Hook,
+    };
+    match identity.hook_lifecycle {
+        Some(mt_ai::HookLifecycleEvent::Started(id)) => registry.start_hook_lifecycle(observation, id),
+        Some(mt_ai::HookLifecycleEvent::Observed(id)) => registry.observe_hook_lifecycle(observation, id),
+        None => registry.observe(observation),
     }
 }
 
@@ -448,55 +639,11 @@ impl AppStore {
         change: &mt_ai::StatusChange,
     ) -> Option<AgentApplyOutcome> {
         let route = route?;
-        let activity = mt_ai::activity_from_legacy_status(&change.status, change.cause.as_deref())?;
         let connection_epoch = self.current_agent_connection_epoch(project_id, &route);
-        if change.agent.is_none() && change.cause.is_some() && activity.is_ended() {
-            return Some(self.agent_runtime.observe_hook_exit(
-                route,
-                event_id,
-                sequence,
-                connection_epoch,
-                chrono::Utc::now().timestamp_millis(),
-            ));
-        }
-        let provider = change
-            .agent
-            .as_deref()
-            .and_then(|provider| provider.parse::<AgentProvider>().ok())
-            .or_else(|| {
-                self.agent_runtime
-                    .active_run_for_route(&route)
-                    .map(|state| state.provider.clone())
-            })
-            .or_else(|| {
-                self.ai
-                    .perception()
-                    .tracker()
-                    .ai_session_agent(change.pty_id)
-                    .and_then(|provider| provider.parse().ok())
-            });
-        let provider = provider?;
-        // A queued monitor event stays weak even if Hook became enabled
-        // between emission and delivery. Authoritative updates carry a cause.
-        let evidence = if change.cause.is_some() {
-            AgentEvidence::Hook
-        } else {
-            AgentEvidence::PtyActivity
-        };
-        Some(self.agent_runtime.observe(AgentObservation {
-            event_id,
-            route,
-            sequence,
-            connection_epoch,
-            provider,
-            provider_session_id: None,
-            process: None,
-            activity,
-            connectivity: AgentConnectivity::Live,
-            confirmation: AgentConfirmation::LiveConfirmed,
-            evidence,
-            received_at_unix_ms: chrono::Utc::now().timestamp_millis(),
-        }))
+        record_runtime_status_change(
+            &mut self.agent_runtime, route, event_id, sequence, connection_epoch,
+            chrono::Utc::now().timestamp_millis(), change,
+        )
     }
 
     fn observe_agent_session(
@@ -508,32 +655,12 @@ impl AppStore {
         identity: &mt_ai::SessionIdentity,
     ) -> Option<AgentApplyOutcome> {
         let route = route?;
-        let existing = self.agent_runtime.active_run_for_route(&route);
-        let provider = identity
-            .agent
-            .as_deref()
-            .and_then(|provider| provider.parse::<AgentProvider>().ok())
-            .or_else(|| existing.map(|state| state.provider.clone()))
-            .unwrap_or_else(|| AgentProvider::CLAUDE.parse().expect("known provider"));
-        let activity = existing
-            .map(|state| state.activity)
-            .unwrap_or(AgentActivity::Starting);
         let connection_epoch = project_id
             .and_then(|project_id| self.current_agent_connection_epoch(project_id, &route));
-        Some(self.agent_runtime.observe(AgentObservation {
-            event_id,
-            route,
-            sequence,
-            connection_epoch,
-            provider,
-            provider_session_id: Some(identity.session_id.clone()),
-            process: None,
-            activity,
-            connectivity: AgentConnectivity::Live,
-            confirmation: AgentConfirmation::LiveConfirmed,
-            evidence: AgentEvidence::Hook,
-            received_at_unix_ms: chrono::Utc::now().timestamp_millis(),
-        }))
+        Some(record_runtime_session_identity(
+            &mut self.agent_runtime, route, event_id, sequence, connection_epoch,
+            chrono::Utc::now().timestamp_millis(), identity,
+        ))
     }
 
     /// 后台线程送上来的 AI 事件(见 `ai.rs` 的接线图)。
@@ -564,7 +691,7 @@ impl AppStore {
                 let pane = self.project_states.get(&owner)?.pane(&pane_id)?;
                 let old_status = pane.status;
                 let old_attention = pane.attention;
-                let hook_event = change.cause.is_some();
+                let hook_event = is_hook_observation(change.cause.as_deref());
                 let incoming_attention = change
                     .cause
                     .as_deref()
@@ -584,13 +711,8 @@ impl AppStore {
                 let notify_transition = (hook_event || projection.evidence != AgentEvidence::Hook)
                     && projected_status == status
                     && projection.attention == incoming_attention;
-                // Git 面板的 pty-output 嗅探要跳过 AI pane 的输出。判据与
-                // `App.tsx:284` 的 `markAiPty(ptyId, status === 'ai-working' ||
-                // status === 'ai-idle')` 一字不差(见 `git_watch` 模块注释)。
-                crate::git_watch::set_ai_pane(
-                    change.pty_id,
-                    matches!(projected_status, PaneStatus::AiWorking | PaneStatus::AiIdle),
-                );
+                // Unknown task activity still belongs to a live Agent, not shell Git output.
+                crate::git_watch::set_ai_pane(change.pty_id, projection.live);
                 if let Some(state) = self.project_states.get_mut(&owner) {
                     state.layouts_mut().any(|layout| {
                         if agent_observation {
@@ -846,33 +968,44 @@ impl AppStore {
     /// 按 `session_id` 跨**全部项目**找「在跑」的 pane。对应
     /// `src/utils/sessionJump.ts::findLiveSessionPane`。
     ///
-    /// 三个条件缺一不可:① 会话身份匹配;② PTY 活着;③ 状态在
-    /// `{AiWorking, AiIdle}` 里。第三条不能省 —— `ai_session` 在 AI 退出后为
-    /// **续接语义刻意保留**(status 落回 idle),只看身份会把「claude 已退出的
-    /// shell」当成在跑,点过去对着一个死会话。
-    ///
-    /// # `exitedPtyIds` 的等价物
-    ///
-    /// 原版第二条查的是 `!exitedPtyIds.has(pane.ptyId)`,而 mt-app 没有这张表
-    /// (审计第 73 行记着这条缺失)。PTY 退出时 store 会把 pane 打成
-    /// [`PaneStatus::Error`],而 `Error` 本就不在第三条的白名单里 —— 两条合起来
-    /// **实际等价**,不必为此新增一份状态。
+    /// Rich routes require the exact live provider/session owner. Legacy-only
+    /// panes retain the four-state fallback; historical pane metadata is not
+    /// enough to identify a replacement process with unknown activity.
     pub fn find_live_session_pane(&self, session_id: &str) -> Option<(String, String, PaneStatus)> {
+        let mut exact = self.agent_target_views().into_iter().filter(|target| {
+            target.provider_session_id.as_deref() == Some(session_id)
+                && self.project_states.get(&target.project_id)
+                    .and_then(|state| state.pane(&target.pane_id))
+                    .is_some_and(|pane| self.pane_has_live_agent(&target.project_id, pane))
+                && !target.activity.is_ended()
+        });
+        if let Some(target) = exact.next() {
+            if exact.next().is_some() {
+                return None;
+            }
+            let status = self.project_states.get(&target.project_id)?.pane(&target.pane_id)?.status;
+            return Some((target.project_id, target.pane_id, status));
+        }
+        let mut found = None;
         for (project_id, state) in self.project_states.iter() {
             for pane in state.all_panes() {
-                let matches = pane
-                    .ai_session
-                    .as_ref()
-                    .is_some_and(|s| s.session_id == session_id);
-                if matches
-                    && pane.pty_id.is_some()
-                    && matches!(pane.status, PaneStatus::AiWorking | PaneStatus::AiIdle)
-                {
-                    return Some((project_id.clone(), pane.id.clone(), pane.status));
+                if !pane.ai_session.as_ref().is_some_and(|s| s.session_id == session_id) {
+                    continue;
+                }
+                if !self.pane_has_live_agent(project_id, pane) {
+                    continue;
+                }
+                let has_rich_route = self.current_agent_route_for_pane(project_id, pane)
+                    .is_some_and(|route| self.agent_runtime.runs().any(|run| &run.route == route));
+                if !has_rich_route {
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some((project_id.clone(), pane.id.clone(), pane.status));
                 }
             }
         }
-        None
+        found
     }
 
     /// 把恢复出来的会话身份**当场**写回 pane(对应 `setPaneAiSessionByPty`)。
@@ -1012,6 +1145,7 @@ mod route_tests {
             route,
             sequence,
             connection_epoch: Some(1),
+            weak_episode: None,
             provider: AgentProvider::CODEX.parse().unwrap(),
             provider_session_id: None,
             process: None,
@@ -1029,6 +1163,453 @@ mod route_tests {
             status: status.into(),
             cause: None,
             agent: Some("codex".into()),
+            weak_episode: None,
+            hook_session: None,
+        }
+    }
+
+    fn source_hook(perception: &mt_ai::AiPerception, event: &str, sid: Option<&str>) {
+        let payload = serde_json::from_value(serde_json::json!({
+            "pty_id": 7, "event": event, "agent": "codex", "session_id": sid,
+        })).unwrap();
+        mt_ai::hook_server::handle_hook_payload(
+            perception.hooks(), perception.emitter(), perception.tracker(), payload,
+        );
+    }
+
+    fn apply_source_channel(
+        registry: &mut AgentRuntimeRegistry,
+        receiver: &mut futures::channel::mpsc::UnboundedReceiver<AiEvent>,
+    ) -> Vec<(mt_ai::StatusChange, AgentApplyOutcome)> {
+        let mut statuses = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            let outcome = apply_source_event(registry, &event, None);
+            match event {
+                AiEvent::Status { change, .. } => {
+                    statuses.push((change, outcome));
+                }
+                AiEvent::Session { .. } => {
+                    assert!(matches!(outcome, AgentApplyOutcome::Applied { .. }));
+                }
+            }
+        }
+        statuses
+    }
+
+    fn apply_source_event(
+        registry: &mut AgentRuntimeRegistry,
+        event: &AiEvent,
+        epoch: Option<u64>,
+    ) -> AgentApplyOutcome {
+        match event {
+            AiEvent::Status { change, route, event_id, sequence } => record_runtime_status_change(
+                registry, route.clone().unwrap(), event_id.clone(), *sequence, epoch,
+                *sequence as i64, change,
+            ).expect("producer status is supported"),
+            AiEvent::Session { identity, route, event_id, sequence } => record_runtime_session_identity(
+                registry, route.clone().unwrap(), event_id.clone(), *sequence, epoch,
+                *sequence as i64, identity,
+            ),
+        }
+    }
+
+    fn source_weak_input(perception: &mt_ai::AiPerception) {
+        perception.emitter().emit_if_changed_with_episode(
+            7, "ai-idle", None, perception.tracker().ai_session_agent(7),
+            perception.tracker().weak_detection_episode(7),
+        );
+    }
+
+    #[test]
+    fn producer_bridge_same_id_resume_creates_new_run_for_sole_and_nonlast_sessions() {
+        for sibling in [false, true] {
+            for detected in [false, true] {
+                let route = route();
+                let (perception, mut receiver) = crate::ai::hook_channel_fixture(7, route.clone());
+                let mut registry = AgentRuntimeRegistry::default();
+                if detected {
+                    perception.observe_input(7, b"codex\r");
+                    source_weak_input(&perception);
+                    apply_source_channel(&mut registry, &mut receiver);
+                }
+                if sibling {
+                    source_hook(&perception, "SessionStart", Some("sibling"));
+                    source_hook(&perception, "UserPromptSubmit", Some("sibling"));
+                    apply_source_channel(&mut registry, &mut receiver);
+                }
+                source_hook(&perception, "SessionStart", Some("resumed"));
+                source_hook(&perception, "UserPromptSubmit", Some("resumed"));
+                apply_source_channel(&mut registry, &mut receiver);
+                let old = registry.runs().find(|run| run.provider_session_id.as_deref() == Some("resumed"))
+                    .unwrap().run_id.clone();
+                let old_identity = perception.hooks().session_of(7).unwrap();
+                source_hook(&perception, "SessionEnd", Some("resumed"));
+                apply_source_channel(&mut registry, &mut receiver);
+                let ended = registry.run(&old).unwrap().clone();
+                assert_eq!(ended.activity, AgentActivity::Exited);
+                let sibling_before = registry.runs().find(|run| run.provider_session_id.as_deref() == Some("sibling")).cloned();
+                if sibling {
+                    assert_eq!(perception.hooks().session_of(7), Some(old_identity.clone()));
+                }
+                source_hook(&perception, "SessionStart", Some("resumed"));
+                let first = receiver.try_recv().unwrap();
+                let AiEvent::Session { identity, sequence: first_sequence, .. } = &first else {
+                    panic!("resumed Started identity must precede its status");
+                };
+                let Some(mt_ai::HookLifecycleEvent::Started(lifecycle_id)) = identity.hook_lifecycle else {
+                    panic!("explicit resumed start must carry source authority");
+                };
+                assert_ne!(Some(lifecycle_id), old_identity.lifecycle_id);
+                assert_eq!(identity.session_id, "resumed");
+                let AgentApplyOutcome::Applied { run_id: resumed, created: true } = apply_source_event(&mut registry, &first, None) else {
+                    panic!("same-ID resume must create a new run");
+                };
+                assert_ne!(resumed, old);
+                let status = receiver.try_recv().unwrap();
+                let AiEvent::Status { change, sequence, .. } = &status else { panic!("missing start status"); };
+                assert!(*sequence > *first_sequence);
+                assert_eq!(change.hook_session.as_ref().unwrap().lifecycle_id, Some(lifecycle_id));
+                assert_eq!(apply_source_event(&mut registry, &status, None), AgentApplyOutcome::Applied {
+                    run_id: resumed.clone(), created: false,
+                });
+                let before_duplicate = registry.run(&resumed).unwrap().clone();
+                source_hook(&perception, "SessionStart", Some("resumed"));
+                assert!(receiver.try_recv().is_err(), "duplicate active start must reuse dedup and identity");
+                assert_eq!(registry.run(&resumed), Some(&before_duplicate));
+                source_hook(&perception, "UserPromptSubmit", Some("resumed"));
+                apply_source_channel(&mut registry, &mut receiver);
+                assert_eq!(registry.run(&resumed).unwrap().activity, AgentActivity::Working);
+                let working = registry.run(&resumed).unwrap().clone();
+                source_hook(&perception, "SessionStart", Some("resumed"));
+                assert!(receiver.try_recv().is_err());
+                assert_eq!(registry.run(&resumed), Some(&working));
+                source_hook(&perception, "Stop", Some("resumed"));
+                apply_source_channel(&mut registry, &mut receiver);
+                assert_eq!(registry.run(&resumed).unwrap().activity, AgentActivity::Done);
+                assert_eq!(live_agent_runs_for_route(&registry, &route).count(), if sibling { 2 } else { 1 });
+                source_hook(&perception, "SessionEnd", Some("resumed"));
+                apply_source_channel(&mut registry, &mut receiver);
+                assert_eq!(registry.run(&resumed).unwrap().activity, AgentActivity::Exited);
+                assert_eq!(registry.run(&old), Some(&ended));
+                assert_eq!(live_agent_runs_for_route(&registry, &route).count(), usize::from(sibling));
+                if let Some(sibling) = sibling_before {
+                    assert_eq!(registry.run(&sibling.run_id), Some(&sibling));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn producer_bridge_queued_old_lifecycle_events_cannot_mutate_a_resumed_run() {
+        let route = route();
+        let (perception, mut receiver) = crate::ai::hook_channel_fixture(7, route.clone());
+        let mut registry = AgentRuntimeRegistry::default();
+        source_hook(&perception, "SessionStart", Some("same"));
+        apply_source_channel(&mut registry, &mut receiver);
+        source_hook(&perception, "SessionStart", Some("sibling"));
+        apply_source_channel(&mut registry, &mut receiver);
+        source_hook(&perception, "UserPromptSubmit", Some("same"));
+        let queued_identity = receiver.try_recv().unwrap();
+        assert!(matches!(queued_identity, AiEvent::Session { .. }));
+        let queued_work = receiver.try_recv().unwrap();
+        source_hook(&perception, "SessionEnd", Some("same"));
+        let ended = receiver.try_recv().unwrap();
+        assert!(matches!(apply_source_event(&mut registry, &ended, None), AgentApplyOutcome::Applied { .. }));
+        source_hook(&perception, "SessionStart", Some("same"));
+        source_hook(&perception, "UserPromptSubmit", Some("same"));
+        apply_source_channel(&mut registry, &mut receiver);
+        let before: Vec<_> = registry.runs().cloned().collect();
+        for event in [&queued_identity, &queued_work] {
+            assert_eq!(apply_source_event(&mut registry, event, Some(99)),
+                AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::EndedRun));
+        }
+        assert_eq!(apply_source_event(&mut registry, &ended, Some(99)),
+            AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::DuplicateEvent));
+        // Keep the actual producer's old end identity while testing a fresh
+        // delivery envelope: ownership must reject it independently of replay.
+        let AiEvent::Status { change, .. } = &ended else { panic!("missing exact end"); };
+        let outcome = record_runtime_status_change(&mut registry, route.clone(), AgentEventId::new(),
+            99, Some(99), 99, change).unwrap();
+        assert_eq!(outcome, AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::EndedRun));
+        assert!(project_status_observation(&registry, Some(&route), Some(outcome), change, true, true).is_none());
+        for run in before { assert_eq!(registry.run(&run.run_id), Some(&run)); }
+        source_hook(&perception, "Stop", Some("same"));
+        let current = apply_source_channel(&mut registry, &mut receiver);
+        assert!(matches!(current[0].1, AgentApplyOutcome::Applied { .. }), "rejected epoch must not fence current events");
+        assert_eq!(live_agent_runs_for_route(&registry, &route)
+            .find(|run| run.provider_session_id.as_deref() == Some("same")).unwrap().activity, AgentActivity::Done);
+    }
+
+    #[test]
+    fn producer_bridge_rejected_start_does_not_bind_or_consume_its_event() {
+        let route = route();
+        let (perception, mut receiver) = crate::ai::hook_channel_fixture(7, route.clone());
+        let mut registry = AgentRuntimeRegistry::default();
+        source_hook(&perception, "SessionStart", Some("same"));
+        apply_source_channel(&mut registry, &mut receiver);
+        source_hook(&perception, "SessionEnd", Some("same"));
+        let queued_end = receiver.try_recv().unwrap();
+        source_hook(&perception, "SessionStart", Some("same"));
+        let early_start = receiver.try_recv().unwrap();
+        let early_status = receiver.try_recv().unwrap();
+        let before: Vec<_> = registry.runs().cloned().collect();
+        for event in [&early_start, &early_status] {
+            assert_eq!(apply_source_event(&mut registry, event, Some(99)),
+                AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::UnresolvedHookOwner));
+        }
+        for run in before { assert_eq!(registry.run(&run.run_id), Some(&run)); }
+        assert!(matches!(apply_source_event(&mut registry, &queued_end, None), AgentApplyOutcome::Applied { .. }));
+        assert!(matches!(apply_source_event(&mut registry, &early_start, None), AgentApplyOutcome::Applied { created: true, .. }));
+        assert!(matches!(apply_source_event(&mut registry, &early_status, None), AgentApplyOutcome::Applied { created: false, .. }));
+        assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 1);
+    }
+
+    #[test]
+    fn producer_bridge_first_explicit_start_after_mid_session_recognition_can_resume() {
+        let route = route();
+        let (perception, mut receiver) = crate::ai::hook_channel_fixture(7, route.clone());
+        let mut registry = AgentRuntimeRegistry::default();
+        source_hook(&perception, "SessionStart", Some("same"));
+        source_hook(&perception, "SessionEnd", Some("same"));
+        apply_source_channel(&mut registry, &mut receiver);
+        let ended = registry.runs().next().unwrap().clone();
+        // Real later source lifecycles evict the bounded sid tombstone. A
+        // subsequent mid-session event still has no rich restart authority.
+        for index in 0..8 {
+            let sid = format!("intervening-{index}");
+            source_hook(&perception, "SessionStart", Some(&sid));
+            source_hook(&perception, "SessionEnd", Some(&sid));
+            apply_source_channel(&mut registry, &mut receiver);
+        }
+        assert!(!perception.hooks().is_session_ended(7, "same"));
+        perception.observe_input(7, b"launcher\r");
+        source_hook(&perception, "UserPromptSubmit", Some("same"));
+        let observed = receiver.try_recv().unwrap();
+        let AiEvent::Session { identity, .. } = &observed else { panic!("missing mid-session identity"); };
+        let Some(mt_ai::HookLifecycleEvent::Observed(lifecycle_id)) = identity.hook_lifecycle else {
+            panic!("mid-session recognition is not Started");
+        };
+        assert_eq!(identity.weak_episode, None);
+        let status = receiver.try_recv().unwrap();
+        for event in [&observed, &status] {
+            assert_eq!(apply_source_event(&mut registry, event, None),
+                AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::EndedRun));
+        }
+        assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 0);
+        perception.observe_output(7, b"PS D:\\project> claude\r\n");
+        let later_episode = perception.tracker().weak_detection_episode(7);
+        assert!(later_episode.is_some());
+        source_hook(&perception, "SessionStart", Some("same"));
+        let started = receiver.try_recv().unwrap();
+        let AiEvent::Session { identity, .. } = &started else { panic!("first explicit start must emit identity"); };
+        assert_eq!(identity.hook_lifecycle, Some(mt_ai::HookLifecycleEvent::Started(lifecycle_id)));
+        assert_eq!(identity.weak_episode, None, "start authority cannot recapture the receipt");
+        assert!(matches!(apply_source_event(&mut registry, &started, None), AgentApplyOutcome::Applied { created: true, .. }));
+        apply_source_channel(&mut registry, &mut receiver);
+        source_hook(&perception, "SessionStart", Some("same"));
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(registry.run(&ended.run_id), Some(&ended));
+        assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 1);
+        source_hook(&perception, "SessionEnd", Some("same"));
+        apply_source_channel(&mut registry, &mut receiver);
+        assert_eq!(perception.tracker().weak_detection_episode(7), later_episode);
+        assert_eq!(perception.tracker().ai_session_agent(7).as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn producer_bridge_resumed_hook_never_borrows_later_provider_input() {
+        for pending in [false, true] {
+            let route = route();
+            let (perception, mut receiver) = crate::ai::hook_channel_fixture(7, route.clone());
+            let mut registry = AgentRuntimeRegistry::default();
+            perception.observe_input(7, b"codex\r");
+            let original = perception.tracker().weak_detection_episode(7);
+            source_weak_input(&perception);
+            apply_source_channel(&mut registry, &mut receiver);
+            let alias = registry.runs().next().unwrap().run_id.clone();
+            source_hook(&perception, "SessionStart", Some("same"));
+            apply_source_channel(&mut registry, &mut receiver);
+            perception.observe_input(7, b"\x04");
+            perception.observe_input(7, if pending { b"launcher\r" } else { b"claude\r" });
+            let newer_run = if pending {
+                None
+            } else {
+                source_weak_input(&perception);
+                apply_source_channel(&mut registry, &mut receiver);
+                registry.runs().find(|run| run.provider.as_str() == "claude").cloned()
+            };
+            for event in ["UserPromptSubmit", "SessionEnd", "SessionStart", "UserPromptSubmit", "SessionEnd"] {
+                source_hook(&perception, event, Some("same"));
+                let emitted = apply_source_channel(&mut registry, &mut receiver);
+                assert!(emitted.iter().all(|(_, result)| matches!(result, AgentApplyOutcome::Applied { .. })));
+                assert_eq!(perception.tracker().is_ai_session(7), !pending);
+                if let Some(newer) = &newer_run {
+                    assert_eq!(registry.run(&newer.run_id), Some(newer));
+                    assert!(!registry.is_superseded_weak_alias(&newer.run_id));
+                }
+            }
+            perception.observe_output(7, b"PS D:\\project> claude\r\n");
+            let newer = perception.tracker().weak_detection_episode(7);
+            assert!(newer > original);
+            assert_eq!(perception.tracker().ai_session_agent(7).as_deref(), Some("claude"));
+            source_weak_input(&perception);
+            apply_source_channel(&mut registry, &mut receiver);
+            assert!(registry.is_superseded_weak_alias(&alias));
+            let live = live_agent_runs_for_route(&registry, &route).collect::<Vec<_>>();
+            assert_eq!(live.len(), 1);
+            assert_eq!(live[0].provider.as_str(), "claude");
+            assert_eq!(live[0].weak_episode, newer);
+            assert_eq!(live[0].activity, AgentActivity::Unknown);
+        }
+    }
+
+    #[test]
+    fn producer_bridge_exact_nonlast_and_last_hook_exits_preserve_later_input() {
+        for pending in [false, true] {
+            for inner_first in [false, true] {
+                let route = route();
+                let (perception, mut receiver) = crate::ai::hook_channel_fixture(7, route.clone());
+                let mut registry = AgentRuntimeRegistry::default();
+                perception.observe_input(7, b"codex\r");
+                let original = perception.tracker().weak_detection_episode(7);
+                source_weak_input(&perception);
+                apply_source_channel(&mut registry, &mut receiver);
+                let alias = registry.runs().next().unwrap().run_id.clone();
+                for sid in ["outer", "inner"] {
+                    source_hook(&perception, "SessionStart", Some(sid));
+                    source_hook(&perception, "UserPromptSubmit", Some(sid));
+                    let emitted = apply_source_channel(&mut registry, &mut receiver);
+                    assert_eq!(emitted.len(), 2, "same status/cause must not dedup a different Hook sid");
+                    assert!(emitted.iter().all(|(_, outcome)| matches!(outcome, AgentApplyOutcome::Applied { .. })));
+                }
+                assert!(registry.is_superseded_weak_alias(&alias));
+                assert_eq!(registry.runs().filter(|run| run.evidence == AgentEvidence::Hook
+                    && run.activity == AgentActivity::Working).count(), 2);
+                perception.observe_input(7, b"\x04");
+                perception.observe_input(7, if pending { b"launcher\r" } else { b"claude\r" });
+                let newer = if pending {
+                    None
+                } else {
+                    source_weak_input(&perception);
+                    apply_source_channel(&mut registry, &mut receiver);
+                    Some(registry.runs().find(|run| run.provider.as_str() == "claude").unwrap().clone())
+                };
+                let endings = if inner_first { ["inner", "outer"] } else { ["outer", "inner"] };
+                for (index, sid) in endings.into_iter().enumerate() {
+                    // Same-sid repeated status after B must retain its source receipt.
+                    source_hook(&perception, "UserPromptSubmit", Some(sid));
+                    let repeated = apply_source_channel(&mut registry, &mut receiver);
+                    assert!(repeated.iter().all(|(change, _)| change.weak_episode == if sid == "outer" { original } else { None }));
+                    source_hook(&perception, "SessionEnd", Some(sid));
+                    let ended = apply_source_channel(&mut registry, &mut receiver);
+                    assert_eq!(ended.len(), 1);
+                    let (change, outcome) = &ended[0];
+                    assert!(matches!(outcome, AgentApplyOutcome::Applied { .. }));
+                    assert_eq!(change.hook_session.as_ref().unwrap().session_id, sid);
+                    assert_eq!(change.weak_episode, if sid == "outer" { original } else { None });
+                    assert_eq!(registry.runs().find(|run| run.provider_session_id.as_deref() == Some(sid)).unwrap().activity, AgentActivity::Exited);
+                    assert_eq!(registry.runs().filter(|run| run.evidence == AgentEvidence::Hook && !run.activity.is_ended()).count(), 1 - index);
+                    assert_eq!(perception.hooks().is_hook_enabled(7), index == 0);
+                    if let Some(newer) = &newer {
+                        assert_eq!(registry.run(&newer.run_id), Some(newer));
+                        assert!(!registry.is_superseded_weak_alias(&newer.run_id));
+                        assert_eq!(perception.tracker().ai_session_agent(7).as_deref(), Some("claude"));
+                    } else {
+                        assert!(!perception.tracker().is_ai_session(7));
+                    }
+                }
+                perception.observe_output(7, b"PS D:\\project> claude\r\n");
+                assert_eq!(perception.tracker().ai_session_agent(7).as_deref(), Some("claude"));
+                assert!(perception.tracker().weak_detection_episode(7) > original);
+                source_weak_input(&perception);
+                apply_source_channel(&mut registry, &mut receiver);
+                let projection = accepted_agent_projection(&registry, &route, false);
+                assert!(projection.live);
+                assert_eq!(projection.status, PaneStatus::Idle);
+                assert_eq!(projection.provider.as_deref(), Some("claude"));
+                assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 1);
+                assert_eq!(live_agent_runs_for_route(&registry, &route).next().unwrap().activity, AgentActivity::Unknown);
+                for sid in [None, Some("never-seen"), Some("inner"), Some("outer")] {
+                    source_hook(&perception, "SessionEnd", sid);
+                }
+                assert!(apply_source_channel(&mut registry, &mut receiver).is_empty());
+                assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn exact_hook_exit_requires_existing_unique_session_before_side_effects() {
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        let mut known = status_observation(route.clone(), 1, AgentActivity::Working, AgentEvidence::Hook);
+        known.provider_session_id = Some("known".into());
+        registry.observe(known);
+        let before: Vec<_> = registry.runs().cloned().collect();
+        let mut change = status_change("idle");
+        change.cause = Some("SessionEnd".into());
+        change.agent = None;
+        change.hook_session = Some(mt_ai::hook_server::HookSessionId {
+            agent: Some("codex".into()), session_id: "unknown".into(),
+            lifecycle_id: None,
+        });
+        assert_eq!(record_runtime_status_change(
+            &mut registry, route.clone(), AgentEventId::new(), 99, Some(99), 99, &change,
+        ), Some(AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::UnresolvedHookOwner)));
+        assert_eq!(registry.runs().count(), before.len());
+        for run in before {
+            assert_eq!(registry.run(&run.run_id), Some(&run));
+        }
+        change.hook_session.as_mut().unwrap().session_id = "known".into();
+        assert!(matches!(record_runtime_status_change(
+            &mut registry, route, AgentEventId::new(), 2, Some(1), 2, &change,
+        ), Some(AgentApplyOutcome::Applied { .. })));
+    }
+
+    #[test]
+    fn producer_bridge_all_hook_exits_allow_new_input_without_old_alias_resurrection() {
+        for inner_first in [false, true] {
+            let route = route();
+            let (perception, mut receiver) = crate::ai::hook_channel_fixture(7, route.clone());
+            let mut registry = AgentRuntimeRegistry::default();
+            perception.observe_input(7, b"codex\r");
+            let original = perception.tracker().weak_detection_episode(7);
+            source_weak_input(&perception);
+            apply_source_channel(&mut registry, &mut receiver);
+            let alias = registry.runs().next().unwrap().run_id.clone();
+            for sid in ["outer", "inner"] {
+                source_hook(&perception, "SessionStart", Some(sid));
+                source_hook(&perception, "UserPromptSubmit", Some(sid));
+            }
+            apply_source_channel(&mut registry, &mut receiver);
+            assert!(registry.is_superseded_weak_alias(&alias));
+            for sid in if inner_first { ["inner", "outer"] } else { ["outer", "inner"] } {
+                source_hook(&perception, "SessionEnd", Some(sid));
+                let statuses = apply_source_channel(&mut registry, &mut receiver);
+                assert_eq!(statuses.len(), 1);
+                assert!(matches!(statuses[0].1, AgentApplyOutcome::Applied { .. }));
+            }
+            assert!(!perception.tracker().is_ai_session(7));
+            assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 0);
+            for _ in 0..3 {
+                perception.emitter().emit_if_changed_with_episode(7, "idle", None, None, original);
+            }
+            assert!(apply_source_channel(&mut registry, &mut receiver).is_empty());
+            perception.observe_input(7, b"claude\r");
+            source_weak_input(&perception);
+            let launched = apply_source_channel(&mut registry, &mut receiver);
+            assert_eq!(launched.len(), 1);
+            assert!(matches!(launched[0].1, AgentApplyOutcome::Applied { created: true, .. }));
+            let newer = live_agent_runs_for_route(&registry, &route).next().unwrap().clone();
+            assert_eq!(newer.activity, AgentActivity::Unknown);
+            assert!(newer.weak_episode > original);
+            assert_ne!(newer.run_id, alias);
+            perception.emitter().emit_if_changed_with_episode(7, "ai-idle", None, Some("codex".into()), original);
+            let queued = apply_source_channel(&mut registry, &mut receiver);
+            assert_eq!(queued.len(), 1);
+            assert_eq!(queued[0].1, AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::SupersededWeakEpisode));
+            assert_eq!(registry.run(&newer.run_id), Some(&newer));
+            assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 1);
         }
     }
 
@@ -1059,11 +1640,14 @@ mod route_tests {
             status: "idle".into(),
             cause: Some("SessionEnd".into()),
             agent: None,
+            weak_episode: None,
+            hook_session: None,
         };
         let projection =
             project_status_observation(&registry, Some(&route), Some(outcome), &change, true, true)
                 .unwrap();
-        assert_eq!(projection.status, PaneStatus::AiWorking);
+        assert_eq!(projection.status, PaneStatus::Idle);
+        assert!(projection.live);
         assert_eq!(projection.provider.as_deref(), Some("claude"));
         assert!(!projection.attention);
         assert!(registry.runs().any(|run| {
@@ -1107,6 +1691,8 @@ mod route_tests {
                 status: "idle".into(),
                 cause: Some("SessionEnd".into()),
                 agent: None,
+                weak_episode: None,
+                hook_session: None,
             };
             assert!(
                 project_status_observation(
@@ -1126,7 +1712,7 @@ mod route_tests {
     }
 
     #[test]
-    fn delayed_pty_working_after_inventory_waiting_has_no_projection() {
+    fn delayed_pty_working_after_process_inventory_has_no_projection() {
         let route = route();
         let mut registry = AgentRuntimeRegistry::default();
         registry
@@ -1135,6 +1721,7 @@ mod route_tests {
                 route: route.clone(),
                 sequence: 11,
                 connection_epoch: 1,
+                weak_episode: None,
                 processes: vec![mt_ai::AgentProcessObservation {
                     provider: AgentProvider::CODEX.parse().unwrap(),
                     process: mt_ai::AgentProcessIdentity::new(10, 20).unwrap(),
@@ -1168,7 +1755,8 @@ mod route_tests {
             .is_none()
         );
         assert_eq!(accepted_agent_projection(&registry, &route, false), before);
-        assert_eq!(before.status, PaneStatus::AiIdle);
+        assert_eq!(before.status, PaneStatus::Idle);
+        assert!(before.live);
     }
 
     #[test]
@@ -1181,18 +1769,23 @@ mod route_tests {
         ] {
             let route = route();
             let mut registry = AgentRuntimeRegistry::default();
-            registry.observe(status_observation(
+            let process = mt_ai::AgentProcessIdentity::new(42, 99);
+            let mut hook = status_observation(
                 route.clone(),
                 1,
                 activity,
                 AgentEvidence::Hook,
-            ));
-            let outcome = registry.observe(status_observation(
+            );
+            hook.process = process;
+            registry.observe(hook);
+            let mut weak = status_observation(
                 route.clone(),
                 2,
                 AgentActivity::Working,
                 AgentEvidence::PtyActivity,
-            ));
+            );
+            weak.process = process;
+            let outcome = registry.observe(weak);
             let projection = project_status_observation(
                 &registry,
                 Some(&route),
@@ -1233,6 +1826,8 @@ mod route_tests {
             status: "idle".into(),
             cause: Some("SessionEnd".into()),
             agent: None,
+            weak_episode: None,
+            hook_session: None,
         };
         assert_eq!(
             project_status_observation(&registry, None, None, &change, true, true)
@@ -1261,7 +1856,8 @@ mod route_tests {
             registry.observe(event);
         }
         let projection = accepted_agent_projection(&registry, &route, false);
-        assert_eq!(projection.status, PaneStatus::AiWorking);
+        assert_eq!(projection.status, PaneStatus::Idle);
+        assert!(projection.live);
         assert_eq!(projection.provider, None);
         assert!(!projection.attention);
 
@@ -1274,10 +1870,10 @@ mod route_tests {
     }
 
     #[test]
-    fn route_projection_keeps_independent_process_work_beside_hook_state() {
+    fn route_projection_keeps_independent_process_liveness_beside_hook_state() {
         for (activity, status, attention) in [
-            (AgentActivity::Done, PaneStatus::AiWorking, false),
-            (AgentActivity::Waiting, PaneStatus::AiWorking, false),
+            (AgentActivity::Done, PaneStatus::AiIdle, false),
+            (AgentActivity::Waiting, PaneStatus::AiIdle, false),
             (AgentActivity::Blocked, PaneStatus::AiWorking, true),
             (AgentActivity::Failed, PaneStatus::Error, false),
         ] {
@@ -1289,6 +1885,7 @@ mod route_tests {
                     route: route.clone(),
                     sequence: 1,
                     connection_epoch: 1,
+                    weak_episode: None,
                     processes: vec![
                         mt_ai::AgentProcessObservation {
                             provider: "codex".parse().unwrap(),
@@ -1333,6 +1930,7 @@ mod route_tests {
         let mut layout = SplitNode::leaf(pane);
         let projection = AgentPaneProjection {
             status: PaneStatus::AiWorking,
+            live: true,
             attention: false,
             provider: None,
             evidence: AgentEvidence::ProcessAttested,
@@ -1348,5 +1946,387 @@ mod route_tests {
         assert_eq!(pane.detected_agent, None);
         assert_eq!(pane.ai_session, Some(session));
         assert_eq!(pane.status, PaneStatus::AiWorking);
+    }
+
+    #[test]
+    fn unknown_activity_retains_live_provider_and_session_without_legacy_work() {
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        registry.observe(status_observation(
+            route.clone(), 1, AgentActivity::Unknown, AgentEvidence::Hook,
+        ));
+        let mut pane = crate::tree::PaneState::new("shell");
+        pane.pty_id = Some(7);
+        let session = AiSessionRef {
+            agent: Some("codex".into()), session_id: "exact".into(), cwd: None,
+        };
+        pane.ai_session = Some(session.clone());
+        let mut layout = SplitNode::leaf(pane);
+        let projection = accepted_agent_projection(&registry, &route, false);
+        assert!(projection.live);
+        assert_eq!(projection.status, PaneStatus::Idle);
+        assert!(projection.apply_to_layout(&mut layout, 7));
+        let pane = layout.pane_by_pty(7).unwrap();
+        assert_eq!(pane.status, PaneStatus::Idle);
+        assert_eq!(pane.detected_agent.as_deref(), Some("codex"));
+        assert_eq!(pane.ai_session, Some(session));
+        assert!(!pane.attention);
+        registry.remove_route(&route);
+        let projection = accepted_agent_projection(&registry, &route, false);
+        assert!(!projection.live);
+        assert!(projection.apply_to_layout(&mut layout, 7));
+        assert!(layout.pane_by_pty(7).unwrap().ai_session.is_none());
+    }
+
+    #[test]
+    fn terminal_display_stops_stale_work_without_losing_agent_liveness() {
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        let process = mt_ai::AgentProcessIdentity::new(42, 99).unwrap();
+        let mut observation = status_observation(
+            route.clone(), 1, AgentActivity::Working, AgentEvidence::ProcessAttested,
+        );
+        observation.process = Some(process);
+        let AgentApplyOutcome::Applied { run_id, .. } = registry.observe(observation)
+        else { panic!("process rejected"); };
+        assert_eq!(agent_display_status(&registry, &route, 1), Some(PaneStatus::Idle));
+        assert!(matches!(registry.observe_semantic(mt_ai::AgentSemanticObservation {
+            event_id: AgentEventId::new(), run_id, route: route.clone(),
+            provider: "codex".parse().unwrap(),
+            owner: mt_ai::AgentSemanticOwner::ForegroundProcess(process),
+            sequence: 2, connection_epoch: Some(1), activity: AgentActivity::Working,
+            observed_at_unix_ms: 2, received_at_unix_ms: 2,
+        }), AgentApplyOutcome::Applied { .. }));
+        assert_eq!(agent_display_status(&registry, &route, 2), Some(PaneStatus::AiWorking));
+        let expired = 3 + mt_ai::AGENT_SEMANTIC_MAX_AGE_MS;
+        assert_eq!(agent_display_status(&registry, &route, expired), Some(PaneStatus::Idle));
+        assert!(accepted_agent_projection(&registry, &route, false).live);
+
+        let mut hook = status_observation(route.clone(), 3, AgentActivity::Working, AgentEvidence::Hook);
+        hook.process = Some(process);
+        registry.observe(hook);
+        assert_eq!(agent_display_status(&registry, &route, expired), Some(PaneStatus::AiWorking));
+        registry.mark_connectivity(mt_ai::AgentConnectivityObservation {
+            event_id: AgentEventId::new(), route: route.clone(), sequence: 4,
+            connection_epoch: Some(1), connectivity: AgentConnectivity::Disconnected,
+            received_at_unix_ms: 4,
+        }).unwrap();
+        assert_eq!(agent_display_status(&registry, &route, expired), Some(PaneStatus::Idle));
+        assert!(accepted_agent_projection(&registry, &route, false).live);
+    }
+
+    #[test]
+    fn session_identity_never_borrows_newest_other_provider_or_session_activity() {
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        let provider: AgentProvider = "codex".parse().unwrap();
+        assert_eq!(activity_for_session_identity(&registry, &route, &provider, "new"),
+            AgentActivity::Unknown);
+        let mut owned = status_observation(route.clone(), 1, AgentActivity::Waiting, AgentEvidence::Hook);
+        owned.provider_session_id = Some("owned".into());
+        registry.observe(owned);
+        let mut other = status_observation(route.clone(), 2, AgentActivity::Working, AgentEvidence::Hook);
+        other.provider = "claude".parse().unwrap();
+        other.provider_session_id = Some("newest-other".into());
+        registry.observe(other);
+        assert_eq!(activity_for_session_identity(&registry, &route, &provider, "owned"),
+            AgentActivity::Waiting);
+        assert_eq!(activity_for_session_identity(&registry, &route, &provider, "new"),
+            AgentActivity::Unknown);
+    }
+
+    #[test]
+    fn session_identity_does_not_promote_unbound_process_semantics_into_hook_authority() {
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        let process = mt_ai::AgentProcessIdentity::new(42, 99).unwrap();
+        let mut observed = status_observation(
+            route.clone(), 1, AgentActivity::Unknown, AgentEvidence::ProcessAttested,
+        );
+        observed.process = Some(process);
+        let AgentApplyOutcome::Applied { run_id, .. } = registry.observe(observed)
+        else { panic!("process rejected"); };
+        let provider: AgentProvider = "codex".parse().unwrap();
+        assert!(matches!(registry.observe_semantic(mt_ai::AgentSemanticObservation {
+            event_id: AgentEventId::new(), run_id: run_id.clone(), route: route.clone(),
+            provider: provider.clone(), owner: mt_ai::AgentSemanticOwner::ForegroundProcess(process),
+            sequence: 2, connection_epoch: Some(1), activity: AgentActivity::Working,
+            observed_at_unix_ms: 2, received_at_unix_ms: 2,
+        }), AgentApplyOutcome::Applied { .. }));
+
+        let mut session = status_observation(
+            route.clone(), 3,
+            activity_for_session_identity(&registry, &route, &provider, "new-session"),
+            AgentEvidence::Hook,
+        );
+        assert_eq!(session.activity, AgentActivity::Unknown);
+        session.provider_session_id = Some("new-session".into());
+        assert!(matches!(registry.observe(session), AgentApplyOutcome::Applied { created: true, .. }));
+        assert_eq!(registry.runs().count(), 2);
+        assert_eq!(registry.activity_freshness(&run_id, 20_000), mt_ai::AgentActivityFreshness::Stale);
+        assert_eq!(agent_display_status(&registry, &route, 20_000), Some(PaneStatus::Idle));
+    }
+
+    #[test]
+    fn session_identity_can_retain_a_unique_unbound_hook_activity() {
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        registry.observe(status_observation(
+            route.clone(), 1, AgentActivity::Waiting, AgentEvidence::Hook,
+        ));
+        assert_eq!(activity_for_session_identity(&registry, &route, &"codex".parse().unwrap(), "new"),
+            AgentActivity::Waiting);
+    }
+
+    #[test]
+    fn unbound_hook_and_two_same_provider_processes_keep_independent_app_liveness() {
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        registry.observe(status_observation(
+            route.clone(), 1, AgentActivity::Waiting, AgentEvidence::Hook,
+        ));
+        registry.apply_process_inventory(mt_ai::AgentProcessInventoryObservation {
+            event_id: AgentEventId::new(), route: route.clone(), sequence: 2,
+            connection_epoch: 1, received_at_unix_ms: 2,
+            weak_episode: None,
+            processes: [42, 43].into_iter().map(|pid| mt_ai::AgentProcessObservation {
+                provider: "codex".parse().unwrap(),
+                process: mt_ai::AgentProcessIdentity::new(pid, 99).unwrap(),
+                activity: AgentActivity::Unknown,
+            }).collect(),
+        }).unwrap();
+        assert_eq!(registry.runs().count(), 3);
+        assert_eq!(registry.runs().filter(|run| run.process.is_some()).count(), 2);
+        let projection = accepted_agent_projection(&registry, &route, false);
+        assert!(projection.live);
+        assert_eq!(projection.status, PaneStatus::AiIdle);
+        assert_eq!(projection.provider.as_deref(), Some("codex"));
+        assert!(!projection.attention);
+    }
+
+    #[test]
+    fn monitor_silence_is_not_hook_evidence_and_provider_fallback_is_unambiguous() {
+        for cause in [None, Some("Stall"), Some("StallExit")] {
+            assert!(!is_hook_observation(cause));
+        }
+        for cause in ["Stop", "PermissionRequest", "SessionEnd", "Interrupt"] {
+            assert!(is_hook_observation(Some(cause)));
+        }
+        let route = route();
+        let mut registry = AgentRuntimeRegistry::default();
+        registry.observe(status_observation(route.clone(), 1, AgentActivity::Working, AgentEvidence::Hook));
+        assert_eq!(unique_route_provider(&registry, &route).unwrap().as_str(), "codex");
+        let outcome = registry.observe(status_observation(route.clone(), 2, AgentActivity::Exited, AgentEvidence::PtyActivity));
+        assert_eq!(outcome, AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::AmbiguousRun));
+        assert!(project_status_observation(
+            &registry, Some(&route), Some(outcome), &status_change("idle"), false, false,
+        ).is_none());
+        assert_eq!(accepted_agent_projection(&registry, &route, false).status, PaneStatus::AiWorking);
+        let mut other = status_observation(route.clone(), 3, AgentActivity::Waiting, AgentEvidence::Hook);
+        other.provider = "claude".parse().unwrap();
+        registry.observe(other);
+        assert!(unique_route_provider(&registry, &route).is_none());
+    }
+
+    #[test]
+    fn weak_fallback_projection_is_sticky_after_hook_end_but_not_a_later_launch() {
+        for hook_first in [false, true] {
+            let route = route();
+            let tracker = mt_ai::SessionTracker::new();
+            tracker.track_input_with_line_snapshot(7, "codex\r", None);
+            let episode = tracker.weak_detection_episode(7).unwrap();
+            let mut registry = AgentRuntimeRegistry::default();
+            let mut weak = status_observation(route.clone(), 1, AgentActivity::Unknown, AgentEvidence::PtyActivity);
+            weak.connection_epoch = None;
+            weak.weak_episode = Some(episode);
+            let mut hook = status_observation(route.clone(), 2, AgentActivity::Done, AgentEvidence::Hook);
+            hook.connection_epoch = None;
+            hook.weak_episode = Some(episode);
+            hook.provider_session_id = Some("exact-session".into());
+            let alias = if hook_first {
+                hook.sequence = 1;
+                registry.observe(hook);
+                weak.sequence = 2;
+                assert_eq!(registry.observe(weak.clone()), AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::SupersededWeakEpisode));
+                None
+            } else {
+                let AgentApplyOutcome::Applied { run_id, .. } = registry.observe(weak.clone()) else { panic!("weak rejected"); };
+                assert!(accepted_agent_projection(&registry, &route, false).live);
+                assert_eq!(single_live_agent_for_route(&registry, &route).unwrap().run_id, run_id);
+                registry.observe(hook);
+                Some(run_id)
+            };
+            assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 1);
+            let hook_id = single_live_agent_for_route(&registry, &route).unwrap().run_id.clone();
+            let projection = accepted_agent_projection(&registry, &route, false);
+            assert!(projection.live, "Done is not a process exit");
+            assert_eq!(projection.status, PaneStatus::AiIdle);
+            assert_eq!(projection.provider.as_deref(), Some("codex"));
+            assert_eq!(agent_display_status(&registry, &route, 3), Some(PaneStatus::AiIdle));
+            if let Some(alias) = alias.as_ref() {
+                assert!(registry.is_superseded_weak_alias(alias));
+                assert!(!registry.run(alias).unwrap().activity.is_ended());
+            }
+
+            tracker.clear_ai_session(7);
+            assert!(matches!(registry.observe_hook_exit(route.clone(), AgentEventId::new(), 3, None, 3), AgentApplyOutcome::Applied { .. }));
+            for sequence in 4..=6 {
+                weak.event_id = AgentEventId::new();
+                weak.sequence = sequence;
+                weak.received_at_unix_ms = sequence as i64 * 10_000;
+                let outcome = registry.observe(weak.clone());
+                assert_eq!(outcome, AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::SupersededWeakEpisode));
+                assert!(project_status_observation(&registry, Some(&route), Some(outcome), &status_change("ai-idle"), false, false).is_none());
+            }
+            let projection = accepted_agent_projection(&registry, &route, true);
+            assert!(!projection.live);
+            assert!(!projection.attention);
+            assert_eq!(projection.provider, None);
+            assert_eq!(unique_route_provider(&registry, &route), None);
+            assert_eq!(agent_display_status(&registry, &route, 60_000), None);
+            assert!(single_live_agent_for_route(&registry, &route).is_none());
+            let mut pane = crate::tree::PaneState::new("shell");
+            pane.pty_id = Some(7);
+            pane.detected_agent = Some("codex".into());
+            pane.ai_session = Some(AiSessionRef { agent: Some("codex".into()), session_id: "exact-session".into(), cwd: None });
+            let mut layout = SplitNode::leaf(pane);
+            assert!(projection.apply_to_layout(&mut layout, 7));
+            assert_eq!(layout.pane_by_pty(7).unwrap().status, PaneStatus::Idle);
+            assert!(layout.pane_by_pty(7).unwrap().ai_session.is_none());
+            assert!(layout.pane_by_pty(7).unwrap().detected_agent.is_none());
+
+            tracker.track_input_with_line_snapshot(7, "codex\r", None);
+            let next_episode = tracker.weak_detection_episode(7).unwrap();
+            assert!(next_episode > episode);
+            weak.event_id = AgentEventId::new();
+            weak.sequence = 7;
+            weak.weak_episode = Some(next_episode);
+            let AgentApplyOutcome::Applied { run_id: next_id, created: true } = registry.observe(weak) else { panic!("later launch rejected"); };
+            assert_ne!(next_id, hook_id);
+            if let Some(alias) = alias {
+                assert_ne!(next_id, alias);
+                assert!(registry.is_superseded_weak_alias(&alias));
+                assert!(!registry.run(&alias).unwrap().activity.is_ended());
+            }
+            assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 1);
+            assert_eq!(single_live_agent_for_route(&registry, &route).unwrap().run_id, next_id);
+            let projection = accepted_agent_projection(&registry, &route, false);
+            assert!(projection.live);
+            assert_eq!(projection.status, PaneStatus::Idle);
+            assert_eq!(projection.provider.as_deref(), Some("codex"));
+        }
+    }
+
+    #[test]
+    fn weak_supersession_never_hides_proved_same_provider_runs_or_another_route() {
+        let route = route();
+        let mut other_route = route.clone();
+        other_route.terminal_incarnation_id = TerminalIncarnationId::new();
+        let tracker = mt_ai::SessionTracker::new();
+        tracker.track_input_with_line_snapshot(7, "codex\r", None);
+        let episode = tracker.weak_detection_episode(7);
+        let mut registry = AgentRuntimeRegistry::default();
+        for route in [route.clone(), other_route.clone()] {
+            let mut weak = status_observation(route, 1, AgentActivity::Unknown, AgentEvidence::PtyActivity);
+            weak.weak_episode = episode;
+            registry.observe(weak);
+        }
+        let mut hook = status_observation(route.clone(), 2, AgentActivity::Waiting, AgentEvidence::Hook);
+        hook.weak_episode = episode;
+        hook.provider_session_id = Some("session".into());
+        registry.observe(hook);
+        registry.apply_process_inventory(mt_ai::AgentProcessInventoryObservation {
+            event_id: AgentEventId::new(), route: route.clone(), sequence: 3,
+            connection_epoch: 1, weak_episode: episode, received_at_unix_ms: 3,
+            processes: [10, 20].into_iter().map(|pid| mt_ai::AgentProcessObservation {
+                provider: "codex".parse().unwrap(), process: mt_ai::AgentProcessIdentity::new(pid, 100).unwrap(),
+                activity: AgentActivity::Unknown,
+            }).collect(),
+        }).unwrap();
+        assert_eq!(registry.runs().count(), 5);
+        assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 3);
+        assert_eq!(live_agent_runs_for_route(&registry, &other_route).count(), 1);
+        assert!(single_live_agent_for_route(&registry, &route).is_none());
+        assert!(registry.runs().filter(|run| run.process.is_some() || run.evidence == AgentEvidence::Hook)
+            .all(|run| !registry.is_superseded_weak_alias(&run.run_id)));
+        registry.observe_hook_exit(route.clone(), AgentEventId::new(), 4, Some(1), 4);
+        assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 2);
+        assert!(accepted_agent_projection(&registry, &route, false).live);
+        registry.apply_process_inventory(mt_ai::AgentProcessInventoryObservation {
+            event_id: AgentEventId::new(), route: route.clone(), sequence: 5,
+            connection_epoch: 1, weak_episode: episode, received_at_unix_ms: 5, processes: vec![],
+        }).unwrap();
+        assert!(!accepted_agent_projection(&registry, &route, false).live);
+        assert_eq!(accepted_agent_projection(&registry, &route, false).provider, None);
+        assert!(accepted_agent_projection(&registry, &other_route, false).live);
+    }
+
+    #[test]
+    fn later_different_provider_episode_survives_older_hook_capture_and_retirement() {
+        let route = route();
+        let tracker = mt_ai::SessionTracker::new();
+        tracker.track_input_with_line_snapshot(7, "codex\r", None);
+        let first_episode = tracker.weak_detection_episode(7).unwrap();
+        let mut registry = AgentRuntimeRegistry::default();
+        let mut weak = status_observation(route.clone(), 1, AgentActivity::Unknown, AgentEvidence::PtyActivity);
+        weak.connection_epoch = None;
+        weak.weak_episode = Some(first_episode);
+        let AgentApplyOutcome::Applied { run_id: old_alias, .. } = registry.observe(weak.clone()) else { panic!("first weak input rejected"); };
+        let mut hook = status_observation(route.clone(), 2, AgentActivity::Working, AgentEvidence::Hook);
+        hook.connection_epoch = None;
+        hook.weak_episode = Some(first_episode);
+        hook.provider_session_id = Some("codex-session".into());
+        let AgentApplyOutcome::Applied { run_id: hook_id, .. } = registry.observe(hook.clone()) else { panic!("Hook rejected"); };
+        assert!(registry.is_superseded_weak_alias(&old_alias));
+        assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 1);
+
+        let mut same_episode = weak.clone();
+        same_episode.event_id = AgentEventId::new();
+        same_episode.sequence = 3;
+        same_episode.provider = "claude".parse().unwrap();
+        assert_eq!(registry.observe(same_episode), AgentApplyOutcome::Ignored(mt_ai::AgentObservationIgnored::SupersededWeakEpisode));
+
+        tracker.track_input_with_line_snapshot(7, "\x04", None);
+        tracker.track_input_with_line_snapshot(7, "claude\r", None);
+        let later_episode = tracker.weak_detection_episode(7).unwrap();
+        assert!(later_episode > first_episode);
+        weak.event_id = AgentEventId::new();
+        weak.sequence = 4;
+        weak.received_at_unix_ms = 4;
+        weak.weak_episode = Some(later_episode);
+        weak.provider = tracker.ai_session_agent(7).unwrap().parse().unwrap();
+        let AgentApplyOutcome::Applied { run_id: later_id, created: true } = registry.observe(weak) else { panic!("later detection rejected"); };
+        let later = registry.run(&later_id).unwrap().clone();
+        assert_eq!(later.activity, AgentActivity::Unknown);
+        assert!(!registry.is_superseded_weak_alias(&later_id));
+        assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 2);
+        assert_eq!(accepted_agent_projection(&registry, &route, false).provider, None);
+
+        hook.event_id = AgentEventId::new();
+        hook.sequence = 5;
+        hook.received_at_unix_ms = 50_000;
+        assert!(matches!(registry.observe(hook), AgentApplyOutcome::Applied { .. }));
+        assert_eq!(registry.run(&later_id), Some(&later));
+        assert!(!registry.is_superseded_weak_alias(&later_id));
+        registry.observe_hook_exit(route.clone(), AgentEventId::new(), 6, None, 50_001);
+        assert_eq!(registry.run(&hook_id).unwrap().activity, AgentActivity::Exited);
+        assert_eq!(registry.run(&later_id), Some(&later));
+        let projection = accepted_agent_projection(&registry, &route, false);
+        assert!(projection.live);
+        assert_eq!(projection.status, PaneStatus::Idle);
+        assert_eq!(projection.provider.as_deref(), Some("claude"));
+        assert_eq!(single_live_agent_for_route(&registry, &route).unwrap().run_id, later_id);
+
+        let mut covering = status_observation(route.clone(), 7, AgentActivity::Done, AgentEvidence::Hook);
+        covering.connection_epoch = None;
+        covering.provider = "claude".parse().unwrap();
+        covering.weak_episode = Some(later_episode);
+        covering.provider_session_id = Some("claude-session".into());
+        covering.received_at_unix_ms = 50_002;
+        assert!(matches!(registry.observe(covering), AgentApplyOutcome::Applied { .. }));
+        assert!(registry.is_superseded_weak_alias(&later_id));
+        assert_eq!(registry.run(&later_id), Some(&later));
+        assert_eq!(live_agent_runs_for_route(&registry, &route).count(), 1);
+        assert_eq!(accepted_agent_projection(&registry, &route, false).status, PaneStatus::AiIdle);
     }
 }

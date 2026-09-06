@@ -23,6 +23,7 @@ pub struct RemoteAgentProcess {
     pub provider: RemoteAgentProvider,
     pub pid: u32,
     pub start_ticks: u64,
+    pub foreground: bool,
 }
 ```
 
@@ -34,6 +35,13 @@ Claude, Codex, OpenCode, Pi, and Grok. The result carries the immutable
 
 - Run one fixed POSIX shell command on the already authenticated pooled
   session. Match every route environment field and protocol version exactly.
+- Require one live managed login root with matching PID/start ticks/TTY, then
+  prove each candidate's ancestry, session and controlling TTY against it.
+  Remote login captures `MINITERM_MANAGED_ROOT_PID`,
+  `MINITERM_MANAGED_ROOT_START_TICKS` and `MINITERM_MANAGED_ROOT_TTY` before exec
+  preserves that process identity. These are public facts, not secrets or a
+  substitute for positive process lineage. Copied route/root environment alone
+  does not admit a process from an unrelated terminal.
 - On Linux, inspect readable `/proc/<pid>/environ`, `/proc/<pid>/exe`,
   `/proc/<pid>/cmdline`, and `/proc/<pid>/stat` remotely. Provider
   classification happens in the script.
@@ -41,14 +49,35 @@ Claude, Codex, OpenCode, Pi, and Grok. The result carries the immutable
   enumeration. Keep `set -f` protection while splitting remote argv/stat text.
   Disabling globbing before that enumeration without a scoped re-enable
   produces a literal path and falsely reports an empty supported inventory.
-- Return only a fixed UTF-8 header, one capability row, at most 64
-  `provider/PID/start_ticks` rows, and a footer. Transport output is capped at
-  16 KiB and the request is time bounded.
+- Return `mini-term-agent-inventory-v2`, one capability row, at most 64
+  `agent/provider/PID/start_ticks/foreground-or-background` tab-separated rows,
+  and `end`. Transport output is capped at 16 KiB and the request is time
+  bounded. v1 captures lack the required ownership facts and are rejected.
+- Interpreter entrypoints/native executable identity identify providers;
+  arbitrary prompt or option text does not. Known help/version/noninteractive
+  helper modes are excluded. A single positively proven launcher/native-child
+  pair in the same process group projects one logical launcher run; independent
+  children remain separate. Provider/cwd equality alone never merges runs.
+- `foreground` states whether that logical CLI process group owns the managed
+  TTY foreground group. It is not Working/Waiting evidence. Owned background
+  processes remain in inventory, independent of the active GUI worktree.
+- Bound root enumeration, environment/argv/stat capture, ancestry depth and
+  candidate count. Recheck process/root identity and foreground group before
+  publishing. Raced or incomplete ownership cannot become supported-empty.
+- NUL-delimited argv/environment capture must preserve read status, its size
+  bound and final NUL. A successful pipeline's last command is not proof that
+  its `/proc` read succeeded. Keep empty argv fields and wildcard text literal;
+  otherwise an empty option value can consume a following helper-mode flag.
+  Compare executable/argv samples and recheck every buffered process identity
+  plus the managed root before publishing a successful frame.
 - Reject missing/duplicate framing, invalid providers, zero or malformed
   numbers, duplicate process identities, truncation, extra fields, non-UTF-8,
   uncertain channel state, and missing exit status.
 - `/proc` or required-tool absence returns `Unsupported`; it is not an empty
-  supported inventory.
+  supported inventory. Missing/ambiguous managed-root proof, including legacy
+  terminals opened before root capture existed, also returns Unsupported.
+  Those terminals need relaunch for this stronger probe; absence/retirement
+  cannot be inferred from the missing capability.
 - Transport failures may retire only the exact failed pooled session and may be
   retried once. Protocol and remote-state errors are not reconnect loops.
 
@@ -63,11 +92,17 @@ reuse cannot impersonate an existing run.
 
 | Condition | Result |
 | --- | --- |
-| Exact public route and known provider with PID/start ticks | Return normalized process facts |
+| Exact public route, managed root, ancestry/TTY and provider PID/start ticks | Return normalized logical process facts |
 | Any route field differs | Exclude that process |
+| Copied route/root environment in an unrelated terminal | Exclude without managed ancestry |
+| One known launcher/native-child pair with same provider/group | One logical run, not two rows |
+| Independent CLI processes on an owned terminal | Keep distinct runs; foreground is a separate fact |
+| Legacy terminal has no managed-root facts | Unsupported; never confirm absence |
 | Required Linux capability is absent | Return `Unsupported`, not supported-empty |
 | Framing is ambiguous, truncated, or lacks exit status | Reject the capture |
 | Argv contains wildcard text | Keep it literal; never classify expanded filenames |
+| Empty argv option value precedes a helper flag | Preserve the empty field and exclude the helper |
+| Failed, oversized or unterminated process capture | Reject/unsupported as appropriate; never confirmed absence |
 
 ## 5. Good / Base / Bad
 
@@ -86,10 +121,15 @@ reuse cannot impersonate an existing run.
 - Timeout and uncertain channel states retain transport/retirement
   classification.
 - On Linux in GitHub Actions, execute the actual generated command against a
-  controlled disposable process. Assert positive exact-route discovery,
-  mismatched route-field rejection, provider normalization, PID/start ticks,
-  bounded framing, and wildcard-looking argv safety. String-presence tests
-  alone cannot detect a valid-looking command that enumerates no processes.
+  controlled disposable PTY/process tree. Assert positive exact-route/root
+  discovery, every mismatched route field, copied-route unrelated-terminal
+  rejection, foreground/background preservation, launcher normalization,
+  independent children, helper exclusion, PID/start ticks, bounded framing,
+  races and wildcard-looking argv safety. String-presence tests alone cannot
+  detect a valid-looking command that enumerates no processes.
+- Fault injection addresses only fixture PIDs and covers failed/partial/NUL-less
+  captures, empty argv options and pre-publication identity changes. A simulated
+  stat change is a race fixture, not evidence that the kernel reused a PID.
 - Fixtures use only public route values and deterministic readiness/cleanup;
   never inspect or terminate the user's Agent as a test fixture. All probe and
   fixture execution is Actions-only, not a local or manually SSH-run check.

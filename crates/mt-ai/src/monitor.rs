@@ -14,7 +14,8 @@ use std::time::Duration;
 // 与 tracker/hook_server 那批表同一条命脉:用 parking_lot 免掉锁中毒。
 use parking_lot::Mutex;
 
-use crate::hook_server::HookState;
+use crate::hook_server::{HookSessionId, HookState};
+use crate::agent_runtime::{AgentHookLifecycleId, AgentWeakEpisode};
 use crate::tracker::SessionTracker;
 
 /// 一次状态变化。字段与原 `PtyStatusChangePayload` 完全一致
@@ -36,6 +37,12 @@ pub struct StatusChange {
     /// None = 非 AI 状态或来源未知。不参与去重(同一会话内恒定)。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Captured at the source, never inferred from delivery time or a poll.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weak_episode: Option<AgentWeakEpisode>,
+    /// Internal source identity, never part of the serialized compatibility event.
+    #[serde(skip)]
+    pub hook_session: Option<HookSessionId>,
 }
 
 /// hook 上报的会话身份变化(原 `pty-ai-session` 事件)。
@@ -50,6 +57,17 @@ pub struct SessionIdentity {
     /// 会话启动目录:claude --resume 只认该目录的会话桶,随身份一起持久化,
     /// 重启续接时 PTY 直接以它为 cwd。None = hook 给的 cwd 已不存在。
     pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weak_episode: Option<AgentWeakEpisode>,
+    /// Source-captured start authority; never serialized to legacy consumers.
+    #[serde(skip)]
+    pub hook_lifecycle: Option<HookLifecycleEvent>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookLifecycleEvent {
+    Started(AgentHookLifecycleId),
+    Observed(AgentHookLifecycleId),
 }
 
 /// 状态变化的去处。上层(GPUI 壳 / 移动端中转)实现它把变化落到自己的模型上。
@@ -73,23 +91,6 @@ where
     }
 }
 
-/// AI 输出活跃超时阈值。**仅**用于无 hook 的降级路径（`resolve_status` 的
-/// `else if` 分支）；hook 已启用的 pane 不在 `resolve_status` 里看输出活跃度
-/// （hook 启用后的输出静默走另一套「一次性落盘」的停摆兜底，见
-/// `stall_settle_target`）。
-const AI_ACTIVE_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// hook 已启用的 pane 上「AI 停摆」的判定窗口：hook 状态停在 ai-working、
-/// 且状态与 PTY 输出双双静默这么久，就认为这一轮实际已经结束。
-const AI_STALL_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// 停摆兜底改写状态时带的成因。两者都**不是** `Stop`，UI 的 `isAiCompletion`
-/// 认不出，不会播报完成；也都不在 `hook_server::is_attention_cause` 里，
-/// 不点托盘黄灯。纯粹用来把徽章从卡死的 ai-working 上摘下来。
-const STALL_CAUSE: &str = "Stall";
-/// 停摆 + 此前已触发过退出 → 判定 AI 已经退出，回落 idle（见 `stall_settle_target`）
-const STALL_EXIT_CAUSE: &str = "StallExit";
-
 /// 状态变化的统一发射器：monitor 轮询与 hook server 直推
 /// 共用同一份"上次发出的状态"去重表。
 ///
@@ -99,9 +100,16 @@ const STALL_EXIT_CAUSE: &str = "StallExit";
 /// 比较、记录、发射收在同一把锁内，保证两个发射源的事件顺序一致。
 #[derive(Clone)]
 pub struct StatusEmitter {
-    /// pty → 上次发出的 (status, cause)
-    prev: Arc<Mutex<HashMap<u32, (String, Option<String>)>>>,
+    /// Previous status/cause and source episode, shared by all producers.
+    prev: Arc<Mutex<HashMap<u32, EmittedStatus>>>,
     sink: Arc<dyn StatusSink>,
+}
+
+struct EmittedStatus {
+    status: String,
+    cause: Option<String>,
+    weak_episode: Option<AgentWeakEpisode>,
+    hook_session: Option<HookSessionId>,
 }
 
 impl StatusEmitter {
@@ -131,24 +139,67 @@ impl StatusEmitter {
         cause: Option<&str>,
         agent: Option<String>,
     ) {
+        self.emit_if_changed_with_episode(pty_id, status, cause, agent, None);
+    }
+
+    /// Episode changes represent source input detection, not poll activity.
+    pub fn emit_if_changed_with_episode(
+        &self,
+        pty_id: u32,
+        status: &str,
+        cause: Option<&str>,
+        agent: Option<String>,
+        weak_episode: Option<AgentWeakEpisode>,
+    ) {
+        self.emit_change(StatusChange {
+            pty_id,
+            status: status.to_string(),
+            cause: cause.map(str::to_string),
+            agent,
+            weak_episode,
+            hook_session: None,
+        });
+    }
+
+    pub(crate) fn emit_hook_status(&self, change: StatusChange) {
+        self.emit_change(change);
+    }
+
+    fn emit_change(&self, change: StatusChange) {
+        let pty_id = change.pty_id;
+        let status = change.status.as_str();
+        let cause = change.cause.as_deref();
+        let weak_episode = change.weak_episode;
         let mut prev = self.prev.lock();
-        if let Some((prev_status, prev_cause)) = prev.get(&pty_id) {
-            if prev_status == status {
+        if let Some(previous) = prev.get(&pty_id) {
+            let same_owner = change.hook_session.as_ref()
+                .is_none_or(|owner| previous.hook_session.as_ref() == Some(owner));
+            if previous.status == status && same_owner {
                 match cause {
-                    None => return,
+                    None if weak_episode.is_none() || weak_episode == previous.weak_episode => return,
                     Some(c) if crate::hook_server::is_attention_cause(c) => {}
-                    Some(c) if prev_cause.as_deref() == Some(c) => return,
+                    Some(c) if previous.cause.as_deref() == Some(c)
+                        && (weak_episode.is_none() || weak_episode == previous.weak_episode) => return,
                     _ => {}
                 }
             }
         }
-        prev.insert(pty_id, (status.to_string(), cause.map(|s| s.to_string())));
-        self.sink.status_changed(StatusChange {
-            pty_id,
+        let remembered_episode = weak_episode.or_else(|| prev.get(&pty_id).and_then(|previous| previous.weak_episode));
+        let remembered_session = change.hook_session.clone()
+            .or_else(|| prev.get(&pty_id).and_then(|previous| previous.hook_session.clone()));
+        let remembered_cause = match (cause, prev.get(&pty_id)) {
+            (None, Some(previous)) if previous.status == status => {
+                previous.cause.clone()
+            }
+            _ => cause.map(str::to_string),
+        };
+        prev.insert(pty_id, EmittedStatus {
             status: status.to_string(),
-            cause: cause.map(|s| s.to_string()),
-            agent,
+            cause: remembered_cause,
+            weak_episode: remembered_episode,
+            hook_session: remembered_session,
         });
+        self.sink.status_changed(change);
     }
 
     /// 会话身份变化的直通口(不参与状态去重):hook server 记录到新会话身份时调。
@@ -156,13 +207,12 @@ impl StatusEmitter {
         self.sink.session_identified(identity);
     }
 
-    /// 上次发给 UI 的成因。停摆兜底用它避让「正等用户批准」的 pane：
-    /// 那类 pane 的黄灯要一直亮到用户处理，兜底若插一脚会把 attention 抹掉。
+    #[cfg(test)]
     pub(crate) fn last_cause(&self, pty_id: u32) -> Option<String> {
         self.prev
             .lock()
             .get(&pty_id)
-            .and_then(|(_, cause)| cause.clone())
+            .and_then(|previous| previous.cause.clone())
     }
 
     /// 清掉已不存在的 pty 的去重记录
@@ -185,11 +235,8 @@ impl StatusEmitter {
 /// 每个下降沿被 UI 当成一次"任务完成"反复播报。v0.9.3 起整条兜底从本函数删除
 /// （retry_hold 机制随之失去消费者一并移除）。
 ///
-/// 输出静默的兜底在 v0.10.3 以另一种形态回来了，但**不在这里**：见
-/// `stall_settle_target` / `settle_stalled_ai`——它一次性地把结论**写进**
-/// `last_hook_status`，于是本函数后续每轮读到的都是同一个收敛值，不存在摆动，
-/// 也就没有可供误判成"完成"的下降沿。判据（hook 状态是否停在 ai-working）
-/// 本身也随之改变，触发一次就不再满足，这正是与旧兜底的分水岭。
+/// Silence never writes back to Hook state. Missing semantic telemetry remains
+/// missing evidence, not a fabricated completion, input wait, or process exit.
 ///
 /// 退出的唯一权威信号是 SessionEnd hook（hook_server 处理：清状态 + 直推 idle）。
 /// 这里**不能**根据输入检测（is_ai_session）把 hook 状态拆掉降级 idle：
@@ -197,128 +244,42 @@ impl StatusEmitter {
 /// 打断并不退出），曾经的 "ai-idle && !is_ai_session → idle" 兜底会把这类
 /// 误差放大成 pane 整个会话期永久显示 idle。
 ///
-/// 判定**不看 hook server 是否在运行**：`hook_enabled` 默认关闭，且 WSL / SSH /
-/// opencode / pi 这些 pane 即便 server 开着也从来没有 hook 上报，它们的徽章全
-/// 依赖这里的降级轮询（CLAUDE.md 「只靠输入检测识别的 agent 拿得到状态徽章」）。
-/// 曾短暂加过一条 `if !server_running { return "idle" }` 的「AI 感知总开关」，
-/// 在默认配置下等于把全部 AI 徽章、完成通知、托盘灯静默关掉，且没解决它声称
-/// 要解决的「降级轮询把等待授权谎报成完成」——那条 else-if 分支原样还在。
+/// Without Hook, `ai-idle` plus agent identity is only a compatibility liveness
+/// signal. The runtime normalizes it to Unknown, not semantic Waiting. This
+/// input-detection path does not depend on whether the Hook server is running.
 pub fn resolve_status(hook_state: &HookState, tracker: &SessionTracker, pty_id: u32) -> String {
+    status_from_detection(hook_state, pty_id, tracker.is_ai_session(pty_id))
+}
+
+fn status_from_detection(hook_state: &HookState, pty_id: u32, detected: bool) -> String {
     if hook_state.is_hook_enabled(pty_id) {
         hook_state
             .get_status(pty_id)
             .unwrap_or_else(|| "idle".to_string())
-    } else if tracker.is_ai_session(pty_id) {
-        // 未启用 hook 时降级到进程轮询逻辑
-        if tracker.has_recent_output(pty_id, AI_ACTIVE_TIMEOUT) {
-            "ai-working".to_string()
-        } else {
-            "ai-idle".to_string()
-        }
+    } else if detected {
+        "ai-idle".to_string()
     } else {
         "idle".to_string()
     }
 }
 
-/// 「AI 停摆」兜底的纯判定部分（发射一侧要动 sink，单测里不便构造，
-/// 因此把判据抽出来；`timeout` 也做成参数，测试可用 `Duration::ZERO` 表示
-/// "窗口已经走完"、用一个极大值表示"还没走完"）。
-///
-/// 背景：hook 状态卡在 ai-working 有确定性的来源——`Stop` 在若干情形下压根不
-/// 触发（用户打断已由 `note_user_interrupt` 覆盖；API 错误已由 `StopFailure`
-/// 覆盖），但仍有覆盖不到的：AI 进程被 kill / PTY 里的 shell 被换掉 / sidecar
-/// 上报失败 / 新版本又加了没注册的事件。这类 pane 会一直顶着 ai-working 徽章。
-///
-/// 五道闸，缺一不可：
-/// 1. hook 已启用——没启用的 pane 走 `resolve_status` 的轮询降级路径，那条路本就
-///    按输出活跃度给 ai-idle，插手只会互相打架；
-/// 2. 当前 hook 状态正是 ai-working——其余状态没什么可收敛的；
-/// 3. 上次发出的成因不是 attention 类——Codex 的 `PermissionRequest` 映射为
-///    ai-working 并点着黄灯，它是**明知故犯**地在等用户，且审批框弹出后本就没有
-///    输出。此时插手会连黄灯一起抹掉（UI 按 cause 重算 attention），
-///    把"等你批准"变成"没在跑"；
-/// 4. 状态本身静置满 `timeout`——刚进 ai-working 就判停摆是误伤；
-/// 5. PTY 输出也静默满 `timeout`——真在干活的 Claude/Codex TUI 一直在重绘
-///    计时器与 spinner，10 秒完全无输出基本只有"已经不在跑了"一种解释。
-///
-/// 目标状态区分两种情形：
-/// - `ai-idle`：AI 进程还在（输入检测的会话标记仍在，且 hook 事件也一直在把它
-///   扶正），只是这一轮结束了/卡住了——降徽章即可；
-/// - `idle`：此前已经**触发过退出**（双击 Ctrl+C / Ctrl+D / `/exit` 等，
-///   `track_input` 据此清掉会话标记），且此后没有任何 hook 事件把标记扶回来。
-///   单看输入检测不可信（双击 Ctrl+C 常常只是打断），但"触发过退出"叠加
-///   "10 秒完全无输出"就足以确认它真的退出了：还活着的 AI 不会这么安静。
-pub(crate) fn stall_settle_target(
-    hook_state: &HookState,
-    tracker: &SessionTracker,
-    last_cause: Option<&str>,
-    pty_id: u32,
-    timeout: Duration,
-) -> Option<&'static str> {
-    if !hook_state.is_hook_enabled(pty_id) {
-        return None;
-    }
-    if hook_state.get_status(pty_id).as_deref() != Some("ai-working") {
-        return None;
-    }
-    if last_cause.is_some_and(crate::hook_server::is_attention_cause) {
-        return None;
-    }
-    if !hook_state
-        .status_age(pty_id)
-        .is_some_and(|age| age >= timeout)
-    {
-        return None;
-    }
-    if tracker.has_recent_output(pty_id, timeout) {
-        return None;
-    }
-    Some(if tracker.is_ai_session(pty_id) {
-        "ai-idle"
-    } else {
-        "idle"
-    })
-}
-
-/// 停摆兜底的发射侧：判定命中就把结论**落盘**到 hook 状态并通知上层。
-///
-/// 落盘是关键（与 `note_user_interrupt` 同一手法）：`last_hook_status` 被改写后，
-/// 判据 2 不再成立，本轮之后不会重复触发；`resolve_status` 每轮读到的也都是这个
-/// 收敛值，不会随空闲期的零星伪输出摆回 ai-working。没有摆动 → 没有下降沿 →
-/// 不会重演 v0.9.3 修掉的"每 20~50s 播报一次假完成"。
-///
-/// 误判（AI 其实还在跑，只是安静）由下一个 hook 事件立刻纠正回 ai-working，
-/// 那条路径还会顺带 `mark_ai_session` 把会话标记扶正。
-fn settle_stalled_ai(
+fn poll_panes(
     hook_state: &HookState,
     tracker: &SessionTracker,
     emitter: &StatusEmitter,
-    pty_id: u32,
+    pty_ids: &[u32],
 ) {
-    let last_cause = emitter.last_cause(pty_id);
-    let Some(target) = stall_settle_target(
-        hook_state,
-        tracker,
-        last_cause.as_deref(),
-        pty_id,
-        AI_STALL_TIMEOUT,
-    ) else {
-        return;
-    };
-    hook_state.update(pty_id, target.to_string());
-    let (cause, agent) = if target == "idle" {
-        (STALL_EXIT_CAUSE, None)
-    } else {
-        (STALL_CAUSE, tracker.ai_session_agent(pty_id))
-    };
-    emitter.emit_if_changed(pty_id, target, Some(cause), agent);
-    eprintln!(
-        "[monitor] pty_id={} ai-working 静默 {}s -> {} (cause={})",
-        pty_id,
-        AI_STALL_TIMEOUT.as_secs(),
-        target,
-        cause
-    );
+    for pty_id in pty_ids {
+        let (detected_agent, weak_episode) = tracker.weak_session_snapshot(*pty_id);
+        let status = status_from_detection(hook_state, *pty_id, detected_agent.is_some());
+        let agent = if status.starts_with("ai-") {
+            detected_agent
+        } else {
+            None
+        };
+        emitter.emit_if_changed_with_episode(*pty_id, &status, None, agent, weak_episode);
+    }
+    emitter.retain(pty_ids);
 }
 
 /// 活着的 pane id 列表。原实现直接问 `PtyManager::get_pty_ids()`;本 crate 不认识
@@ -335,25 +296,7 @@ pub fn start_monitor(
         loop {
             let pty_ids = live_panes();
 
-            for pty_id in &pty_ids {
-                // 停摆收敛会改写 hook 状态，与 server 启停串行化；状态判定本身在
-                // 锁外。server 没起来**不是**跳过收敛的理由：判据是 pane 自己的
-                // hook 记录，AI 跑着时把 hook 开关关掉的 pane 照样得能被拉回来。
-                // 顺序不能颠倒：收敛命中时下面这次 emit 值已相同，会被去重吞掉，
-                // 上层只收到 settle 发出的那条带成因的。
-                hook_state.with_server_lock(|| {
-                    settle_stalled_ai(&hook_state, &tracker, &emitter, *pty_id);
-                });
-                let status = resolve_status(&hook_state, &tracker, *pty_id);
-                let agent = if status.starts_with("ai-") {
-                    tracker.ai_session_agent(*pty_id)
-                } else {
-                    None
-                };
-                emitter.emit_if_changed(*pty_id, &status, None, agent);
-            }
-
-            emitter.retain(&pty_ids);
+            poll_panes(&hook_state, &tracker, &emitter, &pty_ids);
 
             let sleep_ms = if pty_ids.is_empty() { 2000 } else { 500 };
             thread::sleep(Duration::from_millis(sleep_ms));
@@ -477,215 +420,219 @@ mod tests {
         assert_eq!(resolve_status(&hooks, &mgr, 1), "ai-idle");
     }
 
-    // ---- 停摆兜底（stall_settle_target）----
-    //
-    // 窗口用参数模拟：ZERO = 窗口已走完（`status_age >= 0` 恒真，
-    // `has_recent_output(_, 0)` 恒假），大值 = 窗口远未走完。
-
-    const ELAPSED: Duration = Duration::ZERO;
-    const NOT_ELAPSED: Duration = Duration::from_secs(3600);
-
-    /// 主场景：hook 卡在 ai-working、AI 进程还在（会话标记未被清），
-    /// 输出静默满窗口 → 收敛到 ai-idle（只降徽章，不当作退出）。
     #[test]
-    fn stalled_ai_working_settles_to_ai_idle() {
+    fn production_poll_preserves_silent_hooks_even_after_weak_exit_input() {
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
         let hooks = HookState::new();
-        let mgr = SessionTracker::new();
-
-        mgr.track_input(1, "claude\r");
-        hooks.update(1, "ai-working".to_string());
-
-        assert_eq!(
-            stall_settle_target(&hooks, &mgr, None, 1, ELAPSED),
-            Some("ai-idle")
-        );
-    }
-
-    /// 另一半：此前已触发过退出（双击 Ctrl+C，输入检测清掉会话标记），
-    /// 此后再无 hook 事件把标记扶正 + 静默满窗口 → 确认已退出，回落 idle。
-    #[test]
-    fn stalled_after_exit_trigger_settles_to_idle() {
-        let hooks = HookState::new();
-        let mgr = SessionTracker::new();
-
-        mgr.track_input(1, "claude\r");
-        hooks.update(1, "ai-working".to_string()); // 任务运行中
-        mgr.track_input(1, "\x03"); // 双击 Ctrl+C
-        mgr.track_input(1, "\x03"); // → clear_ai_session
-        assert!(!mgr.is_ai_session(1));
-
-        assert_eq!(
-            stall_settle_target(&hooks, &mgr, None, 1, ELAPSED),
-            Some("idle")
-        );
-    }
-
-    /// Ctrl+D 与显式退出命令同样构成「触发过退出」。
-    #[test]
-    fn explicit_exit_paths_settle_to_idle() {
-        for input in ["\x04", "/exit\r"] {
-            let hooks = HookState::new();
-            let mgr = SessionTracker::new();
-
-            mgr.track_input(1, "claude\r");
-            hooks.update(1, "ai-working".to_string());
-            mgr.track_input(1, input);
-
-            assert_eq!(
-                stall_settle_target(&hooks, &mgr, None, 1, ELAPSED),
-                Some("idle"),
-                "退出方式 {:?} 未被确认",
-                input
-            );
+        let tracker = SessionTracker::new();
+        let seen = Arc::new(Mutex::new(Vec::<StatusChange>::new()));
+        let sink = seen.clone();
+        let emitter = StatusEmitter::new(Arc::new(move |change: StatusChange| {
+            sink.lock().push(change);
+        }));
+        let states = [
+            (1, "ai-working", "PreToolUse"),
+            (2, "ai-working", "UserPromptSubmit"),
+            (3, "ai-working", "PermissionRequest"),
+            (4, "ai-idle", "Stop"),
+            (5, "error", "StopFailure"),
+        ];
+        for (pty_id, status, cause) in states {
+            tracker.track_input_with_line_snapshot(pty_id, "claude\r", None);
+            hooks.update(pty_id, status.to_string());
+            emitter.emit_if_changed_with_episode(pty_id, status, Some(cause), Some("claude".into()),
+                tracker.weak_detection_episode(pty_id));
         }
-    }
-
-    /// hook 事件会把误清的会话标记扶正（`mark_ai_session`）：
-    /// 打断后 AI 其实没退，标记回来了 → 只降 ai-idle，不再判定为退出。
-    #[test]
-    fn hook_event_after_exit_trigger_downgrades_target_to_ai_idle() {
-        let hooks = HookState::new();
-        let mgr = SessionTracker::new();
-
-        mgr.track_input(1, "claude\r");
-        hooks.update(1, "ai-working".to_string());
-        mgr.track_input(1, "\x03");
-        mgr.track_input(1, "\x03"); // 误判退出
-        mgr.mark_ai_session(1, "claude"); // 后续 hook 事件证明它还活着
-        hooks.update(1, "ai-working".to_string());
-
-        assert_eq!(
-            stall_settle_target(&hooks, &mgr, None, 1, ELAPSED),
-            Some("ai-idle")
-        );
-    }
-
-    /// 窗口未走完不动手：刚进 ai-working 的 pane 不算停摆。
-    #[test]
-    fn fresh_ai_working_is_not_settled() {
-        let hooks = HookState::new();
-        let mgr = SessionTracker::new();
-
-        mgr.track_input(1, "claude\r");
-        hooks.update(1, "ai-working".to_string());
-
-        assert_eq!(stall_settle_target(&hooks, &mgr, None, 1, NOT_ELAPSED), None);
-    }
-
-    /// 有近期输出不动手：真在干活的 TUI 一直在重绘，这是最主要的活体证据。
-    #[test]
-    fn recent_output_keeps_ai_working() {
-        let hooks = HookState::new();
-        let mgr = SessionTracker::new();
-
-        mgr.track_input(1, "claude\r");
-        hooks.update(1, "ai-working".to_string());
-        mgr.note_output_for_test(1);
-
-        // 状态静置窗口已过，但输出窗口没过 → 不收敛
-        assert_eq!(stall_settle_target(&hooks, &mgr, None, 1, NOT_ELAPSED), None);
-    }
-
-    /// Codex 的 PermissionRequest 映射为 ai-working 且点着黄灯：审批框弹出后
-    /// 本就没有输出，兜底若插手会把 attention 一并抹掉（UI 按 cause 重算），
-    /// 把"等你批准"变成"没在跑"。attention 类成因一律避让。
-    #[test]
-    fn attention_pane_is_exempt_from_stall() {
-        let hooks = HookState::new();
-        let mgr = SessionTracker::new();
-
-        mgr.track_input(1, "codex\r");
-        hooks.update(1, "ai-working".to_string());
-
-        for cause in ["PermissionRequest", "Elicitation", "StopFailure"] {
-            assert_eq!(
-                stall_settle_target(&hooks, &mgr, Some(cause), 1, ELAPSED),
-                None,
-                "cause={} 的 pane 不该被兜底改写",
-                cause
-            );
+        tracker.track_input_with_line_snapshot(2, "\x03", None);
+        tracker.track_input_with_line_snapshot(2, "\x03", None);
+        assert!(!tracker.is_ai_session(2));
+        // Cross the removed ten-second stall window using the real production
+        // poll helper, not a test-only copy of its decision logic.
+        thread::sleep(Duration::from_secs(11));
+        for _ in 0..4 {
+            poll_panes(&hooks, &tracker, &emitter, &[1, 2, 3, 4, 5]);
         }
-        // 非 attention 成因（如工作中事件）不豁免
-        assert_eq!(
-            stall_settle_target(&hooks, &mgr, Some("PreToolUse"), 1, ELAPSED),
-            Some("ai-idle")
-        );
-    }
-
-    /// 只作用于 hook 已启用且正处于 ai-working 的 pane。
-    #[test]
-    fn stall_leaves_other_panes_alone() {
-        let mgr = SessionTracker::new();
-        mgr.track_input(1, "claude\r");
-
-        // hook 从未启用（WSL/SSH/hook 关闭）：走轮询降级路径，不插手
-        let bare = HookState::new();
-        assert_eq!(stall_settle_target(&bare, &mgr, None, 1, ELAPSED), None);
-
-        // 已在等用户 / 已退出：没什么可收敛的
-        for status in ["ai-idle", "idle"] {
-            let hooks = HookState::new();
-            hooks.update(1, status.to_string());
-            assert_eq!(stall_settle_target(&hooks, &mgr, None, 1, ELAPSED), None);
+        assert_eq!(seen.lock().len(), states.len());
+        for (pty_id, status, cause) in states {
+            assert_eq!(hooks.get_status(pty_id).as_deref(), Some(status));
+            assert_eq!(emitter.last_cause(pty_id).as_deref(), Some(cause));
+            assert!(hooks.status_age(pty_id).unwrap() >= Duration::from_secs(10));
         }
+        hooks.update(1, "ai-idle".into());
+        emitter.emit_if_changed_with_episode(1, "ai-idle", Some("Stop"), Some("claude".into()),
+            tracker.weak_detection_episode(1));
+        hooks.remove(2);
+        emitter.emit_if_changed_with_episode(2, "idle", Some("SessionEnd"), None,
+            tracker.weak_detection_episode(2));
+        poll_panes(&hooks, &tracker, &emitter, &[1, 2, 3, 4, 5]);
+        let changes = seen.lock();
+        assert_eq!(changes.len(), states.len() + 2);
+        assert_eq!(changes[states.len()].cause.as_deref(), Some("Stop"));
+        assert_eq!(changes[states.len() + 1].cause.as_deref(), Some("SessionEnd"));
+        assert!(changes.iter().all(|change| !matches!(change.cause.as_deref(), Some("Stall" | "StallExit"))));
     }
 
-    /// 与 v0.9.3 删掉的旧兜底的分水岭：结论必须**落盘**。
-    /// 落盘后判据不再成立，不会每轮重复触发；`resolve_status` 每轮读到同一个
-    /// 收敛值，不随零星伪输出摆回 ai-working —— 没有摆动就没有假完成沿。
     #[test]
-    fn stall_settle_is_latched_and_not_repeated() {
+    fn production_poll_keeps_unhooked_input_liveness_independent_of_output() {
         let hooks = HookState::new();
-        let mgr = SessionTracker::new();
-
-        mgr.track_input(1, "claude\r");
-        hooks.update(1, "ai-working".to_string());
-        let target = stall_settle_target(&hooks, &mgr, None, 1, ELAPSED).unwrap();
-
-        hooks.update(1, target.to_string()); // settle_stalled_ai 的落盘动作
-        assert_eq!(
-            stall_settle_target(&hooks, &mgr, None, 1, ELAPSED),
-            None,
-            "已收敛的 pane 不该被反复改写"
-        );
-
-        // 落盘后即便伪输出继续零星抵达，多轮 resolve_status 也恒定
-        mgr.note_output_for_test(1);
-        let polls: Vec<String> = (0..5).map(|_| resolve_status(&hooks, &mgr, 1)).collect();
-        assert!(
-            polls.iter().all(|s| s == "ai-idle"),
-            "收敛后状态应恒定，实测 {:?}",
-            polls
-        );
-    }
-
-    /// 收敛结果经 `resolve_status` 原样透出（hook 状态仍是唯一读取源）。
-    #[test]
-    fn settled_status_flows_through_resolve_status() {
-        let hooks = HookState::new();
-        let mgr = SessionTracker::new();
-
-        mgr.track_input(1, "claude\r");
-        hooks.update(1, "ai-working".to_string());
-        mgr.track_input(1, "\x04"); // Ctrl+D 触发退出
-        let target = stall_settle_target(&hooks, &mgr, None, 1, ELAPSED).unwrap();
-        hooks.update(1, target.to_string());
-
-        assert_eq!(resolve_status(&hooks, &mgr, 1), "idle");
-    }
-
-    /// 兜底成因不得被 UI 当成「完成」或「待办」——与
-    /// `utils/aiCompletion.ts` 的同名断言互为镜像。
-    #[test]
-    fn stall_causes_are_neither_completion_nor_attention() {
-        for cause in [STALL_CAUSE, STALL_EXIT_CAUSE] {
-            assert_ne!(cause, "Stop", "兜底不得伪装成完成事件");
-            assert!(
-                !crate::hook_server::is_attention_cause(cause),
-                "{} 不该点黄灯",
-                cause
-            );
+        let tracker = SessionTracker::new();
+        let seen = Arc::new(Mutex::new(Vec::<StatusChange>::new()));
+        let sink = seen.clone();
+        let emitter = StatusEmitter::new(Arc::new(move |change: StatusChange| {
+            sink.lock().push(change);
+        }));
+        tracker.track_input_with_line_snapshot(1, "codex\r", None);
+        poll_panes(&hooks, &tracker, &emitter, &[1]);
+        for output in ["shell output", "\x1b[2Jredraw", "done", "working"] {
+            tracker.note_output(1, output);
+            poll_panes(&hooks, &tracker, &emitter, &[1]);
         }
+        let changes = seen.lock();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].status, "ai-idle");
+        assert_eq!(changes[0].agent.as_deref(), Some("codex"));
+        assert_eq!(changes[0].cause, None);
+        assert_eq!(changes[0].weak_episode, tracker.weak_detection_episode(1));
+        assert!(tracker.is_ai_session(1));
+        assert!(!hooks.is_hook_enabled(1));
+    }
+
+    #[test]
+    fn changed_input_episode_does_not_clear_authoritative_hook_cause() {
+        let tracker = SessionTracker::new();
+        let hooks = HookState::new();
+        let emitter = StatusEmitter::new(Arc::new(|_: StatusChange| {}));
+        tracker.track_input_with_line_snapshot(1, "claude\r", None);
+        hooks.update(1, "ai-working".into());
+        emitter.emit_if_changed_with_episode(1, "ai-working", Some("PermissionRequest"), Some("claude".into()),
+            tracker.weak_detection_episode(1));
+        tracker.clear_ai_session(1);
+        tracker.track_input_with_line_snapshot(1, "claude\r", None);
+        poll_panes(&hooks, &tracker, &emitter, &[1]);
+        assert_eq!(emitter.last_cause(1).as_deref(), Some("PermissionRequest"));
+        assert_eq!(hooks.get_status(1).as_deref(), Some("ai-working"));
+    }
+
+    #[test]
+    fn production_input_hook_exit_dedup_and_later_episode_do_not_resurrect_fallback() {
+        use crate::{AgentActivity, AgentApplyOutcome, AgentConfirmation, AgentConnectivity,
+            AgentEvidence, AgentObservation, AgentObservationIgnored, AgentRoute, AgentRuntimeRegistry};
+        use mt_identity::{AgentEventId, ExecutionHostId, HostInstallId, PaneKey, RepoId,
+            TabId, TerminalIncarnationId, TerminalSessionId, WorktreeId};
+
+        struct RuntimeSink {
+            route: AgentRoute,
+            state: Arc<Mutex<(AgentRuntimeRegistry, u64)>>,
+        }
+        impl StatusSink for RuntimeSink {
+            fn status_changed(&self, change: StatusChange) {
+                let mut state = self.state.lock();
+                state.1 += 1;
+                let sequence = state.1;
+                let activity = crate::activity_from_legacy_status(&change.status, change.cause.as_deref()).unwrap();
+                let hook = change.cause.is_some();
+                let outcome = if hook && activity.is_ended() && change.agent.is_none() {
+                    state.0.observe_hook_exit(self.route.clone(), AgentEventId::new(), sequence, None, 100)
+                } else {
+                    let provider = change.agent.as_deref().map(|agent| agent.parse().unwrap())
+                        .or_else(|| state.0.active_run_for_route(&self.route).map(|run| run.provider.clone()))
+                        .expect("an emitted AI/lifecycle observation has an owner");
+                    state.0.observe(AgentObservation {
+                        event_id: AgentEventId::new(), route: self.route.clone(), sequence,
+                        connection_epoch: None, provider, provider_session_id: None, process: None,
+                        weak_episode: change.weak_episode, activity,
+                        connectivity: AgentConnectivity::Live, confirmation: AgentConfirmation::LiveConfirmed,
+                        evidence: if hook { AgentEvidence::Hook } else { AgentEvidence::PtyActivity },
+                        received_at_unix_ms: 100,
+                    })
+                };
+                assert!(matches!(&outcome, AgentApplyOutcome::Applied { .. }), "{outcome:?}");
+            }
+
+            fn session_identified(&self, identity: SessionIdentity) {
+                let mut state = self.state.lock();
+                state.1 += 1;
+                let sequence = state.1;
+                let outcome = state.0.observe(AgentObservation {
+                    event_id: AgentEventId::new(), route: self.route.clone(), sequence,
+                    connection_epoch: None, provider: identity.agent.unwrap().parse().unwrap(),
+                    provider_session_id: Some(identity.session_id), process: None,
+                    weak_episode: identity.weak_episode, activity: AgentActivity::Unknown,
+                    connectivity: AgentConnectivity::Live, confirmation: AgentConfirmation::LiveConfirmed,
+                    evidence: AgentEvidence::Hook, received_at_unix_ms: 100,
+                });
+                assert!(matches!(outcome, AgentApplyOutcome::Applied { created: true, .. }));
+            }
+        }
+
+        let host = ExecutionHostId::derive("local", &HostInstallId::new());
+        let route = AgentRoute {
+            worktree_id: WorktreeId::derive(&RepoId::derive(&host, "/repo/.git"), "/repo", None),
+            execution_host_id: host, tab_id: TabId::new(), pane_key: PaneKey::new(),
+            terminal_session_id: TerminalSessionId::new(), terminal_incarnation_id: TerminalIncarnationId::new(),
+        };
+        let state = Arc::new(Mutex::new((AgentRuntimeRegistry::default(), 0)));
+        let emitter = StatusEmitter::new(Arc::new(RuntimeSink { route: route.clone(), state: state.clone() }));
+        let tracker = SessionTracker::new();
+        let hooks = HookState::new();
+        tracker.track_input_with_line_snapshot(1, "claude\r", None);
+        let old_episode = tracker.weak_detection_episode(1).unwrap();
+        poll_panes(&hooks, &tracker, &emitter, &[1]);
+        let weak = state.lock().0.active_run_for_route(&route).unwrap().clone();
+        assert_eq!(weak.weak_episode, Some(old_episode));
+        assert_eq!(weak.activity, AgentActivity::Unknown);
+        emitter.notify_session_identity(SessionIdentity {
+            pty_id: 1, agent: Some("claude".into()), session_id: "session".into(), cwd: None,
+            weak_episode: tracker.weak_detection_episode(1),
+            hook_lifecycle: None,
+        });
+        {
+            let state = state.lock();
+            assert_eq!(state.0.runs().count(), 2);
+            assert!(state.0.is_superseded_weak_alias(&weak.run_id));
+            assert_eq!(state.0.fallback_supersession(&weak.run_id).unwrap().sequence, 2);
+            assert_eq!(state.0.active_run_for_route(&route).unwrap().evidence, AgentEvidence::Hook);
+        }
+        hooks.update(1, "ai-working".into());
+        tracker.mark_ai_session(1, "claude");
+        emitter.emit_if_changed_with_episode(1, "ai-working", Some("UserPromptSubmit"), Some("claude".into()),
+            tracker.weak_detection_episode(1));
+        hooks.remove(1);
+        tracker.clear_ai_session(1);
+        emitter.emit_if_changed_with_episode(1, "idle", Some("SessionEnd"), None,
+            tracker.weak_detection_episode(1));
+        for _ in 0..4 { poll_panes(&hooks, &tracker, &emitter, &[1]); }
+        {
+            let state = state.lock();
+            assert_eq!(state.1, 4, "Hook exit already emitted idle; monitor must dedup");
+            assert_eq!(state.0.run(&weak.run_id), Some(&weak));
+            assert!(state.0.is_superseded_weak_alias(&weak.run_id));
+            assert!(state.0.active_run_for_route(&route).is_none());
+        }
+        tracker.track_input_with_line_snapshot(1, "claude\r", None);
+        assert!(tracker.weak_detection_episode(1).unwrap() > old_episode);
+        poll_panes(&hooks, &tracker, &emitter, &[1]);
+        let later = state.lock().0.active_run_for_route(&route).unwrap().clone();
+        assert_ne!(later.run_id, weak.run_id);
+        assert_eq!(later.activity, AgentActivity::Unknown);
+        for epoch in [None, Some(99)] {
+            let mut state = state.lock();
+            let outcome = state.0.observe(AgentObservation {
+                event_id: AgentEventId::new(), route: route.clone(), sequence: 100,
+                connection_epoch: epoch, provider: weak.provider.clone(), provider_session_id: None,
+                process: None, weak_episode: Some(old_episode), activity: AgentActivity::Working,
+                connectivity: AgentConnectivity::Live, confirmation: AgentConfirmation::LiveConfirmed,
+                evidence: AgentEvidence::PtyActivity, received_at_unix_ms: 99_000,
+            });
+            assert_eq!(outcome, AgentApplyOutcome::Ignored(AgentObservationIgnored::SupersededWeakEpisode));
+            assert_eq!(state.0.run(&later.run_id), Some(&later));
+            assert!(state.0.is_superseded_weak_alias(&weak.run_id));
+        }
+        for _ in 0..3 { poll_panes(&hooks, &tracker, &emitter, &[1]); }
+        assert_eq!(state.lock().1, 5);
+        tracker.track_input_with_line_snapshot(1, "/exit\r", None);
+        poll_panes(&hooks, &tracker, &emitter, &[1]);
+        assert!(state.lock().0.active_run_for_route(&route).is_none());
     }
 
     // ---- StatusSink 注入(替代原 Tauri emit) ----

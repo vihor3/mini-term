@@ -13,7 +13,7 @@ use crate::session_branch::{BranchMenuSegment, branch_menu_segment};
 use crate::store::{AppStore, TerminalJumpTarget, resolve_fork_cwd};
 use crate::tree::{PaneState, PaneStatus};
 
-/// 这个状态算「AI 会话还活着」吗。
+/// Legacy compatibility only; owned terminal actions use AppStore rich liveness.
 pub fn is_ai_alive(status: PaneStatus) -> bool {
     matches!(status, PaneStatus::AiWorking | PaneStatus::AiIdle)
 }
@@ -145,10 +145,14 @@ pub fn counts_for_window_close(pane: &PaneState) -> bool {
 /// 关窗确认正文里的一行:`· {项目名} / {标签}`;项目名为空时退成 `· {标签}`
 /// (`App.tsx:62-63` 一字不差)。
 pub fn window_close_line(project_name: &str, pane: &PaneState) -> String {
+    window_close_label(project_name, pane.label())
+}
+
+fn window_close_label(project_name: &str, label: &str) -> String {
     if project_name.is_empty() {
-        format!("· {}", pane.label())
+        format!("· {label}")
     } else {
-        format!("· {project_name} / {}", pane.label())
+        format!("· {project_name} / {label}")
     }
 }
 
@@ -164,8 +168,9 @@ pub fn collect_live_ai_panes(store: &AppStore) -> Vec<String> {
             continue;
         };
         for pane in state.all_panes() {
-            if counts_for_window_close(pane) {
-                names.push(window_close_line(&project.name, pane));
+            if store.pane_has_live_agent(&project.id, pane) {
+                let label = store.terminal_runtime_label(&project.id, pane);
+                names.push(window_close_label(&project.name, &label));
             }
         }
     }
@@ -206,8 +211,8 @@ pub fn close_terminal_target(
     else {
         return;
     };
-    let label = pane.label().to_string();
-    let has_ai = is_ai_alive(pane.status);
+    let label = store.read(cx).terminal_runtime_label(&target.project_id, &pane);
+    let has_ai = store.read(cx).pane_has_live_agent(&target.project_id, &pane);
     let (title, message) = if has_ai {
         (
             t("paneGroup", "closeAiTitle"),

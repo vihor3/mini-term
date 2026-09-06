@@ -100,6 +100,7 @@ pub struct ProjectWorktreeGroup {
     pub host_label: String,
     pub backend: CatalogBackend,
     pub warning: Option<String>,
+    /// User-requested progress only; automatic scans still fence registration.
     pub refreshing: bool,
     pub rows: Vec<WorktreeCatalogRow>,
 }
@@ -159,13 +160,31 @@ struct CatalogEntry {
     warning: Option<String>,
     in_flight_revision: Option<u64>,
     dirty: bool,
+    manual_pending: bool,
+    manual_in_flight: bool,
 }
 
 impl CatalogEntry {
     fn begin_scan(&mut self, revision: u64) {
         self.in_flight_revision = Some(revision);
         self.dirty = false;
+        self.manual_in_flight = std::mem::take(&mut self.manual_pending);
     }
+
+    fn finish_scan(&mut self) {
+        self.in_flight_revision = None;
+        self.manual_in_flight = false;
+    }
+
+    fn manual_refreshing(&self) -> bool {
+        self.manual_pending || self.manual_in_flight
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RefreshIntent {
+    Automatic,
+    Manual,
 }
 
 fn enqueue_scan_once(queue: &mut VecDeque<String>, root_project_id: &str) {
@@ -254,7 +273,7 @@ impl WorktreeCatalog {
             let focused = this.store.read(cx).window_focused();
             let regained_focus = focused && !this.was_focused;
             this.was_focused = focused;
-            this.refresh(regained_focus, false, cx);
+            this.refresh(regained_focus, false, RefreshIntent::Automatic, cx);
             cx.notify();
         })
         .detach();
@@ -264,7 +283,7 @@ impl WorktreeCatalog {
                 cx.background_executor().timer(REMOTE_POLL_INTERVAL).await;
                 let Ok(()) = this.update(cx, |catalog: &mut WorktreeCatalog, cx| {
                     if catalog.store.read(cx).window_focused() {
-                        catalog.refresh(true, true, cx);
+                        catalog.refresh(true, true, RefreshIntent::Automatic, cx);
                     }
                 }) else {
                     return;
@@ -283,12 +302,12 @@ impl WorktreeCatalog {
             was_focused,
             _poll_task: poll_task,
         };
-        catalog.refresh(true, false, cx);
+        catalog.refresh(true, false, RefreshIntent::Automatic, cx);
         catalog
     }
 
     pub fn force_refresh(&mut self, cx: &mut Context<Self>) {
-        self.refresh(true, false, cx);
+        self.refresh(true, false, RefreshIntent::Manual, cx);
     }
 
     pub fn groups(&self, cx: &App) -> Vec<ProjectWorktreeGroup> {
@@ -326,7 +345,13 @@ impl WorktreeCatalog {
         Some(row)
     }
 
-    fn refresh(&mut self, force: bool, remote_only: bool, cx: &mut Context<Self>) {
+    fn refresh(
+        &mut self,
+        force: bool,
+        remote_only: bool,
+        intent: RefreshIntent,
+        cx: &mut Context<Self>,
+    ) {
         let roots = {
             let store = self.store.read(cx);
             ordered_top_level_project_ids(store.projects(), store.config().project_tree.as_deref())
@@ -386,11 +411,13 @@ impl WorktreeCatalog {
                         );
                     }
                     if target_changed || eligible_force || entry.snapshot.is_none() {
+                        entry.manual_pending |= intent == RefreshIntent::Manual;
                         request_scan(entry, &mut self.queue, &root_project_id);
                     }
                 }
                 Err(error) => {
                     entry.desired = None;
+                    entry.manual_pending = false;
                     entry.warning = Some(bounded_warning(&error));
                     mark_snapshot_last_known(entry.snapshot.as_mut(), &error);
                     if entry.in_flight_revision.is_some() {
@@ -416,11 +443,13 @@ impl WorktreeCatalog {
                 continue;
             }
             let Some(target) = entry.desired.clone() else {
+                entry.manual_pending = false;
                 continue;
             };
             let target_generation = entry.target_generation;
             let Some(revision) = self.next_revision.checked_add(1) else {
                 entry.warning = Some("worktree catalog revision counter is exhausted".into());
+                entry.manual_pending = false;
                 continue;
             };
             self.next_revision = revision;
@@ -467,7 +496,7 @@ impl WorktreeCatalog {
             self.start_queued(cx);
             return;
         }
-        entry.in_flight_revision = None;
+        entry.finish_scan();
         self.in_flight = self.in_flight.saturating_sub(1);
 
         let mut retry_stale = !target_generation_matches(entry, completion.target_generation);
@@ -618,7 +647,9 @@ pub fn activate_target(
         window,
         cx,
     );
-    catalog.update(cx, |catalog, cx| catalog.force_refresh(cx));
+    catalog.update(cx, |catalog, cx| {
+        catalog.refresh(true, false, RefreshIntent::Automatic, cx);
+    });
     Ok(outcome)
 }
 
@@ -1206,7 +1237,7 @@ fn build_groups(
                 warning: entry
                     .and_then(|entry| entry.warning.clone())
                     .or_else(|| snapshot.and_then(|snapshot| snapshot.warning.clone())),
-                refreshing: entry.is_some_and(|entry| entry.in_flight_revision.is_some()),
+                refreshing: entry.is_some_and(CatalogEntry::manual_refreshing),
                 rows,
             })
         })
@@ -1530,6 +1561,7 @@ pub(crate) mod tests {
         let initial_target = row(entry.snapshot.as_ref().unwrap()).target;
         for revision in 8..11 {
             entry.begin_scan(revision);
+            assert!(!entry.manual_refreshing());
             let snapshot = entry.snapshot.as_ref().unwrap();
             let mut refreshing = row(snapshot);
             apply_refresh_eligibility(&mut refreshing, entry.in_flight_revision.is_some());
@@ -1541,7 +1573,8 @@ pub(crate) mod tests {
             let fresh = row(snapshot);
             assert!(fresh.authoritative && fresh.selectable && !fresh.last_known);
             assert!(!should_project_configured_children(Some(snapshot)));
-            entry.in_flight_revision = None;
+            entry.finish_scan();
+            assert!(!entry.manual_refreshing());
         }
         let mut snapshot = entry.snapshot.unwrap();
         let configured = project("child", "/feature", Some("p"));
@@ -1571,6 +1604,36 @@ pub(crate) mod tests {
         assert!(!retrying.selectable);
         assert_eq!(snapshot.warning.as_deref(), Some("offline"));
         assert_eq!(retrying.visibility_key, hidden.first().cloned());
+    }
+
+    #[test]
+    fn manual_progress_survives_an_automatic_scan_and_its_coalesced_rerun() {
+        let mut entry = CatalogEntry::default();
+        let mut queue = VecDeque::new();
+        entry.begin_scan(1);
+        assert!(!entry.manual_refreshing());
+
+        entry.manual_pending = true;
+        request_scan(&mut entry, &mut queue, "root");
+        assert!(entry.manual_refreshing());
+        assert!(entry.dirty);
+        entry.finish_scan();
+        queue_dirty_rerun(&mut entry, &mut queue, "root");
+        assert!(entry.manual_refreshing());
+        assert_eq!(queue.pop_front().as_deref(), Some("root"));
+
+        entry.begin_scan(2);
+        assert!(entry.manual_refreshing());
+        request_scan(&mut entry, &mut queue, "root");
+        entry.finish_scan();
+        queue_dirty_rerun(&mut entry, &mut queue, "root");
+        entry.begin_scan(3);
+        assert!(!entry.manual_refreshing());
+        assert!(entry.in_flight_revision.is_some());
+        entry.warning = Some("offline".into());
+        entry.finish_scan();
+        assert_eq!(entry.warning.as_deref(), Some("offline"));
+        assert!(!entry.manual_refreshing());
     }
 
     #[test]

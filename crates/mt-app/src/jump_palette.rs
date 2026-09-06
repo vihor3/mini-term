@@ -501,9 +501,12 @@ fn build_candidates(
     for agent in agents {
         let provider = agent.provider.as_str().to_string();
         let title = nonempty_label(&agent.pane_label, &provider);
+        let activity = crate::agent_activity::activity_label_with_freshness(
+            agent_activity_label(agent.activity), agent.activity_freshness,
+        );
         let subtitle = format!(
-            "{} | {} | {}",
-            agent.project_name, agent.worktree_name, agent.host_label
+            "{} | {} | {} | {}",
+            agent.project_name, agent.worktree_name, agent.host_label, activity,
         );
         let project = FilterOption {
             key: agent.project_id.clone(),
@@ -527,7 +530,7 @@ fn build_candidates(
                 agent.worktree_name.clone(),
                 agent.host_label.clone(),
                 provider.clone(),
-                agent_activity_label(agent.activity).to_string(),
+                activity,
             ],
             vec![provider.clone(), format!("{provider} chat")],
             vec![

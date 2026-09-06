@@ -63,6 +63,7 @@ use mt_identity::WorktreeId;
 use mt_ui::icons::{AiVendor, BrandIcon, StatusDot, StatusKind};
 use mt_ui::tooltip::Tooltip;
 
+use crate::execution_host::{ExecutionBackendSignature, ExecutionSourceSignature};
 use crate::i18n::{t, tr};
 use crate::menu;
 use crate::notify::ToastKind;
@@ -86,6 +87,90 @@ const PAGE_SIZE: usize = 20;
 /// 丢后台),且每个 TextView 常驻一前一后两个 task。一个长会话上千条消息全铺
 /// 出去就是开面板即卡窗口 —— 所以按页给,底下留「加载更多」。
 const PREVIEW_PAGE_SIZE: usize = 40;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionHistoryOwner {
+    project_id: String,
+    configured_path: String,
+    wsl_sessions_distro: Option<String>,
+    source: ExecutionSourceSignature,
+}
+
+impl SessionHistoryOwner {
+    pub(crate) fn capture(store: &AppStore) -> Option<Self> {
+        let project = store.active_project()?;
+        let source = store
+            .project_execution_snapshot(&project.id)
+            .ok()?
+            .source_signature();
+        (store.active_worktree_id() == Some(&source.worktree_id)).then(|| Self {
+            project_id: project.id.clone(),
+            configured_path: project.path.clone(),
+            wsl_sessions_distro: project.wsl_sessions_distro.clone(),
+            source,
+        })
+    }
+
+    pub(crate) fn is_current(&self, store: &AppStore) -> bool {
+        Self::capture(store).as_ref() == Some(self)
+    }
+
+    pub(crate) fn matches_local_path(&self, path: &str) -> bool {
+        self.source.backend == ExecutionBackendSignature::Local
+            && (path == self.source.canonical_path || path == self.configured_path)
+    }
+
+    pub(crate) fn exact_target(&self, session: &AiSession, store: &AppStore) -> Option<AgentTargetView> {
+        let current = Self::capture(store);
+        let targets = store.agent_target_views_for_worktree(&self.source.worktree_id);
+        session_agent_target(session, Some(self), current.as_ref(), &targets).exact().cloned()
+    }
+
+    fn owns_history_session(&self, session: &AiSession) -> bool {
+        session_matches_backend(session, &self.source.backend)
+            || (self.source.backend == ExecutionBackendSignature::Local
+                && session.ssh_connection_id.is_none()
+                && session.wsl_distro.is_some()
+                && session.wsl_distro == self.wsl_sessions_distro)
+    }
+}
+
+fn session_matches_backend(session: &AiSession, backend: &ExecutionBackendSignature) -> bool {
+    match backend {
+        ExecutionBackendSignature::Local => {
+            session.ssh_connection_id.is_none() && session.wsl_distro.is_none()
+        }
+        ExecutionBackendSignature::Wsl { distro } => {
+            session.ssh_connection_id.is_none()
+                && session.wsl_distro.as_deref() == Some(distro.as_str())
+        }
+        ExecutionBackendSignature::Ssh { connection_id, connection_epoch, .. } => {
+            connection_epoch.is_some() && session.wsl_distro.is_none()
+                && session.ssh_connection_id.as_deref() == Some(connection_id.as_str())
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionAgentResolution<'a> {
+    NoTarget,
+    ExactTarget(&'a AgentTargetView),
+    Ambiguous,
+    SourceMismatch,
+}
+
+impl<'a> SessionAgentResolution<'a> {
+    fn exact(self) -> Option<&'a AgentTargetView> {
+        match self {
+            Self::ExactTarget(target) => Some(target),
+            _ => None,
+        }
+    }
+
+    fn is_inert(self) -> bool {
+        matches!(self, Self::Ambiguous | Self::SourceMismatch)
+    }
+}
 
 /// 该会话对应的 resume 命令;id 形态异常返回 `None`。
 ///
@@ -125,32 +210,22 @@ pub fn build_resume_command(agent: &str, session_id: &str) -> Option<String> {
 /// 行为必须逐字相同。返回的 `Task` 由调用方持有 —— 丢掉就等于取消。
 pub(crate) fn jump_to_session(
     store: &Entity<AppStore>,
+    owner: SessionHistoryOwner,
     session: AiSession,
     window: &mut Window,
     cx: &mut App,
 ) -> Task<()> {
-    if orca_worktree_context_enabled() {
-        let run_id = {
-            let store = store.read(cx);
-            store.active_worktree_id().and_then(|worktree_id| {
-                let targets = store.agent_target_views_for_worktree(worktree_id);
-                session_agent_target(&session.session_type, &session.id, &targets)
-                    .map(|target| target.run_id.clone())
-            })
-        };
-        if let Some(run_id) = run_id {
-            AppStore::activate_agent_run(store, &run_id, window, cx);
+    let targets = store.read(cx).agent_target_views_for_worktree(&owner.source.worktree_id);
+    let current = SessionHistoryOwner::capture(store.read(cx));
+    match session_agent_target(&session, Some(&owner), current.as_ref(), &targets) {
+        SessionAgentResolution::ExactTarget(target) => {
+            AppStore::activate_agent_run(store, &target.run_id, window, cx);
             return Task::ready(());
         }
-    } else if let Some((project_id, pane_id, _)) =
-        store.read(cx).find_live_session_pane(&session.id)
-    {
-        store.update(cx, |store, cx| {
-            store.set_active_project(&project_id, cx);
-            store.activate_pane(&project_id, &pane_id, window, cx);
-        });
-        crate::workbench_area::activate_terminal_page(window, cx);
-        return Task::ready(());
+        SessionAgentResolution::Ambiguous | SessionAgentResolution::SourceMismatch => {
+            return Task::ready(());
+        }
+        SessionAgentResolution::NoTarget => {}
     }
 
     // WSL / SSH 远程来源的会话记录在别的机器/发行版里,本地 resume 恢复不了。
@@ -177,9 +252,7 @@ pub(crate) fn jump_to_session(
         // opencode / pi 之类没有 resume 能力的 agent:静默不做
         return Task::ready(());
     };
-    let Some(project_id) = store.read(cx).active_project_id.clone() else {
-        return Task::ready(());
-    };
+    let project_id = owner.project_id.clone();
     let anchor = store.read(cx).active_pane_id(&project_id);
     // `claude --resume` 只认「启动目录」对应的会话桶:子目录里起的会话在项目根
     // 恢复会报 `No conversation found`,先反查记录的 cwd。codex 不按目录分桶;
@@ -197,12 +270,22 @@ pub(crate) fn jump_to_session(
             None
         };
         let _ = cx.update(|window, cx| {
-            store.update(cx, |store, cx| {
+            let targets = store.read(cx).agent_target_views_for_worktree(&owner.source.worktree_id);
+            let current = SessionHistoryOwner::capture(store.read(cx));
+            match session_agent_target(&session, Some(&owner), current.as_ref(), &targets) {
+                SessionAgentResolution::ExactTarget(target) => {
+                    AppStore::activate_agent_run(&store, &target.run_id, window, cx);
+                    return;
+                }
+                SessionAgentResolution::Ambiguous | SessionAgentResolution::SourceMismatch => return,
+                SessionAgentResolution::NoTarget => {}
+            }
+            let resumed = store.update(cx, |store, cx| {
                 // 用**返回的那个 pane**,不能事后再取活动 pane:焦点还没落下去
                 let Some(pane_id) =
                     store.new_terminal_with_cwd(&project_id, None, anchor, cwd.clone(), window, cx)
                 else {
-                    return;
+                    return false;
                 };
                 store.write_to_pane(&project_id, &pane_id, &format!("{command}\r"), cx);
                 // 恢复出的会话身份**当场**写回 pane,不等 hook ——
@@ -218,8 +301,11 @@ pub(crate) fn jump_to_session(
                     cx,
                 );
                 store.focus_pane(&project_id, &pane_id, window, cx);
+                true
             });
-            crate::workbench_area::activate_terminal_page(window, cx);
+            if resumed {
+                crate::workbench_area::activate_terminal_page(window, cx);
+            }
         });
     })
 }
@@ -265,6 +351,12 @@ fn agent_activity_label(activity: AgentActivity) -> &'static str {
         AgentActivity::Exited => "Exited",
         AgentActivity::Unknown => "Unknown",
     }
+}
+
+fn agent_target_activity_label(target: &AgentTargetView) -> String {
+    crate::agent_activity::activity_label_with_freshness(
+        agent_activity_label(target.activity), target.activity_freshness,
+    )
 }
 
 fn agent_activity_color(activity: AgentActivity, attention: bool) -> gpui::Hsla {
@@ -336,18 +428,42 @@ fn agent_session_identity_matches(
 }
 
 fn session_agent_target<'a>(
-    session_type: &str,
-    session_id: &str,
+    session: &AiSession,
+    owner: Option<&SessionHistoryOwner>,
+    current: Option<&SessionHistoryOwner>,
     targets: &'a [AgentTargetView],
-) -> Option<&'a AgentTargetView> {
-    targets.iter().find(|target| {
-        agent_session_identity_matches(
-            &target.provider,
-            target.provider_session_id.as_deref(),
-            session_type,
-            session_id,
-        )
-    })
+) -> SessionAgentResolution<'a> {
+    let Some(owner) = owner.filter(|owner| current == Some(*owner)) else {
+        return SessionAgentResolution::SourceMismatch;
+    };
+    if !session_matches_backend(session, &owner.source.backend) {
+        return SessionAgentResolution::SourceMismatch;
+    }
+    let mut matched = targets.iter().filter(|target| {
+        !target.activity.is_ended()
+            && target.route.execution_host_id == owner.source.execution_host_id
+            && target.route.worktree_id == owner.source.worktree_id
+            && target.evidence != mt_ai::AgentEvidence::RestoredHistory
+            && agent_session_identity_matches(
+                &target.provider,
+                target.provider_session_id.as_deref(),
+                &session.session_type,
+                &session.id,
+            )
+    });
+    let Some(target) = matched.next() else {
+        return SessionAgentResolution::NoTarget;
+    };
+    if matched.next().is_some() {
+        SessionAgentResolution::Ambiguous
+    } else if target.connection_epoch != match &owner.source.backend {
+        ExecutionBackendSignature::Ssh { connection_epoch, .. } => *connection_epoch,
+        ExecutionBackendSignature::Local | ExecutionBackendSignature::Wsl { .. } => None,
+    } {
+        SessionAgentResolution::SourceMismatch
+    } else {
+        SessionAgentResolution::ExactTarget(target)
+    }
 }
 
 /// ISO 8601 → 「刚刚 / n 分钟前 / n 小时前 / n 天前 / 月-日」。
@@ -430,6 +546,7 @@ fn preview_text_style(cx: &mut App) -> TextViewStyle {
 
 /// 会话正文预览的一次加载。
 struct Preview {
+    owner: Option<SessionHistoryOwner>,
     /// 会话 id。只用于给每条消息的 [`TextView`] 拼稳定且**跨会话不撞**的
     /// element id —— 光按序号编的话,换一个会话看会命中上一个会话同序号那条
     /// 的缓存状态,首帧显示的是别人的正文。
@@ -502,6 +619,7 @@ fn session_source_signature(
     path: &str,
     wsl_distro: Option<&str>,
     source: &crate::ssh_conn::SessionSource,
+    connection_epoch: Option<u64>,
 ) -> String {
     match source {
         crate::ssh_conn::SessionSource::Local => format!(
@@ -512,7 +630,7 @@ fn session_source_signature(
             format!("{project_id}|{path}|ssh:broken")
         }
         crate::ssh_conn::SessionSource::Remote(connection) => format!(
-            "{project_id}|{path}|ssh:{}:{:016x}",
+            "{project_id}|{path}|ssh:{}:{:016x}:{connection_epoch:?}",
             connection.id,
             crate::remote_ssh::connection_fingerprint(connection)
         ),
@@ -552,6 +670,8 @@ fn loading_preview_needs_restart(preview: Option<&Preview>) -> bool {
 struct SessionScopeState {
     host: Vec<AiSession>,
     wsl: Vec<AiSession>,
+    host_owner: Option<SessionHistoryOwner>,
+    wsl_owner: Option<SessionHistoryOwner>,
     lineage: Vec<LineageEdge>,
     bookkept: Vec<LineageEdge>,
     display_count: usize,
@@ -573,6 +693,8 @@ pub struct SessionPanel {
     scope_generation: u64,
     host: Vec<AiSession>,
     wsl: Vec<AiSession>,
+    host_owner: Option<SessionHistoryOwner>,
+    wsl_owner: Option<SessionHistoryOwner>,
     /// 磁盘扫描出来的分支边。树视图的数据面,平铺不消费。
     lineage: Vec<LineageEdge>,
     /// 自记账边(`AppConfig::session_lineage`)。本面板**只读**;
@@ -641,6 +763,8 @@ impl SessionPanel {
             scope_generation: 0,
             host: Vec::new(),
             wsl: Vec::new(),
+            host_owner: None,
+            wsl_owner: None,
             lineage: Vec::new(),
             bookkept: Vec::new(),
             loading: false,
@@ -675,6 +799,12 @@ impl SessionPanel {
             &path,
             project.wsl_sessions_distro.as_deref(),
             &source,
+            match &source {
+                crate::ssh_conn::SessionSource::Remote(connection) => {
+                    crate::remote_ssh::current_connection_epoch(&connection.id)
+                }
+                _ => None,
+            },
         );
         (
             store.active_worktree_id().cloned(),
@@ -701,6 +831,8 @@ impl SessionPanel {
             SessionScopeState {
                 host: std::mem::take(&mut self.host),
                 wsl: std::mem::take(&mut self.wsl),
+                host_owner: self.host_owner.take(),
+                wsl_owner: self.wsl_owner.take(),
                 lineage: std::mem::take(&mut self.lineage),
                 bookkept: std::mem::take(&mut self.bookkept),
                 display_count: self.display_count,
@@ -720,6 +852,8 @@ impl SessionPanel {
         {
             self.host = state.host;
             self.wsl = state.wsl;
+            self.host_owner = state.host_owner;
+            self.wsl_owner = state.wsl_owner;
             self.lineage = state.lineage;
             self.bookkept = state.bookkept;
             self.display_count = state.display_count;
@@ -732,6 +866,8 @@ impl SessionPanel {
         } else {
             self.host.clear();
             self.wsl.clear();
+            self.host_owner = None;
+            self.wsl_owner = None;
             self.lineage.clear();
             self.bookkept.clear();
             self.display_count = PAGE_SIZE;
@@ -815,6 +951,7 @@ impl SessionPanel {
     ///
     /// [`set_visible`]: Self::set_visible
     pub fn refresh(&mut self, force: bool, cx: &mut Context<Self>) {
+        let owner = SessionHistoryOwner::capture(self.store.read(cx));
         let (project, source) = {
             let store = self.store.read(cx);
             let project = store.active_project().map(|project| {
@@ -863,6 +1000,8 @@ impl SessionPanel {
         let generation = self.scope_generation;
         let worktree_id = self.current_worktree.clone();
         let source_signature = self.source_signature.clone();
+        let title_request = self.store.read(cx).active_project_id.as_deref()
+            .and_then(|project_id| self.store.read(cx).runtime_title_request(project_id));
         let restart_preview =
             self.preview_refresh_pending || loading_preview_needs_restart(self.preview.as_ref());
         self.preview_refresh_pending = false;
@@ -873,6 +1012,8 @@ impl SessionPanel {
             self.project_path = None;
             self.host.clear();
             self.wsl.clear();
+            self.host_owner = None;
+            self.wsl_owner = None;
             self.lineage.clear();
             self.bookkept.clear();
             self.preview = None;
@@ -884,6 +1025,22 @@ impl SessionPanel {
             return;
         };
         self.project_path = Some(path.clone());
+        if owner.is_none() {
+            self.host.clear();
+            self.wsl.clear();
+            self.host_owner = None;
+            self.wsl_owner = None;
+            self.lineage.clear();
+            self.bookkept.clear();
+            self.preview = None;
+            self.loading = false;
+            self.wsl_loading = false;
+            self.remote = matches!(&source, Some(crate::ssh_conn::SessionSource::Remote(_)
+                | crate::ssh_conn::SessionSource::BrokenRemote));
+            self.remote_broken = matches!(&source, Some(crate::ssh_conn::SessionSource::BrokenRemote));
+            cx.notify();
+            return;
+        }
         self.loading = true;
         if restart_preview && self.preview.is_some() {
             self.load_preview(cx);
@@ -898,6 +1055,8 @@ impl SessionPanel {
                 self.remote_broken = true;
                 self.host.clear();
                 self.wsl.clear();
+                self.host_owner = None;
+                self.wsl_owner = None;
                 self.lineage.clear();
                 self.loading = false;
                 self.wsl_loading = false;
@@ -908,6 +1067,7 @@ impl SessionPanel {
                 self.remote = true;
                 self.remote_broken = false;
                 self.wsl.clear();
+                self.wsl_owner = None;
                 self.lineage.clear();
                 self.wsl_loading = false;
                 let remote_path = path.clone();
@@ -930,10 +1090,17 @@ impl SessionPanel {
                             remote_source_signature.as_deref(),
                             this.source_signature.as_deref(),
                         ) || this.request_id != req
+                            || owner.as_ref().is_none_or(|owner| !owner.is_current(this.store.read(cx)))
                         {
                             return;
                         }
                         this.host = result.unwrap_or_default();
+                        this.host_owner = owner;
+                        if let Some(request) = title_request.as_ref() {
+                            this.store.update(cx, |store, cx| {
+                                store.apply_runtime_session_titles(request, &this.host, cx);
+                            });
+                        }
                         this.loading = false;
                         cx.notify();
                     });
@@ -951,6 +1118,8 @@ impl SessionPanel {
         let host_path = path.clone();
         let host_worktree_id = worktree_id.clone();
         let host_source_signature = source_signature.clone();
+        let host_title_request = title_request.clone();
+        let host_owner = owner.clone();
         self._tasks.push(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -965,10 +1134,17 @@ impl SessionPanel {
                     host_source_signature.as_deref(),
                     this.source_signature.as_deref(),
                 ) || this.request_id != req
+                    || host_owner.as_ref().is_none_or(|owner| !owner.is_current(this.store.read(cx)))
                 {
                     return;
                 }
                 this.host = result.unwrap_or_default();
+                this.host_owner = host_owner;
+                if let Some(request) = host_title_request.as_ref() {
+                    this.store.update(cx, |store, cx| {
+                        store.apply_runtime_session_titles(request, &this.host, cx);
+                    });
+                }
                 this.loading = false;
                 cx.notify();
             });
@@ -979,6 +1155,7 @@ impl SessionPanel {
         let lineage_path = path.clone();
         let lineage_worktree_id = worktree_id.clone();
         let lineage_source_signature = source_signature.clone();
+        let lineage_owner = owner.clone();
         self._tasks.push(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -995,6 +1172,7 @@ impl SessionPanel {
                     lineage_source_signature.as_deref(),
                     this.source_signature.as_deref(),
                 ) || this.request_id != req
+                    || lineage_owner.as_ref().is_none_or(|owner| !owner.is_current(this.store.read(cx)))
                 {
                     return;
                 }
@@ -1025,16 +1203,24 @@ impl SessionPanel {
                         wsl_source_signature.as_deref(),
                         this.source_signature.as_deref(),
                     ) || this.request_id != req
+                        || owner.as_ref().is_none_or(|owner| !owner.is_current(this.store.read(cx)))
                     {
                         return;
                     }
                     this.wsl = result.unwrap_or_default();
+                    this.wsl_owner = owner;
+                    if let Some(request) = title_request.as_ref() {
+                        this.store.update(cx, |store, cx| {
+                            store.apply_runtime_session_titles(request, &this.wsl, cx);
+                        });
+                    }
                     this.wsl_loading = false;
                     cx.notify();
                 });
             }));
         } else {
             self.wsl.clear();
+            self.wsl_owner = None;
             self.wsl_loading = false;
         }
         cx.notify();
@@ -1047,6 +1233,14 @@ impl SessionPanel {
             all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         }
         all
+    }
+
+    fn owner_for_session(&self, session: &AiSession) -> Option<&SessionHistoryOwner> {
+        if session.wsl_distro.is_some() {
+            self.wsl_owner.as_ref()
+        } else {
+            self.host_owner.as_ref()
+        }
     }
 
     /// 渲染用的行:`(会话, 连线前缀, 显示标题)`。
@@ -1092,16 +1286,25 @@ impl SessionPanel {
     /// 在当前活动 pane 里恢复会话。没有终端时退化成「开一个新的再恢复」。
     fn resume(
         &mut self,
-        command: String,
+        owner: SessionHistoryOwner,
+        session: AiSession,
         new_tab: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(project_id) = self.store.read(cx).active_project_id.clone() else {
+        let targets = self.store.read(cx).agent_target_views_for_worktree(&owner.source.worktree_id);
+        let current = SessionHistoryOwner::capture(self.store.read(cx));
+        if session_agent_target(&session, Some(&owner), current.as_ref(), &targets).is_inert()
+            || session.wsl_distro.is_some() || session.ssh_connection_id.is_some()
+        {
+            return;
+        }
+        let Some(command) = build_resume_command(&session.session_type, &session.id) else {
             return;
         };
+        let project_id = owner.project_id;
         let existing = self.store.read(cx).active_pane_id(&project_id);
-        self.store.update(cx, |store, cx| {
+        let resumed = self.store.update(cx, |store, cx| {
             let target = if new_tab || existing.is_none() {
                 // 不能事后再 resolveActivePane:新终端的焦点还没落下去,
                 // 拿到的会是用户原本待着的那个 —— 命令就敲进别人的会话了
@@ -1109,11 +1312,14 @@ impl SessionPanel {
             } else {
                 existing.clone()
             };
-            let Some(pane_id) = target else { return };
+            let Some(pane_id) = target else { return false };
             store.write_to_pane(&project_id, &pane_id, &format!("{command}\r"), cx);
             store.focus_pane(&project_id, &pane_id, window, cx);
+            true
         });
-        crate::workbench_area::activate_terminal_page(window, cx);
+        if resumed {
+            crate::workbench_area::activate_terminal_page(window, cx);
+        }
     }
 
     /// 会话行的右键菜单(`SessionList.tsx:378-401`,顺序照抄):
@@ -1129,32 +1335,43 @@ impl SessionPanel {
     ///
     /// `canResumeHere = cmd.is_some() && wsl_distro.is_none() && ssh_connection_id.is_none()`
     /// —— 会话来自别处时把命令敲进本机终端跑不通,只留「查看 / 复制命令」。
-    fn row_menu(&self, session: &AiSession, cx: &mut Context<Self>) -> Vec<menu::MenuEntry> {
+    fn row_menu(
+        &self,
+        session: &AiSession,
+        owner: Option<SessionHistoryOwner>,
+        cx: &mut Context<Self>,
+    ) -> Vec<menu::MenuEntry> {
         let entity = cx.entity();
         let command = build_resume_command(&session.session_type, &session.id);
+        let current = SessionHistoryOwner::capture(self.store.read(cx));
+        let targets = self.store.read(cx).agent_target_views();
         let can_resume_here = command.is_some()
+            && !session_agent_target(session, owner.as_ref(), current.as_ref(), &targets).is_inert()
             && session.wsl_distro.is_none()
             && session.ssh_connection_id.is_none();
 
         let mut entries = vec![menu::item(t("sessionList", "view"), {
             let entity = entity.clone();
             let session = session.clone();
+            let owner = owner.clone();
             move |_window, cx: &mut App| {
                 let session = session.clone();
-                entity.update(cx, |this, cx| this.open_preview(&session, cx));
+                entity.update(cx, |this, cx| this.open_preview(&session, owner.clone(), cx));
             }
         })];
-        if can_resume_here && let Some(cmd) = command.clone() {
+        if can_resume_here && let Some(owner) = owner {
             entries.push(menu::separator());
             for (label, new_tab) in [
                 (t("sessionList", "resumeHere"), false),
                 (t("sessionList", "resumeInNewTab"), true),
             ] {
                 let entity = entity.clone();
-                let cmd = cmd.clone();
+                let owner = owner.clone();
+                let session = session.clone();
                 entries.push(menu::item(label, move |window, cx: &mut App| {
-                    let cmd = cmd.clone();
-                    entity.update(cx, |this, cx| this.resume(cmd, new_tab, window, cx));
+                    entity.update(cx, |this, cx| {
+                        this.resume(owner.clone(), session.clone(), new_tab, window, cx);
+                    });
                 }));
             }
         }
@@ -1180,7 +1397,7 @@ impl SessionPanel {
         let agent = diagnostic.agent.clone();
         let activity = agent
             .as_ref()
-            .map(|agent| agent_activity_label(agent.activity));
+            .map(agent_target_activity_label);
         let activity_color = agent
             .as_ref()
             .map(|agent| agent_activity_color(agent.activity, agent.attention));
@@ -1212,8 +1429,9 @@ impl SessionPanel {
 
         div()
             .id(SharedString::from(format!(
-                "session-runtime-{}-{}",
-                diagnostic.project_id, diagnostic.pane_id
+                "session-runtime-{}-{}-{}",
+                diagnostic.project_id, diagnostic.pane_id,
+                agent.as_ref().map(|agent| agent.run_id.as_str()).unwrap_or("terminal")
             )))
             .flex()
             .items_start()
@@ -1334,9 +1552,20 @@ impl SessionPanel {
             .into_any_element()
     }
 
-    fn open_preview(&mut self, session: &AiSession, cx: &mut Context<Self>) {
+    fn open_preview(
+        &mut self,
+        session: &AiSession,
+        owner: Option<SessionHistoryOwner>,
+        cx: &mut Context<Self>,
+    ) {
+        if owner.as_ref().is_none_or(|owner| {
+            !owner.is_current(self.store.read(cx)) || !owner.owns_history_session(session)
+        }) {
+            return;
+        }
         self.preview_refresh_pending = false;
         self.preview = Some(Preview {
+            owner,
             session_id: session.id.clone(),
             session_type: session.session_type.clone(),
             wsl_distro: session.wsl_distro.clone(),
@@ -1355,6 +1584,11 @@ impl SessionPanel {
 
     fn load_preview(&mut self, cx: &mut Context<Self>) {
         self.preview_refresh_pending = false;
+        let owner = self.preview.as_ref().and_then(|preview| preview.owner.clone());
+        if owner.as_ref().is_none_or(|owner| !owner.is_current(self.store.read(cx))) {
+            self.preview = None;
+            return;
+        }
         let Some(project_path) = self.project_path.clone() else {
             return;
         };
@@ -1422,13 +1656,14 @@ impl SessionPanel {
                     source_signature.as_deref(),
                     this.source_signature.as_deref(),
                 ) || this.preview_request != request
+                    || owner.as_ref().is_none_or(|owner| !owner.is_current(this.store.read(cx)))
                 {
                     return;
                 }
                 let Some(preview) = this.preview.as_mut() else {
                     return;
                 };
-                if preview.session_id != expected_session_id {
+                if preview.session_id != expected_session_id || preview.owner != owner {
                     return;
                 }
                 preview.loading = false;
@@ -1689,6 +1924,11 @@ impl Render for SessionPanel {
             .border_l_1()
             .border_color(ui::border_default());
 
+        if self.preview.as_ref().is_some_and(|preview| {
+            preview.owner.as_ref().is_none_or(|owner| !owner.is_current(self.store.read(cx)))
+        }) {
+            self.preview = None;
+        }
         if let Some(title) = self.preview.as_ref().map(|p| p.title.clone()) {
             let body = self.render_preview(title, window, cx);
             return container.child(body);
@@ -1697,25 +1937,34 @@ impl Render for SessionPanel {
         let rows = self.rows();
         let sessions: Vec<AiSession> = rows.iter().map(|(s, _, _)| s.clone()).collect();
         let worktree_context = orca_worktree_context_enabled();
-        let (agent_targets, terminal_diagnostics) = if worktree_context {
-            self.current_worktree
+        let (agent_targets, terminal_diagnostics) = self.current_worktree
                 .as_ref()
                 .map(|worktree_id| {
                     let store = self.store.read(cx);
                     (
                         store.agent_target_views_for_worktree(worktree_id),
-                        store.terminal_diagnostics_for_worktree(worktree_id, cx),
+                        if worktree_context {
+                            store.terminal_diagnostics_for_worktree(worktree_id, cx)
+                        } else {
+                            Vec::new()
+                        },
                     )
                 })
-                .unwrap_or_default()
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        let session_targets: Vec<Option<AgentTargetView>> = sessions
+                .unwrap_or_default();
+        let current_owner = SessionHistoryOwner::capture(self.store.read(cx));
+        let session_resolutions: Vec<_> = sessions
             .iter()
             .map(|session| {
-                session_agent_target(&session.session_type, &session.id, &agent_targets).cloned()
+                session_agent_target(
+                    session,
+                    self.owner_for_session(session),
+                    current_owner.as_ref(),
+                    &agent_targets,
+                )
             })
+            .collect();
+        let session_targets: Vec<_> = session_resolutions.iter()
+            .map(|resolution| resolution.exact().filter(|_| worktree_context).cloned())
             .collect();
         let runtime_rows: Vec<AnyElement> = terminal_diagnostics
             .into_iter()
@@ -1743,16 +1992,19 @@ impl Render for SessionPanel {
                     .unwrap_or_else(|| "SSH".to_string()),
             )
         };
-        // 回滚时保留旧的 pane 会话嗅探。新路径只认 AgentRuntimeRegistry
-        // 的精确 run，历史记录本身不创建 live 状态。
+        // Rollback badges use the same exact ownership check as activation.
         let legacy_live_of: Vec<Option<(String, PaneStatus)>> = if !worktree_context && tree {
-            sessions
+            session_resolutions
                 .iter()
-                .map(|session| {
-                    self.store
-                        .read(cx)
-                        .find_live_session_pane(&session.id)
-                        .map(|(project_id, _, status)| (project_id, status))
+                .map(|resolution| {
+                    resolution.exact().map(|target| {
+                        let status = if target.activity_freshness == mt_ai::AgentActivityFreshness::Stale {
+                            PaneStatus::Idle
+                        } else {
+                            PaneStatus::from_str(target.activity.legacy_status()).unwrap_or(PaneStatus::Idle)
+                        };
+                        (target.project_id.clone(), status)
+                    })
                 })
                 .collect()
         } else {
@@ -1851,6 +2103,8 @@ impl Render for SessionPanel {
                 AiVendor::from_session_type(&session.session_type).or(Some(AiVendor::Claude))
             };
             let wsl_badge = session.wsl_distro.clone();
+            let owner = self.owner_for_session(&session).cloned();
+            let inert = session_resolutions[i].is_inert();
             let agent_target = session_targets.get(i).cloned().flatten();
             let legacy_live = legacy_live_of.get(i).cloned().flatten();
             let live_project = agent_target
@@ -1865,11 +2119,11 @@ impl Render for SessionPanel {
                 format!(
                     "{display_title}\n{} · {} · {}",
                     target.provider,
-                    agent_activity_label(target.activity),
+                    agent_target_activity_label(target),
                     agent_connectivity_label(target.connectivity)
                 )
                 .into()
-            } else if tree {
+            } else if tree && !inert {
                 match &live_project {
                     Some(name) => tr!(
                         "sessionList",
@@ -1888,8 +2142,8 @@ impl Render for SessionPanel {
             };
             let session_for_menu = session.clone();
             let session_for_click = session.clone();
-            let target_run_id = agent_target.as_ref().map(|target| target.run_id.clone());
-            let has_target = target_run_id.is_some();
+            let owner_for_click = owner.clone();
+            let has_target = agent_target.is_some();
 
             list = list.child(
                 div()
@@ -1902,17 +2156,14 @@ impl Render for SessionPanel {
                     .rounded(px(4.0))
                     .text_size(ui::font_px(12.0))
                     .hover(|el| el.bg(ui::border_subtle()))
-                    .when(tree || has_target, |el| el.cursor_pointer())
+                    .when((tree || has_target) && !inert, |el| el.cursor_pointer())
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                    .when_some(target_run_id, |el, run_id| {
+                    .when((tree || has_target) && !inert, |el| {
                         el.on_click(cx.listener(move |this: &mut Self, _, window, cx| {
-                            AppStore::activate_agent_run(&this.store, &run_id, window, cx);
-                        }))
-                    })
-                    .when(tree && !has_target, |el| {
-                        el.on_click(cx.listener(move |this: &mut Self, _, window, cx| {
-                            let task =
-                                jump_to_session(&this.store, session_for_click.clone(), window, cx);
+                            let Some(owner) = owner_for_click.clone() else { return; };
+                            let task = jump_to_session(
+                                &this.store, owner, session_for_click.clone(), window, cx,
+                            );
                             this._tasks.push(task);
                         }))
                     })
@@ -1921,7 +2172,7 @@ impl Render for SessionPanel {
                         MouseButton::Right,
                         cx.listener(move |this: &mut Self, event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            let entries = this.row_menu(&session_for_menu, cx);
+                            let entries = this.row_menu(&session_for_menu, owner.clone(), cx);
                             menu::show(event.position, entries, window, cx);
                         }),
                     )
@@ -1998,7 +2249,7 @@ impl Render for SessionPanel {
                                                         .rounded_full()
                                                         .bg(color),
                                                 )
-                                                .child(agent_activity_label(target.activity)),
+                                                .child(agent_target_activity_label(target)),
                                         )
                                     }),
                             )
@@ -2272,6 +2523,7 @@ mod tests {
             timestamp: ts.to_string(),
         };
         let preview = Preview {
+            owner: None,
             session_id: "s1".into(),
             session_type: "claude".into(),
             wsl_distro: None,
@@ -2307,6 +2559,7 @@ mod tests {
             })
             .collect();
         let preview = Preview {
+            owner: None,
             session_id: "s1".into(),
             session_type: "claude".into(),
             wsl_distro: None,
@@ -2413,6 +2666,7 @@ mod tests {
     #[test]
     fn loading_preview_is_restarted_after_scope_restore() {
         let mut preview = Preview {
+            owner: None,
             session_id: "session-1".into(),
             session_type: "claude".into(),
             wsl_distro: None,
@@ -2500,5 +2754,163 @@ mod tests {
             "claude",
             "session-1"
         ));
+    }
+
+    fn history_owner(backend: ExecutionBackendSignature) -> SessionHistoryOwner {
+        use mt_identity::{ExecutionHostId, HostInstallId};
+        SessionHistoryOwner {
+            project_id: "project".into(),
+            configured_path: "/repo".into(),
+            wsl_sessions_distro: None,
+            source: ExecutionSourceSignature {
+                execution_host_id: ExecutionHostId::derive("history-test", &HostInstallId::new()),
+                root_project_id: "project".into(),
+                root_source_path: "/repo".into(),
+                worktree_id: worktree_id('a'),
+                canonical_path: "/repo".into(),
+                backend,
+            },
+        }
+    }
+
+    fn history_session() -> AiSession {
+        AiSession {
+            id: "session-1".into(), session_type: "claude-code".into(),
+            title: "Historical title".into(), timestamp: String::new(), model: None,
+            wsl_distro: None, ssh_connection_id: None,
+        }
+    }
+
+    fn history_target(owner: &SessionHistoryOwner) -> AgentTargetView {
+        use mt_identity::{AgentEventId, AgentRunId, PaneKey, TabId, TerminalIncarnationId, TerminalSessionId};
+        AgentTargetView {
+            run_id: AgentRunId::new(), last_event_id: AgentEventId::new(),
+            project_id: owner.project_id.clone(), project_name: "Project".into(),
+            root_project_name: "Project".into(), worktree_name: "Worktree".into(),
+            host_label: "Host".into(), pane_id: "pane".into(), pane_label: "Terminal".into(),
+            route: mt_ai::AgentRoute {
+                execution_host_id: owner.source.execution_host_id.clone(),
+                worktree_id: owner.source.worktree_id.clone(),
+                tab_id: TabId::new(), pane_key: PaneKey::new(),
+                terminal_session_id: TerminalSessionId::new(),
+                terminal_incarnation_id: TerminalIncarnationId::new(),
+            },
+            provider: "claude".parse().unwrap(), provider_session_id: Some("session-1".into()),
+            activity: AgentActivity::Done, activity_freshness: mt_ai::AgentActivityFreshness::Fresh,
+            connectivity: AgentConnectivity::Live, evidence: mt_ai::AgentEvidence::Hook,
+            connection_epoch: match &owner.source.backend {
+                ExecutionBackendSignature::Ssh { connection_epoch, .. } => *connection_epoch,
+                _ => None,
+            },
+            received_at_unix_ms: 1, attention: false, unread: false,
+        }
+    }
+
+    #[test]
+    fn history_distinguishes_no_target_exact_and_ambiguous_routes() {
+        let owner = history_owner(ExecutionBackendSignature::Local);
+        let session = history_session();
+        let resolve = |targets: &[AgentTargetView]| {
+            session_agent_target(&session, Some(&owner), Some(&owner), targets).is_inert()
+        };
+        assert_eq!(session_agent_target(&session, Some(&owner), Some(&owner), &[]), SessionAgentResolution::NoTarget);
+        assert!(!resolve(&[]));
+        let first = history_target(&owner);
+        let second = history_target(&owner);
+        assert_ne!(first.route, second.route);
+        assert_eq!(session_agent_target(&session, Some(&owner), Some(&owner), std::slice::from_ref(&first)).exact(), Some(&first));
+        for targets in [[first.clone(), second.clone()], [second, first.clone()]] {
+            let resolution = session_agent_target(&session, Some(&owner), Some(&owner), &targets);
+            assert_eq!(resolution, SessionAgentResolution::Ambiguous);
+            assert!(resolution.is_inert());
+            assert!(resolution.exact().is_none());
+        }
+        let mut ended = history_target(&owner);
+        ended.activity = AgentActivity::Exited;
+        let mut other_provider = history_target(&owner);
+        other_provider.provider = "codex".parse().unwrap();
+        let mut other_source = history_target(&owner);
+        other_source.route.worktree_id = worktree_id('b');
+        let targets = [first.clone(), ended, other_provider, other_source];
+        assert_eq!(session_agent_target(&session, Some(&owner), Some(&owner), &targets).exact(), Some(&first));
+    }
+
+    #[test]
+    fn history_source_matrix_never_attaches_local_wsl_or_ssh_rows_to_each_other() {
+        let backends = [
+            ExecutionBackendSignature::Local,
+            ExecutionBackendSignature::Wsl { distro: "Ubuntu".into() },
+            ExecutionBackendSignature::Wsl { distro: "Debian".into() },
+            ExecutionBackendSignature::Ssh { connection_id: "ssh-a".into(), connection_fingerprint: 1, connection_epoch: Some(1) },
+            ExecutionBackendSignature::Ssh { connection_id: "ssh-b".into(), connection_fingerprint: 2, connection_epoch: Some(1) },
+        ];
+        let mut sessions = vec![history_session(); backends.len()];
+        sessions[1].wsl_distro = Some("Ubuntu".into());
+        sessions[2].wsl_distro = Some("Debian".into());
+        sessions[3].ssh_connection_id = Some("ssh-a".into());
+        sessions[4].ssh_connection_id = Some("ssh-b".into());
+        for (backend_index, backend) in backends.into_iter().enumerate() {
+            let owner = history_owner(backend);
+            let targets = [history_target(&owner)];
+            for (session_index, session) in sessions.iter().enumerate() {
+                let resolution = session_agent_target(session, Some(&owner), Some(&owner), &targets);
+                if session_index == backend_index {
+                    assert_eq!(resolution.exact(), Some(&targets[0]));
+                    assert_eq!(session_agent_target(session, Some(&owner), Some(&owner), &[]), SessionAgentResolution::NoTarget);
+                    let duplicates = [targets[0].clone(), history_target(&owner)];
+                    assert_eq!(session_agent_target(session, Some(&owner), Some(&owner), &duplicates), SessionAgentResolution::Ambiguous);
+                } else {
+                    assert_eq!(resolution, SessionAgentResolution::SourceMismatch);
+                    assert!(resolution.is_inert());
+                    assert!(session_agent_target(session, Some(&owner), Some(&owner), &[]).is_inert());
+                }
+            }
+        }
+        let mut local = history_owner(ExecutionBackendSignature::Local);
+        local.wsl_sessions_distro = Some("Ubuntu".into());
+        assert!(local.owns_history_session(&sessions[0]));
+        assert!(local.owns_history_session(&sessions[1]));
+        assert!(!local.owns_history_session(&sessions[2]));
+        assert!(!local.owns_history_session(&sessions[3]));
+        assert!(session_agent_target(&sessions[1], Some(&local), Some(&local), &[]).is_inert());
+    }
+
+    #[test]
+    fn history_captured_owner_rejects_source_changes_before_resume_or_title_matching() {
+        let owner = history_owner(ExecutionBackendSignature::Ssh {
+            connection_id: "ssh-a".into(), connection_fingerprint: 1, connection_epoch: Some(1),
+        });
+        let mut session = history_session();
+        session.ssh_connection_id = Some("ssh-a".into());
+        let targets = [history_target(&owner)];
+        let mut changed = vec![owner.clone(); 7];
+        changed[0].project_id = "other-project".into();
+        changed[1].source.worktree_id = worktree_id('b');
+        changed[2].configured_path = "/other".into();
+        changed[3].source = owner.source.with_connection_epoch(Some(2));
+        changed[4].source.backend = ExecutionBackendSignature::Ssh {
+            connection_id: "ssh-a".into(), connection_fingerprint: 2, connection_epoch: Some(1),
+        };
+        changed[5].source.canonical_path = "/other".into();
+        changed[6].wsl_sessions_distro = Some("Ubuntu".into());
+        for current in changed.iter().map(Some).chain([None]) {
+            for candidates in [targets.as_slice(), &[]] {
+                let resolution = session_agent_target(&session, Some(&owner), current, candidates);
+                assert_eq!(resolution, SessionAgentResolution::SourceMismatch);
+                assert!(resolution.is_inert());
+                assert!(resolution.exact().is_none());
+            }
+        }
+        assert_eq!(session_agent_target(&session, None, Some(&owner), &targets), SessionAgentResolution::SourceMismatch);
+        let mut replacement_owner = owner.clone();
+        replacement_owner.source = owner.source.with_connection_epoch(Some(2));
+        let mut old_target = targets[0].clone();
+        old_target.connectivity = AgentConnectivity::Disconnected;
+        let old_targets = [old_target];
+        assert_eq!(session_agent_target(&session, Some(&replacement_owner), Some(&replacement_owner), &old_targets), SessionAgentResolution::SourceMismatch);
+        let local = history_owner(ExecutionBackendSignature::Local);
+        assert!(local.matches_local_path("/repo"));
+        assert!(!local.matches_local_path("/other"));
+        assert!(!owner.matches_local_path("/repo"));
     }
 }

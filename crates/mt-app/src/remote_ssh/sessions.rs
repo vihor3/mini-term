@@ -118,7 +118,13 @@ pub fn ai_sessions(
     project_path: &str,
     force: bool,
 ) -> Result<Vec<AiSession>, String> {
-    let cache_key = format!("ssh|{}|{}", conn.id, normalize_unix_path(project_path));
+    let cache_key = format!(
+        "ssh|{}|{:016x}|{:?}|{}",
+        conn.id,
+        super::connection_fingerprint(conn),
+        super::current_connection_epoch(&conn.id),
+        normalize_unix_path(project_path)
+    );
 
     if !force {
         // 锁即取即放,扫描期间不持锁(SFTP IO 秒级)。

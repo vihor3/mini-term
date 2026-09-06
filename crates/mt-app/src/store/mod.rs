@@ -548,6 +548,9 @@ pub struct AppStore {
     terminal_routes: HashMap<u32, identity::TerminalRoute>,
     /// Rich agent state consumed by worktree cards and the global Agents feed.
     agent_runtime: AgentRuntimeRegistry,
+    /// Exact run/session titles from source-fenced history reads; never liveness.
+    runtime_session_titles: HashMap<AgentRunId, context::RuntimeSessionTitle>,
+    runtime_live_titles: HashMap<AgentRunId, context::RuntimeLiveTitle>,
     /// Process-local acknowledgement watermark for the global exact-run feed.
     /// This is deliberately separate from the legacy pane-level `DoneTracker`.
     agent_feed_acknowledged: HashMap<AgentRunId, AgentEventId>,
@@ -888,6 +891,8 @@ impl AppStore {
             pending_terminal_closes: Default::default(),
             terminal_routes: HashMap::new(),
             agent_runtime: AgentRuntimeRegistry::default(),
+            runtime_session_titles: HashMap::new(),
+            runtime_live_titles: HashMap::new(),
             agent_feed_acknowledged: HashMap::new(),
             pane_subs: HashMap::new(),
             focused_pane_id: None,

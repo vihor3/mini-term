@@ -5,15 +5,17 @@ use std::time::Duration;
 
 use gpui::Context;
 use mt_ai::{
-    AgentActivity, AgentConnectivity, AgentConnectivityObservation, AgentEvidence,
+    AgentActivity, AgentApplyOutcome, AgentConfirmation, AgentConnectivity,
+    AgentConnectivityObservation, AgentEvidence,
     AgentObservationIgnored, AgentProcessIdentity, AgentProcessInventoryObservation,
-    AgentProcessObservation, AgentProvider, AgentRoute, AgentRuntimeRegistry, SessionTracker,
+    AgentProcessObservation, AgentProvider, AgentRoute, AgentRuntimeRegistry,
+    AgentSemanticObservation, AgentSemanticOwner, AgentWeakEpisode, SessionTracker,
 };
-use mt_identity::AgentEventId;
+use mt_identity::{AgentEventId, AgentRunId};
 use mt_ssh::{RemoteAgentCapability, RemoteAgentInventory, RemoteAgentRoute};
 
 use crate::remote_ssh::{RemoteAgentInventoryError, connection_fingerprint};
-use crate::tree::PaneStatus;
+use crate::execution_host::{ExecutionBackendSignature, ExecutionSourceSignature};
 
 use super::AppStore;
 use super::ai::accepted_agent_projection;
@@ -21,9 +23,19 @@ use super::pure::find_pane_of_pty;
 use super::remote_runtime::{RemoteRuntimePhase, allocate_generation};
 
 pub const REMOTE_AGENT_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const REMOTE_AGENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(3);
 const EMPTY_INVENTORY_CONFIRMATIONS: u8 = 2;
 const ERROR_SUMMARY_CHARS: usize = 512;
+const FOREGROUND_SAMPLE_MAX_AGE_MS: i64 = 4_000;
+
+#[derive(Clone, Debug)]
+struct PendingAgentTitle {
+    run_id: AgentRunId,
+    provider: AgentProvider,
+    process: AgentProcessIdentity,
+    source: ExecutionSourceSignature,
+    title: String,
+    observed_at_unix_ms: i64,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteAgentProbeCapability {
@@ -49,6 +61,9 @@ pub struct RemoteAgentPollState {
     route: AgentRoute,
     had_processes: bool,
     empty_successes: u8,
+    foreground: Option<mt_ssh::RemoteAgentProcess>,
+    foreground_observed_at_unix_ms: Option<i64>,
+    pending_title: Option<PendingAgentTitle>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +76,8 @@ struct RemoteAgentPollRequest {
     connection_fingerprint: u64,
     route: AgentRoute,
     connection_epoch: u64,
+    requested_at_unix_ms: i64,
+    weak_episode: Option<AgentWeakEpisode>,
 }
 
 #[derive(Clone)]
@@ -105,10 +122,20 @@ impl RemoteAgentPollState {
             route: request.route.clone(),
             had_processes,
             empty_successes: 0,
+            foreground: None,
+            foreground_observed_at_unix_ms: None,
+            pending_title: None,
         }
     }
 
     fn begin(&mut self, request: &RemoteAgentPollRequest) {
+        if self.route != request.route || self.connection_epoch != request.connection_epoch
+            || self.project_path != request.project_path
+            || self.connection_fingerprint != request.connection_fingerprint
+            || self.connection_id != request.connection_id
+        {
+            self.clear_title_owner();
+        }
         self.generation = request.generation;
         self.in_flight = true;
         self.project_id.clone_from(&request.project_id);
@@ -117,6 +144,12 @@ impl RemoteAgentPollState {
         self.connection_fingerprint = request.connection_fingerprint;
         self.route.clone_from(&request.route);
         self.connection_epoch = request.connection_epoch;
+    }
+
+    fn clear_title_owner(&mut self) {
+        self.foreground = None;
+        self.foreground_observed_at_unix_ms = None;
+        self.pending_title = None;
     }
 
     fn owns(&self, request: &RemoteAgentPollRequest) -> bool {
@@ -147,6 +180,7 @@ fn active_route_connection_epoch(
     registry
         .runs()
         .filter(|state| &state.route == route && !state.activity.is_ended())
+        .filter(|state| !registry.is_superseded_weak_alias(&state.run_id))
         .filter_map(|state| state.connection_epoch)
         .max()
 }
@@ -160,6 +194,7 @@ fn active_route_connectivity_change_needed(
     registry
         .runs()
         .filter(|state| &state.route == route && !state.activity.is_ended())
+        .filter(|state| !registry.is_superseded_weak_alias(&state.run_id))
         .any(|state| {
             state.connectivity != connectivity
                 || connection_epoch.is_some_and(|epoch| state.connection_epoch != Some(epoch))
@@ -227,6 +262,7 @@ fn apply_inventory_and_retire_tracking(
 ) -> Result<(), AgentObservationIgnored> {
     let route = inventory.route.clone();
     let event_id = inventory.event_id.clone();
+    let weak_episode = inventory.weak_episode;
     registry.apply_process_inventory(inventory)?;
     let retired = registry.runs().any(|state| {
         state.route == route
@@ -238,9 +274,10 @@ fn apply_inventory_and_retire_tracking(
         state.route == route
             && !state.activity.is_ended()
             && state.evidence != AgentEvidence::RestoredHistory
+            && !registry.is_superseded_weak_alias(&state.run_id)
     });
     if retired && !has_live_owner && !hook_enabled {
-        tracker.clear_ai_session(pty_id);
+        tracker.clear_ai_session_if_episode(pty_id, weak_episode);
     }
     Ok(())
 }
@@ -254,7 +291,144 @@ pub(super) fn retire_terminal_polling(
     polls.remove(&pty_id);
 }
 
+fn registered_agent_routes<'a>(
+    routes: &'a HashMap<u32, AgentRoute>,
+    exited: &'a HashSet<u32>,
+) -> impl Iterator<Item = (&'a u32, &'a AgentRoute)> {
+    routes.iter().filter(|(pty_id, _)| !exited.contains(pty_id))
+}
+
+fn process_observations(
+    processes: &[mt_ssh::RemoteAgentProcess],
+) -> Result<Vec<AgentProcessObservation>, String> {
+    processes.iter().map(|process| {
+        let provider: AgentProvider = process.provider.as_str().parse()
+            .map_err(|_| "remote agent provider normalization failed".to_string())?;
+        let process_identity = AgentProcessIdentity::new(process.pid, process.start_ticks)
+            .ok_or_else(|| "remote agent process identity was invalid".to_string())?;
+        Ok(AgentProcessObservation {
+            provider,
+            process: process_identity,
+            activity: AgentActivity::Unknown,
+        })
+    }).collect()
+}
+
+fn unique_foreground(processes: &[mt_ssh::RemoteAgentProcess]) -> Option<mt_ssh::RemoteAgentProcess> {
+    let mut foreground = processes.iter().filter(|process| process.foreground);
+    let process = *foreground.next()?;
+    foreground.next().is_none().then_some(process)
+}
+
+fn pending_title_owner(
+    registry: &AgentRuntimeRegistry,
+    poll: &RemoteAgentPollState,
+    source: ExecutionSourceSignature,
+    title: &str,
+    observed_at_unix_ms: i64,
+    now: i64,
+) -> Option<PendingAgentTitle> {
+    let sampled_at = poll.foreground_observed_at_unix_ms?;
+    if !(0..=FOREGROUND_SAMPLE_MAX_AGE_MS).contains(&observed_at_unix_ms.saturating_sub(sampled_at))
+        || !(0..=mt_ai::AGENT_SEMANTIC_MAX_AGE_MS).contains(&now.saturating_sub(observed_at_unix_ms))
+        || poll.capability != RemoteAgentProbeCapability::LinuxProc
+        || poll.connectivity != AgentConnectivity::Live || poll.last_error.is_some()
+        || title.is_empty() || title.len() > 1024 || title.chars().any(char::is_control)
+        || source.execution_host_id != poll.route.execution_host_id
+        || source.worktree_id != poll.route.worktree_id
+        || !matches!(&source.backend, ExecutionBackendSignature::Ssh {
+            connection_id, connection_fingerprint, connection_epoch,
+        } if connection_id == &poll.connection_id
+            && *connection_fingerprint == poll.connection_fingerprint
+            && *connection_epoch == Some(poll.connection_epoch))
+    {
+        return None;
+    }
+    let foreground = poll.foreground?;
+    let process = AgentProcessIdentity::new(foreground.pid, foreground.start_ticks)?;
+    let provider: AgentProvider = foreground.provider.as_str().parse().ok()?;
+    let mut runs = registry.runs().filter(|run| {
+        run.route == poll.route && run.provider == provider && run.process == Some(process)
+            && !run.activity.is_ended() && run.confirmation == AgentConfirmation::LiveConfirmed
+            && run.evidence >= AgentEvidence::ProcessAttested
+            && run.connectivity == AgentConnectivity::Live
+            && run.connection_epoch == Some(poll.connection_epoch)
+    });
+    let run_id = runs.next()?.run_id.clone();
+    if runs.next().is_some() {
+        return None;
+    }
+    Some(PendingAgentTitle { run_id, provider, process, source,
+        title: title.to_string(), observed_at_unix_ms })
+}
+
+fn confirmed_title_owner(
+    foreground: Option<mt_ssh::RemoteAgentProcess>,
+    pending: &PendingAgentTitle,
+    now: i64,
+) -> bool {
+    foreground.is_some_and(|foreground| {
+        AgentProcessIdentity::new(foreground.pid, foreground.start_ticks) == Some(pending.process)
+            && foreground.provider.as_str() == pending.provider.as_str()
+            && foreground.foreground
+    }) && (0..=mt_ai::AGENT_SEMANTIC_MAX_AGE_MS)
+        .contains(&now.saturating_sub(pending.observed_at_unix_ms))
+}
+
+fn take_title_after_sample(
+    pending: &mut Option<PendingAgentTitle>,
+    foreground: Option<mt_ssh::RemoteAgentProcess>,
+    requested_at_unix_ms: i64,
+    now: i64,
+) -> Option<PendingAgentTitle> {
+    let title = pending.as_ref()?;
+    if !confirmed_title_owner(foreground, title, now) {
+        *pending = None;
+        return None;
+    }
+    // A late reply may contain a snapshot taken before the title. Keep the
+    // original capture until a request scheduled strictly after it confirms it.
+    if requested_at_unix_ms <= title.observed_at_unix_ms {
+        return None;
+    }
+    pending.take()
+}
+
 impl AppStore {
+    pub(super) fn observe_terminal_title(
+        &mut self,
+        pty_id: u32,
+        route: &AgentRoute,
+        title: &str,
+        observed_at_unix_ms: i64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.exited_ptys.contains(&pty_id) || self.terminal_routes.get(&pty_id) != Some(route) {
+            return;
+        }
+        if title.is_empty() {
+            self.clear_runtime_live_title(route);
+            if let Some(poll) = self.remote_agent_polls.get_mut(&pty_id) {
+                poll.pending_title = None;
+            }
+            cx.notify();
+            return;
+        }
+        let Some(poll) = self.remote_agent_polls.get(&pty_id).filter(|poll| &poll.route == route)
+        else { return; };
+        if self.project(&poll.project_id).is_none_or(|project| project.path != poll.project_path)
+            || crate::remote_ssh::current_connection_epoch(&poll.connection_id) != Some(poll.connection_epoch)
+        { return; }
+        let Ok(snapshot) = self.project_execution_snapshot(&poll.project_id) else { return; };
+        let pending = pending_title_owner(
+            &self.agent_runtime, poll, snapshot.source_signature(), title,
+            observed_at_unix_ms, chrono::Utc::now().timestamp_millis(),
+        );
+        if let Some(poll) = self.remote_agent_polls.get_mut(&pty_id) {
+            poll.pending_title = pending;
+        }
+    }
+
     pub(super) fn invalidate_remote_agent_connection(&mut self, connection_id: &str) {
         self.remote_agent_polls
             .retain(|_, state| state.connection_id != connection_id);
@@ -283,8 +457,8 @@ impl AppStore {
 
         let mut candidates = Vec::new();
         let mut runtime_gaps = Vec::new();
-        for (pty_id, route) in self.terminal_routes.iter() {
-            if self.exited_ptys.contains(pty_id) {
+        for (pty_id, route) in registered_agent_routes(&self.terminal_routes, &self.exited_ptys) {
+            if !self.terminals.contains_key(pty_id) {
                 continue;
             }
             let Some((project_id, _)) = find_pane_of_pty(&self.project_states, *pty_id) else {
@@ -393,6 +567,7 @@ impl AppStore {
                 .filter(|state| state.route == gap.route)
             {
                 state.connectivity = gap.connectivity;
+                state.clear_title_owner();
                 state.in_flight = false;
                 state.updated_at_unix_ms = Some(now);
                 if let Some(epoch) = observed_epoch {
@@ -443,6 +618,8 @@ impl AppStore {
                 connection_fingerprint: candidate.connection_fingerprint,
                 route: candidate.route,
                 connection_epoch: candidate.connection_epoch,
+                requested_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+                weak_episode: self.ai.perception().tracker().weak_detection_episode(candidate.pty_id),
             };
             let had_processes =
                 has_process_attested_run_for_route(&self.agent_runtime, &request.route);
@@ -562,6 +739,7 @@ impl AppStore {
             RemoteAgentCapability::Unsupported => {
                 if let Some(state) = self.remote_agent_polls.get_mut(&request.pty_id) {
                     state.capability = RemoteAgentProbeCapability::Unsupported;
+                    state.clear_title_owner();
                     state.connectivity = AgentConnectivity::Live;
                     state.process_count = 0;
                     state.connection_epoch = inventory.connection_epoch;
@@ -589,34 +767,7 @@ impl AppStore {
         now: i64,
         cx: &mut Context<Self>,
     ) {
-        let activity = if self
-            .ai
-            .perception()
-            .tracker()
-            .has_recent_output(request.pty_id, REMOTE_AGENT_ACTIVITY_WINDOW)
-        {
-            AgentActivity::Working
-        } else {
-            AgentActivity::Waiting
-        };
-        let processes = inventory
-            .processes
-            .iter()
-            .map(|process| {
-                let provider: AgentProvider = process
-                    .provider
-                    .as_str()
-                    .parse()
-                    .map_err(|_| "remote agent provider normalization failed".to_string())?;
-                let process_identity = AgentProcessIdentity::new(process.pid, process.start_ticks)
-                    .ok_or_else(|| "remote agent process identity was invalid".to_string())?;
-                Ok(AgentProcessObservation {
-                    provider,
-                    process: process_identity,
-                    activity,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>();
+        let processes = process_observations(&inventory.processes);
         let processes = match processes {
             Ok(processes) => processes,
             Err(error) => {
@@ -634,7 +785,10 @@ impl AppStore {
             }
         };
 
+        let foreground = unique_foreground(&inventory.processes);
         let should_apply = if let Some(state) = self.remote_agent_polls.get_mut(&request.pty_id) {
+            state.foreground = None;
+            state.foreground_observed_at_unix_ms = None;
             state.capability = RemoteAgentProbeCapability::LinuxProc;
             state.connectivity = AgentConnectivity::Live;
             state.process_count = processes.len();
@@ -653,6 +807,7 @@ impl AppStore {
         if should_apply {
             let Some(sequence) = self.ai.next_event_sequence() else {
                 if let Some(state) = self.remote_agent_polls.get_mut(&request.pty_id) {
+                    state.clear_title_owner();
                     state.last_error = Some("agent event sequence space exhausted".into());
                     state.connectivity = AgentConnectivity::Stale;
                 }
@@ -669,11 +824,13 @@ impl AppStore {
                     route: request.route.clone(),
                     sequence,
                     connection_epoch: inventory.connection_epoch,
+                    weak_episode: request.weak_episode,
                     processes,
                     received_at_unix_ms: now,
                 },
             ) {
                 if let Some(state) = self.remote_agent_polls.get_mut(&request.pty_id) {
+                    state.clear_title_owner();
                     state.last_error = Some(format!("agent inventory was rejected: {error:?}"));
                     state.connectivity = AgentConnectivity::Stale;
                     state.had_processes |=
@@ -685,8 +842,22 @@ impl AppStore {
                 state.had_processes =
                     has_process_attested_run_for_route(&self.agent_runtime, &request.route);
             }
+            let pending_title = self.remote_agent_polls.get_mut(&request.pty_id)
+                .and_then(|state| {
+                    state.foreground = foreground;
+                    state.foreground_observed_at_unix_ms = foreground.map(|_| now);
+                    take_title_after_sample(
+                        &mut state.pending_title, foreground, request.requested_at_unix_ms, now,
+                    )
+                });
+            if let Some(pending) = pending_title {
+                self.apply_confirmed_title(&request, foreground, pending, now);
+            }
             self.update_remote_agent_projection(request.pty_id, &request.route, cx);
         } else {
+            if let Some(state) = self.remote_agent_polls.get_mut(&request.pty_id) {
+                state.clear_title_owner();
+            }
             self.mark_agent_connectivity(
                 request.route,
                 Some(inventory.connection_epoch),
@@ -695,6 +866,35 @@ impl AppStore {
             );
         }
         cx.notify();
+    }
+
+    fn apply_confirmed_title(
+        &mut self,
+        request: &RemoteAgentPollRequest,
+        foreground: Option<mt_ssh::RemoteAgentProcess>,
+        pending: PendingAgentTitle,
+        now: i64,
+    ) {
+        if !confirmed_title_owner(foreground, &pending, now)
+            || self.project_execution_snapshot(&request.project_id).ok()
+                .is_none_or(|snapshot| snapshot.source_signature() != pending.source)
+        { return; }
+        if let Some(activity) = mt_ai::activity_from_owned_title(&pending.provider, &pending.title) {
+            let Some(sequence) = self.ai.next_event_sequence() else { return; };
+            let outcome = self.agent_runtime.observe_semantic(AgentSemanticObservation {
+                event_id: AgentEventId::new(), run_id: pending.run_id.clone(),
+                route: request.route.clone(), provider: pending.provider.clone(),
+                owner: AgentSemanticOwner::ForegroundProcess(pending.process),
+                sequence, connection_epoch: Some(request.connection_epoch), activity,
+                observed_at_unix_ms: pending.observed_at_unix_ms, received_at_unix_ms: now,
+            });
+            if !matches!(outcome, AgentApplyOutcome::Applied { .. }
+                | AgentApplyOutcome::Ignored(AgentObservationIgnored::StrongerEvidence))
+            { return; }
+        }
+        self.record_runtime_live_title(
+            &pending.run_id, &request.route, pending.process, pending.source, &pending.title,
+        );
     }
 
     fn finish_remote_agent_error(
@@ -711,6 +911,7 @@ impl AppStore {
             AgentConnectivity::Stale
         };
         if let Some(state) = self.remote_agent_polls.get_mut(&request.pty_id) {
+            state.clear_title_owner();
             state.connectivity = connectivity;
             state.last_error = Some(bounded_error(&error.message));
             state.updated_at_unix_ms = Some(now);
@@ -767,13 +968,7 @@ impl AppStore {
             .and_then(|(owner, pane)| self.project_states.get(&owner)?.pane(&pane))
             .is_some_and(|pane| pane.attention);
         let projection = accepted_agent_projection(&self.agent_runtime, route, retained_attention);
-        crate::git_watch::set_ai_pane(
-            pty_id,
-            matches!(
-                projection.status,
-                PaneStatus::AiWorking | PaneStatus::AiIdle
-            ),
-        );
+        crate::git_watch::set_ai_pane(pty_id, projection.live);
         for state in self.project_states.values_mut() {
             let updated = state
                 .layouts_mut()
@@ -800,6 +995,7 @@ fn bounded_error(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tree::PaneStatus;
     use mt_identity::{
         ExecutionHostId, HostInstallId, PaneKey, RepoId, TabId, TerminalIncarnationId,
         TerminalSessionId, WorktreeId,
@@ -828,6 +1024,146 @@ mod tests {
             connection_fingerprint: 9,
             route: route(),
             connection_epoch: 11,
+            requested_at_unix_ms: 0,
+            weak_episode: None,
+        }
+    }
+
+    #[test]
+    fn monitoring_keeps_registered_background_routes_and_excludes_exited_owners() {
+        let foreground = route();
+        let background = route();
+        let exited_route = route();
+        let external_route = route();
+        let routes = HashMap::from([
+            (1, foreground.clone()), (2, background.clone()), (3, exited_route),
+        ]);
+        let exited = HashSet::from([3]);
+        let monitored = registered_agent_routes(&routes, &exited)
+            .map(|(pty_id, route)| (*pty_id, route)).collect::<HashMap<_, _>>();
+        assert_eq!(monitored.len(), 2);
+        assert_eq!(monitored.get(&1), Some(&&foreground));
+        assert_eq!(monitored.get(&2), Some(&&background));
+        assert!(!monitored.values().any(|route| **route == external_route));
+    }
+
+    #[test]
+    fn process_inventory_carries_liveness_not_shared_terminal_activity() {
+        let processes = vec![
+            mt_ssh::RemoteAgentProcess {
+                provider: mt_ssh::RemoteAgentProvider::Codex,
+                pid: 10, start_ticks: 100, foreground: true,
+            },
+            mt_ssh::RemoteAgentProcess {
+                provider: mt_ssh::RemoteAgentProvider::Claude,
+                pid: 20, start_ticks: 200, foreground: false,
+            },
+        ];
+        let tracker = SessionTracker::new();
+        tracker.track_input_with_line_snapshot(7, "codex\r", None);
+        for output in ["shell output\r\n", "\u{1b}[2J", "waiting for input\r\n"] {
+            tracker.note_output(7, output);
+            let observations = process_observations(&processes).unwrap();
+            assert_eq!(observations.len(), 2);
+            assert!(observations.iter().all(|process| process.activity == AgentActivity::Unknown));
+            assert_eq!(observations[0].process.pid, 10);
+            assert_eq!(observations[1].process.pid, 20);
+        }
+    }
+
+    fn title_fixture() -> (RemoteAgentPollRequest, RemoteAgentPollState, AgentRuntimeRegistry, ExecutionSourceSignature) {
+        let request = request();
+        let mut poll = RemoteAgentPollState::from_request(&request, true);
+        poll.capability = RemoteAgentProbeCapability::LinuxProc;
+        poll.foreground = Some(mt_ssh::RemoteAgentProcess {
+            provider: mt_ssh::RemoteAgentProvider::Pi,
+            pid: 10, start_ticks: 100, foreground: true,
+        });
+        poll.foreground_observed_at_unix_ms = Some(100);
+        let mut registry = AgentRuntimeRegistry::default();
+        let mut observed = process(10);
+        observed.provider = "pi".parse().unwrap();
+        observed.process = AgentProcessIdentity::new(10, 100).unwrap();
+        let mut inventory = inventory(&request, 1, vec![observed]);
+        inventory.received_at_unix_ms = 100;
+        registry.apply_process_inventory(inventory).unwrap();
+        let source = ExecutionSourceSignature {
+            execution_host_id: request.route.execution_host_id.clone(),
+            root_project_id: request.project_id.clone(),
+            root_source_path: request.project_path.clone(),
+            worktree_id: request.route.worktree_id.clone(),
+            canonical_path: request.project_path.clone(),
+            backend: ExecutionBackendSignature::Ssh {
+                connection_id: request.connection_id.clone(),
+                connection_fingerprint: request.connection_fingerprint,
+                connection_epoch: Some(request.connection_epoch),
+            },
+        };
+        (request, poll, registry, source)
+    }
+
+    #[test]
+    fn title_semantics_require_fresh_bracketed_foreground_ownership() {
+        let (request, poll, mut registry, source) = title_fixture();
+        let title = "\u{03c0} : owned task";
+        let pending = pending_title_owner(&registry, &poll, source.clone(), title, 110, 120).unwrap();
+        assert!(confirmed_title_owner(poll.foreground, &pending, 200));
+        let mut changed = poll.foreground.unwrap();
+        changed.start_ticks += 1;
+        assert!(!confirmed_title_owner(Some(changed), &pending, 200));
+        assert!(!confirmed_title_owner(None, &pending, 200));
+        assert!(!confirmed_title_owner(poll.foreground, &pending, 20_000));
+        assert!(unique_foreground(&[poll.foreground.unwrap(), changed]).is_none());
+        assert!(pending_title_owner(&registry, &poll, source.clone(), title, 99, 120).is_none());
+        assert!(pending_title_owner(&registry, &poll, source.clone(), title, 110, 109).is_none());
+        assert!(pending_title_owner(&registry, &poll, source.clone(), title, 110, 20_000).is_none());
+        assert!(pending_title_owner(&registry, &poll, source.with_connection_epoch(Some(12)), title, 110, 120).is_none());
+        let before = registry.run(&pending.run_id).unwrap();
+        assert_eq!(before.activity, AgentActivity::Unknown);
+        let outcome = registry.observe_semantic(AgentSemanticObservation {
+            event_id: AgentEventId::new(), run_id: pending.run_id.clone(),
+            route: request.route, provider: pending.provider.clone(),
+            owner: AgentSemanticOwner::ForegroundProcess(pending.process),
+            sequence: 2, connection_epoch: Some(request.connection_epoch),
+            activity: mt_ai::activity_from_owned_title(&pending.provider, &pending.title).unwrap(),
+            observed_at_unix_ms: pending.observed_at_unix_ms, received_at_unix_ms: 200,
+        });
+        assert!(matches!(outcome, AgentApplyOutcome::Applied { .. }));
+        assert_eq!(registry.run(&pending.run_id).unwrap().activity, AgentActivity::Working);
+        assert_eq!(registry.activity_freshness(&pending.run_id, 20_000), mt_ai::AgentActivityFreshness::Stale);
+    }
+
+    #[test]
+    fn epoch_change_discards_pending_title_and_previous_foreground_sample() {
+        let (mut request, mut poll, registry, source) = title_fixture();
+        poll.pending_title = pending_title_owner(&registry, &poll, source, "owned", 110, 120);
+        assert!(poll.pending_title.is_some());
+        request.connection_epoch += 1;
+        poll.begin(&request);
+        assert!(poll.pending_title.is_none());
+        assert!(poll.foreground.is_none());
+        assert!(poll.foreground_observed_at_unix_ms.is_none());
+    }
+
+    #[test]
+    fn title_confirmation_requires_a_poll_scheduled_after_original_capture() {
+        let (_, poll, registry, source) = title_fixture();
+        let mut pending = pending_title_owner(&registry, &poll, source, "owned", 110, 120);
+        assert!(take_title_after_sample(&mut pending, poll.foreground, 100, 200).is_none());
+        assert_eq!(pending.as_ref().unwrap().observed_at_unix_ms, 110);
+        assert!(take_title_after_sample(&mut pending, poll.foreground, 110, 210).is_none());
+        let confirmed = take_title_after_sample(&mut pending, poll.foreground, 211, 300).unwrap();
+        assert_eq!(confirmed.observed_at_unix_ms, 110);
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn pending_title_is_discarded_on_changed_owner_or_expired_capture() {
+        let (_, poll, registry, source) = title_fixture();
+        for (foreground, now) in [(None, 200), (poll.foreground, 20_000)] {
+            let mut pending = pending_title_owner(&registry, &poll, source.clone(), "owned", 110, 120);
+            assert!(take_title_after_sample(&mut pending, foreground, 100, now).is_none());
+            assert!(pending.is_none());
         }
     }
 
@@ -922,6 +1258,7 @@ mod tests {
                 route: request.route.clone(),
                 sequence: 1,
                 connection_epoch: request.connection_epoch,
+                weak_episode: request.weak_episode,
                 processes: vec![AgentProcessObservation {
                     provider: AgentProvider::CODEX.parse().unwrap(),
                     process,
@@ -989,6 +1326,7 @@ mod tests {
             route: request.route.clone(),
             sequence,
             connection_epoch: request.connection_epoch,
+            weak_episode: request.weak_episode,
             processes,
             received_at_unix_ms: sequence as i64,
         }
@@ -1004,10 +1342,11 @@ mod tests {
 
     #[test]
     fn confirmed_retirement_clears_latch_without_blocking_a_new_launch() {
-        let request = request();
+        let mut request = request();
         let mut registry = AgentRuntimeRegistry::default();
         let tracker = SessionTracker::new();
         tracker.track_input_with_line_snapshot(request.pty_id, "codex\r", None);
+        request.weak_episode = tracker.weak_detection_episode(request.pty_id);
         apply_inventory_and_retire_tracking(
             &mut registry,
             &tracker,
@@ -1033,8 +1372,9 @@ mod tests {
         assert!(tracker.is_ai_session(request.pty_id));
         assert_eq!(
             accepted_agent_projection(&registry, &request.route, false).status,
-            PaneStatus::AiWorking
+            PaneStatus::Idle
         );
+        assert!(accepted_agent_projection(&registry, &request.route, false).live);
         assert!(should_apply_process_inventory(
             &mut poll.had_processes,
             &mut poll.empty_successes,
@@ -1060,6 +1400,7 @@ mod tests {
         );
         tracker.track_input_with_line_snapshot(request.pty_id, "codex\r", None);
         assert!(tracker.is_ai_session(request.pty_id));
+        request.weak_episode = tracker.weak_detection_episode(request.pty_id);
         apply_inventory_and_retire_tracking(
             &mut registry,
             &tracker,
@@ -1075,6 +1416,98 @@ mod tests {
                 .run_id,
             old_run
         );
+    }
+
+    fn retirement_preserves_later_input(pending_echo: bool) {
+        let mut request = request();
+        let mut registry = AgentRuntimeRegistry::default();
+        let tracker = SessionTracker::new();
+        tracker.track_input_with_line_snapshot(request.pty_id, "codex\r", None);
+        request.weak_episode = tracker.weak_detection_episode(request.pty_id);
+        apply_inventory_and_retire_tracking(
+            &mut registry, &tracker, request.pty_id, false,
+            inventory(&request, 1, vec![process(10)]),
+        ).unwrap();
+        let old_run = registry.active_run_for_route(&request.route).unwrap().run_id.clone();
+        let mut poll = RemoteAgentPollState::from_request(&request, true);
+        assert!(!should_apply_process_inventory(&mut poll.had_processes, &mut poll.empty_successes, 0));
+
+        tracker.track_input_with_line_snapshot(request.pty_id, "\x04", None);
+        tracker.track_input_with_line_snapshot(
+            request.pty_id, if pending_echo { "launcher\r" } else { "codex\r" }, None,
+        );
+        if pending_echo {
+            assert_eq!(tracker.weak_detection_episode(request.pty_id), request.weak_episode);
+            assert!(!tracker.is_ai_session(request.pty_id));
+        } else {
+            assert!(tracker.weak_detection_episode(request.pty_id) > request.weak_episode);
+        }
+        assert!(should_apply_process_inventory(&mut poll.had_processes, &mut poll.empty_successes, 0));
+        apply_inventory_and_retire_tracking(
+            &mut registry, &tracker, request.pty_id, false, inventory(&request, 3, vec![]),
+        ).unwrap();
+        assert_eq!(registry.run(&old_run).unwrap().activity, AgentActivity::Exited);
+        if pending_echo {
+            tracker.note_output(request.pty_id, "PS D:\\project> codex\r\n");
+        }
+        let next_episode = tracker.weak_detection_episode(request.pty_id);
+        assert!(next_episode > request.weak_episode);
+        assert_eq!(tracker.ai_session_agent(request.pty_id).as_deref(), Some("codex"));
+        let outcome = registry.observe(mt_ai::AgentObservation {
+            event_id: AgentEventId::new(), route: request.route.clone(), sequence: 4,
+            connection_epoch: Some(request.connection_epoch), weak_episode: next_episode,
+            provider: tracker.ai_session_agent(request.pty_id).unwrap().parse().unwrap(),
+            provider_session_id: None, process: None, activity: AgentActivity::Unknown,
+            connectivity: AgentConnectivity::Live, confirmation: AgentConfirmation::LiveConfirmed,
+            evidence: AgentEvidence::PtyActivity, received_at_unix_ms: 4,
+        });
+        let AgentApplyOutcome::Applied { run_id, created: true } = outcome else { panic!("later input rejected"); };
+        assert_ne!(run_id, old_run);
+        let projection = accepted_agent_projection(&registry, &request.route, false);
+        assert!(projection.live);
+        assert_eq!(projection.provider.as_deref(), Some("codex"));
+        assert_eq!(projection.status, PaneStatus::Idle);
+    }
+
+    #[test]
+    fn old_inventory_retirement_preserves_a_later_recognized_input() {
+        retirement_preserves_later_input(false);
+    }
+
+    #[test]
+    fn old_inventory_retirement_preserves_pending_input_before_echo() {
+        retirement_preserves_later_input(true);
+    }
+
+    #[test]
+    fn retirement_rejection_and_hook_guard_preserve_a_matching_source_latch() {
+        for hook_enabled in [false, true] {
+            let mut request = request();
+            let mut registry = AgentRuntimeRegistry::default();
+            let tracker = SessionTracker::new();
+            tracker.track_input_with_line_snapshot(request.pty_id, "codex\r", None);
+            request.weak_episode = tracker.weak_detection_episode(request.pty_id);
+            let started = tracker.ai_session_started_at(request.pty_id);
+            apply_inventory_and_retire_tracking(
+                &mut registry, &tracker, request.pty_id, false,
+                inventory(&request, 1, vec![process(10)]),
+            ).unwrap();
+            let before = registry.active_run_for_route(&request.route).unwrap().clone();
+            let result = apply_inventory_and_retire_tracking(
+                &mut registry, &tracker, request.pty_id, hook_enabled,
+                inventory(&request, if hook_enabled { 2 } else { 1 }, vec![]),
+            );
+            if hook_enabled {
+                result.unwrap();
+                assert_eq!(registry.run(&before.run_id).unwrap().activity, AgentActivity::Exited);
+            } else {
+                assert_eq!(result, Err(AgentObservationIgnored::OutOfOrder));
+                assert_eq!(registry.run(&before.run_id), Some(&before));
+            }
+            assert_eq!(tracker.ai_session_agent(request.pty_id).as_deref(), Some("codex"));
+            assert_eq!(tracker.weak_detection_episode(request.pty_id), request.weak_episode);
+            assert_eq!(tracker.ai_session_started_at(request.pty_id), started);
+        }
     }
 
     #[test]
@@ -1119,6 +1552,7 @@ mod tests {
             route: request.route.clone(),
             sequence: 4,
             connection_epoch: Some(request.connection_epoch),
+            weak_episode: request.weak_episode,
             provider: AgentProvider::CODEX.parse().unwrap(),
             provider_session_id: Some("hook-session".into()),
             process: Some(process(20).process),
@@ -1144,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn ignored_inventory_items_project_accepted_hook_state() {
+    fn rejected_stale_inventory_preserves_accepted_hook_state() {
         let request = request();
         let mut registry = AgentRuntimeRegistry::default();
         let tracker = SessionTracker::new();
@@ -1163,6 +1597,7 @@ mod tests {
             route: request.route.clone(),
             sequence: 11,
             connection_epoch: Some(request.connection_epoch),
+            weak_episode: request.weak_episode,
             provider: AgentProvider::CODEX.parse().unwrap(),
             provider_session_id: Some("hook-session".into()),
             process: Some(process(10).process),
@@ -1172,14 +1607,18 @@ mod tests {
             evidence: AgentEvidence::Hook,
             received_at_unix_ms: 11,
         });
-        apply_inventory_and_retire_tracking(
+        let before = registry.runs().cloned().collect::<Vec<_>>();
+        let outcome = apply_inventory_and_retire_tracking(
             &mut registry,
             &tracker,
             request.pty_id,
             false,
             inventory(&request, 10, vec![process(10), other]),
-        )
-        .unwrap();
+        );
+        assert_eq!(outcome, Err(AgentObservationIgnored::OutOfOrder));
+        for run in &before {
+            assert_eq!(registry.run(&run.run_id), Some(run));
+        }
         let hook = registry
             .runs()
             .find(|run| run.evidence == AgentEvidence::Hook)
@@ -1188,7 +1627,7 @@ mod tests {
         assert_eq!(hook.activity, AgentActivity::Done);
         assert_eq!(registry.runs().count(), 2);
         let projection = accepted_agent_projection(&registry, &request.route, false);
-        assert_eq!(projection.status, PaneStatus::AiWorking);
+        assert_eq!(projection.status, PaneStatus::AiIdle);
         assert_eq!(projection.provider, None);
     }
 
@@ -1240,7 +1679,7 @@ mod tests {
             Some((&request.route, request.connection_epoch)),
         ));
         let run = registry.active_run_for_route(&request.route).unwrap();
-        assert_eq!(run.activity, AgentActivity::Working);
+        assert_eq!(run.activity, AgentActivity::Unknown);
         assert_eq!(run.connectivity, AgentConnectivity::Disconnected);
         assert!(!active_route_connectivity_change_needed(
             &registry,
@@ -1267,6 +1706,7 @@ mod tests {
                 route: request.route.clone(),
                 sequence: 1,
                 connection_epoch: request.connection_epoch,
+                weak_episode: request.weak_episode,
                 processes: vec![AgentProcessObservation {
                     provider: AgentProvider::CODEX.parse().unwrap(),
                     process,

@@ -6,17 +6,35 @@ runtime identities. Main owns spec changes; implement/check agents do not recurs
 
 ## Implementation Order
 
-- [ ] Read the evidence report and runtime/reconciliation/inventory/context specs.
-- [ ] Add bounded lineage/foreground identity facts and logical launcher
+- [x] Read the evidence report and runtime/reconciliation/inventory/context specs.
+- [x] Add bounded lineage/foreground identity facts and logical launcher
   normalization inside the existing inventory ownership boundary.
-- [ ] Separate process liveness from run-owned semantic activity. Remove the
+- [x] Separate process liveness from run-owned semantic activity. Remove the
   unconditional shared-output Working/Waiting assignment and project only
   accepted, owned observations.
-- [ ] Keep automatic catalog progress quiet without suppressing manual progress,
+- [x] Keep automatic catalog progress quiet without suppressing manual progress,
   errors, or last-known/stale handling.
-- [ ] Add exact Runtime title projection and distinguishable fallback; retain
+- [x] Add exact Runtime title projection and distinguishable fallback; retain
   provider/session ownership gates and compact presentation.
-- [ ] Update focused regressions and request a Trellis check review through main.
+- [x] Update focused regressions and request a Trellis check review through main.
+- [x] Complete the conditional episode-clear and immutable Hook receipt source
+  follow-up, including exact nonlast/last end production and bridge regressions.
+- [x] Complete the independently reviewed explicit same-ID lifecycle resume
+  correction and final source integration.
+- [ ] Obtain exact-SHA Actions and matching native artifact evidence.
+
+Source steps above are implemented and reviewed, not tested. The combined review
+introduced source-owned weak episodes and sticky accepted fallback supersession
+across every actionable projection. Its final race follow-up makes empty-process
+retirement conditional and atomic against both newer published and pending input
+episodes. The producer follow-up now preserves immutable receipts and emits
+exact nonlast/last exits into real bridge/registry regressions. Bohr's independent
+producer review confirmed the additional same-ID resume blocker; main approved
+the narrow source lifecycle identity and dedicated registry start/observe APIs.
+Bohr released the completed correction and source check in producer-review.md,
+including first explicit-start promotion and duplicate-start state/age handling.
+Nine new and two expanded production-backed regressions are authored. Main owns
+Actions and native gates; no regression has run yet for this Agent slice.
 
 ## Actions-Only Cases
 

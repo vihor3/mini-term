@@ -462,11 +462,10 @@ impl TitleBar {
             store
                 .project_state(&target.project_id)
                 .and_then(|state| state.pane(target.pane_key.as_str()))
-                .filter(|pane| pane.shows_ai_session(store.config().ai_auto_resume.unwrap_or(true)))
-                .and_then(|pane| pane.ai_agent())
+                .and_then(|pane| store.pane_agent_provider(&target.project_id, pane))
                 .and_then(|agent| {
-                    AiVendor::from_session_type(agent)
-                        .or_else(|| AiVendor::infer(Some(agent), None))
+                    AiVendor::from_session_type(&agent)
+                        .or_else(|| AiVendor::infer(Some(&agent), None))
                 })
         };
         let unread = self.store.read(cx).is_pane_unread_done(key.as_str());
